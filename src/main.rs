@@ -46,11 +46,12 @@ use pce_core::{
     GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
     GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
-    HerdrPaneId, HerdrSessionName, HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, KnownPayload,
-    LandingReadinessDecision, LegacyRepositoryContractPayload, LocalPatchLimit,
-    MeasuredContractSnapshot, MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode,
-    NamedReplayRef, NodeId, NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus,
-    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PackageGateChallenge,
+    HerdrPaneId, HerdrSessionName, HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, HoldIdentity,
+    HoldKey, HoldRoute, HoldStore, KnownPayload, LandingReadinessDecision,
+    LegacyRepositoryContractPayload, LocalPatchLimit, MeasuredContractSnapshot, MergeStatus,
+    MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
+    NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
+    OpenDisposition, OracleFailure, OracleStage, OrderingEdge, PackageGateChallenge,
     PackageWorkerResult, PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError,
     PairedReplayClassification, PaneCleanupOutcome, ParentCriterionFailure,
     PrimeSessionObservation, ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
@@ -126,6 +127,12 @@ const USAGE: &str = concat!(
     "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--worker-env <NAME>]... [--herdr-session <NAME>] [--recovery-reset <HUMAN_RECORD_PATH>] [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--gate-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
+    "       pce hold open [--root <HOLD_STORE>] --repository <REPOSITORY> --plan-version <VERSION> --package <PACKAGE> --question-kind <KIND> [--report <TEXT>|--report-json <JSON>]\n",
+    "       pce hold list [--root <HOLD_STORE>]\n",
+    "       pce hold read [--root <HOLD_STORE>] --key <HOLD_KEY>\n",
+    "       pce hold answer [--root <HOLD_STORE>] --key <HOLD_KEY> --by <ACTOR> --answer <TEXT>\n",
+    "       pce hold route [--root <HOLD_STORE>] --key <HOLD_KEY> --to <human|overseer|reporting-run>\n",
+    "       pce hold close [--root <HOLD_STORE>] --key <HOLD_KEY> --reason <TEXT>\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
     "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
@@ -365,7 +372,40 @@ enum FreezeAuthority {
 }
 
 #[derive(Debug)]
+enum HoldCommand {
+    Open {
+        root: Option<PathBuf>,
+        identity: HoldIdentity,
+        report: Option<Value>,
+    },
+    List {
+        root: Option<PathBuf>,
+    },
+    Read {
+        root: Option<PathBuf>,
+        key: HoldKey,
+    },
+    Answer {
+        root: Option<PathBuf>,
+        key: HoldKey,
+        by: String,
+        answer: String,
+    },
+    Route {
+        root: Option<PathBuf>,
+        key: HoldKey,
+        route: HoldRoute,
+    },
+    Close {
+        root: Option<PathBuf>,
+        key: HoldKey,
+        reason: String,
+    },
+}
+
+#[derive(Debug)]
 enum Command {
+    Hold(HoldCommand),
     DispatchContinuation,
     GateExec,
     GateReplay(GateReplayCommand),
@@ -783,6 +823,7 @@ fn main() -> Result<()> {
 
 fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
     match parse_command(args)? {
+        Command::Hold(command) => run_hold(command, input),
         Command::DispatchContinuation => run_dispatch_continuation(input),
         Command::GateExec => run_gate_exec(input),
         Command::GateReplay(command) => exec_gate_replay_worker(command),
@@ -939,6 +980,7 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
 fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
     let args: Vec<String> = args.collect();
     match args.as_slice() {
+        [verb, action, rest @ ..] if verb == "hold" => parse_hold_command(action, rest),
         [command] if command == "__dispatch-continuation" => Ok(Command::DispatchContinuation),
         [verb, action] if verb == "gate" && action == "exec" => Ok(Command::GateExec),
         [verb, action, rest @ ..] if verb == "gate" && action == "replay" => {
@@ -1031,6 +1073,205 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         .with_context(|| USAGE),
         _ => bail!(USAGE),
     }
+}
+
+fn parse_hold_command(action: &str, rest: &[String]) -> Result<Command> {
+    let mut options = parse_hold_options(rest)?;
+    let root = remove_hold_option(&mut options, &["--root", "--store", "--store-root"])?;
+    let root = root.map(PathBuf::from);
+    let command = match action {
+        "open" => {
+            let repository = require_hold_option(&mut options, &["--repository"])?;
+            let plan_version = require_hold_option(&mut options, &["--plan-version"])?;
+            let package = require_hold_option(&mut options, &["--package"])?;
+            let question_kind = require_hold_option(&mut options, &["--question-kind", "--kind"])?;
+            let report_text = remove_hold_option(&mut options, &["--report"])?;
+            let report_json = remove_hold_option(&mut options, &["--report-json"])?;
+            let report = match (report_text, report_json) {
+                (Some(text), None) => Some(Value::String(text)),
+                (None, Some(raw)) => {
+                    Some(serde_json::from_str(&raw).context("failed to parse --report-json")?)
+                }
+                (None, None) => None,
+                (Some(_), Some(_)) => {
+                    bail!("hold open accepts only one of --report and --report-json")
+                }
+            };
+            let identity = HoldIdentity::parse(repository, plan_version, package, question_kind)
+                .context("failed to parse hold identity")?;
+            HoldCommand::Open {
+                root,
+                identity,
+                report,
+            }
+        }
+        "list" => HoldCommand::List { root },
+        "read" => HoldCommand::Read {
+            root,
+            key: parse_hold_key_option(&mut options)?,
+        },
+        "answer" => HoldCommand::Answer {
+            root,
+            key: parse_hold_key_option(&mut options)?,
+            by: require_hold_option(&mut options, &["--by"])?,
+            answer: require_hold_option(&mut options, &["--answer"])?,
+        },
+        "route" => HoldCommand::Route {
+            root,
+            key: parse_hold_key_option(&mut options)?,
+            route: HoldRoute::parse(&require_hold_option(&mut options, &["--to", "--route"])?)
+                .context("failed to parse hold route")?,
+        },
+        "close" => HoldCommand::Close {
+            root,
+            key: parse_hold_key_option(&mut options)?,
+            reason: require_hold_option(&mut options, &["--reason"])?,
+        },
+        _ => bail!("unsupported hold action `{action}`\n{USAGE}"),
+    };
+    if let Some(flag) = options.keys().next() {
+        bail!("unexpected hold option `{flag}`\n{USAGE}");
+    }
+    Ok(Command::Hold(command))
+}
+
+fn parse_hold_options(rest: &[String]) -> Result<BTreeMap<String, String>> {
+    if !rest.len().is_multiple_of(2) {
+        bail!("hold options must be flag-value pairs\n{USAGE}");
+    }
+    let mut options = BTreeMap::new();
+    for pair in rest.chunks_exact(2) {
+        let flag = &pair[0];
+        if !flag.starts_with("--") {
+            bail!("unexpected hold argument `{flag}`\n{USAGE}");
+        }
+        if options.insert(flag.clone(), pair[1].clone()).is_some() {
+            bail!("duplicate hold option `{flag}`");
+        }
+    }
+    Ok(options)
+}
+
+fn remove_hold_option(
+    options: &mut BTreeMap<String, String>,
+    aliases: &[&str],
+) -> Result<Option<String>> {
+    let mut found = None;
+    for alias in aliases {
+        if let Some(value) = options.remove(*alias) {
+            if found.is_some() {
+                bail!("hold option was supplied through more than one equivalent flag");
+            }
+            found = Some(value);
+        }
+    }
+    Ok(found)
+}
+
+fn require_hold_option(options: &mut BTreeMap<String, String>, aliases: &[&str]) -> Result<String> {
+    remove_hold_option(options, aliases)?
+        .ok_or_else(|| anyhow!("missing required hold option `{}`\n{USAGE}", aliases[0]))
+}
+
+fn parse_hold_key_option(options: &mut BTreeMap<String, String>) -> Result<HoldKey> {
+    let raw = require_hold_option(options, &["--key", "--hold"])?;
+    HoldKey::parse(raw).context("failed to parse hold key")
+}
+
+fn hold_store_root(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(root) = explicit {
+        return Ok(root);
+    }
+    if let Some(root) =
+        std::env::var_os("PCE_HOLD_STORE_ROOT").or_else(|| std::env::var_os("PCE_HOLD_STORE"))
+    {
+        return Ok(PathBuf::from(root));
+    }
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| anyhow!("HOME is required when no hold store root is supplied"))?;
+    Ok(PathBuf::from(home).join(".pce/holds"))
+}
+
+fn run_hold(command: HoldCommand, input: &mut dyn Read) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    match command {
+        HoldCommand::Open {
+            root,
+            identity,
+            report,
+        } => {
+            let report = match report {
+                Some(report) => report,
+                None => {
+                    let mut text = String::new();
+                    input
+                        .read_to_string(&mut text)
+                        .context("failed to read hold report from stdin")?;
+                    Value::String(text)
+                }
+            };
+            let store = HoldStore::new(hold_store_root(root)?);
+            let result = store
+                .open(identity, report, EventTimestamp::new(chrono::Utc::now()))
+                .context("failed to open hold")?;
+            let created = result.disposition() == OpenDisposition::Created;
+            write_json_line(
+                &mut output,
+                &json!({ "created": created, "hold": result.hold() }),
+            )
+        }
+        HoldCommand::List { root } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            write_json_line(&mut output, &store.list().context("failed to list holds")?)
+        }
+        HoldCommand::Read { root, key } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            write_json_line(
+                &mut output,
+                &store.read(&key).context("failed to read hold")?,
+            )
+        }
+        HoldCommand::Answer {
+            root,
+            key,
+            by,
+            answer,
+        } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            write_json_line(
+                &mut output,
+                &store
+                    .answer(&key, by, answer, EventTimestamp::new(chrono::Utc::now()))
+                    .context("failed to answer hold")?,
+            )
+        }
+        HoldCommand::Route { root, key, route } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            write_json_line(
+                &mut output,
+                &store
+                    .route(&key, route, EventTimestamp::new(chrono::Utc::now()))
+                    .context("failed to route hold")?,
+            )
+        }
+        HoldCommand::Close { root, key, reason } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            write_json_line(
+                &mut output,
+                &store
+                    .close(&key, reason, EventTimestamp::new(chrono::Utc::now()))
+                    .context("failed to close hold")?,
+            )
+        }
+    }
+}
+
+fn write_json_line(output: &mut dyn Write, value: &impl Serialize) -> Result<()> {
+    serde_json::to_writer(&mut *output, value).context("failed to serialize hold output")?;
+    output
+        .write_all(b"\n")
+        .context("failed to write hold output")
 }
 
 fn parse_package_gate_agent(rest: &[String]) -> Result<Command> {
