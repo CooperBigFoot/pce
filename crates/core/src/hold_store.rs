@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::event_log::EventTimestamp;
+use crate::overseer_rulebook::{RoutingRule, initial_routing_rules};
 
 /// The stable identity of one question within one work-graph run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,6 +259,55 @@ impl HoldStore {
     }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Loads all routing rules, installing the corpus-derived starting rulebook when needed.
+    ///
+    /// Initialization retains every complete record. If a process stopped after writing a prefix
+    /// and part of the next record, the next query verifies the complete prefix, removes only the
+    /// incomplete tail, and appends the missing records under the same advisory lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rulebook cannot be created, locked, read, or appended, when a
+    /// retained record is malformed, or when the retained starting prefix differs from the corpus.
+    pub fn routing_rules(&self) -> Result<Vec<RoutingRule>, HoldStoreError> {
+        self.ensure_root()?;
+        let directory = self.root.join("rulebook");
+        fs::create_dir_all(&directory).map_err(|source| {
+            HoldStoreError::CreateRulebookDirectory {
+                path: directory.clone(),
+                source,
+            }
+        })?;
+        let path = directory.join("routing-rules.jsonl");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| HoldStoreError::OpenRulebook {
+                path: path.clone(),
+                source,
+            })?;
+        let _lock = AdvisoryLock::acquire(file, path.clone(), advisory_lock::EXCLUSIVE)?;
+        let starting = initial_routing_rules();
+        let mut retained = match read_rulebook(&path) {
+            Ok(retained) => retained,
+            Err(HoldStoreError::IncompleteRulebookTail { .. }) => {
+                recover_incomplete_rulebook_tail(&path, &starting)?
+            }
+            Err(error) => return Err(error),
+        };
+        verify_starting_rulebook_prefix(&path, &retained, &starting)?;
+        if retained.len() < starting.len() {
+            for rule in &starting[retained.len()..] {
+                append_rulebook_record(&path, rule)?;
+            }
+            retained = read_rulebook(&path)?;
+        }
+        Ok(retained)
     }
 
     /// Opens a hold once for its derived identity.
@@ -546,6 +596,124 @@ impl HoldStore {
     }
 }
 
+fn read_rulebook(path: &Path) -> Result<Vec<RoutingRule>, HoldStoreError> {
+    let bytes = fs::read(path).map_err(|source| HoldStoreError::ReadRulebook {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(HoldStoreError::IncompleteRulebookTail {
+            path: path.to_path_buf(),
+        });
+    }
+    parse_rulebook_records(path, &bytes)
+}
+
+fn parse_rulebook_records(path: &Path, bytes: &[u8]) -> Result<Vec<RoutingRule>, HoldStoreError> {
+    BufReader::new(bytes)
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            let line = line.map_err(|source| HoldStoreError::ReadRulebook {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            serde_json::from_str(&line).map_err(|source| HoldStoreError::MalformedRulebookRecord {
+                path: path.to_path_buf(),
+                line: index + 1,
+                detail: source.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn verify_starting_rulebook_prefix(
+    path: &Path,
+    retained: &[RoutingRule],
+    starting: &[RoutingRule],
+) -> Result<(), HoldStoreError> {
+    for (index, existing) in retained.iter().take(starting.len()).enumerate() {
+        if existing != &starting[index] {
+            return Err(HoldStoreError::RulebookPrefixMismatch {
+                path: path.to_path_buf(),
+                line: index + 1,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn recover_incomplete_rulebook_tail(
+    path: &Path,
+    starting: &[RoutingRule],
+) -> Result<Vec<RoutingRule>, HoldStoreError> {
+    let bytes = fs::read(path).map_err(|source| HoldStoreError::ReadRulebook {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let complete_length = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    let retained = parse_rulebook_records(path, &bytes[..complete_length])?;
+    verify_starting_rulebook_prefix(path, &retained, starting)?;
+    let Some(next_rule) = starting.get(retained.len()) else {
+        return Err(HoldStoreError::IncompleteRulebookTail {
+            path: path.to_path_buf(),
+        });
+    };
+    let encoded_next = serde_json::to_vec(next_rule)
+        .map_err(|source| HoldStoreError::SerializeRulebookRecord { source })?;
+    if !encoded_next.starts_with(&bytes[complete_length..]) {
+        return Err(HoldStoreError::IncompleteRulebookTail {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|source| HoldStoreError::OpenRulebook {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.set_len(complete_length as u64).map_err(|source| {
+        HoldStoreError::TruncateIncompleteRulebookTail {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    file.sync_data()
+        .map_err(|source| HoldStoreError::SyncRulebook {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(retained)
+}
+
+fn append_rulebook_record(path: &Path, rule: &RoutingRule) -> Result<(), HoldStoreError> {
+    let mut line = serde_json::to_vec(rule)
+        .map_err(|source| HoldStoreError::SerializeRulebookRecord { source })?;
+    line.push(b'\n');
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(|source| HoldStoreError::OpenRulebook {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(&line)
+        .map_err(|source| HoldStoreError::AppendRulebook {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.sync_data()
+        .map_err(|source| HoldStoreError::SyncRulebook {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
 fn derive_hold(
     key: HoldKey,
     records: Vec<HoldRecord>,
@@ -787,4 +955,65 @@ pub enum HoldStoreError {
     /// A mutating verb targeted a closed hold.
     #[error("hold `{key}` is already closed")]
     HoldClosed { key: String },
+    /// The rulebook directory could not be created.
+    #[error("failed to create rulebook directory `{path}`")]
+    CreateRulebookDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The routing rulebook could not be opened for locking or appending.
+    #[error("failed to open routing rulebook `{path}`")]
+    OpenRulebook {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The routing rulebook could not be read exactly.
+    #[error("failed to read routing rulebook `{path}`")]
+    ReadRulebook {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A routing rule could not be encoded.
+    #[error("failed to serialize routing rule")]
+    SerializeRulebookRecord {
+        #[source]
+        source: serde_json::Error,
+    },
+    /// A complete routing rule could not be appended.
+    #[error("failed to append routing rulebook `{path}`")]
+    AppendRulebook {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// An updated routing rulebook could not be synced.
+    #[error("failed to sync routing rulebook `{path}`")]
+    SyncRulebook {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// An incomplete final rulebook record could not be removed during install recovery.
+    #[error("failed to remove incomplete routing rulebook tail from `{path}`")]
+    TruncateIncompleteRulebookTail {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Existing rulebook bytes end in an incomplete JSONL record.
+    #[error("routing rulebook `{path}` has an incomplete final record")]
+    IncompleteRulebookTail { path: PathBuf },
+    /// One retained line is not a routing rule.
+    #[error("malformed routing rule at `{path}` line {line}: {detail}")]
+    MalformedRulebookRecord {
+        path: PathBuf,
+        line: usize,
+        detail: String,
+    },
+    /// The retained starting records differ from the shipped corpus rules.
+    #[error("routing rulebook `{path}` differs from the starting corpus at line {line}")]
+    RulebookPrefixMismatch { path: PathBuf, line: usize },
 }
