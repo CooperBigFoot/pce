@@ -15,6 +15,7 @@ pub mod gate_execution;
 pub mod gate_replay;
 pub mod graph_authoring;
 pub mod herdr_dispatch;
+pub mod hold_store;
 pub mod landing_readiness;
 pub mod package_completion;
 pub mod package_driver;
@@ -169,6 +170,10 @@ pub use herdr_dispatch::{
     HerdrInvocation, HerdrPaneId, HerdrSessionName, HerdrTabId, HerdrWorkPackageDispatchPlan,
     HerdrWorkspaceId, HerdrWorktreeSpec, RepositoryDispatchInput, WorkerArgumentVector,
     WorkerEnvironment, compose_herdr_work_package_dispatch, derive_herdr_agent_name,
+};
+pub use hold_store::{
+    Hold, HoldIdentity, HoldKey, HoldRecord, HoldRoute, HoldState, HoldStore, HoldStoreError,
+    OpenDisposition, OpenHoldResult,
 };
 pub use landing_readiness::{
     CompletionCriterionIndex, LandingCriterionEvidence, LandingReadinessDecision,
