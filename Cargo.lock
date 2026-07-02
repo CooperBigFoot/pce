@@ -51,24 +51,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "myproject"
-version = "0.1.4"
-dependencies = [
- "anyhow",
- "myproject-core",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "myproject-core"
-version = "0.1.0"
-dependencies = [
- "thiserror",
- "tracing",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -82,6 +64,24 @@ name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+
+[[package]]
+name = "pce"
+version = "0.1.4"
+dependencies = [
+ "anyhow",
+ "pce-core",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pce-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
 
 [[package]]
 name = "pin-project-lite"

@@ -3,3 +3,7 @@
 *.swo
 .DS_Store
 Thumbs.db
+
+# PCE workflow scaffolding (per-vision planning tree + step worktrees)
+/planning/
+/.worktrees/
