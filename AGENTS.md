@@ -213,3 +213,21 @@ Good candidates for typestate: delineation pipeline stages, raster processing ch
 - **Math-friendly names are allowed** in algorithm code (e.g., `dx`, `dy`, `acc`, `phi`), but add a glossary in the module doc.
 - **No `use super::*`** — explicit imports only.
 - **Group imports**: std → external crates → crate-internal, separated by blank lines.
+
+## Quality Gates
+
+All five gates below MUST exit 0 before every commit and every PR. Each command was run on this repository and verified to pass before being documented here. These are the exact invocations — run them as written, from the repository root; never substitute bare tool names or drop flags.
+
+| Gate | Command |
+|---|---|
+| Format check | `cargo fmt --check` |
+| Lint | `cargo clippy --workspace --all-targets -- -D warnings` |
+| Typecheck | `cargo check --workspace --all-targets` |
+| Test | `cargo test --workspace` |
+| Build | `cargo build --workspace` |
+
+Notes:
+
+- `cargo fmt --check` fails on any formatting drift; run `cargo fmt` to fix, then re-check.
+- Clippy warnings are errors (`-D warnings`). Fix the code; do not allow-list lints to get past the gate.
+- There is no CI. These local gates are the only enforcement — run all five before committing.
