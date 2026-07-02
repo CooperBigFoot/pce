@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "iteration", "self_sufficiency", "root_cause", "blocking_issues", "non_blocking_notes", "summary"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["APPROVE", "REVISE", "BLOCK"] },
+    "iteration": { "type": "integer" },
+    "self_sufficiency": { "type": "string", "enum": ["PASS", "FAIL", "NOT_APPLICABLE"] },
+    "root_cause": { "type": "string", "enum": ["execution", "step_plan", "milestone_plan", "vision"] },
+    "blocking_issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "location", "problem", "required_change"],
+        "properties": {
+          "id": { "type": "string" },
+          "severity": { "type": "string", "enum": ["critical", "major"] },
+          "location": { "type": "string" },
+          "problem": { "type": "string" },
+          "required_change": { "type": "string" }
+        }
+      }
+    },
+    "non_blocking_notes": { "type": "array", "items": { "type": "string" } },
+    "summary": { "type": "string" }
+  }
+}
