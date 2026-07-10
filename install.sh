@@ -63,6 +63,14 @@ else
     status=1
 fi
 
+GRAPH_SCHEMA_PATH="$SKILLS_DIR/pce/schemas/graph.schema.json"
+if [ -f "$GRAPH_SCHEMA_PATH" ]; then
+    echo "OK: graph schema present at $GRAPH_SCHEMA_PATH"
+else
+    echo "ERROR: graph schema missing at $GRAPH_SCHEMA_PATH" >&2
+    status=1
+fi
+
 if [ "$status" -ne 0 ]; then
     echo "Install verification FAILED." >&2
     exit 1
