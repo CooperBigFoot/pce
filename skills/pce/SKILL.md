@@ -33,7 +33,7 @@ You are an **active coordinator, not a router, and not an implementer**. You thi
 
 ## The delegation contract (every dispatch, no exceptions)
 
-Every subagent you spawn — Claude or Codex — must be handed all four:
+Every Claude subagent dispatch and Codex `codex exec` shell invocation must be handed all four:
 
 1. **Objective** — the one outcome it must produce.
 2. **Output format** — a schema (for verdicts/graphs) or an exact artifact path (for plans/code).
@@ -120,7 +120,7 @@ For each ready step:
 
    **Self-containment rule:** `VISION_DIR` lives under a gitignored planning directory that is absent from step worktrees, and the plan reaches the executor **via stdin** — so any content the executor needs from `VISION_DIR`, or from any file not present in the worktree, must be **inlined into the plan verbatim**. A Claude critic reviews (`self_sufficiency` gate) → iterate to `APPROVE` (cap 3, stuck-detector); every `REVISE` round is a fresh `codex exec` (never `resume`) whose prompt names the on-disk paths of the `plan.md` under revision and of the critic's `review-<n>.md`; loop state lives in `state.json`.
 2. **Isolate** — create branch `pce/<vision-slug>/m<m>-s<s>` off the milestone integration branch's head; add a worktree at `.worktrees/<vision-slug>/m<m>-s<s>`.
-3. **Execute (Codex)** — the validated invocation shape; every path is absolute, and `<schema-abs>` is the `~`-expanded absolute path of the installed schema:
+3. **Execute (Codex)** — the validated invocation shape; every path is absolute, `<verdict-schema-abs>` is the `~`-expanded absolute path of the installed verdict schema, and `<repo-abs>` is expanded to the absolute parent-repository root at dispatch time before the writable-root string is put on the command line, following the Binding-section rule for schema paths:
 
    ```
    cat "<abs path to plan.md>" | codex exec \
@@ -132,12 +132,14 @@ For each ready step:
       and DO NOT open a PR — report verdict=BLOCK, root_cause=step_plan, summary
       prefixed 'PLAN_INFEASIBLE:'." \
      --sandbox workspace-write \
+     -c 'sandbox_workspace_write.writable_roots=["<repo-abs>/.git"]' \
      -C <worktree-abs> \
-     --output-schema <schema-abs> \
+     --output-schema <verdict-schema-abs> \
      -o <worktree-abs>/.codex-result.json
    ```
 
    - The plan travels on **stdin**; the instruction string is the prompt.
+   - The parent repository `.git` directory must be writable because "a worktree's git metadata lives under the parent repo's `.git/`, outside the sandbox's default writable root." The writable root must cover the whole parent `.git` directory: narrowing it to `.git/worktrees/<name>` fails because a worktree commit also writes objects under `.git/objects`, its branch ref under `.git/refs/heads/`, and reflogs under `.git/logs/`. This broader residual write surface is accepted; the executor prompt already prohibits tags and pushes.
    - The executor runs the plan's acceptance gates **before** committing; a red gate is a `REVISE`, never something to bypass.
    - **Executor policies (binding):** exactly **one** conventional commit with the repo contract's version bump folded in; **no tag** created in the worktree; **no push**; **no attribution footers**; `pr-body.md` written at the worktree root and left **untracked**.
    - The executor's final message conforms to the verdict schema: success ⇒ `verdict=APPROVE`, `root_cause=execution`, `self_sufficiency=NOT_APPLICABLE`; infeasible plan ⇒ `verdict=BLOCK`, `root_cause=step_plan`, `summary` prefixed `PLAN_INFEASIBLE:`. Read it from `<worktree-abs>/.codex-result.json`.
@@ -149,7 +151,7 @@ When every step of a milestone is merged, open one PR `milestone-<m> → main` a
 
 ## Verdict schema
 
-Every verdict — planner critics, PR reviewers, and the executor's structured final message — conforms to the installed schema at `~/.claude/skills/pce/schemas/verdict.schema.json`. Read it once at startup, quote its JSON verbatim into every Claude critic/reviewer prompt, and pass its absolute path via `--output-schema` on every `codex exec` call. Semantics:
+Every verdict — planner critics, PR reviewers, and the executor's structured final message — conforms to the installed schema at `~/.claude/skills/pce/schemas/verdict.schema.json`. Read it once at startup and quote its JSON verbatim into every Claude critic/reviewer prompt. Executor calls pass its absolute path via `--output-schema`; graph-emitting planner calls instead pass the absolute path of the graph schema via `--output-schema`; the step-plan-writer call passes no `--output-schema` because it writes prose directly to `plan.md`. Semantics:
 
 - `verdict`: `APPROVE` | `REVISE` | `BLOCK`.
 - `self_sufficiency`: `PASS`/`FAIL` from plan critics only; `NOT_APPLICABLE` from everyone else.
