@@ -1,10 +1,9 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "iteration", "self_sufficiency", "root_cause", "blocking_issues", "non_blocking_notes", "summary"],
+  "required": ["verdict", "self_sufficiency", "root_cause", "blocking_issues", "non_blocking_notes", "summary"],
   "properties": {
     "verdict": { "type": "string", "enum": ["APPROVE", "REVISE", "BLOCK"] },
-    "iteration": { "type": "integer" },
     "self_sufficiency": { "type": "string", "enum": ["PASS", "FAIL", "NOT_APPLICABLE"] },
     "root_cause": { "type": "string", "enum": ["execution", "step_plan", "milestone_plan", "vision"] },
     "blocking_issues": {
