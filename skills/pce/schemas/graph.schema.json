@@ -8,10 +8,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "title", "depends_on", "files_touched", "summary"],
+        "required": ["id", "title", "repo", "depends_on", "files_touched", "summary"],
         "properties": {
           "id": { "type": "string" },
           "title": { "type": "string" },
+          "repo": { "type": "string" },
           "depends_on": { "type": "array", "items": { "type": "string" } },
           "files_touched": { "type": "array", "items": { "type": "string" } },
           "summary": { "type": "string" }
