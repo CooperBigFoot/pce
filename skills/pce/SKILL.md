@@ -44,12 +44,15 @@ Every Claude subagent dispatch and Codex `codex exec` shell invocation must be h
 
 A critic or reviewer must ground its verdict on the named ref using the supplied read command; a mismatch between that ref and its local checkout is not a finding.
 
+Every `codex exec` dispatch that does not deliberately receive a plan through stdin MUST close stdin with `< /dev/null`; otherwise Codex can block forever on `Reading additional input from stdin`. The executor dispatch is the exception because it deliberately pipes `plan.md` through stdin.
+
 ## Startup
 
 1. Read `VISION_DIR/vision.md`.
-2. Verify both installed schemas exist: the verdict schema at `~/.claude/skills/pce/schemas/verdict.schema.json` and the graph schema at `~/.claude/skills/pce/schemas/graph.schema.json`. Do **not** write per-run schemas — the installed files are the single source of truth. If either is missing, tell the user the skill installation is incomplete (re-run the installer) and stop. You will pass their `~`-expanded **absolute paths** to `codex --output-schema` — the graph schema on graph-emitting planner calls, the verdict schema on executor calls — and quote the verdict schema's JSON verbatim into Claude critic/reviewer prompts.
-3. Verify the repo is supported: it must have an `AGENTS.md` or a `CLAUDE.md` at its root. Repos lacking **both** are **unsupported** — state this to the user and stop.
-4. Initialize `VISION_DIR/state.json`: `{phase, repo_contracts:{}, milestones:[], steps:{}, counters:{}, deltas:[], escalations:[]}`. If `state.json` already exists, this is a resumed run — rehydrate from it instead (see Conflict & recovery). For backward-compatible single-repo rehydration only, an existing state file containing `repo_contract` without `repo_contracts` remains readable through the Phase 0 legacy fallback; never initialize a new run with the singular key.
+2. Resolve the repo mode from the fenced YAML repos block under `## Constraints` and announce it before proceeding: state `no repos block found -> single-repo run on <name>` or `repos block found -> cross-repo run on <names>`, substituting the resolved repo name or names.
+3. Verify both installed schemas exist: the verdict schema at `~/.claude/skills/pce/schemas/verdict.schema.json` and the graph schema at `~/.claude/skills/pce/schemas/graph.schema.json`. Do **not** write per-run schemas — the installed files are the single source of truth. If either is missing, tell the user the skill installation is incomplete (re-run the installer) and stop. You will pass their `~`-expanded **absolute paths** to `codex --output-schema` — the graph schema on graph-emitting planner calls, the verdict schema on executor calls — and quote the verdict schema's JSON verbatim into Claude critic/reviewer prompts.
+4. Verify the repo is supported: it must have an `AGENTS.md` or a `CLAUDE.md` at its root. Repos lacking **both** are **unsupported** — state this to the user and stop.
+5. Initialize `VISION_DIR/state.json`: `{phase, repo_contracts:{}, milestones:[], steps:{}, counters:{}, deltas:[], escalations:[]}`. If `state.json` already exists, this is a resumed run — rehydrate from it instead (see Conflict & recovery). For backward-compatible single-repo rehydration only, an existing state file containing `repo_contract` without `repo_contracts` remains readable through the Phase 0 legacy fallback; never initialize a new run with the singular key.
 
 ## Phase 0 — Orientation → repo contract
 
@@ -96,6 +99,8 @@ Every graph node has a required `repo` field. One repo owns each milestone; ever
 
 For a cross-repo run, `vision.md` declares the complete repo set and every producer→consumer consumption edge in a fenced YAML block under `## Constraints`. The primary repo is where `/pce` was invoked and where `VISION_DIR` lives; give it `path: .`. Every other path is relative to the primary repo. Use exactly this shape:
 
+The `/to-vision` skill emits this repos block for visions whose conversation establishes cross-repo scope.
+
 ```yaml
 repos:
   <primary-repo-name>:
@@ -109,6 +114,8 @@ consumption:
 ```
 
 Repeat repo entries and consumption list items as needed. Omit the entire block for a single-repo vision; the primary repo's name and root then come from its sole repo contract. Repos absent from this declaration are outside the run's blast radius.
+
+For a declared multi-repo vision, an absent or empty `consumption:` list is valid.
 
 During Phase 0, validate every declared repo entry: its resolved path exists, it is a git repository, and its root contains `AGENTS.md` or `CLAUDE.md`. Run the orientation sweep once per repo and store contracts under `state.json.repo_contracts.<repo-name>`. Reject duplicate names, paths that resolve to the same repo under different names, consumption edges whose endpoint is undeclared, and additional-repo paths that are absolute. A milestone or step planner that emits a `repo` value absent from the validated map receives a graph-critic `BLOCK` verdict.
 
@@ -134,7 +141,7 @@ Every declared producer→consumer edge is refined during Phase 0 into the consu
      --sandbox workspace-write \
      -C <repo-abs> \
      --output-schema <graph-schema-abs> \
-     -o <vision-abs>/milestones.json
+     -o <vision-abs>/milestones.json < /dev/null
    ```
 
 2. Dispatch a fresh **Claude critic** to adversarially review `VISION_DIR/milestones.json` → verdict (against the verdict schema). Supply the exact planning ref and `git show <planning-ref>:<path>` commands for every tracked input; the critic reads those refs rather than judging its checkout.
@@ -159,7 +166,7 @@ codex exec \
   --sandbox workspace-write \
   -C <repo-abs> \
   --output-schema <graph-schema-abs> \
-  -o <vision-abs>/milestone-<m>/steps.json
+  -o <vision-abs>/milestone-<m>/steps.json < /dev/null
 ```
 
 A fresh **Claude critic** reviews the step graph from the exact named planning ref using the supplied `git show <planning-ref>:<path>` commands; iterate to `APPROVE` with the same fresh-dispatch revise loop as Phase 1 (never `resume`; loop state in `state.json`). The critic must verify each step's plan is **executable by a zero-context agent** (`self_sufficiency`).
@@ -191,7 +198,7 @@ For each ready step:
       (b) **Authored-data verbatim:** every data shape the executor must author (fixtures, manifests, schemas) is quoted in full in the plan; mandatory when its source of truth is outside the worktree (routine under cross-repo).
       (c) **Assertion blast-radius:** every existing assertion the new code will break is either updated in-plan or explicitly proven untouched." \
      --sandbox workspace-write \
-     -C <repo-abs>
+     -C <repo-abs> < /dev/null
    ```
 
    **Self-containment rule:** `VISION_DIR` lives under a gitignored planning directory that is absent from step worktrees, and the plan reaches the executor **via stdin** — so any content the executor needs from `VISION_DIR`, or from any file not present in the worktree, must be **inlined into the plan verbatim**. A Claude critic reviews (`self_sufficiency` gate) → iterate to `APPROVE` (cap 3, stuck-detector); every `REVISE` round is a fresh `codex exec` (never `resume`) whose prompt names the on-disk paths of the `plan.md` under revision and of the critic's `review-<n>.md`, the exact planning ref, and the applicable `git show <planning-ref>:<path>` commands; loop state lives in `state.json`.
