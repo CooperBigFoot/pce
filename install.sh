@@ -31,7 +31,7 @@ esac
 SKILLS_DIR="$HOME/.claude/skills"
 mkdir -p "$SKILLS_DIR"
 
-for skill in pce to-vision domain-modeling grill-with-docs; do
+for skill in pce to-vision domain-modeling grill-with-docs chart-program; do
     src="$REPO_ROOT/skills/$skill"
     dst="$SKILLS_DIR/$skill"
     if [ -e "$dst" ] && [ ! -L "$dst" ]; then
@@ -46,7 +46,7 @@ done
 # --- Post-install verification ---------------------------------------------------
 status=0
 
-for link in "$BIN_DIR/pce" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DIR/domain-modeling" "$SKILLS_DIR/grill-with-docs"; do
+for link in "$BIN_DIR/pce" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DIR/domain-modeling" "$SKILLS_DIR/grill-with-docs" "$SKILLS_DIR/chart-program"; do
     if [ -L "$link" ] && [ -e "$link" ]; then
         echo "OK: $link resolves"
     else
@@ -55,7 +55,7 @@ for link in "$BIN_DIR/pce" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DI
     fi
 done
 
-for skill in domain-modeling grill-with-docs; do
+for skill in domain-modeling grill-with-docs chart-program; do
     skill_path="$SKILLS_DIR/$skill/SKILL.md"
     if [ -f "$skill_path" ]; then
         echo "OK: skill definition present at $skill_path"
