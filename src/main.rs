@@ -8,15 +8,16 @@ use std::time::SystemTime;
 use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::{
     AppendError, ArtifactPath, AuthorityFailure, BranchState, CreationDate,
-    CurrentArtifactObservation, CurrentArtifactState, EventBodyRef, EventLogTail, EventLogTailLine,
-    EventRecord, EventTimestamp, ExactPullRequestIdentity, ExactPullRequestState,
-    GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
-    GitMergeObservation, KnownPayload, MergeSubject, NodeId, PullRequestNumber,
-    RepositoryBranchName, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RunSnapshot, Sha256Digest,
-    SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState, TagTarget,
-    UnparsedPayload, VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
-    append_event, create_vision, derive_run_state, parse_event_line,
+    CurrentArtifactObservation, CurrentArtifactState, EventBodyRef, EventKindName, EventLogTail,
+    EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, ExactPullRequestIdentity,
+    ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
+    GitHubPullRequestObservation, GitMergeObservation, KnownPayload, MergeSubject, NodeId,
+    PullRequestNumber, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
+    RepositoryName, RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
+    RunSnapshot, Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode, TagName,
+    TagState, TagTarget, UnparsedPayload, VisionName, VisionSlug, WorktreeIdentity, WorktreeState,
+    WriteKind, append_event, create_vision, derive_run_state, event_record_matches,
+    parse_event_line,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -24,6 +25,7 @@ use sha2::{Digest, Sha256};
 const USAGE: &str = concat!(
     "usage: pce vision new \"<name>\"\n",
     "       pce log --file <LOG_PATH> --kind <KIND> --node <NODE>\n",
+    "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR>"
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
@@ -40,8 +42,13 @@ enum Command {
         kind: WriteKind,
         node: NodeId,
     },
+    LogRead {
+        path: PathBuf,
+        filter: EventRecordFilter,
+    },
     Status {
         log_path: PathBuf,
+        recovery_log_path: RecoveryLogPath,
         vision_dir: PathBuf,
         format: StatusFormat,
     },
@@ -127,11 +134,17 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
     match parse_command(args)? {
         Command::VisionNew { name } => run_vision_new(&name),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
+        Command::LogRead { path, filter } => {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            run_log_read(&path, &filter, &mut output)
+        }
         Command::Status {
             log_path,
+            recovery_log_path,
             vision_dir,
             format,
-        } => run_status(&log_path, &vision_dir, format),
+        } => run_status(&log_path, &recovery_log_path, &vision_dir, format),
     }
 }
 
@@ -165,7 +178,47 @@ fn parse_log_command(action: &str, rest: &[String]) -> Result<Command> {
                 node,
             })
         }
-        ("read", _) => bail!(USAGE),
+        ("read", [file_flag, raw_path]) if file_flag == "--file" => Ok(Command::LogRead {
+            path: PathBuf::from(raw_path),
+            filter: EventRecordFilter::All,
+        }),
+        ("read", [file_flag, raw_path, kind_flag, raw_kind])
+            if file_flag == "--file" && kind_flag == "--kind" =>
+        {
+            Ok(Command::LogRead {
+                path: PathBuf::from(raw_path),
+                filter: EventRecordFilter::Kind(EventKindName::new(raw_kind)),
+            })
+        }
+        ("read", [file_flag, raw_path, node_flag, raw_node])
+            if file_flag == "--file" && node_flag == "--node" =>
+        {
+            let node = NodeId::parse(raw_node).context("failed to parse log-read node filter")?;
+            Ok(Command::LogRead {
+                path: PathBuf::from(raw_path),
+                filter: EventRecordFilter::Node(node),
+            })
+        }
+        (
+            "read",
+            [
+                file_flag,
+                raw_path,
+                kind_flag,
+                raw_kind,
+                node_flag,
+                raw_node,
+            ],
+        ) if file_flag == "--file" && kind_flag == "--kind" && node_flag == "--node" => {
+            let node = NodeId::parse(raw_node).context("failed to parse log-read node filter")?;
+            Ok(Command::LogRead {
+                path: PathBuf::from(raw_path),
+                filter: EventRecordFilter::KindAndNode {
+                    kind: EventKindName::new(raw_kind),
+                    node,
+                },
+            })
+        }
         _ => bail!(USAGE),
     }
 }
@@ -178,6 +231,7 @@ fn parse_status_command(action: &str, rest: &[String]) -> Result<Command> {
             let format = parse_status_format(trailing)?;
             Ok(Command::Status {
                 log_path: PathBuf::from(raw_path),
+                recovery_log_path: RecoveryLogPath::new(raw_path),
                 vision_dir: PathBuf::from(raw_vision_dir),
                 format,
             })
@@ -237,8 +291,17 @@ fn run_log(path: &Path, kind: WriteKind, node: NodeId, input: &mut dyn Read) -> 
     }
 }
 
-fn run_status(log_path: &Path, vision_dir: &Path, format: StatusFormat) -> Result<()> {
-    let records = read_event_log(log_path)?;
+fn run_status(
+    log_path: &Path,
+    recovery_log_path: &RecoveryLogPath,
+    vision_dir: &Path,
+    format: StatusFormat,
+) -> Result<()> {
+    let parsed_lines = read_event_log(log_path)?;
+    let records = parsed_lines
+        .iter()
+        .map(|line| line.record.clone())
+        .collect::<Vec<_>>();
     let contracts = repository_contracts(&records)?;
     let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
     let vision = vision_slug(vision_dir)?;
@@ -264,8 +327,15 @@ fn run_status(log_path: &Path, vision_dir: &Path, format: StatusFormat) -> Resul
         .get(primary_index)
         .context("resolved primary repository index is unavailable")?;
     let authorities = observe_authorities(&canonical_nodes, primary)?;
-    let state = derive_run_state(&records, &vision, &artifacts, &repositories, &authorities)
-        .context("failed to derive run state")?;
+    let state = derive_run_state(
+        &records,
+        &vision,
+        recovery_log_path,
+        &artifacts,
+        &repositories,
+        &authorities,
+    )
+    .context("failed to derive run state")?;
     let value = validated_snapshot_value(&state)?;
 
     match format {
@@ -273,11 +343,17 @@ fn run_status(log_path: &Path, vision_dir: &Path, format: StatusFormat) -> Resul
     }
 }
 
-fn read_event_log(path: &Path) -> Result<Vec<EventRecord>> {
+#[derive(Debug)]
+struct ParsedEventLine {
+    raw: String,
+    record: EventRecord,
+}
+
+fn read_event_log(path: &Path) -> Result<Vec<ParsedEventLine>> {
     let file =
         File::open(path).with_context(|| format!("failed to open event log {}", path.display()))?;
     let mut reader = BufReader::new(file);
-    let mut records = Vec::<EventRecord>::new();
+    let mut lines = Vec::<ParsedEventLine>::new();
     let mut physical_line = 0_u64;
     let mut buffer = String::new();
     loop {
@@ -293,29 +369,44 @@ fn read_event_log(path: &Path) -> Result<Vec<EventRecord>> {
             break;
         }
         physical_line += 1;
-        if buffer.ends_with('\n') {
-            buffer.pop();
-        }
-        let record = parse_event_line(&buffer).with_context(|| {
+        let parsed = buffer.strip_suffix('\n').unwrap_or(&buffer);
+        let record = parse_event_line(parsed).with_context(|| {
             format!(
                 "failed to parse physical line {physical_line} from event log {}",
                 path.display()
             )
         })?;
-        if let Some(previous) = records.last()
-            && record.sequence().get() <= previous.sequence().get()
+        if let Some(previous) = lines.last()
+            && record.sequence().get() <= previous.record.sequence().get()
         {
             bail!(
                 "event log {} has non-increasing sequence {} at physical line {} after {}",
                 path.display(),
                 record.sequence().get(),
                 physical_line,
-                previous.sequence().get()
+                previous.record.sequence().get()
             );
         }
-        records.push(record);
+        lines.push(ParsedEventLine {
+            raw: buffer.clone(),
+            record,
+        });
     }
-    Ok(records)
+    Ok(lines)
+}
+
+fn run_log_read(path: &Path, filter: &EventRecordFilter, output: &mut dyn Write) -> Result<()> {
+    let lines = read_event_log(path)?;
+    for line in &lines {
+        if event_record_matches(&line.record, filter) {
+            output.write_all(line.raw.as_bytes()).with_context(|| {
+                format!("failed to write selected event from {}", path.display())
+            })?;
+        }
+    }
+    output
+        .flush()
+        .with_context(|| format!("failed to flush selected events from {}", path.display()))
 }
 
 fn repository_contracts(records: &[EventRecord]) -> Result<Vec<RepositoryContract>> {
@@ -1119,20 +1210,30 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use pce_core::{
-        ArtifactPath, BranchState, CurrentArtifactObservation, CurrentArtifactState,
-        GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
-        GitMergeObservation, KnownPayload, NodeId, ReadKind, ReadPayload, RepositoryBranchName,
-        RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-        RepositoryObservationFailure, Sha256Digest, StepAuthorityObservation, TagName, TagState,
-        VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, derive_run_state, parse_event_line,
+        ArtifactPath, BranchState, CurrentArtifactObservation, CurrentArtifactState, EventKindName,
+        EventRecordFilter, GitAuthorityObservation, GitHubAuthorityObservation,
+        GitHubPullRequestObservation, GitMergeObservation, KnownPayload, NodeId, ReadKind,
+        ReadPayload, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
+        RepositoryName, RepositoryObservation, RepositoryObservationFailure, Sha256Digest,
+        StepAuthorityObservation, TagName, TagState, VisionSlug, WorktreeIdentity, WorktreeState,
+        WriteKind, derive_run_state, parse_event_line,
     };
     use tempfile::tempdir;
 
-    use crate::{Command, StatusFormat, parse_command, run, validated_snapshot_value};
+    use crate::{
+        Command, StatusFormat, parse_command, run, run_log_read, validated_snapshot_value,
+    };
 
     const DELTA_PAYLOAD: &str = r#"{"message":"append one validated event"}"#;
     const UNKNOWN_TAIL: &str = r#"{"sequence":41,"timestamp":"2026-07-27T12:34:55.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
     const MULTILINE_PAYLOAD: &str = "{\n  \"finding\":\"the measured fact\",\n  \"evidence\":\"git rev-parse HEAD\\ncargo test --workspace\"\n}";
+    const RAW_READ_FIXTURE: &str = concat!(
+        r#"{"sequence":1,"timestamp":"2026-07-27T12:34:56.000Z","kind":"delta","node":"m2-s1","payload":{"message":"first"}}"#,
+        "\n",
+        r#"{"sequence":2,"timestamp":"2026-07-27T12:34:57.000Z","kind":"future-kind","node":"m2-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#,
+        "\n",
+        r#"{"sequence":3,"timestamp":"2026-07-27T12:34:58.000Z","kind":"delta","node":"m2-s2","payload":{"message":"third"}}"#,
+    );
 
     fn log_args(path: &Path, kind: &str) -> Vec<String> {
         vec![
@@ -1393,6 +1494,7 @@ mod tests {
         .expect("status command should parse without reaching adapters");
         let Command::Status {
             log_path,
+            recovery_log_path,
             vision_dir,
             format,
         } = command
@@ -1400,6 +1502,7 @@ mod tests {
             panic!("typed status command expected");
         };
         assert_eq!(log_path, PathBuf::from("events.jsonl"));
+        assert_eq!(recovery_log_path.as_str(), "events.jsonl");
         assert_eq!(vision_dir, PathBuf::from("planning/2026-07-27-event-log"));
         assert_eq!(format, StatusFormat::Json);
     }
@@ -1442,7 +1545,27 @@ mod tests {
     #[test]
     fn log_action_seam_rejects_read_reordering_and_payload_arguments() {
         let invalid = [
-            vec!["log", "read", "--file", "events.jsonl"],
+            vec![
+                "log",
+                "read",
+                "--file",
+                "events.jsonl",
+                "--node",
+                "m2-s4",
+                "--kind",
+                "delta",
+            ],
+            vec![
+                "log",
+                "read",
+                "--file",
+                "events.jsonl",
+                "--kind",
+                "delta",
+                "--kind",
+                "delta",
+            ],
+            vec!["log", "read", "--file", "events.jsonl", "extra"],
             vec![
                 "log",
                 "--kind",
@@ -1469,14 +1592,186 @@ mod tests {
     }
 
     #[test]
+    fn log_read_parser_accepts_exact_filters_and_preserves_domain_errors() {
+        let legal = [
+            (
+                vec!["log", "read", "--file", "events.jsonl"],
+                EventRecordFilter::All,
+            ),
+            (
+                vec![
+                    "log",
+                    "read",
+                    "--file",
+                    "events.jsonl",
+                    "--kind",
+                    "--future",
+                ],
+                EventRecordFilter::Kind(EventKindName::new("--future")),
+            ),
+            (
+                vec![
+                    "log",
+                    "read",
+                    "--file",
+                    "events.jsonl",
+                    "--node",
+                    "--node-value",
+                ],
+                EventRecordFilter::Node(NodeId::parse("--node-value").expect("node")),
+            ),
+            (
+                vec![
+                    "log",
+                    "read",
+                    "--file",
+                    "events.jsonl",
+                    "--kind",
+                    "delta",
+                    "--node",
+                    "m2-s2",
+                ],
+                EventRecordFilter::KindAndNode {
+                    kind: EventKindName::new("delta"),
+                    node: NodeId::parse("m2-s2").expect("node"),
+                },
+            ),
+        ];
+        for (args, expected) in legal {
+            let Command::LogRead { path, filter } =
+                parse_command(args.into_iter().map(str::to_owned)).expect("legal read shape")
+            else {
+                panic!("log-read command expected");
+            };
+            assert_eq!(path, PathBuf::from("events.jsonl"));
+            assert_eq!(filter, expected);
+        }
+
+        let shape_error = parse_command(
+            ["log", "read", "--kind", "delta", "--file", "events.jsonl"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect_err("wrong order should fail");
+        assert_eq!(shape_error.to_string(), super::USAGE);
+
+        let node_error = parse_command(
+            ["log", "read", "--file", "events.jsonl", "--node", ""]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect_err("empty node should fail");
+        assert_eq!(
+            node_error.to_string(),
+            "failed to parse log-read node filter"
+        );
+        assert!(!node_error.to_string().contains("usage:"));
+
+        let write_error = parse_command(
+            [
+                "log",
+                "--file",
+                "events.jsonl",
+                "--kind",
+                "future-kind",
+                "--node",
+                "m2-s2",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect_err("unknown write kind should fail");
+        assert_eq!(write_error.to_string(), "failed to parse event kind");
+    }
+
+    #[test]
+    fn log_read_preserves_exact_selected_raw_bytes() {
+        let directory = tempdir().expect("temporary directory should create");
+        let path = directory.path().join("events.jsonl");
+        fs::write(&path, RAW_READ_FIXTURE).expect("fixture should seed");
+        let fixtures = [
+            (EventRecordFilter::All, RAW_READ_FIXTURE.as_bytes().to_vec()),
+            (
+                EventRecordFilter::Kind(EventKindName::new("delta")),
+                concat!(
+                    r#"{"sequence":1,"timestamp":"2026-07-27T12:34:56.000Z","kind":"delta","node":"m2-s1","payload":{"message":"first"}}"#,
+                    "\n",
+                    r#"{"sequence":3,"timestamp":"2026-07-27T12:34:58.000Z","kind":"delta","node":"m2-s2","payload":{"message":"third"}}"#
+                )
+                .as_bytes()
+                .to_vec(),
+            ),
+            (
+                EventRecordFilter::Node(NodeId::parse("m2-s1").expect("node")),
+                concat!(
+                    r#"{"sequence":1,"timestamp":"2026-07-27T12:34:56.000Z","kind":"delta","node":"m2-s1","payload":{"message":"first"}}"#,
+                    "\n",
+                    r#"{"sequence":2,"timestamp":"2026-07-27T12:34:57.000Z","kind":"future-kind","node":"m2-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#,
+                    "\n"
+                )
+                .as_bytes()
+                .to_vec(),
+            ),
+            (
+                EventRecordFilter::KindAndNode {
+                    kind: EventKindName::new("delta"),
+                    node: NodeId::parse("m2-s2").expect("node"),
+                },
+                r#"{"sequence":3,"timestamp":"2026-07-27T12:34:58.000Z","kind":"delta","node":"m2-s2","payload":{"message":"third"}}"#
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        ];
+        for (filter, expected) in fixtures {
+            let mut output = Vec::new();
+            run_log_read(&path, &filter, &mut output).expect("raw read should succeed");
+            assert_eq!(output, expected);
+        }
+    }
+
+    #[test]
+    fn log_read_validates_complete_file_before_writing() {
+        let directory = tempdir().expect("temporary directory should create");
+        let path = directory.path().join("events.jsonl");
+        for suffix in [
+            "\n{",
+            concat!(
+                "\n",
+                r#"{"sequence":1,"timestamp":"2026-07-27T12:34:59.000Z","kind":"delta","node":"m2-s3","payload":{"message":"decreasing"}}"#
+            ),
+        ] {
+            fs::write(&path, format!("{RAW_READ_FIXTURE}{suffix}")).expect("fixture should seed");
+            let mut output = Vec::new();
+            assert!(
+                run_log_read(&path, &EventRecordFilter::All, &mut output).is_err(),
+                "invalid complete log should fail"
+            );
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
     fn typed_empty_snapshot_uses_compiled_schema_identity() {
         let vision =
             VisionSlug::parse("2026-07-27-event-log").expect("vision fixture should parse");
-        let state =
-            derive_run_state(&[], &vision, &[], &[], &[]).expect("empty typed state should derive");
+        let state = derive_run_state(
+            &[],
+            &vision,
+            &RecoveryLogPath::new("events.jsonl"),
+            &[],
+            &[],
+            &[],
+        )
+        .expect("empty typed state should derive");
         let value = validated_snapshot_value(&state).expect("typed empty snapshot should validate");
         assert_eq!(value["schema_id"], "pce.run-snapshot");
         assert_eq!(value["schema_version"], 1);
+        for category in ["rounds", "open_holds", "deltas", "facts"] {
+            assert_eq!(
+                value["recovery_digest"][category]["entries"],
+                serde_json::json!([])
+            );
+        }
     }
 
     #[test]
@@ -1519,14 +1814,29 @@ mod tests {
         )];
         let vision =
             VisionSlug::parse("2026-07-27-event-log").expect("vision fixture should parse");
-        let state = derive_run_state(&records, &vision, &artifacts, &repositories, &authorities)
-            .expect("rich typed state should derive");
+        let state = derive_run_state(
+            &records,
+            &vision,
+            &RecoveryLogPath::new("events.jsonl"),
+            &artifacts,
+            &repositories,
+            &authorities,
+        )
+        .expect("rich typed state should derive");
         let value = validated_snapshot_value(&state).expect("typed rich snapshot should validate");
         assert_eq!(value["repositories"][0]["repository"], "pce");
         assert_eq!(value["steps"][0]["merge_status"], "not-merged");
         assert_eq!(
             value["provenance"][0]["condition"]["state"],
             "digest-matches"
+        );
+        assert_eq!(
+            value["recovery_digest"]["deltas"]["entries"][0]["sequence"],
+            1
+        );
+        assert_eq!(
+            value["recovery_digest"]["facts"]["entries"][0]["kind"],
+            "planning-artifact-approved"
         );
     }
 }

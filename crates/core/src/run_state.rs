@@ -1,4 +1,4 @@
-//! run_state : Ordered<EventRecord> × VisionSlug × ArtifactDigestObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot   (pure, deterministic)
+//! run_state : Ordered<EventRecord> × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot   (pure, deterministic)
 //! This module performs no I/O.
 
 use serde::Serialize;
@@ -52,6 +52,22 @@ impl VisionSlug {
     }
 
     /// Return the preserved vision slug.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The exact event-log path spelling used in recovery commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryLogPath(String);
+
+impl RecoveryLogPath {
+    /// Preserve a caller-provided log path without filesystem interpretation.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Return the exact caller-provided path spelling.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -1102,6 +1118,7 @@ pub struct DerivedRunState {
     holds: Vec<HoldObservation>,
     provenance: Vec<ArtifactProvenance>,
     resume: ResumeObservation,
+    recovery_digest: RecoveryDigest,
 }
 
 impl DerivedRunState {
@@ -1138,6 +1155,11 @@ impl DerivedRunState {
     /// Return the conservative resume observation.
     pub const fn resume(&self) -> &ResumeObservation {
         &self.resume
+    }
+
+    /// Return the bounded recovery digest derived by the ordered fold.
+    pub const fn recovery_digest(&self) -> &RecoveryDigest {
+        &self.recovery_digest
     }
 }
 
@@ -1196,7 +1218,7 @@ impl<'a> From<&'a DerivedRunState> for RunSnapshot<'a> {
                 .map(ProvenanceSnapshot::from)
                 .collect(),
             resume: ResumeSnapshot::from(state.resume()),
-            recovery_digest: RecoveryDigest::empty_scaffold(),
+            recovery_digest: state.recovery_digest().clone(),
         }
     }
 }
@@ -1761,7 +1783,7 @@ impl From<CyclePosition> for CyclePositionSnapshot {
 }
 
 /// Versioned recovery-digest carriers populated by the bounded digest fold in m2-s5.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecoveryDigest {
     rounds: RecoveryCategory<RecoveryRoundEntry>,
     open_holds: RecoveryCategory<RecoveryOpenHoldEntry>,
@@ -1769,36 +1791,15 @@ pub struct RecoveryDigest {
     facts: RecoveryCategory<RecoveryFactEntry>,
 }
 
-impl RecoveryDigest {
-    // m2-s5 replaces this staged empty population with the bounded digest fold.
-    fn empty_scaffold() -> Self {
-        Self {
-            rounds: RecoveryCategory::empty_scaffold(),
-            open_holds: RecoveryCategory::empty_scaffold(),
-            deltas: RecoveryCategory::empty_scaffold(),
-            facts: RecoveryCategory::empty_scaffold(),
-        }
-    }
-}
-
 /// One typed recovery category with explicit elisions.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecoveryCategory<T> {
     entries: Vec<T>,
     elisions: Vec<RecoveryElision>,
 }
 
-impl<T> RecoveryCategory<T> {
-    fn empty_scaffold() -> Self {
-        Self {
-            entries: Vec::new(),
-            elisions: Vec::new(),
-        }
-    }
-}
-
 /// One recovery round entry.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecoveryRoundEntry {
     sequence: u64,
     node: String,
@@ -1807,7 +1808,7 @@ pub struct RecoveryRoundEntry {
 }
 
 /// One recovery open-hold entry.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecoveryOpenHoldEntry {
     sequence: u64,
     node: String,
@@ -1816,7 +1817,7 @@ pub struct RecoveryOpenHoldEntry {
 }
 
 /// One recovery delta entry.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecoveryDeltaEntry {
     sequence: u64,
     node: String,
@@ -1824,7 +1825,7 @@ pub struct RecoveryDeltaEntry {
 }
 
 /// One recovery fact entry.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecoveryFactEntry {
     sequence: u64,
     node: String,
@@ -1833,7 +1834,7 @@ pub struct RecoveryFactEntry {
 }
 
 /// One explicit omitted recovery range and its retrieval commands.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecoveryElision {
     omitted_count: u64,
     start_sequence: u64,
@@ -1856,6 +1857,14 @@ struct LatestApproval {
     sequence: Sequence,
 }
 
+#[derive(Debug)]
+struct RecoveryCandidate<T> {
+    sequence: u64,
+    node: NodeId,
+    kind: &'static str,
+    entry: T,
+}
+
 /// Fold ordered records and typed authority observations into deterministic run state.
 ///
 /// # Errors
@@ -1863,10 +1872,18 @@ struct LatestApproval {
 /// Returns a named [`RunStateError`] for non-increasing records, checked round overflow,
 /// close-before-open history, duplicate or missing cross-input identities, malformed or
 /// absent authority nodes, or empty raw values passed to typed constructors.
-#[instrument(skip(records, vision, artifacts, repositories, authorities))]
+#[instrument(skip(
+    records,
+    vision,
+    recovery_log_path,
+    artifacts,
+    repositories,
+    authorities
+))]
 pub fn derive_run_state(
     records: &[EventRecord],
     vision: &VisionSlug,
+    recovery_log_path: &RecoveryLogPath,
     artifacts: &[CurrentArtifactObservation],
     repositories: &[RepositoryObservation],
     authorities: &[StepAuthorityObservation],
@@ -1880,6 +1897,9 @@ pub fn derive_run_state(
     let mut rounds = Vec::<RoundSeries>::new();
     let mut holds = Vec::<HoldObservation>::new();
     let mut approvals = Vec::<LatestApproval>::new();
+    let mut recovery_rounds = Vec::<RecoveryCandidate<RecoveryRoundEntry>>::new();
+    let mut recovery_deltas = Vec::<RecoveryCandidate<RecoveryDeltaEntry>>::new();
+    let mut recovery_facts = Vec::<RecoveryCandidate<RecoveryFactEntry>>::new();
     let mut previous = None::<Sequence>;
 
     for record in records {
@@ -1904,12 +1924,23 @@ pub fn derive_run_state(
                 });
                 let classification = DispatchRoleClass::classify(&payload.role);
                 if let Some(round_classification) = classification.round_classification() {
-                    increment_round_series(
+                    let round_number = increment_round_series(
                         &mut rounds,
                         record.node(),
                         &payload.role,
                         round_classification,
                     )?;
+                    recovery_rounds.push(RecoveryCandidate {
+                        sequence: record.sequence().get(),
+                        node: record.node().clone(),
+                        kind: "dispatch",
+                        entry: RecoveryRoundEntry {
+                            sequence: record.sequence().get(),
+                            node: record.node().as_str().to_owned(),
+                            role: payload.role.as_str().to_owned(),
+                            round_number: round_number.get(),
+                        },
+                    });
                     update_cycle_position(
                         &mut visible_nodes,
                         record.node(),
@@ -1917,6 +1948,7 @@ pub fn derive_run_state(
                         record.sequence(),
                     );
                 }
+                recovery_facts.push(recovery_fact(record, "dispatch", payload.evidence.as_str()));
             }
             EventBodyRef::Known(KnownPayload::EscalationOpen(payload)) => {
                 let status = HoldStatus::Open {
@@ -1959,19 +1991,73 @@ pub fn derive_run_state(
                 } else {
                     approvals.push(latest);
                 }
+                recovery_facts.push(recovery_fact(
+                    record,
+                    "planning-artifact-approved",
+                    payload.evidence.as_str(),
+                ));
             }
-            EventBodyRef::Known(
-                KnownPayload::Delta(_)
-                | KnownPayload::KeyFinding(_)
-                | KnownPayload::RepositoryContract(_),
-            )
-            | EventBodyRef::Unknown { .. } => {}
+            EventBodyRef::Known(KnownPayload::Delta(payload)) => {
+                recovery_deltas.push(RecoveryCandidate {
+                    sequence: record.sequence().get(),
+                    node: record.node().clone(),
+                    kind: "delta",
+                    entry: RecoveryDeltaEntry {
+                        sequence: record.sequence().get(),
+                        node: record.node().as_str().to_owned(),
+                        message: payload.message.clone(),
+                    },
+                });
+            }
+            EventBodyRef::Known(KnownPayload::KeyFinding(payload)) => {
+                recovery_facts.push(recovery_fact(
+                    record,
+                    "key-finding",
+                    payload.evidence.as_str(),
+                ));
+            }
+            EventBodyRef::Known(KnownPayload::RepositoryContract(payload)) => {
+                recovery_facts.push(recovery_fact(
+                    record,
+                    "repository-contract",
+                    payload.evidence.as_str(),
+                ));
+            }
+            EventBodyRef::Unknown { .. } => {}
         }
     }
 
     let provenance = derive_provenance(&approvals, artifacts)?;
     let steps = derive_step_results(&visible_nodes, vision, authorities)?;
     let resume = derive_resume(&visible_nodes, &steps);
+    let mut recovery_open_holds = holds
+        .iter()
+        .filter_map(|hold| match &hold.status {
+            HoldStatus::Open {
+                node,
+                sequence,
+                question,
+            } => Some(RecoveryCandidate {
+                sequence: sequence.get(),
+                node: node.clone(),
+                kind: "escalation-open",
+                entry: RecoveryOpenHoldEntry {
+                    sequence: sequence.get(),
+                    node: node.as_str().to_owned(),
+                    key: hold.key.as_str().to_owned(),
+                    question: question.clone(),
+                },
+            }),
+            HoldStatus::Closed { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    recovery_open_holds.sort_by_key(|candidate| candidate.sequence);
+    let recovery_digest = RecoveryDigest {
+        rounds: finalize_recovery_category(recovery_rounds, recovery_log_path),
+        open_holds: finalize_recovery_category(recovery_open_holds, recovery_log_path),
+        deltas: finalize_recovery_category(recovery_deltas, recovery_log_path),
+        facts: finalize_recovery_category(recovery_facts, recovery_log_path),
+    };
 
     Ok(DerivedRunState {
         repositories: repositories.to_vec(),
@@ -1981,7 +2067,80 @@ pub fn derive_run_state(
         holds,
         provenance,
         resume,
+        recovery_digest,
     })
+}
+
+fn recovery_fact(
+    record: &EventRecord,
+    kind: &'static str,
+    evidence: &str,
+) -> RecoveryCandidate<RecoveryFactEntry> {
+    RecoveryCandidate {
+        sequence: record.sequence().get(),
+        node: record.node().clone(),
+        kind,
+        entry: RecoveryFactEntry {
+            sequence: record.sequence().get(),
+            node: record.node().as_str().to_owned(),
+            kind: kind.to_owned(),
+            evidence: evidence.to_owned(),
+        },
+    }
+}
+
+fn finalize_recovery_category<T>(
+    mut candidates: Vec<RecoveryCandidate<T>>,
+    recovery_log_path: &RecoveryLogPath,
+) -> RecoveryCategory<T> {
+    const CAP: usize = 20;
+    let omitted_count = candidates.len().saturating_sub(CAP);
+    let retained = candidates.split_off(omitted_count);
+    let omitted = candidates;
+    let mut elisions = Vec::new();
+    let mut start = 0;
+    while start < omitted.len() {
+        let mut end = start + 1;
+        while end < omitted.len()
+            && omitted[end - 1].sequence.checked_add(1) == Some(omitted[end].sequence)
+        {
+            end += 1;
+        }
+        let range = &omitted[start..end];
+        let mut commands = Vec::new();
+        for candidate in range {
+            let command = recovery_command(recovery_log_path, candidate.kind, &candidate.node);
+            if !commands.contains(&command) {
+                commands.push(command);
+            }
+        }
+        elisions.push(RecoveryElision {
+            omitted_count: range.len() as u64,
+            start_sequence: range[0].sequence,
+            end_sequence: range[range.len() - 1].sequence,
+            retrieval_commands: commands,
+        });
+        start = end;
+    }
+    RecoveryCategory {
+        entries: retained
+            .into_iter()
+            .map(|candidate| candidate.entry)
+            .collect(),
+        elisions,
+    }
+}
+
+fn recovery_command(path: &RecoveryLogPath, kind: &str, node: &NodeId) -> String {
+    format!(
+        "pce log read --file {} --kind {kind} --node {}",
+        shell_quote(path.as_str()),
+        shell_quote(node.as_str())
+    )
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn validate_repository_inputs(repositories: &[RepositoryObservation]) -> Result<(), RunStateError> {
@@ -2070,21 +2229,23 @@ fn increment_round_series(
     node: &NodeId,
     role: &DispatchRole,
     classification: RoundClassification,
-) -> Result<(), RunStateError> {
+) -> Result<RoundCount, RunStateError> {
     if let Some(existing) = rounds
         .iter_mut()
         .find(|item| item.node == *node && item.role == *role)
     {
         existing.count = checked_round_increment(existing.count, node, role)?;
+        Ok(existing.count)
     } else {
+        let count = RoundCount(1);
         rounds.push(RoundSeries {
             node: node.clone(),
             role: role.clone(),
             classification,
-            count: RoundCount(1),
+            count,
         });
+        Ok(count)
     }
-    Ok(())
 }
 
 fn checked_round_increment(
@@ -2277,13 +2438,12 @@ mod tests {
         CurrentArtifactState, CyclePosition, DispatchRoleClass, ExactPullRequestIdentity,
         ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
         GitHubPullRequestObservation, GitMergeObservation, HoldStatus, MergeStatus, MergeSubject,
-        PullRequestNumber, RecoveryCategory, RecoveryDeltaEntry, RecoveryDigest, RecoveryElision,
-        RecoveryFactEntry, RecoveryOpenHoldEntry, RecoveryRoundEntry, RepositoryBranchName,
-        RepositoryFetchObservation, RepositoryObservation, RepositoryObservationFailure,
-        RepositoryObservationRef, ResumeObservation, RoundCount, RunSnapshot, RunStateError,
-        SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState, TagTarget,
-        VisionSlug, WorktreeIdentity, WorktreeState, checked_round_increment, derive_merge_status,
-        derive_run_state,
+        PullRequestNumber, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
+        RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
+        ResumeObservation, RoundCount, RunSnapshot, RunStateError, SquashCommitOid,
+        StepAuthorityObservation, StepNode, TagName, TagState, TagTarget, VisionSlug,
+        WorktreeIdentity, WorktreeState, checked_round_increment, derive_merge_status,
+        derive_run_state, recovery_command,
     };
 
     const RUN_SNAPSHOT_SCHEMA: &str =
@@ -2406,7 +2566,14 @@ mod tests {
         authorities: &[StepAuthorityObservation],
     ) -> Result<crate::run_state::DerivedRunState, RunStateError> {
         let vision = VisionSlug::parse("2026-07-27-example")?;
-        derive_run_state(records, &vision, artifacts, repositories, authorities)
+        derive_run_state(
+            records,
+            &vision,
+            &RecoveryLogPath::new("events.jsonl"),
+            artifacts,
+            repositories,
+            authorities,
+        )
     }
 
     #[test]
@@ -2939,7 +3106,14 @@ mod tests {
                 GitAuthorityObservation::Unreachable { failure },
             ),
         ];
-        let state = derive_run_state(&records, &vision, &[], &[], &authorities)?;
+        let state = derive_run_state(
+            &records,
+            &vision,
+            &RecoveryLogPath::new("events.jsonl"),
+            &[],
+            &[],
+            &authorities,
+        )?;
         assert!(matches!(
             state.resume(),
             ResumeObservation::Candidate { node, latest_sequence, cycle_position: CyclePosition::NoRoundDispatch }
@@ -2958,6 +3132,7 @@ mod tests {
         let all_merged = derive_run_state(
             &all_merged_records,
             &vision,
+            &RecoveryLogPath::new("events.jsonl"),
             &[],
             &[],
             &[merged_authority(&vision, "m2-s1")?],
@@ -3090,6 +3265,231 @@ mod tests {
     }
 
     #[test]
+    fn recovery_digest_uses_same_fold_content_and_schema() -> Result<(), Box<dyn Error>> {
+        let lines = [
+            r#"{"sequence":1,"timestamp":"2026-07-27T12:34:56.000Z","kind":"dispatch","node":"m2-s1","payload":{"role":"step-planner","ref":"plan-ref","evidence":"git rev-parse HEAD"}}"#,
+            r#"{"sequence":2,"timestamp":"2026-07-27T12:34:56.000Z","kind":"escalation-open","node":"m2-s1","payload":{"key":"review","question":"Proceed?"}}"#,
+            r#"{"sequence":3,"timestamp":"2026-07-27T12:34:56.000Z","kind":"delta","node":"m2-s1","payload":{"message":"changed"}}"#,
+            r#"{"sequence":4,"timestamp":"2026-07-27T12:34:56.000Z","kind":"key-finding","node":"m2-s1","payload":{"finding":"measured","evidence":"git status --short"}}"#,
+            r#"{"sequence":5,"timestamp":"2026-07-27T12:34:56.000Z","kind":"repository-contract","node":"m2-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stack":"Rust","format":"cargo fmt --all --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --workspace","preflight":"cargo check --workspace --all-targets","gates_rule":"all gates pass","install":"none","evidence":"git rev-parse --show-toplevel"}}"#,
+            r#"{"sequence":6,"timestamp":"2026-07-27T12:34:56.000Z","kind":"planning-artifact-approved","node":"m2-s1","payload":{"path":"planning/steps.json","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","evidence":"shasum -a 256 planning/steps.json"}}"#,
+            r#"{"sequence":7,"timestamp":"2026-07-27T12:34:56.000Z","kind":"escalation-close","node":"m2-s1","payload":{"key":"review","resolution":"done"}}"#,
+            r#"{"sequence":8,"timestamp":"2026-07-27T12:34:56.000Z","kind":"escalation-open","node":"m2-s2","payload":{"key":"review","question":"Again?"}}"#,
+        ];
+        let records = lines
+            .into_iter()
+            .map(crate::event_log::parse_event_line)
+            .collect::<Result<Vec<_>, _>>()?;
+        let artifacts = [CurrentArtifactObservation::new(
+            ArtifactPath::new("planning/steps.json"),
+            CurrentArtifactState::Present {
+                digest: digest('a')?,
+            },
+        )];
+        let authorities = [
+            not_merged_authority("m2-s1")?,
+            not_merged_authority("m2-s2")?,
+        ];
+        let state = derive(&records, &artifacts, &[], &authorities)?;
+        let value = serde_json::to_value(RunSnapshot::from(&state))?;
+        let recovery = &value["recovery_digest"];
+
+        assert_eq!(
+            recovery["rounds"]["entries"],
+            serde_json::json!([{
+                "sequence": 1, "node": "m2-s1", "role": "step-planner", "round_number": 1
+            }])
+        );
+        assert_eq!(
+            recovery["open_holds"]["entries"],
+            serde_json::json!([{
+                "sequence": 8, "node": "m2-s2", "key": "review", "question": "Again?"
+            }])
+        );
+        assert_eq!(
+            recovery["deltas"]["entries"],
+            serde_json::json!([{
+                "sequence": 3, "node": "m2-s1", "message": "changed"
+            }])
+        );
+        assert_eq!(
+            recovery["facts"]["entries"],
+            serde_json::json!([
+                {"sequence": 1, "node": "m2-s1", "kind": "dispatch", "evidence": "git rev-parse HEAD"},
+                {"sequence": 4, "node": "m2-s1", "kind": "key-finding", "evidence": "git status --short"},
+                {"sequence": 5, "node": "m2-s1", "kind": "repository-contract", "evidence": "git rev-parse --show-toplevel"},
+                {"sequence": 6, "node": "m2-s1", "kind": "planning-artifact-approved", "evidence": "shasum -a 256 planning/steps.json"}
+            ])
+        );
+        for category in ["rounds", "open_holds", "deltas", "facts"] {
+            assert_eq!(recovery[category]["elisions"], serde_json::json!([]));
+        }
+        assert!(snapshot_validator()?.is_valid(&value));
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_digest_caps_each_category_independently() -> Result<(), Box<dyn Error>> {
+        let mut records = Vec::new();
+        for sequence in 1..=22 {
+            records.push(dispatch(
+                sequence,
+                "m2-s1",
+                "step-planner",
+                &format!("ref-{sequence}"),
+            )?);
+        }
+        for sequence in 23..=44 {
+            records.push(event(
+                sequence,
+                "m2-s2",
+                KnownPayload::Delta(DeltaPayload {
+                    message: format!("delta-{sequence}"),
+                }),
+            )?);
+        }
+        for sequence in 45..=66 {
+            records.push(event(
+                sequence,
+                if sequence % 2 == 1 { "m2-s1" } else { "m2-s2" },
+                KnownPayload::EscalationOpen(EscalationOpenPayload {
+                    key: EscalationKey::new(format!("hold-{sequence}")),
+                    question: format!("question-{sequence}"),
+                }),
+            )?);
+        }
+        let authorities = [
+            not_merged_authority("m2-s1")?,
+            not_merged_authority("m2-s2")?,
+        ];
+        let state = derive(&records, &[], &[], &authorities)?;
+        let value = serde_json::to_value(RunSnapshot::from(&state))?;
+        let recovery = &value["recovery_digest"];
+
+        for category in ["rounds", "facts"] {
+            let entries = recovery[category]["entries"].as_array().expect("entries");
+            assert_eq!(entries.len(), 20);
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|entry| entry["sequence"].as_u64().expect("sequence"))
+                    .collect::<Vec<_>>(),
+                (3..=22).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                recovery[category]["elisions"],
+                serde_json::json!([{
+                    "omitted_count": 2,
+                    "start_sequence": 1,
+                    "end_sequence": 2,
+                    "retrieval_commands": [
+                        "pce log read --file 'events.jsonl' --kind dispatch --node 'm2-s1'"
+                    ]
+                }])
+            );
+        }
+        assert_eq!(
+            recovery["rounds"]["entries"]
+                .as_array()
+                .expect("round entries")
+                .iter()
+                .map(|entry| entry["round_number"].as_u64().expect("round number"))
+                .collect::<Vec<_>>(),
+            (3..=22).collect::<Vec<_>>()
+        );
+        assert!(
+            recovery["facts"]["entries"]
+                .as_array()
+                .expect("fact entries")
+                .iter()
+                .all(|entry| entry["evidence"] == "dispatch evidence")
+        );
+        assert_eq!(
+            recovery["deltas"]["entries"]
+                .as_array()
+                .expect("delta entries")
+                .iter()
+                .map(|entry| entry["sequence"].as_u64().expect("sequence"))
+                .collect::<Vec<_>>(),
+            (25..=44).collect::<Vec<_>>()
+        );
+        assert_eq!(recovery["deltas"]["entries"][0]["message"], "delta-25");
+        assert_eq!(recovery["deltas"]["entries"][19]["message"], "delta-44");
+        assert_eq!(
+            recovery["deltas"]["elisions"],
+            serde_json::json!([{
+                "omitted_count": 2,
+                "start_sequence": 23,
+                "end_sequence": 24,
+                "retrieval_commands": [
+                    "pce log read --file 'events.jsonl' --kind delta --node 'm2-s2'"
+                ]
+            }])
+        );
+        assert_eq!(
+            recovery["open_holds"]["entries"]
+                .as_array()
+                .expect("hold entries")
+                .iter()
+                .map(|entry| entry["sequence"].as_u64().expect("sequence"))
+                .collect::<Vec<_>>(),
+            (47..=66).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            recovery["open_holds"]["elisions"],
+            serde_json::json!([{
+                "omitted_count": 2,
+                "start_sequence": 45,
+                "end_sequence": 46,
+                "retrieval_commands": [
+                    "pce log read --file 'events.jsonl' --kind escalation-open --node 'm2-s1'",
+                    "pce log read --file 'events.jsonl' --kind escalation-open --node 'm2-s2'"
+                ]
+            }])
+        );
+        assert!(snapshot_validator()?.is_valid(&value));
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_elisions_use_actual_sequence_gaps_and_quote_shell_values()
+    -> Result<(), Box<dyn Error>> {
+        let mut records = vec![delta(1, "node")?, delta(3, "node")?, delta(4, "node")?];
+        for sequence in 5..=24 {
+            records.push(delta(sequence, "node")?);
+        }
+        let state = derive_run_state(
+            &records,
+            &VisionSlug::parse("2026-07-27-example")?,
+            &RecoveryLogPath::new("dir/it's log.jsonl"),
+            &[],
+            &[],
+            &[],
+        )?;
+        let value = serde_json::to_value(RunSnapshot::from(&state))?;
+        let elisions = &value["recovery_digest"]["deltas"]["elisions"];
+        assert_eq!(elisions[0]["omitted_count"], 1);
+        assert_eq!(elisions[0]["start_sequence"], 1);
+        assert_eq!(elisions[0]["end_sequence"], 1);
+        assert_eq!(elisions[1]["omitted_count"], 2);
+        assert_eq!(elisions[1]["start_sequence"], 3);
+        assert_eq!(elisions[1]["end_sequence"], 4);
+        assert_eq!(
+            elisions[0]["retrieval_commands"][0],
+            "pce log read --file 'dir/it'\\''s log.jsonl' --kind delta --node 'node'"
+        );
+        assert_eq!(
+            recovery_command(
+                &RecoveryLogPath::new("dir/it's log.jsonl"),
+                "delta",
+                &NodeId::parse("m2-s1")?
+            ),
+            "pce log read --file 'dir/it'\\''s log.jsonl' --kind delta --node 'm2-s1'"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn typed_rich_snapshot_conforms_and_pins_identity() -> Result<(), Box<dyn Error>> {
         let vision = VisionSlug::parse("2026-07-27-example")?;
         let records = vec![
@@ -3130,6 +3530,7 @@ mod tests {
         let state = derive_run_state(
             &records,
             &vision,
+            &RecoveryLogPath::new("events.jsonl"),
             &artifacts,
             &[repository],
             std::slice::from_ref(&authority),
@@ -3181,7 +3582,14 @@ mod tests {
             TagName::parse("missing-tag")?,
             TagState::Absent,
         );
-        let state = derive_run_state(&records, &vision, &[], &[repository], &[one_not_merged])?;
+        let state = derive_run_state(
+            &records,
+            &vision,
+            &RecoveryLogPath::new("events.jsonl"),
+            &[],
+            &[repository],
+            &[one_not_merged],
+        )?;
         let value = serde_json::to_value(RunSnapshot::from(&state))?;
         assert_eq!(
             value["steps"][0]["github"]["pull_request"]["state"]["status"],
@@ -3209,7 +3617,14 @@ mod tests {
                     failure: AuthorityFailure::parse("git offline")?,
                 },
             );
-            let state = derive_run_state(&records, &vision, &[], &[], &[authority])?;
+            let state = derive_run_state(
+                &records,
+                &vision,
+                &RecoveryLogPath::new("events.jsonl"),
+                &[],
+                &[],
+                &[authority],
+            )?;
             assert!(
                 snapshot_validator()?.is_valid(&serde_json::to_value(RunSnapshot::from(&state))?)
             );
@@ -3219,55 +3634,19 @@ mod tests {
 
     #[test]
     fn recovery_carriers_and_negative_contract_boundaries() -> Result<(), Box<dyn Error>> {
-        let state = derive(&[], &[], &[], &[])?;
-        let mut snapshot = RunSnapshot::from(&state);
-        snapshot.recovery_digest = RecoveryDigest {
-            rounds: RecoveryCategory {
-                entries: (1..=20)
-                    .map(|sequence| RecoveryRoundEntry {
-                        sequence,
-                        node: "m2-s1".to_owned(),
-                        role: "step-planner".to_owned(),
-                        round_number: sequence,
-                    })
-                    .collect(),
-                elisions: vec![RecoveryElision {
-                    omitted_count: 1,
-                    start_sequence: 21,
-                    end_sequence: 21,
-                    retrieval_commands: vec!["pce log read 21".to_owned()],
-                }],
-            },
-            open_holds: RecoveryCategory {
-                entries: vec![RecoveryOpenHoldEntry {
-                    sequence: 1,
-                    node: "m2-s1".to_owned(),
-                    key: String::new(),
-                    question: String::new(),
-                }],
-                elisions: Vec::new(),
-            },
-            deltas: RecoveryCategory {
-                entries: vec![RecoveryDeltaEntry {
-                    sequence: 1,
-                    node: "m2-s1".to_owned(),
-                    message: String::new(),
-                }],
-                elisions: Vec::new(),
-            },
-            facts: RecoveryCategory {
-                entries: vec![RecoveryFactEntry {
-                    sequence: 1,
-                    node: "m2-s1".to_owned(),
-                    kind: "key-finding".to_owned(),
-                    evidence: "evidence".to_owned(),
-                }],
-                elisions: Vec::new(),
-            },
-        };
-        let valid = serde_json::to_value(snapshot)?;
+        let records = (1..=21)
+            .map(|sequence| dispatch(sequence, "m2-s1", "step-planner", "ref"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let state = derive(&records, &[], &[], &[not_merged_authority("m2-s1")?])?;
+        let valid = serde_json::to_value(RunSnapshot::from(&state))?;
         let validator = snapshot_validator()?;
         assert!(validator.is_valid(&valid));
+        assert_eq!(
+            valid["recovery_digest"]["rounds"]["elisions"][0]["retrieval_commands"],
+            serde_json::json!([
+                "pce log read --file 'events.jsonl' --kind dispatch --node 'm2-s1'"
+            ])
+        );
 
         let mut invalid_values = Vec::new();
         let mut wrong_id = valid.clone();
