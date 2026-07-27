@@ -81,6 +81,14 @@ else
     status=1
 fi
 
+RUN_SNAPSHOT_SCHEMA_PATH="$SKILLS_DIR/pce/schemas/run-snapshot.schema.json"
+if [ -f "$RUN_SNAPSHOT_SCHEMA_PATH" ]; then
+    echo "OK: run snapshot schema present at $RUN_SNAPSHOT_SCHEMA_PATH"
+else
+    echo "ERROR: run snapshot schema missing at $RUN_SNAPSHOT_SCHEMA_PATH" >&2
+    status=1
+fi
+
 if [ "$status" -ne 0 ]; then
     echo "Install verification FAILED." >&2
     exit 1
