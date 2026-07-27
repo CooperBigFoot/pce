@@ -17,7 +17,7 @@ use pce_core::{
     RunSnapshot, Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode, TagName,
     TagState, TagTarget, UnparsedPayload, VisionName, VisionSlug, WorktreeIdentity, WorktreeState,
     WriteKind, append_event, create_vision, derive_run_state, event_record_matches,
-    parse_event_line,
+    parse_event_line, render_human_snapshot,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -26,7 +26,7 @@ const USAGE: &str = concat!(
     "usage: pce vision new \"<name>\"\n",
     "       pce log --file <LOG_PATH> --kind <KIND> --node <NODE>\n",
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
-    "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR>"
+    "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]"
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
@@ -57,6 +57,7 @@ enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusFormat {
     Json,
+    Human,
 }
 
 #[derive(Debug)]
@@ -243,7 +244,7 @@ fn parse_status_command(action: &str, rest: &[String]) -> Result<Command> {
 fn parse_status_format(trailing: &[String]) -> Result<StatusFormat> {
     match trailing {
         [] => Ok(StatusFormat::Json),
-        [mode] if mode == "--human" => bail!(USAGE),
+        [mode] if mode == "--human" => Ok(StatusFormat::Human),
         _ => bail!(USAGE),
     }
 }
@@ -336,10 +337,15 @@ fn run_status(
         &authorities,
     )
     .context("failed to derive run state")?;
-    let value = validated_snapshot_value(&state)?;
+    let snapshot = RunSnapshot::from(&state);
+    let value = validated_snapshot_value(&snapshot)?;
 
     match format {
         StatusFormat::Json => write_json_stdout(&value),
+        StatusFormat::Human => {
+            let rendered = render_human_snapshot(&snapshot);
+            write_human_stdout(&rendered)
+        }
     }
 }
 
@@ -1118,10 +1124,8 @@ fn one_nonempty_line(bytes: &[u8]) -> Result<String> {
     }
 }
 
-fn validated_snapshot_value(state: &pce_core::DerivedRunState) -> Result<Value> {
-    let snapshot = RunSnapshot::from(state);
-    let value =
-        serde_json::to_value(&snapshot).context("failed to serialize typed run snapshot")?;
+fn validated_snapshot_value(snapshot: &RunSnapshot<'_>) -> Result<Value> {
+    let value = serde_json::to_value(snapshot).context("failed to serialize typed run snapshot")?;
     let schema: Value =
         serde_json::from_str(RUN_SNAPSHOT_SCHEMA).context("failed to parse compiled run schema")?;
     let validator =
@@ -1147,6 +1151,15 @@ fn write_json_stdout(value: &Value) -> Result<()> {
         .write_all(b"\n")
         .context("failed to terminate JSON status with newline")?;
     output.flush().context("failed to flush JSON status")
+}
+
+fn write_human_stdout(rendered: &str) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    output
+        .write_all(rendered.as_bytes())
+        .context("failed to write human status to stdout")?;
+    output.flush().context("failed to flush human status")
 }
 
 fn append_locked(
@@ -1214,9 +1227,9 @@ mod tests {
         EventRecordFilter, GitAuthorityObservation, GitHubAuthorityObservation,
         GitHubPullRequestObservation, GitMergeObservation, KnownPayload, NodeId, ReadKind,
         ReadPayload, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
-        RepositoryName, RepositoryObservation, RepositoryObservationFailure, Sha256Digest,
-        StepAuthorityObservation, TagName, TagState, VisionSlug, WorktreeIdentity, WorktreeState,
-        WriteKind, derive_run_state, parse_event_line,
+        RepositoryName, RepositoryObservation, RepositoryObservationFailure, RunSnapshot,
+        Sha256Digest, StepAuthorityObservation, TagName, TagState, VisionSlug, WorktreeIdentity,
+        WorktreeState, WriteKind, derive_run_state, parse_event_line, render_human_snapshot,
     };
     use tempfile::tempdir;
 
@@ -1505,6 +1518,27 @@ mod tests {
         assert_eq!(recovery_log_path.as_str(), "events.jsonl");
         assert_eq!(vision_dir, PathBuf::from("planning/2026-07-27-event-log"));
         assert_eq!(format, StatusFormat::Json);
+
+        let command = parse_command(
+            [
+                "status",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-27-event-log",
+                "--human",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("trailing human status command should parse");
+        assert!(matches!(
+            command,
+            Command::Status {
+                format: StatusFormat::Human,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1516,6 +1550,30 @@ mod tests {
             vec!["status", "--file", "--file", "--vision-dir", "vision"],
             vec!["status", "--file", "log", "--file", "vision"],
             vec!["status", "--file", "log", "--vision-dir"],
+            vec![
+                "status",
+                "--vision-dir",
+                "vision",
+                "--human",
+                "--file",
+                "log",
+            ],
+            vec![
+                "status",
+                "--human",
+                "--file",
+                "log",
+                "--vision-dir",
+                "vision",
+            ],
+            vec![
+                "status",
+                "--file",
+                "log",
+                "--human",
+                "--vision-dir",
+                "vision",
+            ],
             vec!["status", "--file", "log", "--vision-dir", "vision", "extra"],
             vec![
                 "status",
@@ -1524,6 +1582,16 @@ mod tests {
                 "--vision-dir",
                 "vision",
                 "--human",
+                "--human",
+            ],
+            vec![
+                "status",
+                "--file",
+                "log",
+                "--vision-dir",
+                "vision",
+                "--human",
+                "value",
             ],
             vec![
                 "status",
@@ -1535,10 +1603,9 @@ mod tests {
             ],
         ];
         for args in invalid {
-            assert!(
-                parse_command(args.into_iter().map(str::to_owned)).is_err(),
-                "invalid status shape must be rejected"
-            );
+            let error = parse_command(args.into_iter().map(str::to_owned))
+                .expect_err("invalid status shape must be rejected");
+            assert_eq!(error.to_string(), super::USAGE);
         }
     }
 
@@ -1763,7 +1830,21 @@ mod tests {
             &[],
         )
         .expect("empty typed state should derive");
-        let value = validated_snapshot_value(&state).expect("typed empty snapshot should validate");
+        let snapshot = RunSnapshot::from(&state);
+        let value =
+            validated_snapshot_value(&snapshot).expect("typed empty snapshot should validate");
+        assert_eq!(
+            render_human_snapshot(&snapshot),
+            concat!(
+                "pce status (pce.run-snapshot v1)\n",
+                "repositories (0)\nsteps (0)\ndispatches (0)\nrounds (0)\nholds (0)\n",
+                "provenance (0)\nresume state=no-log-visible-candidate\nrecovery-digest\n",
+                "  rounds (entries=0, elisions=0)\n",
+                "  open-holds (entries=0, elisions=0)\n",
+                "  deltas (entries=0, elisions=0)\n",
+                "  facts (entries=0, elisions=0)\n",
+            )
+        );
         assert_eq!(value["schema_id"], "pce.run-snapshot");
         assert_eq!(value["schema_version"], 1);
         for category in ["rounds", "open_holds", "deltas", "facts"] {
@@ -1823,7 +1904,13 @@ mod tests {
             &authorities,
         )
         .expect("rich typed state should derive");
-        let value = validated_snapshot_value(&state).expect("typed rich snapshot should validate");
+        let snapshot = RunSnapshot::from(&state);
+        let value =
+            validated_snapshot_value(&snapshot).expect("typed rich snapshot should validate");
+        let human = render_human_snapshot(&snapshot);
+        assert!(human.contains("repository 1: name=\"pce\""));
+        assert!(human.contains("step 1: node=\"m2-s4\" merge-status=not-merged"));
+        assert!(human.ends_with('\n'));
         assert_eq!(value["repositories"][0]["repository"], "pce");
         assert_eq!(value["steps"][0]["merge_status"], "not-merged");
         assert_eq!(

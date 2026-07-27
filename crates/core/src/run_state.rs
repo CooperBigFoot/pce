@@ -1,6 +1,7 @@
-//! run_state : Ordered<EventRecord> × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot   (pure, deterministic)
+//! run_state : Ordered<EventRecord> × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String   (pure, deterministic)
 //! This module performs no I/O.
 
+use chrono::SecondsFormat;
 use serde::Serialize;
 use thiserror::Error;
 use tracing::instrument;
@@ -1842,6 +1843,402 @@ pub struct RecoveryElision {
     retrieval_commands: Vec<String>,
 }
 
+/// Render the versioned snapshot as deterministic human-readable status.
+#[instrument(skip(snapshot))]
+pub fn render_human_snapshot(snapshot: &RunSnapshot<'_>) -> String {
+    let mut output = String::new();
+    output.push_str("pce status (pce.run-snapshot v1)\n");
+    output.push_str(&format!("repositories ({})\n", snapshot.repositories.len()));
+    for (index, repository) in snapshot.repositories.iter().enumerate() {
+        output.push_str(&format!(
+            "  repository {}: name={}\n",
+            index + 1,
+            quoted(repository.repository)
+        ));
+        match &repository.fetch {
+            RepositoryFetchSnapshot::Observed {
+                observation_ref,
+                fetched_at,
+            } => output.push_str(&format!(
+                "    fetch observed: ref={} fetched-at={}\n",
+                quoted(observation_ref),
+                quoted(
+                    &fetched_at
+                        .as_datetime()
+                        .to_rfc3339_opts(SecondsFormat::Millis, true)
+                )
+            )),
+            RepositoryFetchSnapshot::Unavailable { failure } => output.push_str(&format!(
+                "    fetch unavailable: failure={}\n",
+                quoted(failure)
+            )),
+        }
+        match repository.branch.state {
+            BranchState::Present => output.push_str(&format!(
+                "    branch: name={} state=present\n",
+                quoted(repository.branch.name)
+            )),
+            BranchState::Absent => output.push_str(&format!(
+                "    branch: name={} state=absent\n",
+                quoted(repository.branch.name)
+            )),
+        }
+        match repository.worktree.state {
+            WorktreeState::Present => output.push_str(&format!(
+                "    worktree: identity={} state=present\n",
+                quoted(repository.worktree.identity)
+            )),
+            WorktreeState::Absent => output.push_str(&format!(
+                "    worktree: identity={} state=absent\n",
+                quoted(repository.worktree.identity)
+            )),
+        }
+        match &repository.tag {
+            TagSnapshot::Absent { name } => {
+                output.push_str(&format!("    tag: name={} state=absent\n", quoted(name)))
+            }
+            TagSnapshot::PointsTo { name, target } => output.push_str(&format!(
+                "    tag: name={} state=points-to target={}\n",
+                quoted(name),
+                quoted(target)
+            )),
+        }
+    }
+
+    output.push_str(&format!("steps ({})\n", snapshot.steps.len()));
+    for (index, step) in snapshot.steps.iter().enumerate() {
+        let merge_status = match step.merge_status {
+            MergeStatus::Merged => "merged",
+            MergeStatus::NotMerged => "not-merged",
+            MergeStatus::Inconclusive => "inconclusive",
+        };
+        output.push_str(&format!(
+            "  step {}: node={} merge-status={merge_status}\n",
+            index + 1,
+            quoted(step.node)
+        ));
+        output.push_str(&format!(
+            "    subject: milestone={} step={} head={} integration={}\n",
+            step.subject.milestone,
+            step.subject.step,
+            quoted(step.subject.head_branch),
+            quoted(step.subject.integration_branch)
+        ));
+        output.push_str(&format!(
+            "    selector: head={} base={}\n",
+            quoted(step.subject.pull_request_selector.head),
+            quoted(step.subject.pull_request_selector.base)
+        ));
+        render_github(&mut output, &step.github);
+        render_git(&mut output, &step.git);
+    }
+
+    output.push_str(&format!("dispatches ({})\n", snapshot.dispatches.len()));
+    for (index, dispatch) in snapshot.dispatches.iter().enumerate() {
+        output.push_str(&format!(
+            "  dispatch {}: sequence={} node={} role={} ref={}\n",
+            index + 1,
+            dispatch.sequence,
+            quoted(dispatch.node),
+            quoted(dispatch.role),
+            quoted(dispatch.dispatch_ref)
+        ));
+    }
+
+    output.push_str(&format!("rounds ({})\n", snapshot.rounds.len()));
+    for (index, round) in snapshot.rounds.iter().enumerate() {
+        let classification = match round.classification {
+            RoundClassification::PlanProducing => "plan-producing",
+            RoundClassification::CritiqueProducing => "critique-producing",
+            RoundClassification::Execution => "execution",
+        };
+        output.push_str(&format!(
+            "  round {}: node={} role={} classification={classification} count={}\n",
+            index + 1,
+            quoted(round.node),
+            quoted(round.role),
+            round.count
+        ));
+    }
+
+    output.push_str(&format!("holds ({})\n", snapshot.holds.len()));
+    for (index, hold) in snapshot.holds.iter().enumerate() {
+        match &hold.status {
+            HoldStatusSnapshot::Open {
+                node,
+                sequence,
+                question,
+            } => output.push_str(&format!(
+                "  hold {}: key={} state=open node={} sequence={} question={}\n",
+                index + 1,
+                quoted(hold.key),
+                quoted(node),
+                sequence,
+                quoted(question)
+            )),
+            HoldStatusSnapshot::Closed {
+                node,
+                sequence,
+                resolution,
+            } => output.push_str(&format!(
+                "  hold {}: key={} state=closed node={} sequence={} resolution={}\n",
+                index + 1,
+                quoted(hold.key),
+                quoted(node),
+                sequence,
+                quoted(resolution)
+            )),
+        }
+    }
+
+    output.push_str(&format!("provenance ({})\n", snapshot.provenance.len()));
+    for (index, artifact) in snapshot.provenance.iter().enumerate() {
+        match &artifact.condition {
+            ProvenanceConditionSnapshot::DigestMatches => output.push_str(&format!(
+                "  artifact {}: path={} approved-sha256={} approval-node={} approval-sequence={} condition=digest-matches\n",
+                index + 1,
+                quoted(artifact.path),
+                quoted(artifact.approved_sha256),
+                quoted(artifact.approval_node),
+                artifact.approval_sequence
+            )),
+            ProvenanceConditionSnapshot::DigestMismatch {
+                approved_sha256,
+                current_sha256,
+            } => output.push_str(&format!(
+                "  artifact {}: path={} approved-sha256={} approval-node={} approval-sequence={} condition=digest-mismatch current-sha256={}\n",
+                index + 1,
+                quoted(artifact.path),
+                quoted(approved_sha256),
+                quoted(artifact.approval_node),
+                artifact.approval_sequence,
+                quoted(current_sha256)
+            )),
+            ProvenanceConditionSnapshot::ArtifactMissing => output.push_str(&format!(
+                "  artifact {}: path={} approved-sha256={} approval-node={} approval-sequence={} condition=artifact-missing\n",
+                index + 1,
+                quoted(artifact.path),
+                quoted(artifact.approved_sha256),
+                quoted(artifact.approval_node),
+                artifact.approval_sequence
+            )),
+        }
+    }
+
+    render_resume(&mut output, &snapshot.resume);
+    output.push_str("recovery-digest\n");
+    render_recovery_rounds(&mut output, &snapshot.recovery_digest.rounds);
+    render_recovery_holds(&mut output, &snapshot.recovery_digest.open_holds);
+    render_recovery_deltas(&mut output, &snapshot.recovery_digest.deltas);
+    render_recovery_facts(&mut output, &snapshot.recovery_digest.facts);
+    output
+}
+
+fn render_github(output: &mut String, github: &GitHubObservationSnapshot<'_>) {
+    match github {
+        GitHubObservationSnapshot::Unreachable { failure } => output.push_str(&format!(
+            "    github unreachable: failure={}\n",
+            quoted(failure)
+        )),
+        GitHubObservationSnapshot::ReachableZero { cardinality } => {
+            output.push_str(&format!(
+                "    github reachable: cardinality={}\n",
+                exact_match_cardinality(cardinality)
+            ));
+        }
+        GitHubObservationSnapshot::ReachableMultiple { cardinality } => {
+            output.push_str(&format!(
+                "    github reachable: cardinality={}\n",
+                exact_match_cardinality(cardinality)
+            ));
+        }
+        GitHubObservationSnapshot::ReachableOne {
+            cardinality,
+            pull_request,
+        } => {
+            let cardinality = exact_match_cardinality(cardinality);
+            match &pull_request.state {
+                PullRequestStateSnapshot::NotMerged => output.push_str(&format!(
+                    "    github reachable: cardinality={cardinality} pr={} head={} base={} status=not-merged\n",
+                    pull_request.number,
+                    quoted(pull_request.selector.head),
+                    quoted(pull_request.selector.base)
+                )),
+                PullRequestStateSnapshot::Merged { squash_commit_oid } => {
+                    output.push_str(&format!(
+                        "    github reachable: cardinality={cardinality} pr={} head={} base={} status=merged squash={}\n",
+                        pull_request.number,
+                        quoted(pull_request.selector.head),
+                        quoted(pull_request.selector.base),
+                        quoted(squash_commit_oid)
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn exact_match_cardinality(cardinality: &ExactMatchCardinality) -> &'static str {
+    match cardinality {
+        ExactMatchCardinality::ZeroExactMatches => "zero-exact-matches",
+        ExactMatchCardinality::OneExactMatch => "one-exact-match",
+        ExactMatchCardinality::MultipleExactMatches => "multiple-exact-matches",
+    }
+}
+
+fn render_git(output: &mut String, git: &GitObservationSnapshot<'_>) {
+    match git {
+        GitObservationSnapshot::Unreachable { failure } => output.push_str(&format!(
+            "    git unreachable: failure={}\n",
+            quoted(failure)
+        )),
+        GitObservationSnapshot::ReachableNotMerged { state } => {
+            let state = match state {
+                GitReachableState::NotMerged => "not-merged",
+                GitReachableState::SquashCommitReachable => "squash-commit-reachable",
+            };
+            output.push_str(&format!("    git reachable: state={state}\n"));
+        }
+        GitObservationSnapshot::ReachableSquashCommit {
+            state,
+            squash_commit_oid,
+        } => {
+            let state = match state {
+                GitReachableState::NotMerged => "not-merged",
+                GitReachableState::SquashCommitReachable => "squash-commit-reachable",
+            };
+            output.push_str(&format!(
+                "    git reachable: state={state} squash={}\n",
+                quoted(squash_commit_oid)
+            ));
+        }
+    }
+}
+
+fn render_resume(output: &mut String, resume: &ResumeSnapshot<'_>) {
+    match resume {
+        ResumeSnapshot::NoLogVisibleCandidate => {
+            output.push_str("resume state=no-log-visible-candidate\n");
+        }
+        ResumeSnapshot::Candidate {
+            node,
+            latest_sequence,
+            cycle_position,
+        } => {
+            output.push_str(&format!(
+                "resume state=candidate node={} latest-sequence={latest_sequence}",
+                quoted(node)
+            ));
+            match cycle_position {
+                CyclePositionSnapshot::NoRoundDispatch => {
+                    output.push_str(" cycle=no-round-dispatch\n");
+                }
+                CyclePositionSnapshot::PlanDispatched { sequence } => output.push_str(&format!(
+                    " cycle=plan-dispatched cycle-sequence={sequence}\n"
+                )),
+                CyclePositionSnapshot::CritiqueDispatched { sequence } => output.push_str(
+                    &format!(" cycle=critique-dispatched cycle-sequence={sequence}\n"),
+                ),
+                CyclePositionSnapshot::ExecutionDispatched { sequence } => output.push_str(
+                    &format!(" cycle=execution-dispatched cycle-sequence={sequence}\n"),
+                ),
+                CyclePositionSnapshot::ReviewDispatched { sequence } => output.push_str(&format!(
+                    " cycle=review-dispatched cycle-sequence={sequence}\n"
+                )),
+            }
+        }
+    }
+}
+
+fn render_recovery_rounds(output: &mut String, category: &RecoveryCategory<RecoveryRoundEntry>) {
+    render_recovery_header(output, "rounds", category);
+    for entry in &category.entries {
+        output.push_str(&format!(
+            "    entry: sequence={} node={} role={} round-number={}\n",
+            entry.sequence,
+            quoted(&entry.node),
+            quoted(&entry.role),
+            entry.round_number
+        ));
+    }
+    render_elisions(output, &category.elisions);
+}
+
+fn render_recovery_holds(output: &mut String, category: &RecoveryCategory<RecoveryOpenHoldEntry>) {
+    render_recovery_header(output, "open-holds", category);
+    for entry in &category.entries {
+        output.push_str(&format!(
+            "    entry: sequence={} node={} key={} question={}\n",
+            entry.sequence,
+            quoted(&entry.node),
+            quoted(&entry.key),
+            quoted(&entry.question)
+        ));
+    }
+    render_elisions(output, &category.elisions);
+}
+
+fn render_recovery_deltas(output: &mut String, category: &RecoveryCategory<RecoveryDeltaEntry>) {
+    render_recovery_header(output, "deltas", category);
+    for entry in &category.entries {
+        output.push_str(&format!(
+            "    entry: sequence={} node={} message={}\n",
+            entry.sequence,
+            quoted(&entry.node),
+            quoted(&entry.message)
+        ));
+    }
+    render_elisions(output, &category.elisions);
+}
+
+fn render_recovery_facts(output: &mut String, category: &RecoveryCategory<RecoveryFactEntry>) {
+    render_recovery_header(output, "facts", category);
+    for entry in &category.entries {
+        output.push_str(&format!(
+            "    entry: sequence={} node={} kind={} evidence={}\n",
+            entry.sequence,
+            quoted(&entry.node),
+            quoted(&entry.kind),
+            quoted(&entry.evidence)
+        ));
+    }
+    render_elisions(output, &category.elisions);
+}
+
+fn render_recovery_header<T>(output: &mut String, name: &str, category: &RecoveryCategory<T>) {
+    output.push_str(&format!(
+        "  {name} (entries={}, elisions={})\n",
+        category.entries.len(),
+        category.elisions.len()
+    ));
+}
+
+fn render_elisions(output: &mut String, elisions: &[RecoveryElision]) {
+    for elision in elisions {
+        output.push_str(&format!(
+            "    elision: omitted-count={} sequence={}..={}\n",
+            elision.omitted_count, elision.start_sequence, elision.end_sequence
+        ));
+        for command in &elision.retrieval_commands {
+            output.push_str(&format!("      retrieve: {}\n", quoted(command)));
+        }
+    }
+}
+
+fn quoted(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        if character == '\'' {
+            escaped.push(character);
+        } else {
+            escaped.extend(character.escape_default());
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VisibleNode {
     node: NodeId,
@@ -2443,7 +2840,7 @@ mod tests {
         ResumeObservation, RoundCount, RunSnapshot, RunStateError, SquashCommitOid,
         StepAuthorityObservation, StepNode, TagName, TagState, TagTarget, VisionSlug,
         WorktreeIdentity, WorktreeState, checked_round_increment, derive_merge_status,
-        derive_run_state, recovery_command,
+        derive_run_state, recovery_command, render_human_snapshot,
     };
 
     const RUN_SNAPSHOT_SCHEMA: &str =
@@ -2574,6 +2971,179 @@ mod tests {
             repositories,
             authorities,
         )
+    }
+
+    fn rich_render_state() -> Result<crate::run_state::DerivedRunState, Box<dyn Error>> {
+        let mut records = vec![
+            event(
+                1,
+                "m2-s1",
+                KnownPayload::Dispatch(DispatchPayload {
+                    role: DispatchRole::new("step-executor"),
+                    r#ref: DispatchRef::new("dispatch-1"),
+                    evidence: Evidence::parse("dispatch evidence 1")?,
+                }),
+            )?,
+            event(
+                2,
+                "m2-s3",
+                KnownPayload::Dispatch(DispatchPayload {
+                    role: DispatchRole::new("pr-reviewer"),
+                    r#ref: DispatchRef::new("review-1"),
+                    evidence: Evidence::parse("dispatch evidence 2")?,
+                }),
+            )?,
+            event(
+                3,
+                "m2-s2",
+                KnownPayload::EscalationOpen(EscalationOpenPayload {
+                    key: EscalationKey::new("release"),
+                    question: "Approve?".to_owned(),
+                }),
+            )?,
+            event(
+                4,
+                "m2-s2",
+                KnownPayload::EscalationClose(EscalationClosePayload {
+                    key: EscalationKey::new("release"),
+                    resolution: "approved".to_owned(),
+                }),
+            )?,
+            event(
+                5,
+                "m2-s3",
+                KnownPayload::EscalationOpen(EscalationOpenPayload {
+                    key: EscalationKey::new("network"),
+                    question: "Retry?".to_owned(),
+                }),
+            )?,
+        ];
+        for (sequence, node, path, digest_byte, evidence) in [
+            (6, "m2-s1", "planning/match.md", 'a', "approve match"),
+            (7, "m2-s2", "planning/mismatch.md", 'b', "approve mismatch"),
+            (8, "m2-s3", "planning/missing.md", 'd', "approve missing"),
+        ] {
+            records.push(event(
+                sequence,
+                node,
+                KnownPayload::PlanningArtifactApproved(PlanningArtifactApprovedPayload {
+                    path: ArtifactPath::new(path),
+                    sha256: digest(digest_byte)?,
+                    evidence: Evidence::parse(evidence)?,
+                }),
+            )?);
+        }
+        records.push(event(
+            9,
+            "m2-s3",
+            KnownPayload::KeyFinding(crate::event_log::KeyFindingPayload {
+                finding: "fact".to_owned(),
+                evidence: Evidence::parse("git rev-parse HEAD\ncargo test --workspace")?,
+            }),
+        )?);
+        for sequence in 10..=30 {
+            records.push(event(
+                sequence,
+                "m2-s3",
+                KnownPayload::Delta(DeltaPayload {
+                    message: format!("delta-{sequence}"),
+                }),
+            )?);
+        }
+
+        let artifacts = [
+            CurrentArtifactObservation::new(
+                ArtifactPath::new("planning/match.md"),
+                CurrentArtifactState::Present {
+                    digest: digest('a')?,
+                },
+            ),
+            CurrentArtifactObservation::new(
+                ArtifactPath::new("planning/mismatch.md"),
+                CurrentArtifactState::Present {
+                    digest: digest('c')?,
+                },
+            ),
+            CurrentArtifactObservation::new(
+                ArtifactPath::new("planning/missing.md"),
+                CurrentArtifactState::Missing,
+            ),
+        ];
+        let fetched_at = EventTimestamp::parse("2026-07-27T12:34:56.123Z")?;
+        let repositories = [
+            RepositoryObservation::new(
+                RepositoryName::new("pce"),
+                RepositoryFetchObservation::Observed {
+                    observation_ref: RepositoryObservationRef::parse("origin/milestone-2")?,
+                    fetched_at,
+                },
+                RepositoryBranchName::parse("milestone-2")?,
+                BranchState::Present,
+                WorktreeIdentity::parse("pce/event-log-and-derived-run-state/m2-s6")?,
+                WorktreeState::Absent,
+                TagName::parse("v0.1.16")?,
+                TagState::PointsTo {
+                    target: TagTarget::parse("release-oid")?,
+                },
+            ),
+            RepositoryObservation::new(
+                RepositoryName::new("docs"),
+                RepositoryFetchObservation::Unavailable {
+                    failure: RepositoryObservationFailure::parse("offline")?,
+                },
+                RepositoryBranchName::parse("milestone-2")?,
+                BranchState::Absent,
+                WorktreeIdentity::parse("pce/event-log-and-derived-run-state/m2-s6")?,
+                WorktreeState::Present,
+                TagName::parse("v0.1.16")?,
+                TagState::Absent,
+            ),
+        ];
+        let vision = VisionSlug::parse("2026-07-27-event-log-and-derived-run-state")?;
+        let merged_subject =
+            MergeSubject::derive(&vision, StepNode::parse(&NodeId::parse("m2-s1")?)?);
+        let merged_oid = SquashCommitOid::parse("merge-oid")?;
+        let authorities = [
+            StepAuthorityObservation::new(
+                NodeId::parse("m2-s1")?,
+                GitHubAuthorityObservation::Reachable {
+                    observation: GitHubPullRequestObservation::OneExactMatch {
+                        identity: ExactPullRequestIdentity::from_selector(
+                            PullRequestNumber::parse(53)?,
+                            merged_subject.selector(),
+                        ),
+                        state: ExactPullRequestState::Merged {
+                            squash_commit: merged_oid.clone(),
+                        },
+                    },
+                },
+                GitAuthorityObservation::Reachable {
+                    observation: GitMergeObservation::SquashCommitReachable {
+                        squash_commit: merged_oid,
+                    },
+                },
+            ),
+            not_merged_authority("m2-s2")?,
+            StepAuthorityObservation::new(
+                NodeId::parse("m2-s3")?,
+                GitHubAuthorityObservation::Unreachable {
+                    failure: AuthorityFailure::parse("gh offline")?,
+                },
+                GitAuthorityObservation::Unreachable {
+                    failure: AuthorityFailure::parse(
+                        "GitHub authority unavailable before git reachability selection",
+                    )?,
+                },
+            ),
+        ];
+        Ok(derive_run_state(
+            &records,
+            &vision,
+            &RecoveryLogPath::new("events.jsonl"),
+            &artifacts,
+            &repositories,
+            &authorities,
+        )?)
     }
 
     #[test]
@@ -3755,6 +4325,252 @@ mod tests {
                 snapshot_validator()?.is_valid(&serde_json::to_value(RunSnapshot::from(&state))?)
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn renders_exact_empty_human_snapshot() -> Result<(), Box<dyn Error>> {
+        let state = derive(&[], &[], &[], &[])?;
+        let snapshot = RunSnapshot::from(&state);
+        assert_eq!(
+            render_human_snapshot(&snapshot),
+            concat!(
+                "pce status (pce.run-snapshot v1)\n",
+                "repositories (0)\n",
+                "steps (0)\n",
+                "dispatches (0)\n",
+                "rounds (0)\n",
+                "holds (0)\n",
+                "provenance (0)\n",
+                "resume state=no-log-visible-candidate\n",
+                "recovery-digest\n",
+                "  rounds (entries=0, elisions=0)\n",
+                "  open-holds (entries=0, elisions=0)\n",
+                "  deltas (entries=0, elisions=0)\n",
+                "  facts (entries=0, elisions=0)\n",
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn renders_exact_rich_snapshot_from_one_real_fold() -> Result<(), Box<dyn Error>> {
+        let state = rich_render_state()?;
+        let snapshot = RunSnapshot::from(&state);
+        let json = serde_json::to_vec(&snapshot)?;
+        assert_eq!(
+            json,
+            serde_json::to_string(&snapshot)?.into_bytes(),
+            "the compact JSON path must retain identical bytes"
+        );
+        let value: serde_json::Value = serde_json::from_slice(&json)?;
+        assert_eq!(value["schema_id"], "pce.run-snapshot");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["steps"][0]["merge_status"], "merged");
+        assert_eq!(
+            value["provenance"][1]["condition"]["state"],
+            "digest-mismatch"
+        );
+        assert_eq!(
+            render_human_snapshot(&snapshot),
+            concat!(
+                "pce status (pce.run-snapshot v1)\n",
+                "repositories (2)\n",
+                "  repository 1: name=\"pce\"\n",
+                "    fetch observed: ref=\"origin/milestone-2\" fetched-at=\"2026-07-27T12:34:56.123Z\"\n",
+                "    branch: name=\"milestone-2\" state=present\n",
+                "    worktree: identity=\"pce/event-log-and-derived-run-state/m2-s6\" state=absent\n",
+                "    tag: name=\"v0.1.16\" state=points-to target=\"release-oid\"\n",
+                "  repository 2: name=\"docs\"\n",
+                "    fetch unavailable: failure=\"offline\"\n",
+                "    branch: name=\"milestone-2\" state=absent\n",
+                "    worktree: identity=\"pce/event-log-and-derived-run-state/m2-s6\" state=present\n",
+                "    tag: name=\"v0.1.16\" state=absent\n",
+                "steps (3)\n",
+                "  step 1: node=\"m2-s1\" merge-status=merged\n",
+                "    subject: milestone=2 step=1 head=\"pce/event-log-and-derived-run-state/m2-s1\" integration=\"milestone-2\"\n",
+                "    selector: head=\"pce/event-log-and-derived-run-state/m2-s1\" base=\"milestone-2\"\n",
+                "    github reachable: cardinality=one-exact-match pr=53 head=\"pce/event-log-and-derived-run-state/m2-s1\" base=\"milestone-2\" status=merged squash=\"merge-oid\"\n",
+                "    git reachable: state=squash-commit-reachable squash=\"merge-oid\"\n",
+                "  step 2: node=\"m2-s2\" merge-status=not-merged\n",
+                "    subject: milestone=2 step=2 head=\"pce/event-log-and-derived-run-state/m2-s2\" integration=\"milestone-2\"\n",
+                "    selector: head=\"pce/event-log-and-derived-run-state/m2-s2\" base=\"milestone-2\"\n",
+                "    github reachable: cardinality=zero-exact-matches\n",
+                "    git reachable: state=not-merged\n",
+                "  step 3: node=\"m2-s3\" merge-status=inconclusive\n",
+                "    subject: milestone=2 step=3 head=\"pce/event-log-and-derived-run-state/m2-s3\" integration=\"milestone-2\"\n",
+                "    selector: head=\"pce/event-log-and-derived-run-state/m2-s3\" base=\"milestone-2\"\n",
+                "    github unreachable: failure=\"gh offline\"\n",
+                "    git unreachable: failure=\"GitHub authority unavailable before git reachability selection\"\n",
+                "dispatches (2)\n",
+                "  dispatch 1: sequence=1 node=\"m2-s1\" role=\"step-executor\" ref=\"dispatch-1\"\n",
+                "  dispatch 2: sequence=2 node=\"m2-s3\" role=\"pr-reviewer\" ref=\"review-1\"\n",
+                "rounds (2)\n",
+                "  round 1: node=\"m2-s1\" role=\"step-executor\" classification=execution count=1\n",
+                "  round 2: node=\"m2-s3\" role=\"pr-reviewer\" classification=critique-producing count=1\n",
+                "holds (2)\n",
+                "  hold 1: key=\"release\" state=closed node=\"m2-s2\" sequence=4 resolution=\"approved\"\n",
+                "  hold 2: key=\"network\" state=open node=\"m2-s3\" sequence=5 question=\"Retry?\"\n",
+                "provenance (3)\n",
+                "  artifact 1: path=\"planning/match.md\" approved-sha256=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" approval-node=\"m2-s1\" approval-sequence=6 condition=digest-matches\n",
+                "  artifact 2: path=\"planning/mismatch.md\" approved-sha256=\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" approval-node=\"m2-s2\" approval-sequence=7 condition=digest-mismatch current-sha256=\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"\n",
+                "  artifact 3: path=\"planning/missing.md\" approved-sha256=\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\" approval-node=\"m2-s3\" approval-sequence=8 condition=artifact-missing\n",
+                "resume state=candidate node=\"m2-s3\" latest-sequence=30 cycle=review-dispatched cycle-sequence=2\n",
+                "recovery-digest\n",
+                "  rounds (entries=2, elisions=0)\n",
+                "    entry: sequence=1 node=\"m2-s1\" role=\"step-executor\" round-number=1\n",
+                "    entry: sequence=2 node=\"m2-s3\" role=\"pr-reviewer\" round-number=1\n",
+                "  open-holds (entries=1, elisions=0)\n",
+                "    entry: sequence=5 node=\"m2-s3\" key=\"network\" question=\"Retry?\"\n",
+                "  deltas (entries=20, elisions=1)\n",
+                "    entry: sequence=11 node=\"m2-s3\" message=\"delta-11\"\n",
+                "    entry: sequence=12 node=\"m2-s3\" message=\"delta-12\"\n",
+                "    entry: sequence=13 node=\"m2-s3\" message=\"delta-13\"\n",
+                "    entry: sequence=14 node=\"m2-s3\" message=\"delta-14\"\n",
+                "    entry: sequence=15 node=\"m2-s3\" message=\"delta-15\"\n",
+                "    entry: sequence=16 node=\"m2-s3\" message=\"delta-16\"\n",
+                "    entry: sequence=17 node=\"m2-s3\" message=\"delta-17\"\n",
+                "    entry: sequence=18 node=\"m2-s3\" message=\"delta-18\"\n",
+                "    entry: sequence=19 node=\"m2-s3\" message=\"delta-19\"\n",
+                "    entry: sequence=20 node=\"m2-s3\" message=\"delta-20\"\n",
+                "    entry: sequence=21 node=\"m2-s3\" message=\"delta-21\"\n",
+                "    entry: sequence=22 node=\"m2-s3\" message=\"delta-22\"\n",
+                "    entry: sequence=23 node=\"m2-s3\" message=\"delta-23\"\n",
+                "    entry: sequence=24 node=\"m2-s3\" message=\"delta-24\"\n",
+                "    entry: sequence=25 node=\"m2-s3\" message=\"delta-25\"\n",
+                "    entry: sequence=26 node=\"m2-s3\" message=\"delta-26\"\n",
+                "    entry: sequence=27 node=\"m2-s3\" message=\"delta-27\"\n",
+                "    entry: sequence=28 node=\"m2-s3\" message=\"delta-28\"\n",
+                "    entry: sequence=29 node=\"m2-s3\" message=\"delta-29\"\n",
+                "    entry: sequence=30 node=\"m2-s3\" message=\"delta-30\"\n",
+                "    elision: omitted-count=1 sequence=10..=10\n",
+                "      retrieve: \"pce log read --file 'events.jsonl' --kind delta --node 'm2-s3'\"\n",
+                "  facts (entries=6, elisions=0)\n",
+                "    entry: sequence=1 node=\"m2-s1\" kind=\"dispatch\" evidence=\"dispatch evidence 1\"\n",
+                "    entry: sequence=2 node=\"m2-s3\" kind=\"dispatch\" evidence=\"dispatch evidence 2\"\n",
+                "    entry: sequence=6 node=\"m2-s1\" kind=\"planning-artifact-approved\" evidence=\"approve match\"\n",
+                "    entry: sequence=7 node=\"m2-s2\" kind=\"planning-artifact-approved\" evidence=\"approve mismatch\"\n",
+                "    entry: sequence=8 node=\"m2-s3\" kind=\"planning-artifact-approved\" evidence=\"approve missing\"\n",
+                "    entry: sequence=9 node=\"m2-s3\" kind=\"key-finding\" evidence=\"git rev-parse HEAD\\ncargo test --workspace\"\n",
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn human_renderer_escapes_arbitrary_text_to_one_physical_line() -> Result<(), Box<dyn Error>> {
+        let text = "quote\" slash\\ newline\nreturn\rtab\tcontrol\u{7}";
+        let state = derive(
+            &[event(
+                1,
+                "m2-s1",
+                KnownPayload::Delta(DeltaPayload {
+                    message: text.to_owned(),
+                }),
+            )?],
+            &[],
+            &[],
+            &[],
+        )?;
+        let rendered = render_human_snapshot(&RunSnapshot::from(&state));
+        assert!(
+            rendered
+                .contains("message=\"quote\\\" slash\\\\ newline\\nreturn\\rtab\\tcontrol\\u{7}\"")
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.contains("message="))
+                .count(),
+            1
+        );
+        assert!(rendered.ends_with('\n'));
+        assert!(!rendered.ends_with("\n\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn human_renderer_spells_remaining_authority_round_and_cycle_variants()
+    -> Result<(), Box<dyn Error>> {
+        let vision = VisionSlug::parse("2026-07-27-example")?;
+        let node = NodeId::parse("m2-s1")?;
+        let subject = MergeSubject::derive(&vision, StepNode::parse(&node)?);
+        let one_not_merged = StepAuthorityObservation::new(
+            node.clone(),
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::OneExactMatch {
+                    identity: ExactPullRequestIdentity::from_selector(
+                        PullRequestNumber::parse(19)?,
+                        subject.selector(),
+                    ),
+                    state: ExactPullRequestState::NotMerged,
+                },
+            },
+            GitAuthorityObservation::Reachable {
+                observation: GitMergeObservation::NotMerged,
+            },
+        );
+        let multiple = StepAuthorityObservation::new(
+            node.clone(),
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::MultipleExactMatches,
+            },
+            GitAuthorityObservation::Reachable {
+                observation: GitMergeObservation::NotMerged,
+            },
+        );
+        let disagreement = StepAuthorityObservation::new(
+            node,
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::OneExactMatch {
+                    identity: ExactPullRequestIdentity::from_selector(
+                        PullRequestNumber::parse(20)?,
+                        subject.selector(),
+                    ),
+                    state: ExactPullRequestState::Merged {
+                        squash_commit: SquashCommitOid::parse("github-oid")?,
+                    },
+                },
+            },
+            GitAuthorityObservation::Reachable {
+                observation: GitMergeObservation::SquashCommitReachable {
+                    squash_commit: SquashCommitOid::parse("git-oid")?,
+                },
+            },
+        );
+        for (authority, expected) in [
+            (
+                one_not_merged,
+                "github reachable: cardinality=one-exact-match pr=19 head=\"pce/example/m2-s1\" base=\"milestone-2\" status=not-merged",
+            ),
+            (
+                multiple,
+                "github reachable: cardinality=multiple-exact-matches",
+            ),
+            (
+                disagreement,
+                "step 1: node=\"m2-s1\" merge-status=inconclusive",
+            ),
+        ] {
+            let state = derive(&[delta(1, "m2-s1")?], &[], &[], &[authority])?;
+            assert!(render_human_snapshot(&RunSnapshot::from(&state)).contains(expected));
+        }
+
+        for (role, cycle, classification) in [
+            ("step-planner", "plan-dispatched", "plan-producing"),
+            ("step-critic", "critique-dispatched", "critique-producing"),
+            ("step-executor", "execution-dispatched", "execution"),
+            ("pr-reviewer", "review-dispatched", "critique-producing"),
+        ] {
+            let state = derive(&[dispatch(1, "m2-s1", role, "ref")?], &[], &[], &[])?;
+            let rendered = render_human_snapshot(&RunSnapshot::from(&state));
+            assert!(rendered.contains(&format!("cycle={cycle} cycle-sequence=1")));
+            assert!(rendered.contains(&format!("classification={classification} count=1")));
+        }
+        let state = derive(&[delta(1, "m2-s1")?], &[], &[], &[])?;
+        assert!(
+            render_human_snapshot(&RunSnapshot::from(&state)).contains("cycle=no-round-dispatch")
+        );
         Ok(())
     }
 }
