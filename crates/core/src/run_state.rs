@@ -1,6 +1,7 @@
-//! run_state : Ordered<EventRecord> × VisionSlug × ArtifactDigestObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState ∪ RunStateError   (pure, deterministic)
+//! run_state : Ordered<EventRecord> × VisionSlug × ArtifactDigestObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot   (pure, deterministic)
 //! This module performs no I/O.
 
+use serde::Serialize;
 use thiserror::Error;
 use tracing::instrument;
 
@@ -830,11 +831,35 @@ impl DispatchRoleClass {
         }
     }
 
-    fn is_round_bearing(self) -> bool {
-        matches!(
-            self,
-            Self::PlanProducing | Self::CritiqueProducing | Self::Execution
-        )
+    fn round_classification(self) -> Option<RoundClassification> {
+        match self {
+            Self::PlanProducing => Some(RoundClassification::PlanProducing),
+            Self::CritiqueProducing => Some(RoundClassification::CritiqueProducing),
+            Self::Execution => Some(RoundClassification::Execution),
+            Self::ExplicitlyNonRoundBearing | Self::Unrecognized => None,
+        }
+    }
+}
+
+/// A classification whose carrier contains only round-bearing roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoundClassification {
+    /// A role producing a plan artifact.
+    PlanProducing,
+    /// A role producing a critique artifact.
+    CritiqueProducing,
+    /// The step execution role.
+    Execution,
+}
+
+impl From<RoundClassification> for DispatchRoleClass {
+    fn from(value: RoundClassification) -> Self {
+        match value {
+            RoundClassification::PlanProducing => Self::PlanProducing,
+            RoundClassification::CritiqueProducing => Self::CritiqueProducing,
+            RoundClassification::Execution => Self::Execution,
+        }
     }
 }
 
@@ -885,7 +910,7 @@ impl RoundCount {
 pub struct RoundSeries {
     node: NodeId,
     role: DispatchRole,
-    classification: DispatchRoleClass,
+    classification: RoundClassification,
     count: RoundCount,
 }
 
@@ -902,7 +927,11 @@ impl RoundSeries {
 
     /// Return the pinned role classification.
     pub const fn classification(&self) -> DispatchRoleClass {
-        self.classification
+        match self.classification {
+            RoundClassification::PlanProducing => DispatchRoleClass::PlanProducing,
+            RoundClassification::CritiqueProducing => DispatchRoleClass::CritiqueProducing,
+            RoundClassification::Execution => DispatchRoleClass::Execution,
+        }
     }
 
     /// Return the checked dispatch count.
@@ -1003,6 +1032,8 @@ impl ArtifactProvenance {
 pub struct StepMergeResult {
     node: NodeId,
     subject: MergeSubject,
+    github: GitHubAuthorityObservation,
+    git: GitAuthorityObservation,
     status: MergeStatus,
 }
 
@@ -1015,6 +1046,16 @@ impl StepMergeResult {
     /// Return the core-derived merge subject.
     pub const fn subject(&self) -> &MergeSubject {
         &self.subject
+    }
+
+    /// Return the retained GitHub authority observation.
+    pub const fn github(&self) -> &GitHubAuthorityObservation {
+        &self.github
+    }
+
+    /// Return the retained git authority observation.
+    pub const fn git(&self) -> &GitAuthorityObservation {
+        &self.git
     }
 
     /// Return the independent merge status.
@@ -1100,6 +1141,706 @@ impl DerivedRunState {
     }
 }
 
+/// The compiled version-1 serialized projection of one derived run state.
+#[derive(Debug, Serialize)]
+pub struct RunSnapshot<'a> {
+    schema_id: &'static str,
+    schema_version: u64,
+    repositories: Vec<RepositorySnapshot<'a>>,
+    steps: Vec<StepSnapshot<'a>>,
+    dispatches: Vec<DispatchSnapshot<'a>>,
+    rounds: Vec<RoundSeriesSnapshot<'a>>,
+    holds: Vec<HoldSnapshot<'a>>,
+    provenance: Vec<ProvenanceSnapshot<'a>>,
+    resume: ResumeSnapshot<'a>,
+    recovery_digest: RecoveryDigest,
+}
+
+impl<'a> RunSnapshot<'a> {
+    /// Return the fixed schema identifier.
+    pub const fn schema_id(&self) -> &'static str {
+        self.schema_id
+    }
+
+    /// Return the fixed schema version.
+    pub const fn schema_version(&self) -> u64 {
+        self.schema_version
+    }
+}
+
+impl<'a> From<&'a DerivedRunState> for RunSnapshot<'a> {
+    fn from(state: &'a DerivedRunState) -> Self {
+        Self {
+            schema_id: "pce.run-snapshot",
+            schema_version: 1,
+            repositories: state
+                .repositories()
+                .iter()
+                .map(RepositorySnapshot::from)
+                .collect(),
+            steps: state.steps().iter().map(StepSnapshot::from).collect(),
+            dispatches: state
+                .dispatches()
+                .iter()
+                .map(DispatchSnapshot::from)
+                .collect(),
+            rounds: state
+                .rounds()
+                .iter()
+                .map(RoundSeriesSnapshot::from)
+                .collect(),
+            holds: state.holds().iter().map(HoldSnapshot::from).collect(),
+            provenance: state
+                .provenance()
+                .iter()
+                .map(ProvenanceSnapshot::from)
+                .collect(),
+            resume: ResumeSnapshot::from(state.resume()),
+            recovery_digest: RecoveryDigest::empty_scaffold(),
+        }
+    }
+}
+
+/// Serialized repository observation.
+#[derive(Debug, Serialize)]
+pub struct RepositorySnapshot<'a> {
+    repository: &'a str,
+    fetch: RepositoryFetchSnapshot<'a>,
+    branch: BranchSnapshot<'a>,
+    worktree: WorktreeSnapshot<'a>,
+    tag: TagSnapshot<'a>,
+}
+
+impl<'a> From<&'a RepositoryObservation> for RepositorySnapshot<'a> {
+    fn from(value: &'a RepositoryObservation) -> Self {
+        Self {
+            repository: value.repository().as_str(),
+            fetch: RepositoryFetchSnapshot::from(value.fetch()),
+            branch: BranchSnapshot {
+                name: value.branch_name().as_str(),
+                state: value.branch_state(),
+            },
+            worktree: WorktreeSnapshot {
+                identity: value.worktree().as_str(),
+                state: value.worktree_state(),
+            },
+            tag: TagSnapshot::from((value.tag_name(), value.tag_state())),
+        }
+    }
+}
+
+/// Serialized repository fetch availability.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum RepositoryFetchSnapshot<'a> {
+    /// A successful observation.
+    Observed {
+        observation_ref: &'a str,
+        fetched_at: &'a EventTimestamp,
+    },
+    /// An unavailable observation.
+    Unavailable { failure: &'a str },
+}
+
+impl<'a> From<&'a RepositoryFetchObservation> for RepositoryFetchSnapshot<'a> {
+    fn from(value: &'a RepositoryFetchObservation) -> Self {
+        match value {
+            RepositoryFetchObservation::Observed {
+                observation_ref,
+                fetched_at,
+            } => Self::Observed {
+                observation_ref: observation_ref.as_str(),
+                fetched_at,
+            },
+            RepositoryFetchObservation::Unavailable { failure } => Self::Unavailable {
+                failure: failure.as_str(),
+            },
+        }
+    }
+}
+
+/// Serialized branch name and state.
+#[derive(Debug, Serialize)]
+pub struct BranchSnapshot<'a> {
+    name: &'a str,
+    state: BranchState,
+}
+
+impl Serialize for BranchState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Present => "present",
+            Self::Absent => "absent",
+        })
+    }
+}
+
+/// Serialized worktree identity and state.
+#[derive(Debug, Serialize)]
+pub struct WorktreeSnapshot<'a> {
+    identity: &'a str,
+    state: WorktreeState,
+}
+
+impl Serialize for WorktreeState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Present => "present",
+            Self::Absent => "absent",
+        })
+    }
+}
+
+/// Serialized tag state.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum TagSnapshot<'a> {
+    /// An absent tag.
+    Absent { name: &'a str },
+    /// A tag pointing to an exact target.
+    PointsTo { name: &'a str, target: &'a str },
+}
+
+impl<'a> From<(&'a TagName, &'a TagState)> for TagSnapshot<'a> {
+    fn from((name, state): (&'a TagName, &'a TagState)) -> Self {
+        match state {
+            TagState::Absent => Self::Absent {
+                name: name.as_str(),
+            },
+            TagState::PointsTo { target } => Self::PointsTo {
+                name: name.as_str(),
+                target: target.as_str(),
+            },
+        }
+    }
+}
+
+/// Serialized step result and its explanatory observations.
+#[derive(Debug, Serialize)]
+pub struct StepSnapshot<'a> {
+    node: &'a str,
+    subject: MergeSubjectSnapshot<'a>,
+    github: GitHubObservationSnapshot<'a>,
+    git: GitObservationSnapshot<'a>,
+    merge_status: MergeStatus,
+}
+
+impl<'a> From<&'a StepMergeResult> for StepSnapshot<'a> {
+    fn from(value: &'a StepMergeResult) -> Self {
+        Self {
+            node: value.node().as_str(),
+            subject: MergeSubjectSnapshot::from(value.subject()),
+            github: GitHubObservationSnapshot::from(value.github()),
+            git: GitObservationSnapshot::from(value.git()),
+            merge_status: value.status(),
+        }
+    }
+}
+
+impl Serialize for MergeStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Merged => "merged",
+            Self::NotMerged => "not-merged",
+            Self::Inconclusive => "inconclusive",
+        })
+    }
+}
+
+/// Serialized convention-derived merge subject.
+#[derive(Debug, Serialize)]
+pub struct MergeSubjectSnapshot<'a> {
+    milestone: u64,
+    step: u64,
+    head_branch: &'a str,
+    integration_branch: &'a str,
+    pull_request_selector: SelectorSnapshot<'a>,
+}
+
+impl<'a> From<&'a MergeSubject> for MergeSubjectSnapshot<'a> {
+    fn from(value: &'a MergeSubject) -> Self {
+        Self {
+            milestone: value.node().milestone().get(),
+            step: value.node().step().get(),
+            head_branch: value.head().as_str(),
+            integration_branch: value.integration_branch().as_str(),
+            pull_request_selector: SelectorSnapshot::from(value.selector()),
+        }
+    }
+}
+
+/// Serialized exact pull-request selector.
+#[derive(Debug, Serialize)]
+pub struct SelectorSnapshot<'a> {
+    head: &'a str,
+    base: &'a str,
+}
+
+impl<'a> From<&'a PullRequestSelector> for SelectorSnapshot<'a> {
+    fn from(value: &'a PullRequestSelector) -> Self {
+        Self {
+            head: value.head().as_str(),
+            base: value.base().as_str(),
+        }
+    }
+}
+
+/// Serialized GitHub lookup availability and cardinality.
+#[derive(Debug, Serialize)]
+#[serde(tag = "availability", rename_all = "kebab-case")]
+pub enum GitHubObservationSnapshot<'a> {
+    /// GitHub was unreachable.
+    Unreachable { failure: &'a str },
+    /// GitHub returned no exact match.
+    #[serde(rename = "reachable")]
+    ReachableZero { cardinality: ExactMatchCardinality },
+    /// GitHub returned multiple exact matches.
+    #[serde(rename = "reachable")]
+    ReachableMultiple { cardinality: ExactMatchCardinality },
+    /// GitHub returned one exact match.
+    #[serde(rename = "reachable")]
+    ReachableOne {
+        cardinality: ExactMatchCardinality,
+        pull_request: PullRequestSnapshot<'a>,
+    },
+}
+
+/// Serialized exact-match cardinality.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExactMatchCardinality {
+    /// No exact matches.
+    ZeroExactMatches,
+    /// One exact match.
+    OneExactMatch,
+    /// Multiple exact matches.
+    MultipleExactMatches,
+}
+
+impl<'a> From<&'a GitHubAuthorityObservation> for GitHubObservationSnapshot<'a> {
+    fn from(value: &'a GitHubAuthorityObservation) -> Self {
+        match value {
+            GitHubAuthorityObservation::Unreachable { failure } => Self::Unreachable {
+                failure: failure.as_str(),
+            },
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::ZeroExactMatches,
+            } => Self::ReachableZero {
+                cardinality: ExactMatchCardinality::ZeroExactMatches,
+            },
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::MultipleExactMatches,
+            } => Self::ReachableMultiple {
+                cardinality: ExactMatchCardinality::MultipleExactMatches,
+            },
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::OneExactMatch { identity, state },
+            } => Self::ReachableOne {
+                cardinality: ExactMatchCardinality::OneExactMatch,
+                pull_request: PullRequestSnapshot::from((identity, state)),
+            },
+        }
+    }
+}
+
+/// Serialized exact pull request.
+#[derive(Debug, Serialize)]
+pub struct PullRequestSnapshot<'a> {
+    number: u64,
+    selector: SelectorSnapshot<'a>,
+    state: PullRequestStateSnapshot<'a>,
+}
+
+impl<'a> From<(&'a ExactPullRequestIdentity, &'a ExactPullRequestState)>
+    for PullRequestSnapshot<'a>
+{
+    fn from((identity, state): (&'a ExactPullRequestIdentity, &'a ExactPullRequestState)) -> Self {
+        Self {
+            number: identity.number().get(),
+            selector: SelectorSnapshot::from(identity.selector()),
+            state: PullRequestStateSnapshot::from(state),
+        }
+    }
+}
+
+/// Serialized exact pull-request state.
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum PullRequestStateSnapshot<'a> {
+    /// The exact pull request is not merged.
+    NotMerged,
+    /// The exact pull request is merged with this squash commit.
+    Merged { squash_commit_oid: &'a str },
+}
+
+impl<'a> From<&'a ExactPullRequestState> for PullRequestStateSnapshot<'a> {
+    fn from(value: &'a ExactPullRequestState) -> Self {
+        match value {
+            ExactPullRequestState::NotMerged => Self::NotMerged,
+            ExactPullRequestState::Merged { squash_commit } => Self::Merged {
+                squash_commit_oid: squash_commit.as_str(),
+            },
+        }
+    }
+}
+
+/// Serialized git reachability observation.
+#[derive(Debug, Serialize)]
+#[serde(tag = "availability", rename_all = "kebab-case")]
+pub enum GitObservationSnapshot<'a> {
+    /// Git was unreachable.
+    Unreachable { failure: &'a str },
+    /// Git found no reachable relevant squash commit.
+    #[serde(rename = "reachable")]
+    ReachableNotMerged { state: GitReachableState },
+    /// Git found the exact squash commit reachable.
+    #[serde(rename = "reachable")]
+    ReachableSquashCommit {
+        state: GitReachableState,
+        squash_commit_oid: &'a str,
+    },
+}
+
+/// Serialized state of a reachable git authority.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitReachableState {
+    /// No merge was observed.
+    NotMerged,
+    /// The exact squash commit is reachable.
+    SquashCommitReachable,
+}
+
+impl<'a> From<&'a GitAuthorityObservation> for GitObservationSnapshot<'a> {
+    fn from(value: &'a GitAuthorityObservation) -> Self {
+        match value {
+            GitAuthorityObservation::Unreachable { failure } => Self::Unreachable {
+                failure: failure.as_str(),
+            },
+            GitAuthorityObservation::Reachable {
+                observation: GitMergeObservation::NotMerged,
+            } => Self::ReachableNotMerged {
+                state: GitReachableState::NotMerged,
+            },
+            GitAuthorityObservation::Reachable {
+                observation: GitMergeObservation::SquashCommitReachable { squash_commit },
+            } => Self::ReachableSquashCommit {
+                state: GitReachableState::SquashCommitReachable,
+                squash_commit_oid: squash_commit.as_str(),
+            },
+        }
+    }
+}
+
+/// Serialized dispatch observation.
+#[derive(Debug, Serialize)]
+pub struct DispatchSnapshot<'a> {
+    sequence: u64,
+    node: &'a str,
+    role: &'a str,
+    #[serde(rename = "ref")]
+    dispatch_ref: &'a str,
+}
+
+impl<'a> From<&'a DispatchObservation> for DispatchSnapshot<'a> {
+    fn from(value: &'a DispatchObservation) -> Self {
+        Self {
+            sequence: value.sequence().get(),
+            node: value.node().as_str(),
+            role: value.role().as_str(),
+            dispatch_ref: value.dispatch_ref().as_str(),
+        }
+    }
+}
+
+/// Serialized exact round series.
+#[derive(Debug, Serialize)]
+pub struct RoundSeriesSnapshot<'a> {
+    node: &'a str,
+    role: &'a str,
+    classification: RoundClassification,
+    count: u64,
+}
+
+impl<'a> From<&'a RoundSeries> for RoundSeriesSnapshot<'a> {
+    fn from(value: &'a RoundSeries) -> Self {
+        Self {
+            node: value.node().as_str(),
+            role: value.role().as_str(),
+            classification: value.classification,
+            count: value.count().get(),
+        }
+    }
+}
+
+/// Serialized latest hold observation.
+#[derive(Debug, Serialize)]
+pub struct HoldSnapshot<'a> {
+    key: &'a str,
+    status: HoldStatusSnapshot<'a>,
+}
+
+impl<'a> From<&'a HoldObservation> for HoldSnapshot<'a> {
+    fn from(value: &'a HoldObservation) -> Self {
+        Self {
+            key: value.key().as_str(),
+            status: HoldStatusSnapshot::from(value.status()),
+        }
+    }
+}
+
+/// Serialized open or closed hold state.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum HoldStatusSnapshot<'a> {
+    /// The hold is open.
+    Open {
+        node: &'a str,
+        sequence: u64,
+        question: &'a str,
+    },
+    /// The hold is closed.
+    Closed {
+        node: &'a str,
+        sequence: u64,
+        resolution: &'a str,
+    },
+}
+
+impl<'a> From<&'a HoldStatus> for HoldStatusSnapshot<'a> {
+    fn from(value: &'a HoldStatus) -> Self {
+        match value {
+            HoldStatus::Open {
+                node,
+                sequence,
+                question,
+            } => Self::Open {
+                node: node.as_str(),
+                sequence: sequence.get(),
+                question,
+            },
+            HoldStatus::Closed {
+                node,
+                sequence,
+                resolution,
+            } => Self::Closed {
+                node: node.as_str(),
+                sequence: sequence.get(),
+                resolution,
+            },
+        }
+    }
+}
+
+/// Serialized artifact provenance result.
+#[derive(Debug, Serialize)]
+pub struct ProvenanceSnapshot<'a> {
+    path: &'a str,
+    approved_sha256: &'a str,
+    approval_node: &'a str,
+    approval_sequence: u64,
+    condition: ProvenanceConditionSnapshot<'a>,
+}
+
+impl<'a> From<&'a ArtifactProvenance> for ProvenanceSnapshot<'a> {
+    fn from(value: &'a ArtifactProvenance) -> Self {
+        Self {
+            path: value.path().as_str(),
+            approved_sha256: value.approved_digest().as_str(),
+            approval_node: value.approval_node().as_str(),
+            approval_sequence: value.approval_sequence().get(),
+            condition: ProvenanceConditionSnapshot::from(value.condition()),
+        }
+    }
+}
+
+/// Serialized provenance condition independent of merge status.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum ProvenanceConditionSnapshot<'a> {
+    /// Current and approved digests match.
+    DigestMatches,
+    /// Current and approved digests differ.
+    DigestMismatch {
+        approved_sha256: &'a str,
+        current_sha256: &'a str,
+    },
+    /// The approved artifact is missing.
+    ArtifactMissing,
+}
+
+impl<'a> From<&'a ArtifactProvenanceCondition> for ProvenanceConditionSnapshot<'a> {
+    fn from(value: &'a ArtifactProvenanceCondition) -> Self {
+        match value {
+            ArtifactProvenanceCondition::DigestMatches => Self::DigestMatches,
+            ArtifactProvenanceCondition::DigestMismatch { approved, current } => {
+                Self::DigestMismatch {
+                    approved_sha256: approved.as_str(),
+                    current_sha256: current.as_str(),
+                }
+            }
+            ArtifactProvenanceCondition::ArtifactMissing => Self::ArtifactMissing,
+        }
+    }
+}
+
+/// Serialized conservative resume observation.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum ResumeSnapshot<'a> {
+    /// No log-visible candidate remains.
+    NoLogVisibleCandidate,
+    /// The latest log-visible candidate.
+    Candidate {
+        node: &'a str,
+        latest_sequence: u64,
+        cycle_position: CyclePositionSnapshot,
+    },
+}
+
+impl<'a> From<&'a ResumeObservation> for ResumeSnapshot<'a> {
+    fn from(value: &'a ResumeObservation) -> Self {
+        match value {
+            ResumeObservation::NoLogVisibleCandidate => Self::NoLogVisibleCandidate,
+            ResumeObservation::Candidate {
+                node,
+                latest_sequence,
+                cycle_position,
+            } => Self::Candidate {
+                node: node.as_str(),
+                latest_sequence: latest_sequence.get(),
+                cycle_position: CyclePositionSnapshot::from(*cycle_position),
+            },
+        }
+    }
+}
+
+/// Serialized dispatch-cycle position.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum CyclePositionSnapshot {
+    /// No round dispatch has occurred.
+    NoRoundDispatch,
+    /// A plan-producing role was dispatched.
+    PlanDispatched { sequence: u64 },
+    /// A critique-producing role was dispatched.
+    CritiqueDispatched { sequence: u64 },
+    /// Execution was dispatched.
+    ExecutionDispatched { sequence: u64 },
+    /// PR review was dispatched.
+    ReviewDispatched { sequence: u64 },
+}
+
+impl From<CyclePosition> for CyclePositionSnapshot {
+    fn from(value: CyclePosition) -> Self {
+        match value {
+            CyclePosition::NoRoundDispatch => Self::NoRoundDispatch,
+            CyclePosition::PlanDispatched { sequence } => Self::PlanDispatched {
+                sequence: sequence.get(),
+            },
+            CyclePosition::CritiqueDispatched { sequence } => Self::CritiqueDispatched {
+                sequence: sequence.get(),
+            },
+            CyclePosition::ExecutionDispatched { sequence } => Self::ExecutionDispatched {
+                sequence: sequence.get(),
+            },
+            CyclePosition::ReviewDispatched { sequence } => Self::ReviewDispatched {
+                sequence: sequence.get(),
+            },
+        }
+    }
+}
+
+/// Versioned recovery-digest carriers populated by the bounded digest fold in m2-s5.
+#[derive(Debug, Serialize)]
+pub struct RecoveryDigest {
+    rounds: RecoveryCategory<RecoveryRoundEntry>,
+    open_holds: RecoveryCategory<RecoveryOpenHoldEntry>,
+    deltas: RecoveryCategory<RecoveryDeltaEntry>,
+    facts: RecoveryCategory<RecoveryFactEntry>,
+}
+
+impl RecoveryDigest {
+    // m2-s5 replaces this staged empty population with the bounded digest fold.
+    fn empty_scaffold() -> Self {
+        Self {
+            rounds: RecoveryCategory::empty_scaffold(),
+            open_holds: RecoveryCategory::empty_scaffold(),
+            deltas: RecoveryCategory::empty_scaffold(),
+            facts: RecoveryCategory::empty_scaffold(),
+        }
+    }
+}
+
+/// One typed recovery category with explicit elisions.
+#[derive(Debug, Serialize)]
+pub struct RecoveryCategory<T> {
+    entries: Vec<T>,
+    elisions: Vec<RecoveryElision>,
+}
+
+impl<T> RecoveryCategory<T> {
+    fn empty_scaffold() -> Self {
+        Self {
+            entries: Vec::new(),
+            elisions: Vec::new(),
+        }
+    }
+}
+
+/// One recovery round entry.
+#[derive(Debug, Serialize)]
+pub struct RecoveryRoundEntry {
+    sequence: u64,
+    node: String,
+    role: String,
+    round_number: u64,
+}
+
+/// One recovery open-hold entry.
+#[derive(Debug, Serialize)]
+pub struct RecoveryOpenHoldEntry {
+    sequence: u64,
+    node: String,
+    key: String,
+    question: String,
+}
+
+/// One recovery delta entry.
+#[derive(Debug, Serialize)]
+pub struct RecoveryDeltaEntry {
+    sequence: u64,
+    node: String,
+    message: String,
+}
+
+/// One recovery fact entry.
+#[derive(Debug, Serialize)]
+pub struct RecoveryFactEntry {
+    sequence: u64,
+    node: String,
+    kind: String,
+    evidence: String,
+}
+
+/// One explicit omitted recovery range and its retrieval commands.
+#[derive(Debug, Serialize)]
+pub struct RecoveryElision {
+    omitted_count: u64,
+    start_sequence: u64,
+    end_sequence: u64,
+    retrieval_commands: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VisibleNode {
     node: NodeId,
@@ -1162,12 +1903,12 @@ pub fn derive_run_state(
                     dispatch_ref: payload.r#ref.clone(),
                 });
                 let classification = DispatchRoleClass::classify(&payload.role);
-                if classification.is_round_bearing() {
+                if let Some(round_classification) = classification.round_classification() {
                     increment_round_series(
                         &mut rounds,
                         record.node(),
                         &payload.role,
-                        classification,
+                        round_classification,
                     )?;
                     update_cycle_position(
                         &mut visible_nodes,
@@ -1328,7 +2069,7 @@ fn increment_round_series(
     rounds: &mut Vec<RoundSeries>,
     node: &NodeId,
     role: &DispatchRole,
-    classification: DispatchRoleClass,
+    classification: RoundClassification,
 ) -> Result<(), RunStateError> {
     if let Some(existing) = rounds
         .iter_mut()
@@ -1414,6 +2155,8 @@ fn derive_step_results(
         steps.push(StepMergeResult {
             node: authority.node.clone(),
             subject,
+            github: authority.github.clone(),
+            git: authority.git.clone(),
             status,
         });
     }
@@ -1534,12 +2277,17 @@ mod tests {
         CurrentArtifactState, CyclePosition, DispatchRoleClass, ExactPullRequestIdentity,
         ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
         GitHubPullRequestObservation, GitMergeObservation, HoldStatus, MergeStatus, MergeSubject,
-        PullRequestNumber, RepositoryBranchName, RepositoryFetchObservation, RepositoryObservation,
-        RepositoryObservationFailure, RepositoryObservationRef, ResumeObservation, RoundCount,
-        RunStateError, SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState,
-        TagTarget, VisionSlug, WorktreeIdentity, WorktreeState, checked_round_increment,
-        derive_merge_status, derive_run_state,
+        PullRequestNumber, RecoveryCategory, RecoveryDeltaEntry, RecoveryDigest, RecoveryElision,
+        RecoveryFactEntry, RecoveryOpenHoldEntry, RecoveryRoundEntry, RepositoryBranchName,
+        RepositoryFetchObservation, RepositoryObservation, RepositoryObservationFailure,
+        RepositoryObservationRef, ResumeObservation, RoundCount, RunSnapshot, RunStateError,
+        SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState, TagTarget,
+        VisionSlug, WorktreeIdentity, WorktreeState, checked_round_increment, derive_merge_status,
+        derive_run_state,
     };
+
+    const RUN_SNAPSHOT_SCHEMA: &str =
+        include_str!("../../../skills/pce/schemas/run-snapshot.schema.json");
 
     fn subject(slug: &str, node: &str) -> Result<MergeSubject, Box<dyn Error>> {
         let slug = VisionSlug::parse(slug)?;
@@ -2333,6 +3081,301 @@ mod tests {
             derive_merge_status(&merge_subject, &github, &git),
             MergeStatus::Inconclusive
         );
+        Ok(())
+    }
+
+    fn snapshot_validator() -> Result<jsonschema::Validator, Box<dyn Error>> {
+        let schema = serde_json::from_str(RUN_SNAPSHOT_SCHEMA)?;
+        Ok(jsonschema::validator_for(&schema)?)
+    }
+
+    #[test]
+    fn typed_rich_snapshot_conforms_and_pins_identity() -> Result<(), Box<dyn Error>> {
+        let vision = VisionSlug::parse("2026-07-27-example")?;
+        let records = vec![
+            dispatch(1, "m2-s1", "step-executor", "dispatch-ref")?,
+            event(
+                2,
+                "m2-s1",
+                KnownPayload::EscalationOpen(EscalationOpenPayload {
+                    key: EscalationKey::new("review"),
+                    question: "Proceed?".to_owned(),
+                }),
+            )?,
+            approval(3, "m2-s1", "plan.json", digest('a')?)?,
+            dispatch(4, "m2-s2", "step-planner", "next-ref")?,
+        ];
+        let repository = RepositoryObservation::new(
+            RepositoryName::new("pce"),
+            RepositoryFetchObservation::Observed {
+                observation_ref: RepositoryObservationRef::parse("origin/milestone-2")?,
+                fetched_at: EventTimestamp::parse("2026-07-27T12:34:56.123Z")?,
+            },
+            RepositoryBranchName::parse("milestone-2")?,
+            BranchState::Present,
+            WorktreeIdentity::parse("m2-s3")?,
+            WorktreeState::Present,
+            TagName::parse("v0.1.16")?,
+            TagState::PointsTo {
+                target: TagTarget::parse("commit-oid")?,
+            },
+        );
+        let artifacts = [CurrentArtifactObservation::new(
+            ArtifactPath::new("plan.json"),
+            CurrentArtifactState::Present {
+                digest: digest('a')?,
+            },
+        )];
+        let authority = merged_authority(&vision, "m2-s1")?;
+        let state = derive_run_state(
+            &records,
+            &vision,
+            &artifacts,
+            &[repository],
+            std::slice::from_ref(&authority),
+        )?;
+        assert_eq!(state.steps()[0].github(), authority.github());
+        assert_eq!(state.steps()[0].git(), authority.git());
+
+        let snapshot = RunSnapshot::from(&state);
+        assert_eq!(snapshot.schema_id(), "pce.run-snapshot");
+        assert_eq!(snapshot.schema_version(), 1);
+        let value = serde_json::to_value(&snapshot)?;
+        assert_eq!(value["schema_id"], "pce.run-snapshot");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(
+            value["repositories"][0]["fetch"]["fetched_at"],
+            "2026-07-27T12:34:56.123Z"
+        );
+        assert!(snapshot_validator()?.is_valid(&value));
+        Ok(())
+    }
+
+    #[test]
+    fn typed_snapshot_covers_unavailable_absent_and_not_merged_arms() -> Result<(), Box<dyn Error>>
+    {
+        let vision = VisionSlug::parse("2026-07-27-example")?;
+        let records = vec![delta(1, "m2-s1")?];
+        let subject = MergeSubject::derive(&vision, StepNode::parse(&NodeId::parse("m2-s1")?)?);
+        let one_not_merged = StepAuthorityObservation::new(
+            NodeId::parse("m2-s1")?,
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::OneExactMatch {
+                    identity: identity(&subject)?,
+                    state: ExactPullRequestState::NotMerged,
+                },
+            },
+            GitAuthorityObservation::Reachable {
+                observation: GitMergeObservation::NotMerged,
+            },
+        );
+        let repository = RepositoryObservation::new(
+            RepositoryName::new(""),
+            RepositoryFetchObservation::Unavailable {
+                failure: RepositoryObservationFailure::parse("offline")?,
+            },
+            RepositoryBranchName::parse("missing-branch")?,
+            BranchState::Absent,
+            WorktreeIdentity::parse("missing-worktree")?,
+            WorktreeState::Absent,
+            TagName::parse("missing-tag")?,
+            TagState::Absent,
+        );
+        let state = derive_run_state(&records, &vision, &[], &[repository], &[one_not_merged])?;
+        let value = serde_json::to_value(RunSnapshot::from(&state))?;
+        assert_eq!(
+            value["steps"][0]["github"]["pull_request"]["state"]["status"],
+            "not-merged"
+        );
+        assert_eq!(value["steps"][0]["git"]["state"], "not-merged");
+        assert_eq!(value["steps"][0]["merge_status"], "not-merged");
+        assert!(snapshot_validator()?.is_valid(&value));
+
+        for github in [
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::ZeroExactMatches,
+            },
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::MultipleExactMatches,
+            },
+            GitHubAuthorityObservation::Unreachable {
+                failure: AuthorityFailure::parse("github offline")?,
+            },
+        ] {
+            let authority = StepAuthorityObservation::new(
+                NodeId::parse("m2-s1")?,
+                github,
+                GitAuthorityObservation::Unreachable {
+                    failure: AuthorityFailure::parse("git offline")?,
+                },
+            );
+            let state = derive_run_state(&records, &vision, &[], &[], &[authority])?;
+            assert!(
+                snapshot_validator()?.is_valid(&serde_json::to_value(RunSnapshot::from(&state))?)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_carriers_and_negative_contract_boundaries() -> Result<(), Box<dyn Error>> {
+        let state = derive(&[], &[], &[], &[])?;
+        let mut snapshot = RunSnapshot::from(&state);
+        snapshot.recovery_digest = RecoveryDigest {
+            rounds: RecoveryCategory {
+                entries: (1..=20)
+                    .map(|sequence| RecoveryRoundEntry {
+                        sequence,
+                        node: "m2-s1".to_owned(),
+                        role: "step-planner".to_owned(),
+                        round_number: sequence,
+                    })
+                    .collect(),
+                elisions: vec![RecoveryElision {
+                    omitted_count: 1,
+                    start_sequence: 21,
+                    end_sequence: 21,
+                    retrieval_commands: vec!["pce log read 21".to_owned()],
+                }],
+            },
+            open_holds: RecoveryCategory {
+                entries: vec![RecoveryOpenHoldEntry {
+                    sequence: 1,
+                    node: "m2-s1".to_owned(),
+                    key: String::new(),
+                    question: String::new(),
+                }],
+                elisions: Vec::new(),
+            },
+            deltas: RecoveryCategory {
+                entries: vec![RecoveryDeltaEntry {
+                    sequence: 1,
+                    node: "m2-s1".to_owned(),
+                    message: String::new(),
+                }],
+                elisions: Vec::new(),
+            },
+            facts: RecoveryCategory {
+                entries: vec![RecoveryFactEntry {
+                    sequence: 1,
+                    node: "m2-s1".to_owned(),
+                    kind: "key-finding".to_owned(),
+                    evidence: "evidence".to_owned(),
+                }],
+                elisions: Vec::new(),
+            },
+        };
+        let valid = serde_json::to_value(snapshot)?;
+        let validator = snapshot_validator()?;
+        assert!(validator.is_valid(&valid));
+
+        let mut invalid_values = Vec::new();
+        let mut wrong_id = valid.clone();
+        wrong_id["schema_id"] = serde_json::json!("wrong");
+        invalid_values.push(wrong_id);
+        let mut wrong_version = valid.clone();
+        wrong_version["schema_version"] = serde_json::json!(2);
+        invalid_values.push(wrong_version);
+        let mut missing = valid.clone();
+        missing.as_object_mut().expect("object").remove("steps");
+        invalid_values.push(missing);
+        let mut extra = valid.clone();
+        extra["extra"] = serde_json::json!(true);
+        invalid_values.push(extra);
+        let mut invalid_enum = valid.clone();
+        invalid_enum["resume"]["state"] = serde_json::json!("invalid");
+        invalid_values.push(invalid_enum);
+        let mut zero = valid.clone();
+        zero["recovery_digest"]["rounds"]["entries"][0]["sequence"] = serde_json::json!(0);
+        invalid_values.push(zero);
+        let mut malformed_digest = valid.clone();
+        malformed_digest["provenance"] = serde_json::json!([{"path":"x","approved_sha256":"bad","approval_node":"m2-s1","approval_sequence":1,"condition":{"state":"digest-matches"}}]);
+        invalid_values.push(malformed_digest);
+        let mut too_many = valid.clone();
+        let extra_entry = too_many["recovery_digest"]["rounds"]["entries"][0].clone();
+        too_many["recovery_digest"]["rounds"]["entries"]
+            .as_array_mut()
+            .expect("array")
+            .push(extra_entry);
+        invalid_values.push(too_many);
+        let mut empty_commands = valid.clone();
+        empty_commands["recovery_digest"]["rounds"]["elisions"][0]["retrieval_commands"] =
+            serde_json::json!([]);
+        invalid_values.push(empty_commands);
+        assert!(
+            invalid_values
+                .iter()
+                .all(|value| !validator.is_valid(value))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn typed_snapshots_cover_hold_provenance_and_cycle_variants() -> Result<(), Box<dyn Error>> {
+        let records = vec![
+            event(
+                1,
+                "m2-s1",
+                KnownPayload::EscalationOpen(EscalationOpenPayload {
+                    key: EscalationKey::new("hold"),
+                    question: String::new(),
+                }),
+            )?,
+            event(
+                2,
+                "m2-s1",
+                KnownPayload::EscalationClose(EscalationClosePayload {
+                    key: EscalationKey::new("hold"),
+                    resolution: String::new(),
+                }),
+            )?,
+            approval(3, "m2-s1", "matching", digest('a')?)?,
+            approval(4, "m2-s1", "mismatch", digest('b')?)?,
+            approval(5, "m2-s1", "missing", digest('c')?)?,
+        ];
+        let artifacts = [
+            CurrentArtifactObservation::new(
+                ArtifactPath::new("matching"),
+                CurrentArtifactState::Present {
+                    digest: digest('a')?,
+                },
+            ),
+            CurrentArtifactObservation::new(
+                ArtifactPath::new("mismatch"),
+                CurrentArtifactState::Present {
+                    digest: digest('d')?,
+                },
+            ),
+            CurrentArtifactObservation::new(
+                ArtifactPath::new("missing"),
+                CurrentArtifactState::Missing,
+            ),
+        ];
+        let state = derive(&records, &artifacts, &[], &[])?;
+        let value = serde_json::to_value(RunSnapshot::from(&state))?;
+        assert!(snapshot_validator()?.is_valid(&value));
+        assert_eq!(value["holds"][0]["status"]["state"], "closed");
+        assert_eq!(
+            value["provenance"][1]["condition"]["state"],
+            "digest-mismatch"
+        );
+        assert_eq!(
+            value["provenance"][2]["condition"]["state"],
+            "artifact-missing"
+        );
+
+        for role in [
+            "step-planner",
+            "step-critic",
+            "step-executor",
+            "pr-reviewer",
+            "repository-analyst",
+        ] {
+            let state = derive(&[dispatch(1, "m2-s1", role, "ref")?], &[], &[], &[])?;
+            assert!(
+                snapshot_validator()?.is_valid(&serde_json::to_value(RunSnapshot::from(&state))?)
+            );
+        }
         Ok(())
     }
 }
