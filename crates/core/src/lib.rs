@@ -7,11 +7,12 @@ pub mod vision;
 pub use event_log::{
     AppendError, AppendIntent, ArtifactPath, DeltaPayload, DispatchPayload, DispatchRef,
     DispatchRole, EscalationClosePayload, EscalationKey, EscalationOpenPayload, EventBodyRef,
-    EventLogError, EventLogTail, EventLogTailLine, EventRecord, EventTimestamp, Evidence,
-    EvidencePolicy, EvidencePresence, KeyFindingPayload, KnownPayload, NodeId,
-    PlanningArtifactApprovedPayload, ReadKind, ReadPayload, RepositoryContractPayload,
+    EventKindName, EventLogError, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
+    EventTimestamp, Evidence, EvidencePolicy, EvidencePresence, KeyFindingPayload, KnownPayload,
+    NodeId, PlanningArtifactApprovedPayload, ReadKind, ReadPayload, RepositoryContractPayload,
     RepositoryName, RepositoryRoot, Sequence, Sha256Digest, UnparsedPayload, WriteKind,
-    append_event, parse_event_line, serialize_event_line, validate_evidence_policy,
+    append_event, event_record_matches, parse_event_line, serialize_event_line,
+    validate_evidence_policy,
 };
 pub use run_state::{
     ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BranchSnapshot, BranchState,
@@ -24,7 +25,7 @@ pub use run_state::{
     MergeStatus, MergeSubject, MergeSubjectSnapshot, MilestoneNumber, ProvenanceConditionSnapshot,
     ProvenanceSnapshot, PullRequestNumber, PullRequestSelector, PullRequestSnapshot,
     PullRequestStateSnapshot, RecoveryCategory, RecoveryDeltaEntry, RecoveryDigest,
-    RecoveryElision, RecoveryFactEntry, RecoveryOpenHoldEntry, RecoveryRoundEntry,
+    RecoveryElision, RecoveryFactEntry, RecoveryLogPath, RecoveryOpenHoldEntry, RecoveryRoundEntry,
     RepositoryBranchName, RepositoryFetchObservation, RepositoryFetchSnapshot,
     RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
     RepositorySnapshot, ResumeObservation, ResumeSnapshot, RoundClassification, RoundCount,
