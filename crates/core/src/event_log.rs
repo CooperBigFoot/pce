@@ -1,4 +1,4 @@
-//! decode : EventLogLine → KnownEvent ∪ UnknownEvent; append : AppendInput → AppendIntent.
+//! decode : EventLogLine → KnownEvent ∪ UnknownEvent; append : AppendInput → AppendIntent; select : EventRecord × EventRecordFilter → Bool.
 //! This module is pure domain logic and performs no I/O.
 
 use std::fmt;
@@ -578,6 +578,40 @@ pub enum ReadKind {
     Unknown(String),
 }
 
+/// An exact open-world event-kind spelling used by raw-record retrieval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventKindName(String);
+
+impl EventKindName {
+    /// Preserve an event-kind spelling without applying the writable registry.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Return the exact event-kind spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The four legal raw-record filter combinations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventRecordFilter {
+    /// Select every record.
+    All,
+    /// Select records with one exact open-world kind spelling.
+    Kind(EventKindName),
+    /// Select records with one exact node.
+    Node(NodeId),
+    /// Select records matching both exact values.
+    KindAndNode {
+        /// The exact open-world kind spelling.
+        kind: EventKindName,
+        /// The exact node.
+        node: NodeId,
+    },
+}
+
 /// The open payload returned by the read API.
 // This mirrors `KnownPayload` directly so callers do not need schema-specific boxing.
 #[allow(clippy::large_enum_variant)]
@@ -587,6 +621,20 @@ pub enum ReadPayload {
     Known(KnownPayload),
     /// Arbitrary JSON paired with an unregistered kind.
     Unknown(Value),
+}
+
+/// A correlated borrowed view of a known or unknown event body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventBodyRef<'a> {
+    /// A payload decoded according to its registered kind.
+    Known(&'a KnownPayload),
+    /// An unregistered kind paired with its arbitrary JSON payload.
+    Unknown {
+        /// The exact unregistered kind spelling.
+        kind: &'a str,
+        /// The arbitrary JSON payload paired with the kind.
+        payload: &'a Value,
+    },
 }
 
 // This internal correlation carrier retains the same direct typed payload representation.
@@ -637,6 +685,14 @@ impl EventRecord {
         &self.node
     }
 
+    /// Borrow the correlated known or unknown event body without cloning it.
+    pub fn body_ref(&self) -> EventBodyRef<'_> {
+        match &self.body {
+            EventBody::Known(payload) => EventBodyRef::Known(payload),
+            EventBody::Unknown { kind, payload } => EventBodyRef::Unknown { kind, payload },
+        }
+    }
+
     /// Return the open read kind.
     pub fn kind(&self) -> ReadKind {
         match &self.body {
@@ -650,6 +706,25 @@ impl EventRecord {
         match &self.body {
             EventBody::Known(payload) => ReadPayload::Known(payload.clone()),
             EventBody::Unknown { payload, .. } => ReadPayload::Unknown(payload.clone()),
+        }
+    }
+
+    fn kind_spelling(&self) -> &str {
+        match &self.body {
+            EventBody::Known(payload) => payload.kind().as_str(),
+            EventBody::Unknown { kind, .. } => kind,
+        }
+    }
+}
+
+/// Select an event record using one of the four legal raw-read filters.
+pub fn event_record_matches(record: &EventRecord, filter: &EventRecordFilter) -> bool {
+    match filter {
+        EventRecordFilter::All => true,
+        EventRecordFilter::Kind(kind) => record.kind_spelling() == kind.as_str(),
+        EventRecordFilter::Node(node) => record.node() == node,
+        EventRecordFilter::KindAndNode { kind, node } => {
+            record.kind_spelling() == kind.as_str() && record.node() == node
         }
     }
 }
@@ -978,9 +1053,10 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::event_log::{
-        AppendError, EventLogError, EventLogTail, EventLogTailLine, Evidence, EvidencePresence,
-        KnownPayload, NodeId, ReadKind, ReadPayload, Sequence, Sha256Digest, UnparsedPayload,
-        WriteKind, append_event, parse_event_line, serialize_event_line, validate_evidence_policy,
+        AppendError, EventBodyRef, EventKindName, EventLogError, EventLogTail, EventLogTailLine,
+        EventRecordFilter, Evidence, EvidencePresence, KnownPayload, NodeId, ReadKind, ReadPayload,
+        Sequence, Sha256Digest, UnparsedPayload, WriteKind, append_event, event_record_matches,
+        parse_event_line, serialize_event_line, validate_evidence_policy,
     };
 
     const APPEND_TIME_SECONDS: u64 = 1_785_155_696;
@@ -1009,6 +1085,39 @@ mod tests {
         r#"{"sequence":7,"timestamp":"2026-07-27T12:35:02.000Z","kind":"planning-artifact-approved","node":"m1-s1","payload":{"path":"planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","evidence":"shasum -a 256 planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json"}}"#,
     ];
     const UNKNOWN_LINE: &str = r#"{"sequence":8,"timestamp":"2026-07-27T12:35:03.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
+
+    #[test]
+    fn raw_record_filters_match_known_and_unknown_kinds_exactly() -> Result<(), EventLogError> {
+        let known = parse_event_line(KNOWN_LINES[1])?;
+        let unknown = parse_event_line(UNKNOWN_LINE)?;
+        let node = NodeId::parse("m1-s1")?;
+
+        assert!(event_record_matches(&known, &EventRecordFilter::All));
+        assert!(event_record_matches(
+            &known,
+            &EventRecordFilter::Kind(EventKindName::new("delta"))
+        ));
+        assert!(event_record_matches(
+            &unknown,
+            &EventRecordFilter::Kind(EventKindName::new("future-kind"))
+        ));
+        assert!(event_record_matches(
+            &unknown,
+            &EventRecordFilter::Node(node.clone())
+        ));
+        assert!(event_record_matches(
+            &unknown,
+            &EventRecordFilter::KindAndNode {
+                kind: EventKindName::new("future-kind"),
+                node,
+            }
+        ));
+        assert!(!event_record_matches(
+            &known,
+            &EventRecordFilter::Kind(EventKindName::new("future-kind"))
+        ));
+        Ok(())
+    }
 
     #[test]
     fn empty_tail_builds_exact_first_intent_and_invokes_once() -> Result<(), EventLogError> {
@@ -1293,6 +1402,36 @@ mod tests {
             assert!(expected_payload);
             assert_eq!(serialize_event_line(&record)?, line);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_body_view_preserves_all_known_and_unknown_correlations() -> Result<(), EventLogError>
+    {
+        for (index, line) in KNOWN_LINES.into_iter().enumerate() {
+            let record = parse_event_line(line)?;
+            let expected_payload = matches!(
+                (index, record.body_ref()),
+                (0, EventBodyRef::Known(KnownPayload::Dispatch(_)))
+                    | (1, EventBodyRef::Known(KnownPayload::Delta(_)))
+                    | (2, EventBodyRef::Known(KnownPayload::EscalationOpen(_)))
+                    | (3, EventBodyRef::Known(KnownPayload::EscalationClose(_)))
+                    | (4, EventBodyRef::Known(KnownPayload::KeyFinding(_)))
+                    | (5, EventBodyRef::Known(KnownPayload::RepositoryContract(_)))
+                    | (
+                        6,
+                        EventBodyRef::Known(KnownPayload::PlanningArtifactApproved(_))
+                    )
+            );
+            assert!(expected_payload);
+        }
+
+        let record = parse_event_line(UNKNOWN_LINE)?;
+        let EventBodyRef::Unknown { kind, payload } = record.body_ref() else {
+            panic!("unknown borrowed body expected");
+        };
+        assert_eq!(kind, "future-kind");
+        assert_eq!(payload["nested"]["answer"], 42);
         Ok(())
     }
 

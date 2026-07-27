@@ -1,0 +1,1047 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PCE run snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "repositories",
+    "steps",
+    "dispatches",
+    "rounds",
+    "holds",
+    "provenance",
+    "resume",
+    "recovery_digest"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "pce.run-snapshot"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "repositories": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/repository"
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "dispatches": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dispatch"
+      }
+    },
+    "rounds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/roundSeries"
+      }
+    },
+    "holds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/hold"
+      }
+    },
+    "provenance": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/provenance"
+      }
+    },
+    "resume": {
+      "$ref": "#/$defs/resume"
+    },
+    "recovery_digest": {
+      "$ref": "#/$defs/recoveryDigest"
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bytePreservedString": {
+      "type": "string"
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "head",
+        "base"
+      ],
+      "properties": {
+        "head": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "base": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "fetch",
+        "branch",
+        "worktree",
+        "tag"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "#/$defs/bytePreservedString"
+        },
+        "fetch": {
+          "$ref": "#/$defs/repositoryFetch"
+        },
+        "branch": {
+          "$ref": "#/$defs/branch"
+        },
+        "worktree": {
+          "$ref": "#/$defs/worktree"
+        },
+        "tag": {
+          "$ref": "#/$defs/tag"
+        }
+      }
+    },
+    "repositoryFetch": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "observation_ref",
+            "fetched_at"
+          ],
+          "properties": {
+            "state": {
+              "const": "observed"
+            },
+            "observation_ref": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "fetched_at": {
+              "$ref": "#/$defs/timestamp"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "failure"
+          ],
+          "properties": {
+            "state": {
+              "const": "unavailable"
+            },
+            "failure": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        }
+      ]
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "state"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "present",
+            "absent"
+          ]
+        }
+      }
+    },
+    "worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "state"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "present",
+            "absent"
+          ]
+        }
+      }
+    },
+    "tag": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "state"
+          ],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "state": {
+              "const": "absent"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "state",
+            "target"
+          ],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "state": {
+              "const": "points-to"
+            },
+            "target": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "subject",
+        "github",
+        "git",
+        "merge_status"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "subject": {
+          "$ref": "#/$defs/mergeSubject"
+        },
+        "github": {
+          "$ref": "#/$defs/githubObservation"
+        },
+        "git": {
+          "$ref": "#/$defs/gitObservation"
+        },
+        "merge_status": {
+          "type": "string",
+          "enum": [
+            "merged",
+            "not-merged",
+            "inconclusive"
+          ]
+        }
+      }
+    },
+    "mergeSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "milestone",
+        "step",
+        "head_branch",
+        "integration_branch",
+        "pull_request_selector"
+      ],
+      "properties": {
+        "milestone": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "step": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "head_branch": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "integration_branch": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "pull_request_selector": {
+          "$ref": "#/$defs/selector"
+        }
+      }
+    },
+    "githubObservation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "failure"
+          ],
+          "properties": {
+            "availability": {
+              "const": "unreachable"
+            },
+            "failure": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "cardinality"
+          ],
+          "properties": {
+            "availability": {
+              "const": "reachable"
+            },
+            "cardinality": {
+              "const": "zero-exact-matches"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "cardinality"
+          ],
+          "properties": {
+            "availability": {
+              "const": "reachable"
+            },
+            "cardinality": {
+              "const": "multiple-exact-matches"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "cardinality",
+            "pull_request"
+          ],
+          "properties": {
+            "availability": {
+              "const": "reachable"
+            },
+            "cardinality": {
+              "const": "one-exact-match"
+            },
+            "pull_request": {
+              "$ref": "#/$defs/pullRequest"
+            }
+          }
+        }
+      ]
+    },
+    "pullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "selector",
+        "state"
+      ],
+      "properties": {
+        "number": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "selector": {
+          "$ref": "#/$defs/selector"
+        },
+        "state": {
+          "$ref": "#/$defs/pullRequestState"
+        }
+      }
+    },
+    "pullRequestState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "not-merged"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "squash_commit_oid"
+          ],
+          "properties": {
+            "status": {
+              "const": "merged"
+            },
+            "squash_commit_oid": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        }
+      ]
+    },
+    "gitObservation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "failure"
+          ],
+          "properties": {
+            "availability": {
+              "const": "unreachable"
+            },
+            "failure": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "state"
+          ],
+          "properties": {
+            "availability": {
+              "const": "reachable"
+            },
+            "state": {
+              "const": "not-merged"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "state",
+            "squash_commit_oid"
+          ],
+          "properties": {
+            "availability": {
+              "const": "reachable"
+            },
+            "state": {
+              "const": "squash-commit-reachable"
+            },
+            "squash_commit_oid": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        }
+      ]
+    },
+    "dispatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "node",
+        "role",
+        "ref"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "node": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "role": {
+          "$ref": "#/$defs/bytePreservedString"
+        },
+        "ref": {
+          "$ref": "#/$defs/bytePreservedString"
+        }
+      }
+    },
+    "roundSeries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "role",
+        "classification",
+        "count"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "role": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "plan-producing",
+            "critique-producing",
+            "execution"
+          ]
+        },
+        "count": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "hold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "status"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/bytePreservedString"
+        },
+        "status": {
+          "$ref": "#/$defs/holdStatus"
+        }
+      }
+    },
+    "holdStatus": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "node",
+            "sequence",
+            "question"
+          ],
+          "properties": {
+            "state": {
+              "const": "open"
+            },
+            "node": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "sequence": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "question": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "node",
+            "sequence",
+            "resolution"
+          ],
+          "properties": {
+            "state": {
+              "const": "closed"
+            },
+            "node": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "sequence": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "resolution": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "approved_sha256",
+        "approval_node",
+        "approval_sequence",
+        "condition"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/bytePreservedString"
+        },
+        "approved_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "approval_node": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "approval_sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "condition": {
+          "$ref": "#/$defs/provenanceCondition"
+        }
+      }
+    },
+    "provenanceCondition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state"
+          ],
+          "properties": {
+            "state": {
+              "const": "digest-matches"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "approved_sha256",
+            "current_sha256"
+          ],
+          "properties": {
+            "state": {
+              "const": "digest-mismatch"
+            },
+            "approved_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "current_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state"
+          ],
+          "properties": {
+            "state": {
+              "const": "artifact-missing"
+            }
+          }
+        }
+      ]
+    },
+    "resume": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state"
+          ],
+          "properties": {
+            "state": {
+              "const": "no-log-visible-candidate"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "node",
+            "latest_sequence",
+            "cycle_position"
+          ],
+          "properties": {
+            "state": {
+              "const": "candidate"
+            },
+            "node": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "latest_sequence": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "cycle_position": {
+              "$ref": "#/$defs/cyclePosition"
+            }
+          }
+        }
+      ]
+    },
+    "cyclePosition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state"
+          ],
+          "properties": {
+            "state": {
+              "const": "no-round-dispatch"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "sequence"
+          ],
+          "properties": {
+            "state": {
+              "const": "plan-dispatched"
+            },
+            "sequence": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "sequence"
+          ],
+          "properties": {
+            "state": {
+              "const": "critique-dispatched"
+            },
+            "sequence": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "sequence"
+          ],
+          "properties": {
+            "state": {
+              "const": "execution-dispatched"
+            },
+            "sequence": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "sequence"
+          ],
+          "properties": {
+            "state": {
+              "const": "review-dispatched"
+            },
+            "sequence": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          }
+        }
+      ]
+    },
+    "recoveryDigest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rounds",
+        "open_holds",
+        "deltas",
+        "facts"
+      ],
+      "properties": {
+        "rounds": {
+          "$ref": "#/$defs/recoveryRounds"
+        },
+        "open_holds": {
+          "$ref": "#/$defs/recoveryOpenHolds"
+        },
+        "deltas": {
+          "$ref": "#/$defs/recoveryDeltas"
+        },
+        "facts": {
+          "$ref": "#/$defs/recoveryFacts"
+        }
+      }
+    },
+    "recoveryRounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries",
+        "elisions"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/recoveryRoundEntry"
+          }
+        },
+        "elisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/elision"
+          }
+        }
+      }
+    },
+    "recoveryRoundEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "node",
+        "role",
+        "round_number"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "node": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "role": {
+          "$ref": "#/$defs/bytePreservedString"
+        },
+        "round_number": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "recoveryOpenHolds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries",
+        "elisions"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/recoveryOpenHoldEntry"
+          }
+        },
+        "elisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/elision"
+          }
+        }
+      }
+    },
+    "recoveryOpenHoldEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "node",
+        "key",
+        "question"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "node": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "key": {
+          "$ref": "#/$defs/bytePreservedString"
+        },
+        "question": {
+          "type": "string"
+        }
+      }
+    },
+    "recoveryDeltas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries",
+        "elisions"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/recoveryDeltaEntry"
+          }
+        },
+        "elisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/elision"
+          }
+        }
+      }
+    },
+    "recoveryDeltaEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "node",
+        "message"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "node": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "recoveryFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries",
+        "elisions"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/recoveryFactEntry"
+          }
+        },
+        "elisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/elision"
+          }
+        }
+      }
+    },
+    "recoveryFactEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "node",
+        "kind",
+        "evidence"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "node": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "kind": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "elision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "omitted_count",
+        "start_sequence",
+        "end_sequence",
+        "retrieval_commands"
+      ],
+      "properties": {
+        "omitted_count": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "start_sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "end_sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "retrieval_commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        }
+      }
+    }
+  }
+}
