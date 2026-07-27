@@ -589,6 +589,20 @@ pub enum ReadPayload {
     Unknown(Value),
 }
 
+/// A correlated borrowed view of a known or unknown event body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventBodyRef<'a> {
+    /// A payload decoded according to its registered kind.
+    Known(&'a KnownPayload),
+    /// An unregistered kind paired with its arbitrary JSON payload.
+    Unknown {
+        /// The exact unregistered kind spelling.
+        kind: &'a str,
+        /// The arbitrary JSON payload paired with the kind.
+        payload: &'a Value,
+    },
+}
+
 // This internal correlation carrier retains the same direct typed payload representation.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -635,6 +649,14 @@ impl EventRecord {
     /// Return the node identifier.
     pub const fn node(&self) -> &NodeId {
         &self.node
+    }
+
+    /// Borrow the correlated known or unknown event body without cloning it.
+    pub fn body_ref(&self) -> EventBodyRef<'_> {
+        match &self.body {
+            EventBody::Known(payload) => EventBodyRef::Known(payload),
+            EventBody::Unknown { kind, payload } => EventBodyRef::Unknown { kind, payload },
+        }
     }
 
     /// Return the open read kind.
@@ -978,9 +1000,10 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::event_log::{
-        AppendError, EventLogError, EventLogTail, EventLogTailLine, Evidence, EvidencePresence,
-        KnownPayload, NodeId, ReadKind, ReadPayload, Sequence, Sha256Digest, UnparsedPayload,
-        WriteKind, append_event, parse_event_line, serialize_event_line, validate_evidence_policy,
+        AppendError, EventBodyRef, EventLogError, EventLogTail, EventLogTailLine, Evidence,
+        EvidencePresence, KnownPayload, NodeId, ReadKind, ReadPayload, Sequence, Sha256Digest,
+        UnparsedPayload, WriteKind, append_event, parse_event_line, serialize_event_line,
+        validate_evidence_policy,
     };
 
     const APPEND_TIME_SECONDS: u64 = 1_785_155_696;
@@ -1293,6 +1316,36 @@ mod tests {
             assert!(expected_payload);
             assert_eq!(serialize_event_line(&record)?, line);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_body_view_preserves_all_known_and_unknown_correlations() -> Result<(), EventLogError>
+    {
+        for (index, line) in KNOWN_LINES.into_iter().enumerate() {
+            let record = parse_event_line(line)?;
+            let expected_payload = matches!(
+                (index, record.body_ref()),
+                (0, EventBodyRef::Known(KnownPayload::Dispatch(_)))
+                    | (1, EventBodyRef::Known(KnownPayload::Delta(_)))
+                    | (2, EventBodyRef::Known(KnownPayload::EscalationOpen(_)))
+                    | (3, EventBodyRef::Known(KnownPayload::EscalationClose(_)))
+                    | (4, EventBodyRef::Known(KnownPayload::KeyFinding(_)))
+                    | (5, EventBodyRef::Known(KnownPayload::RepositoryContract(_)))
+                    | (
+                        6,
+                        EventBodyRef::Known(KnownPayload::PlanningArtifactApproved(_))
+                    )
+            );
+            assert!(expected_payload);
+        }
+
+        let record = parse_event_line(UNKNOWN_LINE)?;
+        let EventBodyRef::Unknown { kind, payload } = record.body_ref() else {
+            panic!("unknown borrowed body expected");
+        };
+        assert_eq!(kind, "future-kind");
+        assert_eq!(payload["nested"]["answer"], 42);
         Ok(())
     }
 
