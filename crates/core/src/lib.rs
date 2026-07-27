@@ -32,7 +32,7 @@ pub use run_state::{
     RoundSeries, RoundSeriesSnapshot, RunSnapshot, RunStateError, SelectorSnapshot,
     SquashCommitOid, StepAuthorityObservation, StepMergeResult, StepNode, StepNumber, StepSnapshot,
     TagName, TagSnapshot, TagState, TagTarget, VisionSlug, WorktreeIdentity, WorktreeSnapshot,
-    WorktreeState, derive_merge_status, derive_run_state,
+    WorktreeState, derive_merge_status, derive_run_state, render_human_snapshot,
 };
 pub use vision::{
     CreationDate, NewVision, Slug, VisionDir, VisionDirOutcome, VisionError, VisionName,
