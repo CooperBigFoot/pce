@@ -1,13 +1,56 @@
-//! decode : EventLogLine → KnownEvent ∪ UnknownEvent; encode is its inverse on valid records.
+//! decode : EventLogLine → KnownEvent ∪ UnknownEvent; append : AppendInput → AppendIntent.
 //! This module is pure domain logic and performs no I/O.
 
 use std::fmt;
+use std::time::SystemTime;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use thiserror::Error;
 use tracing::instrument;
+
+/// Exact unparsed JSON submitted as the payload for one event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnparsedPayload(String);
+
+impl UnparsedPayload {
+    /// Wrap owned payload text before it crosses into event-log domain logic.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+/// One supplied physical event-log tail line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventLogTailLine(String);
+
+impl EventLogTailLine {
+    /// Wrap an owned tail line for complete validation by the append path.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+/// The supplied state at the end of an event log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventLogTail {
+    /// The log contains no records.
+    Empty,
+    /// The log ends with the supplied physical record.
+    Present(EventLogTailLine),
+}
+
+/// Validated bytes for exactly one compact, newline-terminated event record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendIntent(Vec<u8>);
+
+impl AppendIntent {
+    /// Borrow the complete bytes to pass to an append capability.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 /// The first-based position of an event in the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -685,20 +728,7 @@ pub fn parse_event_line(line: &str) -> Result<EventRecord, EventLogError> {
         Err(error) => return Err(error),
     };
 
-    let object = raw
-        .payload
-        .as_object()
-        .ok_or_else(|| EventLogError::InvalidKnownPayload {
-            kind,
-            detail: "payload must be a JSON object".to_owned(),
-        })?;
-    let presence = if object.contains_key("evidence") {
-        EvidencePresence::Present
-    } else {
-        EvidencePresence::Absent
-    };
-    validate_evidence_policy(kind, presence)?;
-    let payload = decode_known_payload(kind, raw.payload)?;
+    let payload = validate_and_decode_known_payload(kind, raw.payload)?;
 
     Ok(EventRecord {
         sequence: raw.sequence,
@@ -716,6 +746,77 @@ pub fn parse_event_line(line: &str) -> Result<EventRecord, EventLogError> {
 #[instrument(skip(record))]
 pub fn serialize_event_line(record: &EventRecord) -> Result<String, EventLogError> {
     serde_json::to_string(record).map_err(|source| EventLogError::MalformedEnvelope { source })
+}
+
+/// Validate one submitted payload, derive the next sequence, and invoke an append capability once.
+///
+/// The capability error type should represent the boundary operation directly. In the binary,
+/// use `std::io::Error` rather than `anyhow::Error`, then add anyhow context outside core.
+///
+/// # Errors
+///
+/// Returns a specific [`AppendError`] variant when submitted JSON is malformed, payload or tail
+/// validation fails, the supplied external tail has no successor, envelope serialization fails,
+/// or the single capability invocation rejects the validated bytes.
+#[instrument(skip(payload, tail, capability))]
+pub fn append_event<E, F>(
+    kind: WriteKind,
+    payload: UnparsedPayload,
+    tail: EventLogTail,
+    node: NodeId,
+    timestamp: SystemTime,
+    capability: F,
+) -> Result<AppendIntent, AppendError<E>>
+where
+    F: FnOnce(&[u8]) -> Result<(), E>,
+{
+    let payload_value = serde_json::from_str(&payload.0)
+        .map_err(|source| AppendError::MalformedSubmittedPayload { source })?;
+    let known_payload = validate_and_decode_known_payload(kind, payload_value)
+        .map_err(|source| AppendError::InvalidSubmittedPayload { source })?;
+
+    let sequence = match tail {
+        EventLogTail::Empty => Sequence::first(),
+        EventLogTail::Present(line) => {
+            let tail_record =
+                parse_event_line(&line.0).map_err(|source| AppendError::InvalidTail { source })?;
+            let tail_sequence = tail_record.sequence().get();
+            let successor = tail_sequence
+                .checked_add(1)
+                .ok_or(AppendError::SequenceOverflow { tail_sequence })?;
+            Sequence::parse(successor).map_err(|source| AppendError::InvalidTail { source })?
+        }
+    };
+
+    let timestamp = EventTimestamp::new(DateTime::<Utc>::from(timestamp));
+    let record = EventRecord::known(sequence, timestamp, node, known_payload);
+    let mut bytes = serialize_event_line(&record)
+        .map_err(|source| AppendError::SerializationFailed { source })?
+        .into_bytes();
+    bytes.push(b'\n');
+    let intent = AppendIntent(bytes);
+
+    capability(intent.as_bytes()).map_err(|source| AppendError::CapabilityFailed { source })?;
+    Ok(intent)
+}
+
+fn validate_and_decode_known_payload(
+    kind: WriteKind,
+    payload: Value,
+) -> Result<KnownPayload, EventLogError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| EventLogError::InvalidKnownPayload {
+            kind,
+            detail: "payload must be a JSON object".to_owned(),
+        })?;
+    let presence = if object.contains_key("evidence") {
+        EvidencePresence::Present
+    } else {
+        EvidencePresence::Absent
+    };
+    validate_evidence_policy(kind, presence)?;
+    decode_known_payload(kind, payload)
 }
 
 fn decode_known_payload(kind: WriteKind, payload: Value) -> Result<KnownPayload, EventLogError> {
@@ -818,15 +919,85 @@ pub enum EventLogError {
     },
 }
 
+/// Errors produced while validating and delivering one append intent.
+///
+/// The generic `E` is the narrow capability's native error. Downstream composition should use
+/// `AppendError<std::io::Error>` for file append operations; `anyhow::Error` does not satisfy the
+/// source-error bounds inferred by `thiserror` for [`AppendError::CapabilityFailed`].
+#[derive(Debug, Error)]
+pub enum AppendError<E> {
+    /// Returned when the submitted bare payload text is not valid JSON.
+    #[error("submitted event payload is malformed JSON: {source}")]
+    MalformedSubmittedPayload {
+        /// The JSON parser failure for the submitted payload text.
+        source: serde_json::Error,
+    },
+
+    /// Returned when submitted JSON violates the selected kind's schema or evidence policy.
+    #[error("submitted event payload is invalid: {source}")]
+    InvalidSubmittedPayload {
+        /// The payload-domain validation failure.
+        source: EventLogError,
+    },
+
+    /// Returned when a present tail is not one complete, structurally valid event envelope.
+    #[error("supplied event-log tail is invalid: {source}")]
+    InvalidTail {
+        /// The complete-envelope parsing or validation failure.
+        source: EventLogError,
+    },
+
+    /// Returned only when an otherwise-valid supplied external tail already has sequence `u64::MAX`.
+    #[error("supplied event-log tail sequence {tail_sequence} has no valid successor")]
+    SequenceOverflow {
+        /// The maximum external tail sequence that cannot be incremented.
+        tail_sequence: u64,
+    },
+
+    /// Returned when the validated five-field envelope cannot be serialized.
+    #[error("validated event envelope could not be serialized: {source}")]
+    SerializationFailed {
+        /// The envelope serialization failure.
+        source: EventLogError,
+    },
+
+    /// Returned when the sole append-capability invocation rejects the complete intent bytes.
+    #[error("event append capability failed: {source}")]
+    CapabilityFailed {
+        /// The capability's original error, preserved without alteration.
+        source: E,
+    },
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::io;
+    use std::time::{Duration, SystemTime};
+
     use serde_json::{Value, json};
 
     use crate::event_log::{
-        EventLogError, Evidence, EvidencePresence, KnownPayload, NodeId, ReadKind, ReadPayload,
-        Sequence, Sha256Digest, WriteKind, parse_event_line, serialize_event_line,
-        validate_evidence_policy,
+        AppendError, EventLogError, EventLogTail, EventLogTailLine, Evidence, EvidencePresence,
+        KnownPayload, NodeId, ReadKind, ReadPayload, Sequence, Sha256Digest, UnparsedPayload,
+        WriteKind, append_event, parse_event_line, serialize_event_line, validate_evidence_policy,
     };
+
+    const APPEND_TIME_SECONDS: u64 = 1_785_155_696;
+    const VALID_DELTA_PAYLOAD: &str = r#"{"message":"append one validated event"}"#;
+    const FIRST_APPEND: &str = concat!(
+        r#"{"sequence":1,"timestamp":"2026-07-27T12:34:56.000Z","kind":"delta","node":"m1-s2","payload":{"message":"append one validated event"}}"#,
+        "\n"
+    );
+    const UNKNOWN_TAIL: &str = r#"{"sequence":41,"timestamp":"2026-07-27T12:34:55.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
+    const SECOND_APPEND: &str = concat!(
+        r#"{"sequence":42,"timestamp":"2026-07-27T12:34:56.000Z","kind":"delta","node":"m1-s2","payload":{"message":"append one validated event"}}"#,
+        "\n"
+    );
+
+    fn append_time() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(APPEND_TIME_SECONDS)
+    }
 
     const KNOWN_LINES: [&str; 7] = [
         r#"{"sequence":1,"timestamp":"2026-07-27T12:34:56.000Z","kind":"dispatch","node":"m1-s1","payload":{"role":"step-executor","ref":"ca9788ded3daec9b9e9fd7679caa24e7c64a8193","evidence":"git rev-parse HEAD"}}"#,
@@ -838,6 +1009,256 @@ mod tests {
         r#"{"sequence":7,"timestamp":"2026-07-27T12:35:02.000Z","kind":"planning-artifact-approved","node":"m1-s1","payload":{"path":"planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","evidence":"shasum -a 256 planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json"}}"#,
     ];
     const UNKNOWN_LINE: &str = r#"{"sequence":8,"timestamp":"2026-07-27T12:35:03.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
+
+    #[test]
+    fn empty_tail_builds_exact_first_intent_and_invokes_once() -> Result<(), EventLogError> {
+        let calls = Cell::new(0);
+        let recorded = RefCell::new(Vec::new());
+
+        let intent = append_event(
+            WriteKind::Delta,
+            UnparsedPayload::new(VALID_DELTA_PAYLOAD),
+            EventLogTail::Empty,
+            NodeId::parse("m1-s2")?,
+            append_time(),
+            |bytes| {
+                calls.set(calls.get() + 1);
+                recorded.borrow_mut().extend_from_slice(bytes);
+                Ok::<(), io::Error>(())
+            },
+        )
+        .map_err(append_test_error)?;
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(recorded.borrow().as_slice(), FIRST_APPEND.as_bytes());
+        assert_eq!(intent.as_bytes(), FIRST_APPEND.as_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_kind_tail_builds_exact_successor_intent() -> Result<(), EventLogError> {
+        let calls = Cell::new(0);
+        let recorded = RefCell::new(Vec::new());
+
+        let intent = append_event(
+            WriteKind::Delta,
+            UnparsedPayload::new(VALID_DELTA_PAYLOAD),
+            EventLogTail::Present(EventLogTailLine::new(UNKNOWN_TAIL)),
+            NodeId::parse("m1-s2")?,
+            append_time(),
+            |bytes| {
+                calls.set(calls.get() + 1);
+                recorded.borrow_mut().extend_from_slice(bytes);
+                Ok::<(), io::Error>(())
+            },
+        )
+        .map_err(append_test_error)?;
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(recorded.borrow().as_slice(), SECOND_APPEND.as_bytes());
+        assert_eq!(intent.as_bytes(), SECOND_APPEND.as_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn required_evidence_newline_stays_inside_one_physical_record() -> Result<(), EventLogError> {
+        let payload = r#"{"finding":"the measured fact","evidence":"git rev-parse HEAD\ncargo test --workspace"}"#;
+        let expected = concat!(
+            r#"{"sequence":1,"timestamp":"2026-07-27T12:34:56.000Z","kind":"key-finding","node":"m1-s2","payload":{"finding":"the measured fact","evidence":"git rev-parse HEAD\ncargo test --workspace"}}"#,
+            "\n"
+        );
+        let calls = Cell::new(0);
+
+        let intent = append_event(
+            WriteKind::KeyFinding,
+            UnparsedPayload::new(payload),
+            EventLogTail::Empty,
+            NodeId::parse("m1-s2")?,
+            append_time(),
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok::<(), io::Error>(())
+            },
+        )
+        .map_err(append_test_error)?;
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(intent.as_bytes(), expected.as_bytes());
+        assert_eq!(
+            intent
+                .as_bytes()
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count(),
+            1
+        );
+        assert!(intent.as_bytes().ends_with(b"\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_submitted_payloads_never_invoke_capability() -> Result<(), EventLogError> {
+        let cases = [
+            (WriteKind::Delta, "{"),
+            (WriteKind::Delta, "{}"),
+            (
+                WriteKind::KeyFinding,
+                r#"{"finding":"no evidence supplied"}"#,
+            ),
+            (
+                WriteKind::Delta,
+                r#"{"message":"wrong evidence","evidence":"must be absent"}"#,
+            ),
+        ];
+
+        for (index, (kind, payload)) in cases.into_iter().enumerate() {
+            let calls = Cell::new(0);
+            let result = append_event(
+                kind,
+                UnparsedPayload::new(payload),
+                EventLogTail::Empty,
+                NodeId::parse("m1-s2")?,
+                append_time(),
+                |_| {
+                    calls.set(calls.get() + 1);
+                    Ok::<(), io::Error>(())
+                },
+            );
+
+            match index {
+                0 => assert!(matches!(
+                    result,
+                    Err(AppendError::MalformedSubmittedPayload { .. })
+                )),
+                1 => assert!(matches!(
+                    result,
+                    Err(AppendError::InvalidSubmittedPayload {
+                        source: EventLogError::InvalidKnownPayload {
+                            kind: WriteKind::Delta,
+                            ..
+                        }
+                    })
+                )),
+                2 => assert!(matches!(
+                    result,
+                    Err(AppendError::InvalidSubmittedPayload {
+                        source: EventLogError::MissingRequiredEvidence {
+                            kind: WriteKind::KeyFinding
+                        }
+                    })
+                )),
+                3 => assert!(matches!(
+                    result,
+                    Err(AppendError::InvalidSubmittedPayload {
+                        source: EventLogError::ForbiddenEvidence {
+                            kind: WriteKind::Delta
+                        }
+                    })
+                )),
+                _ => unreachable!("every fixture index is classified"),
+            }
+            assert_eq!(calls.get(), 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_write_kind_is_rejected_before_append_is_reachable() {
+        let calls = Cell::new(0);
+        let kind = WriteKind::parse("future-kind");
+
+        assert!(matches!(
+            kind,
+            Err(EventLogError::UnknownWriteKind { kind }) if kind == "future-kind"
+        ));
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn invalid_tails_never_guess_or_invoke_capability() -> Result<(), EventLogError> {
+        let tails = [
+            "{",
+            r#"{"sequence":41,"timestamp":"2026-07-27T12:34:55.000Z","kind":"delta","node":"m1-s1"}"#,
+        ];
+
+        for tail in tails {
+            let calls = Cell::new(0);
+            let result = append_event(
+                WriteKind::Delta,
+                UnparsedPayload::new(VALID_DELTA_PAYLOAD),
+                EventLogTail::Present(EventLogTailLine::new(tail)),
+                NodeId::parse("m1-s2")?,
+                append_time(),
+                |_| {
+                    calls.set(calls.get() + 1);
+                    Ok::<(), io::Error>(())
+                },
+            );
+
+            assert!(matches!(result, Err(AppendError::InvalidTail { .. })));
+            assert_eq!(calls.get(), 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn maximum_external_tail_overflows_before_capability() -> Result<(), EventLogError> {
+        let tail = r#"{"sequence":18446744073709551615,"timestamp":"2026-07-27T12:34:55.000Z","kind":"delta","node":"m1-s1","payload":{"message":"external maximum tail"}}"#;
+        let calls = Cell::new(0);
+        let result = append_event(
+            WriteKind::Delta,
+            UnparsedPayload::new(VALID_DELTA_PAYLOAD),
+            EventLogTail::Present(EventLogTailLine::new(tail)),
+            NodeId::parse("m1-s2")?,
+            append_time(),
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok::<(), io::Error>(())
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppendError::SequenceOverflow {
+                tail_sequence: u64::MAX
+            })
+        ));
+        assert_eq!(calls.get(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn capability_failure_is_preserved_without_retry() -> Result<(), EventLogError> {
+        let calls = Cell::new(0);
+        let result = append_event(
+            WriteKind::Delta,
+            UnparsedPayload::new(VALID_DELTA_PAYLOAD),
+            EventLogTail::Empty,
+            NodeId::parse("m1-s2")?,
+            append_time(),
+            |_| {
+                calls.set(calls.get() + 1);
+                Err(io::Error::other("append refused"))
+            },
+        );
+
+        let Err(AppendError::CapabilityFailed { source }) = result else {
+            panic!("capability failure expected");
+        };
+        assert_eq!(source.to_string(), "append refused");
+        assert_eq!(source.kind(), io::ErrorKind::Other);
+        assert_eq!(calls.get(), 1);
+        Ok(())
+    }
+
+    fn append_test_error(error: AppendError<io::Error>) -> EventLogError {
+        match error {
+            AppendError::InvalidSubmittedPayload { source }
+            | AppendError::InvalidTail { source }
+            | AppendError::SerializationFailed { source } => source,
+            other => panic!("unexpected append failure: {other}"),
+        }
+    }
 
     #[test]
     fn parses_and_exactly_serializes_all_known_examples() -> Result<(), EventLogError> {
