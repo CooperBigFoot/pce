@@ -4,6 +4,9 @@
 running a Planner-Critic-Executor / PR-review multi-agent development workflow.
 The workflow is referred to by the skills as PCE-PR-C.
 
+Post-run orchestrator reviews can be recorded using the
+[PCE orchestrator feedback guide](orchestrator-feedback/README.md).
+
 - `pce vision new "<name>"` creates an idempotent dated vision directory under
   `planning/`, seeds it with the fixed `vision.md` template, and prints the
   relative path.
