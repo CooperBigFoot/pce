@@ -1,4 +1,4 @@
-//! run_state : Ordered<EventRecord> × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String   (pure, deterministic)
+//! run_state : Ordered<EventRecord> × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String; compute_dispatchability : ArtifactProvenance × Ordered<DispatchCandidate> × OrderingEdge* × (CanonicalNode → MergeStatus) × (RepositoryName → VersionPolicy) → Ordered<DispatchabilityResult> ∪ RunStateError   (pure, deterministic)
 //! This module performs no I/O.
 
 use chrono::SecondsFormat;
@@ -85,6 +85,60 @@ impl MilestoneNumber {
     }
 }
 
+/// A canonical `m<milestone>` event-log node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MilestoneNode {
+    milestone: MilestoneNumber,
+}
+
+impl MilestoneNode {
+    /// Parse a canonical milestone node from a general event-log node identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunStateError::MalformedMilestoneNode`] for a non-canonical shape,
+    /// [`RunStateError::LeadingZeroMilestoneNodeComponent`] for a leading zero,
+    /// [`RunStateError::ZeroMilestoneNodeComponent`] for zero, or
+    /// [`RunStateError::MilestoneNodeComponentOverflow`] when the component exceeds `u64`.
+    #[instrument]
+    pub fn parse(node: &NodeId) -> Result<Self, RunStateError> {
+        let raw = node.as_str();
+        let Some(component) = raw.strip_prefix('m') else {
+            return Err(RunStateError::MalformedMilestoneNode {
+                value: raw.to_owned(),
+            });
+        };
+        if component.is_empty() || component.bytes().any(|byte| !byte.is_ascii_digit()) {
+            return Err(RunStateError::MalformedMilestoneNode {
+                value: raw.to_owned(),
+            });
+        }
+        if component.len() > 1 && component.starts_with('0') {
+            return Err(RunStateError::LeadingZeroMilestoneNodeComponent {
+                value: raw.to_owned(),
+            });
+        }
+        let milestone = component.parse::<u64>().map_err(|_| {
+            RunStateError::MilestoneNodeComponentOverflow {
+                value: raw.to_owned(),
+            }
+        })?;
+        if milestone == 0 {
+            return Err(RunStateError::ZeroMilestoneNodeComponent {
+                value: raw.to_owned(),
+            });
+        }
+        Ok(Self {
+            milestone: MilestoneNumber(milestone),
+        })
+    }
+
+    /// Return the milestone number.
+    pub const fn milestone(&self) -> MilestoneNumber {
+        self.milestone
+    }
+}
+
 /// A positive step number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepNumber(u64);
@@ -154,6 +208,97 @@ impl StepNode {
     }
 }
 
+/// Either valid form of canonical event-log node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalNode {
+    /// A canonical bare milestone node.
+    Milestone(MilestoneNode),
+    /// A canonical milestone step node.
+    Step(StepNode),
+}
+
+/// A typed dependency requiring one canonical node to merge before another dispatches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderingEdge {
+    dependent: CanonicalNode,
+    dependency: CanonicalNode,
+}
+
+impl OrderingEdge {
+    /// Construct an edge from a dependent node to its required dependency.
+    pub const fn new(dependent: CanonicalNode, dependency: CanonicalNode) -> Self {
+        Self {
+            dependent,
+            dependency,
+        }
+    }
+
+    /// Return the node whose dispatch is constrained.
+    pub const fn dependent(&self) -> &CanonicalNode {
+        &self.dependent
+    }
+
+    /// Return the node that must be conclusively merged.
+    pub const fn dependency(&self) -> &CanonicalNode {
+        &self.dependency
+    }
+}
+
+/// One caller-ordered undispatched canonical node and its repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchCandidate {
+    node: CanonicalNode,
+    repository: RepositoryName,
+}
+
+impl DispatchCandidate {
+    /// Construct an undispatched candidate in its repository.
+    pub const fn new(node: CanonicalNode, repository: RepositoryName) -> Self {
+        Self { node, repository }
+    }
+
+    /// Return the candidate's canonical node.
+    pub const fn node(&self) -> &CanonicalNode {
+        &self.node
+    }
+
+    /// Return the candidate's repository.
+    pub const fn repository(&self) -> &RepositoryName {
+        &self.repository
+    }
+}
+
+/// The live version policy governing dispatch admission in one repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionPolicy {
+    /// The live `NONE` policy, which does not narrow otherwise-dispatchable candidates.
+    None,
+    /// A representative non-`NONE` policy admitting only the first otherwise-dispatchable candidate.
+    SerializeDispatches,
+}
+
+/// The three-valued dispatch classification for one complete candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchabilityResult {
+    /// The candidate may dispatch now.
+    Dispatchable { candidate: DispatchCandidate },
+    /// The candidate must wait for a conclusive merge or repository admission.
+    Waiting { candidate: DispatchCandidate },
+    /// At least one relevant merge status is inconclusive.
+    DependencyInconclusive { candidate: DispatchCandidate },
+}
+
+impl DispatchabilityResult {
+    /// Return the complete classified candidate.
+    pub const fn candidate(&self) -> &DispatchCandidate {
+        match self {
+            Self::Dispatchable { candidate }
+            | Self::Waiting { candidate }
+            | Self::DependencyInconclusive { candidate } => candidate,
+        }
+    }
+}
+
 fn parse_component(node: &str, component: &'static str, raw: &str) -> Result<u64, RunStateError> {
     if raw.len() > 1 && raw.starts_with('0') {
         return Err(RunStateError::LeadingZeroStepNodeComponent {
@@ -187,7 +332,7 @@ impl HeadBranch {
     }
 }
 
-/// A derived milestone integration branch.
+/// A derived pull-request base branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegrationBranch(String);
 
@@ -257,6 +402,45 @@ impl MergeSubject {
 
     /// Return the derived integration branch.
     pub const fn integration_branch(&self) -> &IntegrationBranch {
+        self.selector.base()
+    }
+}
+
+/// A milestone node and its convention-derived merge identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MilestoneMergeSubject {
+    node: MilestoneNode,
+    selector: PullRequestSelector,
+}
+
+impl MilestoneMergeSubject {
+    /// Derive the merge subject from a canonical milestone node.
+    pub fn derive(node: MilestoneNode) -> Self {
+        let head = HeadBranch(format!("milestone-{}", node.milestone().get()));
+        let base = IntegrationBranch("main".to_owned());
+        Self {
+            node,
+            selector: PullRequestSelector { head, base },
+        }
+    }
+
+    /// Return the canonical milestone node.
+    pub const fn node(&self) -> &MilestoneNode {
+        &self.node
+    }
+
+    /// Return the convention-derived exact pull-request selector.
+    pub const fn selector(&self) -> &PullRequestSelector {
+        &self.selector
+    }
+
+    /// Return the derived head branch.
+    pub const fn head(&self) -> &HeadBranch {
+        self.selector.head()
+    }
+
+    /// Return the derived base branch.
+    pub const fn base(&self) -> &IntegrationBranch {
         self.selector.base()
     }
 }
@@ -433,6 +617,23 @@ pub fn derive_merge_status(
     github: &GitHubAuthorityObservation,
     git: &GitAuthorityObservation,
 ) -> MergeStatus {
+    derive_merge_status_for_selector(subject.selector(), github, git)
+}
+
+/// Derive three-valued merge status from the exact milestone subject and both authorities.
+pub fn derive_milestone_merge_status(
+    subject: &MilestoneMergeSubject,
+    github: &GitHubAuthorityObservation,
+    git: &GitAuthorityObservation,
+) -> MergeStatus {
+    derive_merge_status_for_selector(subject.selector(), github, git)
+}
+
+fn derive_merge_status_for_selector(
+    selector: &PullRequestSelector,
+    github: &GitHubAuthorityObservation,
+    git: &GitAuthorityObservation,
+) -> MergeStatus {
     use GitAuthorityObservation::{Reachable as GitReachable, Unreachable as GitUnreachable};
     use GitHubAuthorityObservation::{Reachable as GhReachable, Unreachable as GhUnreachable};
     use GitHubPullRequestObservation::{MultipleExactMatches, OneExactMatch, ZeroExactMatches};
@@ -537,7 +738,7 @@ pub fn derive_merge_status(
                 observation: GitMergeObservation::NotMerged,
             },
         ) => {
-            if identity.selector() == subject.selector() {
+            if identity.selector() == selector {
                 MergeStatus::NotMerged
             } else {
                 MergeStatus::Inconclusive
@@ -561,7 +762,7 @@ pub fn derive_merge_status(
                     },
             },
         ) => {
-            if identity.selector() == subject.selector() && github_oid == git_oid {
+            if identity.selector() == selector && github_oid == git_oid {
                 MergeStatus::Merged
             } else {
                 MergeStatus::Inconclusive
@@ -1042,6 +1243,171 @@ impl ArtifactProvenance {
     pub const fn condition(&self) -> &ArtifactProvenanceCondition {
         &self.condition
     }
+}
+
+/// Classify every supplied undispatched candidate while preserving caller order.
+///
+/// The composition root must filter dispatch history and supply only undispatched
+/// candidates. The merge-status arrow must be an exhaustive lookup over every
+/// candidate and every ordering-edge endpoint. The version-policy arrow must be
+/// an exhaustive lookup over every candidate repository. Both lookups are
+/// explicit inputs, not hidden global state.
+///
+/// # Errors
+///
+/// Returns [`RunStateError::PlanningArtifactDigestMismatch`] or
+/// [`RunStateError::PlanningArtifactMissing`] when selected-artifact provenance
+/// is not current. Returns malformed-input errors when candidates repeat, either
+/// lookup contains duplicate keys, or either lookup omits a required key.
+#[instrument(skip(
+    provenance,
+    candidates,
+    ordering_edges,
+    merge_statuses,
+    version_policies
+))]
+pub fn compute_dispatchability(
+    provenance: &ArtifactProvenance,
+    candidates: &[DispatchCandidate],
+    ordering_edges: &[OrderingEdge],
+    merge_statuses: &[(CanonicalNode, MergeStatus)],
+    version_policies: &[(RepositoryName, VersionPolicy)],
+) -> Result<Vec<DispatchabilityResult>, RunStateError> {
+    match provenance.condition() {
+        ArtifactProvenanceCondition::DigestMatches => {}
+        ArtifactProvenanceCondition::DigestMismatch { current, .. } => {
+            return Err(RunStateError::PlanningArtifactDigestMismatch {
+                path: provenance.path().clone(),
+                approved_digest: provenance.approved_digest().clone(),
+                current_digest: current.clone(),
+            });
+        }
+        ArtifactProvenanceCondition::ArtifactMissing => {
+            return Err(RunStateError::PlanningArtifactMissing {
+                path: provenance.path().clone(),
+                approved_digest: provenance.approved_digest().clone(),
+                current_digest: None,
+            });
+        }
+    }
+
+    for (index, candidate) in candidates.iter().enumerate() {
+        if candidates[..index]
+            .iter()
+            .any(|earlier| earlier.node() == candidate.node())
+        {
+            return Err(RunStateError::DuplicateDispatchCandidate {
+                node: candidate.node().clone(),
+            });
+        }
+    }
+    for (index, (node, _)) in merge_statuses.iter().enumerate() {
+        if merge_statuses[..index]
+            .iter()
+            .any(|(earlier, _)| earlier == node)
+        {
+            return Err(RunStateError::DuplicateMergeStatus { node: node.clone() });
+        }
+    }
+    for (index, (repository, _)) in version_policies.iter().enumerate() {
+        if version_policies[..index]
+            .iter()
+            .any(|(earlier, _)| earlier == repository)
+        {
+            return Err(RunStateError::DuplicateVersionPolicy {
+                repository: repository.clone(),
+            });
+        }
+    }
+
+    let status_for = |node: &CanonicalNode| {
+        merge_statuses
+            .iter()
+            .find(|(candidate, _)| candidate == node)
+            .map(|(_, status)| status)
+            .ok_or_else(|| RunStateError::MissingMergeStatus { node: node.clone() })
+    };
+    for candidate in candidates {
+        status_for(candidate.node())?;
+    }
+    for edge in ordering_edges {
+        status_for(edge.dependent())?;
+        status_for(edge.dependency())?;
+    }
+
+    let policy_for = |repository: &RepositoryName| {
+        version_policies
+            .iter()
+            .find(|(candidate, _)| candidate == repository)
+            .map(|(_, policy)| policy)
+            .ok_or_else(|| RunStateError::MissingVersionPolicy {
+                repository: repository.clone(),
+            })
+    };
+    for candidate in candidates {
+        policy_for(candidate.repository())?;
+    }
+
+    let mut results = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let result = match status_for(candidate.node())? {
+            MergeStatus::Merged => DispatchabilityResult::Waiting {
+                candidate: candidate.clone(),
+            },
+            MergeStatus::Inconclusive => DispatchabilityResult::DependencyInconclusive {
+                candidate: candidate.clone(),
+            },
+            MergeStatus::NotMerged => {
+                let mut any_not_merged = false;
+                let mut any_inconclusive = false;
+                for edge in ordering_edges
+                    .iter()
+                    .filter(|edge| edge.dependent() == candidate.node())
+                {
+                    match status_for(edge.dependency())? {
+                        MergeStatus::Merged => {}
+                        MergeStatus::NotMerged => any_not_merged = true,
+                        MergeStatus::Inconclusive => any_inconclusive = true,
+                    }
+                }
+                if any_inconclusive {
+                    DispatchabilityResult::DependencyInconclusive {
+                        candidate: candidate.clone(),
+                    }
+                } else if any_not_merged {
+                    DispatchabilityResult::Waiting {
+                        candidate: candidate.clone(),
+                    }
+                } else {
+                    DispatchabilityResult::Dispatchable {
+                        candidate: candidate.clone(),
+                    }
+                }
+            }
+        };
+        results.push(result);
+    }
+
+    let mut admitted_repositories = Vec::<RepositoryName>::new();
+    for result in &mut results {
+        let DispatchabilityResult::Dispatchable { candidate } = result else {
+            continue;
+        };
+        if policy_for(candidate.repository())? == &VersionPolicy::SerializeDispatches {
+            if admitted_repositories
+                .iter()
+                .any(|repository| repository == candidate.repository())
+            {
+                *result = DispatchabilityResult::Waiting {
+                    candidate: candidate.clone(),
+                };
+            } else {
+                admitted_repositories.push(candidate.repository().clone());
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 /// Derived merge result for one supplied log-visible canonical step.
@@ -2755,6 +3121,18 @@ pub enum RunStateError {
     /// Returned when a date-shaped vision basename has no suffix.
     #[error("vision directory basename has an empty slug suffix: {value}")]
     EmptyVisionSlug { value: String },
+    /// Returned when a milestone node does not have canonical `m<digits>` shape.
+    #[error("milestone node is not canonical m<milestone>: {value}")]
+    MalformedMilestoneNode { value: String },
+    /// Returned when a milestone-node component contains a leading zero.
+    #[error("milestone node component has a leading zero: {value}")]
+    LeadingZeroMilestoneNodeComponent { value: String },
+    /// Returned when a milestone-node component is numerically zero.
+    #[error("milestone node component is zero: {value}")]
+    ZeroMilestoneNodeComponent { value: String },
+    /// Returned when a milestone-node component exceeds the `u64` range.
+    #[error("milestone node component overflows u64: {value}")]
+    MilestoneNodeComponentOverflow { value: String },
     /// Returned when a node does not have canonical `m<digits>-s<digits>` shape.
     #[error("step node is not canonical m<milestone>-s<step>: {value}")]
     MalformedStepNode { value: String },
@@ -2818,6 +3196,39 @@ pub enum RunStateError {
     /// Returned when an authority observation names a node absent from the supplied log.
     #[error("step authority observation names node absent from log: {node:?}")]
     AuthorityNodeAbsentFromLog { node: NodeId },
+    /// Returned when the selected planning artifact's current digest differs from its approval.
+    #[error(
+        "planning artifact {path:?} digest mismatch: approved {approved_digest:?}, current {current_digest:?}"
+    )]
+    PlanningArtifactDigestMismatch {
+        path: ArtifactPath,
+        approved_digest: Sha256Digest,
+        current_digest: Sha256Digest,
+    },
+    /// Returned when the selected approved planning artifact is currently missing.
+    #[error(
+        "planning artifact {path:?} is missing: approved {approved_digest:?}, current {current_digest:?}"
+    )]
+    PlanningArtifactMissing {
+        path: ArtifactPath,
+        approved_digest: Sha256Digest,
+        current_digest: Option<Sha256Digest>,
+    },
+    /// Returned when caller-ordered candidates repeat an exact canonical node.
+    #[error("duplicate dispatch candidate for node {node:?}")]
+    DuplicateDispatchCandidate { node: CanonicalNode },
+    /// Returned when the merge-status lookup repeats an exact canonical node.
+    #[error("duplicate merge status for node {node:?}")]
+    DuplicateMergeStatus { node: CanonicalNode },
+    /// Returned when the exhaustive merge-status lookup omits a required canonical node.
+    #[error("missing merge status for required node {node:?}")]
+    MissingMergeStatus { node: CanonicalNode },
+    /// Returned when the version-policy lookup repeats an exact repository.
+    #[error("duplicate version policy for repository {repository:?}")]
+    DuplicateVersionPolicy { repository: RepositoryName },
+    /// Returned when the exhaustive version-policy lookup omits a candidate repository.
+    #[error("missing version policy for candidate repository {repository:?}")]
+    MissingVersionPolicy { repository: RepositoryName },
 }
 
 #[cfg(test)]
@@ -2831,16 +3242,18 @@ mod tests {
         Sha256Digest,
     };
     use crate::run_state::{
-        ArtifactProvenanceCondition, AuthorityFailure, BranchState, CurrentArtifactObservation,
-        CurrentArtifactState, CyclePosition, DispatchRoleClass, ExactPullRequestIdentity,
+        ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BranchState,
+        CanonicalNode, CurrentArtifactObservation, CurrentArtifactState, CyclePosition,
+        DispatchCandidate, DispatchRoleClass, DispatchabilityResult, ExactPullRequestIdentity,
         ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
         GitHubPullRequestObservation, GitMergeObservation, HoldStatus, MergeStatus, MergeSubject,
-        PullRequestNumber, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
-        RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
-        ResumeObservation, RoundCount, RunSnapshot, RunStateError, SquashCommitOid,
-        StepAuthorityObservation, StepNode, TagName, TagState, TagTarget, VisionSlug,
-        WorktreeIdentity, WorktreeState, checked_round_increment, derive_merge_status,
-        derive_run_state, recovery_command, render_human_snapshot,
+        MilestoneMergeSubject, MilestoneNode, OrderingEdge, PullRequestNumber, PullRequestSelector,
+        RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation, RepositoryObservation,
+        RepositoryObservationFailure, RepositoryObservationRef, ResumeObservation, RoundCount,
+        RunSnapshot, RunStateError, SquashCommitOid, StepAuthorityObservation, StepNode, TagName,
+        TagState, TagTarget, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
+        checked_round_increment, compute_dispatchability, derive_merge_status,
+        derive_milestone_merge_status, derive_run_state, recovery_command, render_human_snapshot,
     };
 
     const RUN_SNAPSHOT_SCHEMA: &str =
@@ -2853,10 +3266,12 @@ mod tests {
         Ok(MergeSubject::derive(&slug, node))
     }
 
-    fn identity(subject: &MergeSubject) -> Result<ExactPullRequestIdentity, Box<dyn Error>> {
+    fn identity(
+        selector: &PullRequestSelector,
+    ) -> Result<ExactPullRequestIdentity, Box<dyn Error>> {
         Ok(ExactPullRequestIdentity::from_selector(
             PullRequestNumber::parse(17)?,
-            subject.selector(),
+            selector,
         ))
     }
 
@@ -2904,6 +3319,32 @@ mod tests {
         Ok(Sha256Digest::parse(&byte.to_string().repeat(64))?)
     }
 
+    fn canonical_node(value: &str) -> Result<CanonicalNode, Box<dyn Error>> {
+        let node = NodeId::parse(value)?;
+        Ok(CanonicalNode::Step(StepNode::parse(&node)?))
+    }
+
+    fn candidate(node: &str, repository: &str) -> Result<DispatchCandidate, Box<dyn Error>> {
+        Ok(DispatchCandidate::new(
+            canonical_node(node)?,
+            RepositoryName::new(repository),
+        ))
+    }
+
+    fn provenance(
+        path: &str,
+        approved_digest: Sha256Digest,
+        condition: ArtifactProvenanceCondition,
+    ) -> Result<ArtifactProvenance, Box<dyn Error>> {
+        Ok(ArtifactProvenance {
+            path: ArtifactPath::new(path),
+            approved_digest,
+            approval_node: NodeId::parse("m2-s1")?,
+            approval_sequence: Sequence::parse(1)?,
+            condition,
+        })
+    }
+
     fn approval(
         sequence: u64,
         node: &str,
@@ -2944,7 +3385,7 @@ mod tests {
             node_id,
             GitHubAuthorityObservation::Reachable {
                 observation: GitHubPullRequestObservation::OneExactMatch {
-                    identity: identity(&merge_subject)?,
+                    identity: identity(merge_subject.selector())?,
                     state: ExactPullRequestState::Merged {
                         squash_commit: squash_commit.clone(),
                     },
@@ -3147,6 +3588,306 @@ mod tests {
     }
 
     #[test]
+    fn returns_multiple_dispatchable_candidates_when_edges_permit() -> Result<(), Box<dyn Error>> {
+        let first = candidate("m2-s1", "pce")?;
+        let second = candidate("m2-s2", "pce")?;
+        let provenance = provenance(
+            "planning/plan.md",
+            digest('a')?,
+            ArtifactProvenanceCondition::DigestMatches,
+        )?;
+        let results = compute_dispatchability(
+            &provenance,
+            &[first.clone(), second.clone()],
+            &[],
+            &[
+                (first.node().clone(), MergeStatus::NotMerged),
+                (second.node().clone(), MergeStatus::NotMerged),
+            ],
+            &[(RepositoryName::new("pce"), VersionPolicy::None)],
+        )?;
+
+        assert_eq!(
+            results,
+            vec![
+                DispatchabilityResult::Dispatchable { candidate: first },
+                DispatchabilityResult::Dispatchable { candidate: second },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_all_three_dependency_classifications_with_inconclusive_precedence()
+    -> Result<(), Box<dyn Error>> {
+        let ready = candidate("m2-s1", "pce")?;
+        let waiting = candidate("m2-s2", "pce")?;
+        let inconclusive = candidate("m2-s3", "pce")?;
+        let merged_dependency = canonical_node("m1-s1")?;
+        let not_merged_dependency = canonical_node("m1-s2")?;
+        let inconclusive_dependency = canonical_node("m1-s3")?;
+        let provenance = provenance(
+            "planning/plan.md",
+            digest('a')?,
+            ArtifactProvenanceCondition::DigestMatches,
+        )?;
+        let results = compute_dispatchability(
+            &provenance,
+            &[ready.clone(), waiting.clone(), inconclusive.clone()],
+            &[
+                OrderingEdge::new(ready.node().clone(), merged_dependency.clone()),
+                OrderingEdge::new(waiting.node().clone(), not_merged_dependency.clone()),
+                OrderingEdge::new(inconclusive.node().clone(), not_merged_dependency.clone()),
+                OrderingEdge::new(inconclusive.node().clone(), inconclusive_dependency.clone()),
+            ],
+            &[
+                (ready.node().clone(), MergeStatus::NotMerged),
+                (waiting.node().clone(), MergeStatus::NotMerged),
+                (inconclusive.node().clone(), MergeStatus::NotMerged),
+                (merged_dependency, MergeStatus::Merged),
+                (not_merged_dependency, MergeStatus::NotMerged),
+                (inconclusive_dependency, MergeStatus::Inconclusive),
+            ],
+            &[(RepositoryName::new("pce"), VersionPolicy::None)],
+        )?;
+
+        assert_eq!(
+            results,
+            vec![
+                DispatchabilityResult::Dispatchable { candidate: ready },
+                DispatchabilityResult::Waiting { candidate: waiting },
+                DispatchabilityResult::DependencyInconclusive {
+                    candidate: inconclusive
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merged_zero_dependency_candidate_waits() -> Result<(), Box<dyn Error>> {
+        let candidate = candidate("m2-s1", "pce")?;
+        let provenance = provenance(
+            "planning/plan.md",
+            digest('a')?,
+            ArtifactProvenanceCondition::DigestMatches,
+        )?;
+        let results = compute_dispatchability(
+            &provenance,
+            std::slice::from_ref(&candidate),
+            &[],
+            &[(candidate.node().clone(), MergeStatus::Merged)],
+            &[(RepositoryName::new("pce"), VersionPolicy::None)],
+        )?;
+
+        assert_eq!(results, vec![DispatchabilityResult::Waiting { candidate }]);
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_non_candidate_merged_predecessor_from_status_lookup() -> Result<(), Box<dyn Error>>
+    {
+        let candidate = candidate("m2-s1", "pce")?;
+        let predecessor = canonical_node("m1-s1")?;
+        let provenance = provenance(
+            "planning/plan.md",
+            digest('a')?,
+            ArtifactProvenanceCondition::DigestMatches,
+        )?;
+        let results = compute_dispatchability(
+            &provenance,
+            std::slice::from_ref(&candidate),
+            &[OrderingEdge::new(
+                candidate.node().clone(),
+                predecessor.clone(),
+            )],
+            &[
+                (candidate.node().clone(), MergeStatus::NotMerged),
+                (predecessor, MergeStatus::Merged),
+            ],
+            &[(RepositoryName::new("pce"), VersionPolicy::None)],
+        )?;
+
+        assert_eq!(
+            results,
+            vec![DispatchabilityResult::Dispatchable { candidate }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serializes_dispatches_per_repository_without_rewriting_inconclusive()
+    -> Result<(), Box<dyn Error>> {
+        let a1 = candidate("m3-s1", "repository-a")?;
+        let a_inconclusive = candidate("m2-s1", "repository-a")?;
+        let a2 = candidate("m1-s1", "repository-a")?;
+        let b1 = candidate("m3-s2", "repository-b")?;
+        let b2 = candidate("m1-s2", "repository-b")?;
+        let dependency = canonical_node("m4-s1")?;
+        let provenance = provenance(
+            "planning/plan.md",
+            digest('a')?,
+            ArtifactProvenanceCondition::DigestMatches,
+        )?;
+        let results = compute_dispatchability(
+            &provenance,
+            &[
+                a1.clone(),
+                a_inconclusive.clone(),
+                a2.clone(),
+                b1.clone(),
+                b2.clone(),
+            ],
+            &[OrderingEdge::new(
+                a_inconclusive.node().clone(),
+                dependency.clone(),
+            )],
+            &[
+                (a1.node().clone(), MergeStatus::NotMerged),
+                (a_inconclusive.node().clone(), MergeStatus::NotMerged),
+                (a2.node().clone(), MergeStatus::NotMerged),
+                (b1.node().clone(), MergeStatus::NotMerged),
+                (b2.node().clone(), MergeStatus::NotMerged),
+                (dependency, MergeStatus::Inconclusive),
+            ],
+            &[
+                (
+                    RepositoryName::new("repository-a"),
+                    VersionPolicy::SerializeDispatches,
+                ),
+                (
+                    RepositoryName::new("repository-b"),
+                    VersionPolicy::SerializeDispatches,
+                ),
+            ],
+        )?;
+
+        assert_eq!(
+            results,
+            vec![
+                DispatchabilityResult::Dispatchable { candidate: a1 },
+                DispatchabilityResult::DependencyInconclusive {
+                    candidate: a_inconclusive
+                },
+                DispatchabilityResult::Waiting { candidate: a2 },
+                DispatchabilityResult::Dispatchable { candidate: b1 },
+                DispatchabilityResult::Waiting { candidate: b2 },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn matching_provenance_allows_dispatchability_classification() -> Result<(), Box<dyn Error>> {
+        let candidate = candidate("m2-s1", "pce")?;
+        let provenance = provenance(
+            "planning/selected.md",
+            digest('a')?,
+            ArtifactProvenanceCondition::DigestMatches,
+        )?;
+        let results = compute_dispatchability(
+            &provenance,
+            std::slice::from_ref(&candidate),
+            &[],
+            &[(candidate.node().clone(), MergeStatus::NotMerged)],
+            &[(RepositoryName::new("pce"), VersionPolicy::None)],
+        )?;
+
+        assert_eq!(
+            results,
+            vec![DispatchabilityResult::Dispatchable { candidate }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mismatched_provenance_returns_typed_digest_error() -> Result<(), Box<dyn Error>> {
+        let candidate = candidate("m2-s1", "pce")?;
+        let path = ArtifactPath::new("planning/recognizable-mismatch.md");
+        let approved = digest('a')?;
+        let current = digest('b')?;
+        let provenance = provenance(
+            path.as_str(),
+            approved.clone(),
+            ArtifactProvenanceCondition::DigestMismatch {
+                approved: approved.clone(),
+                current: current.clone(),
+            },
+        )?;
+        let error = compute_dispatchability(
+            &provenance,
+            std::slice::from_ref(&candidate),
+            &[],
+            &[(candidate.node().clone(), MergeStatus::NotMerged)],
+            &[(RepositoryName::new("pce"), VersionPolicy::None)],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            RunStateError::PlanningArtifactDigestMismatch {
+                path,
+                approved_digest: approved,
+                current_digest: current,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_provenance_returns_typed_missing_artifact_error() -> Result<(), Box<dyn Error>> {
+        let candidate = candidate("m2-s1", "pce")?;
+        let path = ArtifactPath::new("planning/recognizable-missing.md");
+        let approved = digest('c')?;
+        let provenance = provenance(
+            path.as_str(),
+            approved.clone(),
+            ArtifactProvenanceCondition::ArtifactMissing,
+        )?;
+        let error = compute_dispatchability(
+            &provenance,
+            std::slice::from_ref(&candidate),
+            &[],
+            &[(candidate.node().clone(), MergeStatus::NotMerged)],
+            &[(RepositoryName::new("pce"), VersionPolicy::None)],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            RunStateError::PlanningArtifactMissing {
+                path,
+                approved_digest: approved,
+                current_digest: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inconclusive_zero_dependency_candidate_remains_inconclusive() -> Result<(), Box<dyn Error>> {
+        let candidate = candidate("m2-s1", "pce")?;
+        let provenance = provenance(
+            "planning/plan.md",
+            digest('a')?,
+            ArtifactProvenanceCondition::DigestMatches,
+        )?;
+        let results = compute_dispatchability(
+            &provenance,
+            std::slice::from_ref(&candidate),
+            &[],
+            &[(candidate.node().clone(), MergeStatus::Inconclusive)],
+            &[(RepositoryName::new("pce"), VersionPolicy::None)],
+        )?;
+
+        assert_eq!(
+            results,
+            vec![DispatchabilityResult::DependencyInconclusive { candidate }]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn derives_complete_worked_merge_subject_example() -> Result<(), Box<dyn Error>> {
         let subject = subject("2026-07-27-event-log-and-derived-run-state", "m2-s1")?;
 
@@ -3159,6 +3900,71 @@ mod tests {
         assert_eq!(subject.integration_branch().as_str(), "milestone-2");
         assert_eq!(subject.selector().head(), subject.head());
         assert_eq!(subject.selector().base(), subject.integration_branch());
+        Ok(())
+    }
+
+    #[test]
+    fn milestone_node_parses_only_strict_canonical_identifiers() -> Result<(), Box<dyn Error>> {
+        let first = MilestoneNode::parse(&NodeId::parse("m1")?)?;
+        assert_eq!(first.milestone().get(), 1);
+
+        let maximum = MilestoneNode::parse(&NodeId::parse("m18446744073709551615")?)?;
+        assert_eq!(maximum.milestone().get(), u64::MAX);
+
+        assert!(matches!(
+            MilestoneNode::parse(&NodeId::parse("m0")?),
+            Err(RunStateError::ZeroMilestoneNodeComponent { value }) if value == "m0"
+        ));
+        for raw in ["m00", "m01"] {
+            assert!(matches!(
+                MilestoneNode::parse(&NodeId::parse(raw)?),
+                Err(RunStateError::LeadingZeroMilestoneNodeComponent { value })
+                    if value == raw
+            ));
+        }
+        for raw in ["m", "m1-s1", "M1", "x1", "mA", "m+1", "m 1", "m١"] {
+            assert!(matches!(
+                MilestoneNode::parse(&NodeId::parse(raw)?),
+                Err(RunStateError::MalformedMilestoneNode { value }) if value == raw
+            ));
+        }
+        assert!(matches!(
+            MilestoneNode::parse(&NodeId::parse("m18446744073709551616")?),
+            Err(RunStateError::MilestoneNodeComponentOverflow { value })
+                if value == "m18446744073709551616"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_node_variants_carry_typed_nodes() -> Result<(), Box<dyn Error>> {
+        let milestone = CanonicalNode::Milestone(MilestoneNode::parse(&NodeId::parse("m2")?)?);
+        let step = CanonicalNode::Step(StepNode::parse(&NodeId::parse("m2-s3")?)?);
+
+        match milestone {
+            CanonicalNode::Milestone(node) => assert_eq!(node.milestone().get(), 2),
+            CanonicalNode::Step(_) => panic!("milestone variant changed"),
+        }
+        match step {
+            CanonicalNode::Step(node) => {
+                assert_eq!(node.milestone().get(), 2);
+                assert_eq!(node.step().get(), 3);
+            }
+            CanonicalNode::Milestone(_) => panic!("step variant changed"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn derives_exact_milestone_merge_subject() -> Result<(), Box<dyn Error>> {
+        let node = MilestoneNode::parse(&NodeId::parse("m2")?)?;
+        let subject = MilestoneMergeSubject::derive(node);
+
+        assert_eq!(subject.node().milestone().get(), 2);
+        assert_eq!(subject.head().as_str(), "milestone-2");
+        assert_eq!(subject.base().as_str(), "main");
+        assert_eq!(subject.selector().head(), subject.head());
+        assert_eq!(subject.selector().base(), subject.base());
         Ok(())
     }
 
@@ -3210,9 +4016,50 @@ mod tests {
     }
 
     #[test]
+    fn step_node_remains_strict_for_step_identifiers() -> Result<(), Box<dyn Error>> {
+        let step = StepNode::parse(&NodeId::parse("m1-s1")?)?;
+        assert_eq!(step.milestone().get(), 1);
+        assert_eq!(step.step().get(), 1);
+
+        assert!(matches!(
+            StepNode::parse(&NodeId::parse("m1")?),
+            Err(RunStateError::MalformedStepNode { value }) if value == "m1"
+        ));
+        assert!(matches!(
+            StepNode::parse(&NodeId::parse("m0-s1")?),
+            Err(RunStateError::ZeroStepNodeComponent {
+                value,
+                component: "milestone"
+            }) if value == "m0-s1"
+        ));
+        assert!(matches!(
+            StepNode::parse(&NodeId::parse("m1-s0")?),
+            Err(RunStateError::ZeroStepNodeComponent {
+                value,
+                component: "step"
+            }) if value == "m1-s0"
+        ));
+        assert!(matches!(
+            StepNode::parse(&NodeId::parse("m01-s1")?),
+            Err(RunStateError::LeadingZeroStepNodeComponent {
+                value,
+                component: "milestone"
+            }) if value == "m01-s1"
+        ));
+        assert!(matches!(
+            StepNode::parse(&NodeId::parse("m1-s01")?),
+            Err(RunStateError::LeadingZeroStepNodeComponent {
+                value,
+                component: "step"
+            }) if value == "m1-s01"
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn exact_identity_is_constructed_from_subject_selector() -> Result<(), Box<dyn Error>> {
         let subject = subject("2026-07-27-example", "m3-s4")?;
-        let identity = identity(&subject)?;
+        let identity = identity(subject.selector())?;
 
         assert_eq!(identity.number().get(), 17);
         assert_eq!(identity.selector(), subject.selector());
@@ -3242,7 +4089,7 @@ mod tests {
         let failure = AuthorityFailure::parse("unavailable")?;
         let squash_a = SquashCommitOid::parse("A")?;
         let squash_b = SquashCommitOid::parse("B")?;
-        let exact_identity = identity(&subject)?;
+        let exact_identity = identity(subject.selector())?;
         let github = [
             GitHubAuthorityObservation::Unreachable {
                 failure: failure.clone(),
@@ -3325,7 +4172,7 @@ mod tests {
         let other_subject = subject("2026-07-27-other", "m2-s1")?;
         let github = GitHubAuthorityObservation::Reachable {
             observation: GitHubPullRequestObservation::OneExactMatch {
-                identity: identity(&other_subject)?,
+                identity: identity(other_subject.selector())?,
                 state: ExactPullRequestState::NotMerged,
             },
         };
@@ -3335,6 +4182,65 @@ mod tests {
 
         assert_eq!(
             derive_merge_status(&merge_subject, &github, &git),
+            MergeStatus::Inconclusive
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn milestone_merge_status_uses_shared_three_valued_rules() -> Result<(), Box<dyn Error>> {
+        let subject = MilestoneMergeSubject::derive(MilestoneNode::parse(&NodeId::parse("m2")?)?);
+        let squash_a = SquashCommitOid::parse("A")?;
+        let squash_b = SquashCommitOid::parse("B")?;
+        let exact_identity = identity(subject.selector())?;
+
+        let merged_github = GitHubAuthorityObservation::Reachable {
+            observation: GitHubPullRequestObservation::OneExactMatch {
+                identity: exact_identity.clone(),
+                state: ExactPullRequestState::Merged {
+                    squash_commit: squash_a.clone(),
+                },
+            },
+        };
+        let merged_git = GitAuthorityObservation::Reachable {
+            observation: GitMergeObservation::SquashCommitReachable {
+                squash_commit: squash_a,
+            },
+        };
+        assert_eq!(
+            derive_milestone_merge_status(&subject, &merged_github, &merged_git),
+            MergeStatus::Merged
+        );
+
+        let not_merged_github = GitHubAuthorityObservation::Reachable {
+            observation: GitHubPullRequestObservation::OneExactMatch {
+                identity: exact_identity.clone(),
+                state: ExactPullRequestState::NotMerged,
+            },
+        };
+        let not_merged_git = GitAuthorityObservation::Reachable {
+            observation: GitMergeObservation::NotMerged,
+        };
+        assert_eq!(
+            derive_milestone_merge_status(&subject, &not_merged_github, &not_merged_git),
+            MergeStatus::NotMerged
+        );
+
+        let oid_mismatch_github = GitHubAuthorityObservation::Reachable {
+            observation: GitHubPullRequestObservation::OneExactMatch {
+                identity: exact_identity,
+                state: ExactPullRequestState::Merged {
+                    squash_commit: SquashCommitOid::parse("A")?,
+                },
+            },
+        };
+        let oid_mismatch_git = GitAuthorityObservation::Reachable {
+            observation: GitMergeObservation::SquashCommitReachable {
+                squash_commit: squash_b,
+            },
+        };
+        assert_eq!(
+            derive_milestone_merge_status(&subject, &oid_mismatch_github, &oid_mismatch_git),
             MergeStatus::Inconclusive
         );
         Ok(())
@@ -3812,7 +4718,7 @@ mod tests {
         let squash_commit = SquashCommitOid::parse("A")?;
         let github = GitHubAuthorityObservation::Reachable {
             observation: GitHubPullRequestObservation::OneExactMatch {
-                identity: identity(&other_subject)?,
+                identity: identity(other_subject.selector())?,
                 state: ExactPullRequestState::Merged {
                     squash_commit: squash_commit.clone(),
                 },
@@ -4132,7 +5038,7 @@ mod tests {
             NodeId::parse("m2-s1")?,
             GitHubAuthorityObservation::Reachable {
                 observation: GitHubPullRequestObservation::OneExactMatch {
-                    identity: identity(&subject)?,
+                    identity: identity(subject.selector())?,
                     state: ExactPullRequestState::NotMerged,
                 },
             },
