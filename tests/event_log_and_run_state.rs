@@ -1636,6 +1636,775 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
     );
 }
 
+#[test]
+fn authority_disagreement_reports_inconclusive() {
+    let harness = CliHarness::new().expect("create CLI harness");
+    let root = harness.path().join("repo");
+    let vision_dir = root.join("planning/2026-07-27-authority-disagreement");
+    let log = vision_dir.join("events.jsonl");
+    fs::create_dir_all(&vision_dir).expect("create scratch vision directory");
+
+    let contract = json!({
+        "repository": "pce",
+        "repo_root": root,
+        "stack": "Rust authority disagreement fixture",
+        "format": "cargo fmt --all --check",
+        "lint": "cargo clippy --workspace --all-targets",
+        "typecheck": "cargo check --workspace --all-targets",
+        "test": "cargo test --workspace",
+        "build": "cargo build --workspace",
+        "preflight": "cargo check --workspace --all-targets",
+        "gates_rule": "all four fixture gates must pass",
+        "install": "none",
+        "evidence": "fixture disagreement repository contract"
+    })
+    .to_string();
+    let seed = harness
+        .run(
+            [
+                OsString::from("log"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--kind"),
+                OsString::from("repository-contract"),
+                OsString::from("--node"),
+                OsString::from("m3-s4"),
+            ],
+            contract.as_bytes(),
+        )
+        .expect("run repository-contract log command");
+    assert!(seed.status.success(), "seed stderr: {}", stderr(&seed));
+
+    let root_text = root.to_str().expect("UTF-8 root");
+    // observe_git first resolves the selected branch fetch result. A failed fetch or
+    // branch-free FETCH_HEAD rev-parse makes git unreachable for every node.
+    // Git is not consulted when gh reports zero exact matches or one exact not-merged
+    // match. The exact MERGED match below is therefore required to issue merge-base.
+    // Only merge-base exit 1 means not-an-ancestor; every other nonzero exit is
+    // deliberately unreachable so a missing object cannot become a false negative.
+    let responses = vec![
+        response(
+            "git",
+            argv(["-C", root_text, "remote", "get-url", "origin"]),
+            0,
+            b"https://example.invalid/authority-disagreement.git\n",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "fetch",
+                "--no-tags",
+                "origin",
+                "refs/heads/milestone-3",
+            ]),
+            0,
+            b"",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "rev-parse",
+                "--verify",
+                "FETCH_HEAD^{commit}",
+            ]),
+            0,
+            b"fetched-authority-oid\n",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/milestone-3",
+            ]),
+            0,
+            b"",
+        ),
+        response(
+            "git",
+            argv(["-C", root_text, "worktree", "list", "--porcelain"]),
+            0,
+            format!(
+                "worktree {}/worktrees/m3-s4\nHEAD disagreement-worktree-oid\nbranch refs/heads/pce/authority-disagreement/m3-s4\n",
+                root.display()
+            )
+            .as_bytes(),
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/tags/v0.1.16^{}",
+            ]),
+            0,
+            b"tag-authority-oid\n",
+        ),
+        response(
+            "gh",
+            argv([
+                "pr",
+                "list",
+                "--head",
+                "pce/authority-disagreement/m3-s4",
+                "--base",
+                "milestone-3",
+                "--state",
+                "all",
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,baseRefName,state,mergeCommit",
+            ]),
+            0,
+            b"[{\"number\":404,\"headRefName\":\"pce/authority-disagreement/m3-s4\",\"baseRefName\":\"milestone-3\",\"state\":\"MERGED\",\"mergeCommit\":{\"oid\":\"squash-disagreement-oid\"}}]\n",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "merge-base",
+                "--is-ancestor",
+                "squash-disagreement-oid",
+                "fetched-authority-oid",
+            ]),
+            1,
+            b"",
+        ),
+    ];
+    harness
+        .materialize_responses(&responses)
+        .expect("materialize scripted responses");
+
+    let output = harness
+        .run(
+            [
+                OsString::from("status"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--vision-dir"),
+                vision_dir.as_os_str().to_owned(),
+            ],
+            b"",
+        )
+        .expect("run authority disagreement status command");
+    assert!(
+        output.status.success(),
+        "status stderr: {}",
+        stderr(&output)
+    );
+    let snapshot: Value = serde_json::from_slice(&output.stdout).expect("parse status snapshot");
+
+    let exact_fields = [
+        ("/schema_id", json!("pce.run-snapshot")),
+        ("/schema_version", json!(1)),
+        ("/repositories/0/repository", json!("pce")),
+        ("/repositories/0/fetch/state", json!("observed")),
+        (
+            "/repositories/0/fetch/observation_ref",
+            json!("fetched-authority-oid"),
+        ),
+        ("/repositories/0/branch/name", json!("milestone-3")),
+        ("/repositories/0/branch/state", json!("present")),
+        (
+            "/repositories/0/worktree/identity",
+            json!("pce/authority-disagreement/m3-s4"),
+        ),
+        ("/repositories/0/worktree/state", json!("present")),
+        ("/repositories/0/tag/name", json!("v0.1.16")),
+        ("/repositories/0/tag/state", json!("points-to")),
+        ("/repositories/0/tag/target", json!("tag-authority-oid")),
+        ("/steps/0/node", json!("m3-s4")),
+        ("/steps/0/subject/milestone", json!(3)),
+        ("/steps/0/subject/step", json!(4)),
+        (
+            "/steps/0/subject/head_branch",
+            json!("pce/authority-disagreement/m3-s4"),
+        ),
+        ("/steps/0/subject/integration_branch", json!("milestone-3")),
+        (
+            "/steps/0/subject/pull_request_selector/head",
+            json!("pce/authority-disagreement/m3-s4"),
+        ),
+        (
+            "/steps/0/subject/pull_request_selector/base",
+            json!("milestone-3"),
+        ),
+        ("/steps/0/github/availability", json!("reachable")),
+        ("/steps/0/github/cardinality", json!("one-exact-match")),
+        ("/steps/0/github/pull_request/number", json!(404)),
+        (
+            "/steps/0/github/pull_request/selector/head",
+            json!("pce/authority-disagreement/m3-s4"),
+        ),
+        (
+            "/steps/0/github/pull_request/selector/base",
+            json!("milestone-3"),
+        ),
+        ("/steps/0/github/pull_request/state/status", json!("merged")),
+        (
+            "/steps/0/github/pull_request/state/squash_commit_oid",
+            json!("squash-disagreement-oid"),
+        ),
+        ("/steps/0/git/availability", json!("reachable")),
+        ("/steps/0/git/state", json!("not-merged")),
+        ("/steps/0/merge_status", json!("inconclusive")),
+        ("/resume/state", json!("candidate")),
+        ("/resume/node", json!("m3-s4")),
+        ("/resume/latest_sequence", json!(1)),
+        ("/resume/cycle_position/state", json!("no-round-dispatch")),
+        ("/recovery_digest/facts/entries/0/sequence", json!(1)),
+        ("/recovery_digest/facts/entries/0/node", json!("m3-s4")),
+        (
+            "/recovery_digest/facts/entries/0/kind",
+            json!("repository-contract"),
+        ),
+        (
+            "/recovery_digest/facts/entries/0/evidence",
+            json!("fixture disagreement repository contract"),
+        ),
+    ];
+    for (pointer, expected) in exact_fields {
+        assert_eq!(at(&snapshot, pointer), &expected, "JSON pointer {pointer}");
+    }
+
+    assert_eq!(
+        at(&snapshot, "/repositories").as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(at(&snapshot, "/steps").as_array().map(Vec::len), Some(1));
+    assert_eq!(at(&snapshot, "/dispatches"), &json!([]));
+    assert_eq!(at(&snapshot, "/rounds"), &json!([]));
+    assert_eq!(at(&snapshot, "/holds"), &json!([]));
+    assert_eq!(at(&snapshot, "/provenance"), &json!([]));
+    assert_eq!(at(&snapshot, "/recovery_digest/rounds/entries"), &json!([]));
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/rounds/elisions"),
+        &json!([])
+    );
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/open_holds/entries"),
+        &json!([])
+    );
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/open_holds/elisions"),
+        &json!([])
+    );
+    assert_eq!(at(&snapshot, "/recovery_digest/deltas/entries"), &json!([]));
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/deltas/elisions"),
+        &json!([])
+    );
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/facts/entries")
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(at(&snapshot, "/recovery_digest/facts/elisions"), &json!([]));
+    let fetched_at = at(&snapshot, "/repositories/0/fetch/fetched_at")
+        .as_str()
+        .expect("fetched_at string");
+    assert!(
+        is_millisecond_z_timestamp(fetched_at),
+        "fetched_at: {fetched_at}"
+    );
+
+    let root_arg = root.as_os_str().to_owned();
+    let expected = vec![
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "remote".into(),
+                "get-url".into(),
+                "origin".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "fetch".into(),
+                "--no-tags".into(),
+                "origin".into(),
+                "refs/heads/milestone-3".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "rev-parse".into(),
+                "--verify".into(),
+                "FETCH_HEAD^{commit}".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "show-ref".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                "refs/heads/milestone-3".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "worktree".into(),
+                "list".into(),
+                "--porcelain".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                "refs/tags/v0.1.16^{}".into(),
+            ],
+        ),
+        invocation(
+            "gh",
+            argv([
+                "pr",
+                "list",
+                "--head",
+                "pce/authority-disagreement/m3-s4",
+                "--base",
+                "milestone-3",
+                "--state",
+                "all",
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,baseRefName,state,mergeCommit",
+            ]),
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg,
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                "squash-disagreement-oid".into(),
+                "fetched-authority-oid".into(),
+            ],
+        ),
+    ];
+    assert_eq!(harness.invocations().expect("parse invocations"), expected);
+}
+
+#[test]
+fn merge_base_failure_reports_inconclusive() {
+    let harness = CliHarness::new().expect("create CLI harness");
+    let root = harness.path().join("repo");
+    let vision_dir = root.join("planning/2026-07-27-authority-unreachable");
+    let log = vision_dir.join("events.jsonl");
+    fs::create_dir_all(&vision_dir).expect("create scratch vision directory");
+
+    let contract = json!({
+        "repository": "pce",
+        "repo_root": root,
+        "stack": "Rust authority unreachability fixture",
+        "format": "cargo fmt --all --check",
+        "lint": "cargo clippy --workspace --all-targets",
+        "typecheck": "cargo check --workspace --all-targets",
+        "test": "cargo test --workspace",
+        "build": "cargo build --workspace",
+        "preflight": "cargo check --workspace --all-targets",
+        "gates_rule": "all four fixture gates must pass",
+        "install": "none",
+        "evidence": "fixture unreachable repository contract"
+    })
+    .to_string();
+    let seed = harness
+        .run(
+            [
+                OsString::from("log"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--kind"),
+                OsString::from("repository-contract"),
+                OsString::from("--node"),
+                OsString::from("m3-s4"),
+            ],
+            contract.as_bytes(),
+        )
+        .expect("run repository-contract log command");
+    assert!(seed.status.success(), "seed stderr: {}", stderr(&seed));
+
+    let root_text = root.to_str().expect("UTF-8 root");
+    // observe_git first resolves the selected branch fetch result. A failed fetch or
+    // branch-free FETCH_HEAD rev-parse makes git unreachable for every node.
+    // Git is not consulted when gh reports zero exact matches or one exact not-merged
+    // match. The exact MERGED match below is therefore required to issue merge-base.
+    // Only merge-base exit 1 means not-an-ancestor; every other nonzero exit is
+    // deliberately unreachable so a missing object cannot become a false negative.
+    let responses = vec![
+        response(
+            "git",
+            argv(["-C", root_text, "remote", "get-url", "origin"]),
+            0,
+            b"https://example.invalid/authority-unreachable.git\n",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "fetch",
+                "--no-tags",
+                "origin",
+                "refs/heads/milestone-3",
+            ]),
+            0,
+            b"",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "rev-parse",
+                "--verify",
+                "FETCH_HEAD^{commit}",
+            ]),
+            0,
+            b"fetched-authority-oid\n",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/milestone-3",
+            ]),
+            0,
+            b"",
+        ),
+        response(
+            "git",
+            argv(["-C", root_text, "worktree", "list", "--porcelain"]),
+            0,
+            format!(
+                "worktree {}/worktrees/m3-s4\nHEAD unreachable-worktree-oid\nbranch refs/heads/pce/authority-unreachable/m3-s4\n",
+                root.display()
+            )
+            .as_bytes(),
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/tags/v0.1.16^{}",
+            ]),
+            0,
+            b"tag-authority-oid\n",
+        ),
+        response(
+            "gh",
+            argv([
+                "pr",
+                "list",
+                "--head",
+                "pce/authority-unreachable/m3-s4",
+                "--base",
+                "milestone-3",
+                "--state",
+                "all",
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,baseRefName,state,mergeCommit",
+            ]),
+            0,
+            b"[{\"number\":405,\"headRefName\":\"pce/authority-unreachable/m3-s4\",\"baseRefName\":\"milestone-3\",\"state\":\"MERGED\",\"mergeCommit\":{\"oid\":\"squash-unreachable-oid\"}}]\n",
+        ),
+        ScriptedResponse {
+            program: "git".into(),
+            argv: argv([
+                "-C",
+                root_text,
+                "merge-base",
+                "--is-ancestor",
+                "squash-unreachable-oid",
+                "fetched-authority-oid",
+            ]),
+            exit_code: 42,
+            stdout: Vec::new(),
+            stderr: b"fatal: simulated missing squash object\n".to_vec(),
+        },
+    ];
+    harness
+        .materialize_responses(&responses)
+        .expect("materialize scripted responses");
+
+    let output = harness
+        .run(
+            [
+                OsString::from("status"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--vision-dir"),
+                vision_dir.as_os_str().to_owned(),
+            ],
+            b"",
+        )
+        .expect("run authority unreachability status command");
+    assert!(
+        output.status.success(),
+        "status stderr: {}",
+        stderr(&output)
+    );
+    let snapshot: Value = serde_json::from_slice(&output.stdout).expect("parse status snapshot");
+    let expected_failure = format!(
+        "command `git -C {} merge-base --is-ancestor squash-unreachable-oid fetched-authority-oid` exited exit status: 42; stdout: ; stderr: fatal: simulated missing squash object\n",
+        root.display()
+    );
+
+    let exact_fields = [
+        ("/schema_id", json!("pce.run-snapshot")),
+        ("/schema_version", json!(1)),
+        ("/repositories/0/repository", json!("pce")),
+        ("/repositories/0/fetch/state", json!("observed")),
+        (
+            "/repositories/0/fetch/observation_ref",
+            json!("fetched-authority-oid"),
+        ),
+        ("/repositories/0/branch/name", json!("milestone-3")),
+        ("/repositories/0/branch/state", json!("present")),
+        (
+            "/repositories/0/worktree/identity",
+            json!("pce/authority-unreachable/m3-s4"),
+        ),
+        ("/repositories/0/worktree/state", json!("present")),
+        ("/repositories/0/tag/name", json!("v0.1.16")),
+        ("/repositories/0/tag/state", json!("points-to")),
+        ("/repositories/0/tag/target", json!("tag-authority-oid")),
+        ("/steps/0/node", json!("m3-s4")),
+        ("/steps/0/subject/milestone", json!(3)),
+        ("/steps/0/subject/step", json!(4)),
+        (
+            "/steps/0/subject/head_branch",
+            json!("pce/authority-unreachable/m3-s4"),
+        ),
+        ("/steps/0/subject/integration_branch", json!("milestone-3")),
+        (
+            "/steps/0/subject/pull_request_selector/head",
+            json!("pce/authority-unreachable/m3-s4"),
+        ),
+        (
+            "/steps/0/subject/pull_request_selector/base",
+            json!("milestone-3"),
+        ),
+        ("/steps/0/github/availability", json!("reachable")),
+        ("/steps/0/github/cardinality", json!("one-exact-match")),
+        ("/steps/0/github/pull_request/number", json!(405)),
+        (
+            "/steps/0/github/pull_request/selector/head",
+            json!("pce/authority-unreachable/m3-s4"),
+        ),
+        (
+            "/steps/0/github/pull_request/selector/base",
+            json!("milestone-3"),
+        ),
+        ("/steps/0/github/pull_request/state/status", json!("merged")),
+        (
+            "/steps/0/github/pull_request/state/squash_commit_oid",
+            json!("squash-unreachable-oid"),
+        ),
+        ("/steps/0/git/availability", json!("unreachable")),
+        ("/steps/0/git/failure", json!(expected_failure)),
+        ("/steps/0/merge_status", json!("inconclusive")),
+        ("/resume/state", json!("candidate")),
+        ("/resume/node", json!("m3-s4")),
+        ("/resume/latest_sequence", json!(1)),
+        ("/resume/cycle_position/state", json!("no-round-dispatch")),
+        ("/recovery_digest/facts/entries/0/sequence", json!(1)),
+        ("/recovery_digest/facts/entries/0/node", json!("m3-s4")),
+        (
+            "/recovery_digest/facts/entries/0/kind",
+            json!("repository-contract"),
+        ),
+        (
+            "/recovery_digest/facts/entries/0/evidence",
+            json!("fixture unreachable repository contract"),
+        ),
+    ];
+    for (pointer, expected) in exact_fields {
+        assert_eq!(at(&snapshot, pointer), &expected, "JSON pointer {pointer}");
+    }
+
+    assert_eq!(
+        at(&snapshot, "/repositories").as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(at(&snapshot, "/steps").as_array().map(Vec::len), Some(1));
+    assert_eq!(at(&snapshot, "/dispatches"), &json!([]));
+    assert_eq!(at(&snapshot, "/rounds"), &json!([]));
+    assert_eq!(at(&snapshot, "/holds"), &json!([]));
+    assert_eq!(at(&snapshot, "/provenance"), &json!([]));
+    assert_eq!(at(&snapshot, "/recovery_digest/rounds/entries"), &json!([]));
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/rounds/elisions"),
+        &json!([])
+    );
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/open_holds/entries"),
+        &json!([])
+    );
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/open_holds/elisions"),
+        &json!([])
+    );
+    assert_eq!(at(&snapshot, "/recovery_digest/deltas/entries"), &json!([]));
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/deltas/elisions"),
+        &json!([])
+    );
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/facts/entries")
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(at(&snapshot, "/recovery_digest/facts/elisions"), &json!([]));
+    let fetched_at = at(&snapshot, "/repositories/0/fetch/fetched_at")
+        .as_str()
+        .expect("fetched_at string");
+    assert!(
+        is_millisecond_z_timestamp(fetched_at),
+        "fetched_at: {fetched_at}"
+    );
+
+    let root_arg = root.as_os_str().to_owned();
+    let expected = vec![
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "remote".into(),
+                "get-url".into(),
+                "origin".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "fetch".into(),
+                "--no-tags".into(),
+                "origin".into(),
+                "refs/heads/milestone-3".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "rev-parse".into(),
+                "--verify".into(),
+                "FETCH_HEAD^{commit}".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "show-ref".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                "refs/heads/milestone-3".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "worktree".into(),
+                "list".into(),
+                "--porcelain".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                "refs/tags/v0.1.16^{}".into(),
+            ],
+        ),
+        invocation(
+            "gh",
+            argv([
+                "pr",
+                "list",
+                "--head",
+                "pce/authority-unreachable/m3-s4",
+                "--base",
+                "milestone-3",
+                "--state",
+                "all",
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,baseRefName,state,mergeCommit",
+            ]),
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg,
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                "squash-unreachable-oid".into(),
+                "fetched-authority-oid".into(),
+            ],
+        ),
+    ];
+    assert_eq!(harness.invocations().expect("parse invocations"), expected);
+}
+
 fn response(program: &str, argv: Vec<OsString>, exit_code: i32, stdout: &[u8]) -> ScriptedResponse {
     ScriptedResponse {
         program: program.into(),
