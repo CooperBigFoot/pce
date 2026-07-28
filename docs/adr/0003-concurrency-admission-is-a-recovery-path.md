@@ -30,9 +30,16 @@ Concurrency admission is a recovery path. Overlapping ready nodes dispatch concu
 merge absorbs the resulting rebase. Serialization requires a semantic dependency returned by an
 actor that read the code, not an overlapping write-set.
 
-This rests on two properties the workflow already has and that this decision does not extend:
-steps run in fully isolated worktrees, and an unexpected merge conflict is already routed to a
-Codex rebase dispatch from named base and head refs.
+The rule applies at both altitudes. Milestones with no ordering edge between them proceed
+concurrently, which is where the wall-clock actually is: a milestone is a whole
+plan-critique-execute-review-merge cycle, and `SKILL.md:237` walked them strictly in dependency
+order regardless of whether any edge existed.
+
+This rests on two properties the workflow already has: nodes run in fully isolated worktrees, and
+an unexpected merge conflict is already routed to a Codex rebase dispatch from named base and head
+refs. Extending admission to milestones does stretch the second one, because a milestone PR merges
+into `main` while a step PR merges into `milestone-<m>`, so concurrent milestones can conflict at
+a wider blast radius than concurrent steps.
 
 ## Consequences
 
@@ -43,7 +50,8 @@ code could not have supported the old rule either.
 The cost moves from wall-clock spent waiting to occasional rebase work at merge time, and it
 becomes visible where it is paid rather than invisible in a chain that looks intentional. A
 merge conflict is now an ordinary outcome rather than a signal that something went wrong, so the
-conflict path must stay reliable; if it degrades, the whole admission rule degrades with it.
+conflict path becomes load-bearing rather than incidental; if it degrades, the whole admission
+rule degrades with it, and it degrades first at milestone altitude where the target is `main`.
 
 Reversing this means returning to a predicate over write-sets, and any such predicate inherits
 the same problem — the hub file is a property of how code is organized, not of how PCE plans.
