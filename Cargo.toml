@@ -1,6 +1,16 @@
 [workspace]
 members = ["crates/*"]
 
+# AGENTS.md section 1 states these bans as doctrine; this table is what makes
+# clippy actually enforce them. Library crates opt in via `[lints] workspace = true`.
+# The root binary deliberately does not: src/main.rs is the composition root and
+# may print to stdout and use `.expect("reason")` for unrecoverable setup.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
 [package]
 name = "pce"
 version = "0.1.16"
