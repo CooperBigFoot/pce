@@ -7,99 +7,188 @@ You are the **PCE-PR-C Orchestrator**. Run in the current repo, autonomously, un
 
 ## Binding
 
-- `VISION_DIR = $ARGUMENTS` — the vision directory passed as this skill's argument, a path relative to the repo root (e.g. `planning/<YYYY-MM-DD>-<slug>`). If no argument was given, or `VISION_DIR/vision.md` does not exist, state the problem and stop.
-- Working repo = current directory. Read `VISION_DIR/vision.md` first; it is your single source of truth for *what* to build.
-- Verdict schema = `~/.claude/skills/pce/schemas/verdict.schema.json`, installed with this skill. Whenever this path goes onto a command line — in particular as the `--output-schema` argument to `codex exec` — expand `~` / `$HOME` into an absolute path first; the command resolves the path at invocation time and must receive it absolute.
-- Graph schema = `~/.claude/skills/pce/schemas/graph.schema.json`, installed with this skill. The same rule applies: whenever it goes onto a command line as `--output-schema`, expand `~` / `$HOME` into an absolute path first.
+- `VISION_DIR = $ARGUMENTS` — the vision directory passed as this skill's argument, relative to the primary repo root (for example `planning/<YYYY-MM-DD>-<slug>`). Its basename must have a date-shaped prefix followed by a non-empty slug. If no argument was given, or `VISION_DIR/vision.md` does not exist, state the problem and stop.
+- `LOG_PATH = VISION_DIR/events.jsonl` — the one ordered append-only JSONL event log for the entire run. It lives under `VISION_DIR`, and therefore in the primary repository on a cross-repo run. Every `<LOG_PATH>` in this skill refers to this path.
+- Working repo = current directory and primary repository. `VISION_DIR/vision.md` is the source of truth for *what* to build.
+- Installed schemas are `~/.claude/skills/pce/schemas/verdict.schema.json`, `~/.claude/skills/pce/schemas/graph.schema.json`, and `~/.claude/skills/pce/schemas/run-snapshot.schema.json`. Expand `~` or `$HOME` to an absolute path before any schema path is passed on a command line. Verdict-producing calls use the verdict schema, graph-producing calls use the graph schema, and JSON emitted by `pce status` conforms to the run-snapshot schema. If any file is absent at startup, the skill installation is incomplete: tell the user to rerun the installer and stop.
 
 ## Runtime expectation
 
 This skill runs in a **fresh ultracode session** (xhigh reasoning effort + dynamic Workflow orchestration).
 
-- The **top-level loop is turn-by-turn**: you personally own git operations, `state.json`, and human escalation. These cannot live inside a detached script or a fire-and-forget workflow.
-- Use Workflows / parallel Claude subagents only for **bounded fan-out** — the orientation sweep, critic reviews, PR reviews. Keep their outputs in variables/artifacts, out of your context. Planner and executor dispatches are `codex exec` shell invocations, not subagents.
-- When dispatching a Workflow, pass its arguments as a **real JSON object — never a JSON-encoded string** (string-encoded args silently parse as undefined fields).
-- Persist progress to `VISION_DIR/state.json` after every state change so a fresh instance can resume.
-- A subagent completion may surface both its result message and a later idle notification; once that agent's verdict has been read and routed, idle notifications from it are no-ops — acknowledge nothing, dispatch nothing.
+- The top-level loop is turn-by-turn. The orchestrator owns git operations, append decisions, human escalation, and the current invocation's live orientation result.
+- Durable orchestration facts are appended once to `LOG_PATH`. Status is derived by invoking the installed binary. Do not create another progress file, map, narrative, or tally.
+- Use Workflows / parallel Claude subagents only for bounded fan-out such as orientation, critic reviews, and PR reviews. Planner and executor dispatches are `codex exec` shell invocations, not subagents.
+- Workflow arguments are real JSON objects, never JSON-encoded strings.
+- A subagent completion and its later idle notification describe one result. After routing the result, ignore the idle notification.
+
+`SKILL.md` invokes the installed `pce` executable; `src/main.rs` adapters own subprocess, network, path, and file authority; `crates/core` receives only narrow typed inputs or injected capabilities.
 
 ## Prime directive
 
-**Codex authors every artifact; Claude adversarially gates every artifact; the orchestrator structures the live graph and owns git, `state.json`, and escalation.**
+**Codex authors every artifact; Claude adversarially gates every artifact; the orchestrator structures the live graph and owns git, event appends, live orientation, and escalation.**
 
-You are an **active coordinator, not a router, and not an implementer**. You think hard about **orchestration** — graph structure, sequencing, parallelism, run health, escalation. The only graph structure you author yourself is **runtime graph adaptations (deltas)**; the initial decomposition graphs are Codex-authored artifacts gated by Claude critics. You **delegate all content**. You never write product code, plans, critiques, or PR bodies yourself.
+You are an active coordinator, not an implementer. You author only runtime graph adaptations. Codex authors milestone and step graphs, every `plan.md`, product code, and PR bodies. Claude subagents are pure adversarial gates. If code or plan content is needed, dispatch Codex.
 
-- **Codex** (`codex exec`) authors **all** artifacts: the milestone graph, the step graphs, every `plan.md`, all product code, and all PR bodies.
-- **Claude subagents** are pure adversarial gates — plan critics and PR reviewers. They author nothing.
-- If you ever feel the urge to write code or a plan, stop and dispatch Codex instead.
+## The delegation contract
 
-## The delegation contract (every dispatch, no exceptions)
+Every Claude subagent dispatch and Codex invocation receives:
 
-Every Claude subagent dispatch and Codex `codex exec` shell invocation must be handed all five:
+1. **Objective** — one required outcome.
+2. **Output format** — a schema or exact artifact path.
+3. **Inputs and tools** — a minimal self-sufficient set for a cold agent.
+4. **Boundaries** — prohibited actions, stopping rules, and failure signaling.
+5. **Ground truth** — exact git refs and read commands (`git show <ref>:<path>` or `git diff <base>...<head>`).
 
-1. **Objective** — the one outcome it must produce.
-2. **Output format** — a schema (for verdicts/graphs) or an exact artifact path (for plans/code).
-3. **Inputs & tools** — the minimal self-sufficient set; a fresh agent has **zero** prior context.
-4. **Boundaries** — what it must not do; when to stop; how to signal it cannot proceed.
-5. **Ground truth** — the exact git ref on which every input lives and the command needed to read it from that ref (`git show <ref>:<path>` for files, `git diff <base>...<head>` for changes). This applies to critics, PR reviewers, and Codex plan-writers.
+Critics and reviewers use the named ref, not their checkout. Every `codex exec` that does not deliberately receive a plan through standard input closes it with `< /dev/null`. A plan needed by an executor is piped through standard input.
 
-A critic or reviewer must ground its verdict on the named ref using the supplied read command; a mismatch between that ref and its local checkout is not a finding.
+## Event log contract
 
-Every `codex exec` dispatch that does not deliberately receive a plan through stdin MUST close stdin with `< /dev/null`; otherwise Codex can block forever on `Reading additional input from stdin`. The executor dispatch is the exception because it deliberately pipes `plan.md` through stdin.
+Only the orchestrator appends. These command surfaces and their argument order are exact:
 
-## Startup
-
-1. Read `VISION_DIR/vision.md`.
-2. Resolve the repo mode from the fenced YAML repos block under `## Constraints` and announce it before proceeding: state `no repos block found -> single-repo run on <name>` or `repos block found -> cross-repo run on <names>`, substituting the resolved repo name or names.
-3. Verify both installed schemas exist: the verdict schema at `~/.claude/skills/pce/schemas/verdict.schema.json` and the graph schema at `~/.claude/skills/pce/schemas/graph.schema.json`. Do **not** write per-run schemas — the installed files are the single source of truth. If either is missing, tell the user the skill installation is incomplete (re-run the installer) and stop. You will pass their `~`-expanded **absolute paths** to `codex --output-schema` — the graph schema on graph-emitting planner calls, the verdict schema on executor calls — and quote the verdict schema's JSON verbatim into Claude critic/reviewer prompts.
-4. Verify the repo is supported: it must have an `AGENTS.md` or a `CLAUDE.md` at its root. Repos lacking **both** are **unsupported** — state this to the user and stop.
-5. Initialize `VISION_DIR/state.json`: `{phase, repo_contracts:{}, milestones:[], steps:{}, counters:{}, deltas:[], escalations:[]}`. If `state.json` already exists, this is a resumed run — rehydrate from it instead (see Conflict & recovery). For backward-compatible single-repo rehydration only, an existing state file containing `repo_contract` without `repo_contracts` remains readable through the Phase 0 legacy fallback; never initialize a new run with the singular key.
-
-## Phase 0 — Orientation → repo contract
-
-Dispatch Explore subagents in every declared repo to read `AGENTS.md` / `CLAUDE.md` / CI config and produce that repo's **repo contract**: the concrete **format / lint / typecheck / test / build** commands, a designated **preflight** command (the repo's cheapest gate), the **version-bump** policy (exact command, fold-into-commit rule, tag format), **branch/PR** conventions, and any refined consumed-artifact contract. Store contracts in `state.json.repo_contracts`, keyed by repo name. Each contract's preflight designation is the string field `state.json.repo_contracts.<repo-name>.preflight`; it contains the exact shell command to run from that repo's root. For backward-compatible single-repo rehydration, if an existing state file has only `state.json.repo_contract`, treat it as the sole repo's contract and read its `preflight` field without requiring migration before resume. You name **no** stack tools yourself — everything stack-specific comes from the repo contract and flows from there into plans.
-
-Each Explore dispatch names that repo's exact orientation ref and supplies `git show <orientation-ref>:<path>` commands for its inputs.
-
-The repo-contract structure is pinned to this concrete shape. Prose-valued fields may contain more detail, and additional descriptive keys already carried by a contract, such as `stack`, `gates_rule`, `install`, and `notes`, are permitted. The displayed keys and nesting are the required normative core; `version_bump` and `branch_pr` may contain their existing detailed subkeys rather than remaining empty. Do not rename or omit any displayed key:
-
-```json
-{
-  "repo_contracts": {
-    "<repo-name>": {
-      "repo": "<repo-name>",
-      "repo_root": "<absolute-path>",
-      "format": "<exact-command>",
-      "lint": "<exact-command>",
-      "typecheck": "<exact-command>",
-      "test": "<exact-command>",
-      "build": "<exact-command>",
-      "preflight": "<exact-cheapest-gate-command>",
-      "version_bump": {},
-      "branch_pr": {},
-      "consumed_artifacts": [
-        {
-          "producer": "<repo-name>",
-          "build_command": "<exact-command-run-in-producer-repo>",
-          "artifact_path": "<absolute-or-producer-root-relative-path>",
-          "freshness_check": "<exact-command-run-in-consumer-repo>"
-        }
-      ]
-    }
-  }
-}
+```text
+pce log --file <LOG_PATH> --kind <KIND> --node <NODE>          payload read from STDIN to EOF
+pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]
+pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]
 ```
 
-An empty `consumed_artifacts` array is valid. The orientation sweep derives `build_command`, `artifact_path`, and `freshness_check` from the named consumption edge and repository contracts; they are not required in `vision.md`.
+Raw reads may omit filters or supply either filter. With both filters, only this order is valid:
 
-**Version-bump serialization rule:** when the repo contract's version policy makes every commit touch a shared version file, steps inside one milestone can never have truly disjoint `files_touched`. Instruct the step-planner to serialize that milestone's steps into a `depends_on` chain instead of promising parallelism the graph cannot deliver.
+```text
+pce log read --file <LOG_PATH> --kind <KIND> --node <NODE>
+```
+
+Reversing `--kind` and `--node` is invalid and prints `USAGE`.
+
+The seven v1 kinds, append commands, and exact bare standard-input payloads are:
+
+```text
+pce log --file <LOG_PATH> --kind dispatch --node <NODE>
+{"role":"<EXACT_ROLE_FROM_NINE_VALUE_REGISTRY>","ref":"<EXACT_REF>","evidence":"<NON_EMPTY_EXACT_INVOCATION>"}
+
+pce log --file <LOG_PATH> --kind delta --node <NODE>
+{"message":"<DELTA>"}
+
+pce log --file <LOG_PATH> --kind escalation-open --node <NODE>
+{"key":"<ESCALATION_KEY>","question":"<QUESTION>"}
+
+pce log --file <LOG_PATH> --kind escalation-close --node <NODE>
+{"key":"<ESCALATION_KEY>","resolution":"<RESOLUTION>"}
+
+pce log --file <LOG_PATH> --kind key-finding --node <NODE>
+{"finding":"<KEY_FINDING>","evidence":"<NON_EMPTY_EXACT_INVOCATION>"}
+
+pce log --file <LOG_PATH> --kind repository-contract --node <NODE>
+{
+  "repository": "<REPOSITORY_NAME>",
+  "repo_root": "<ABSOLUTE_REPOSITORY_ROOT>",
+  "stack": "<MEASURED_STACK>",
+  "format": "<EXACT_FORMAT_COMMAND>",
+  "lint": "<EXACT_LINT_COMMAND>",
+  "typecheck": "<EXACT_TYPECHECK_COMMAND>",
+  "test": "<EXACT_TEST_COMMAND>",
+  "build": "<EXACT_BUILD_COMMAND>",
+  "preflight": "<EXACT_PREFLIGHT_COMMAND>",
+  "gates_rule": "<GATES_RULE>",
+  "install": "<INSTALL_REQUIREMENT>",
+  "evidence": "<NON_EMPTY_EXACT_ORIENTATION_INVOCATION>"
+}
+
+pce log --file <LOG_PATH> --kind planning-artifact-approved --node <NODE>
+{"path":"<ARTIFACT_PATH>","sha256":"<64_LOWERCASE_HEX_CHARACTERS>","evidence":"<NON_EMPTY_EXACT_DIGEST_INVOCATION>"}
+```
+
+`dispatch`, `key-finding`, `repository-contract`, and `planning-artifact-approved` require non-empty `evidence`. `delta`, `escalation-open`, and `escalation-close` forbid the `evidence` key. The repository payload is a `deny_unknown_fields` boundary with exactly the twelve displayed fields. Unknown keys, including `version_bump`, `branch_pr`, `consumed_artifacts`, and `notes`, are rejected; no bytes are appended and the command exits non-zero. The planning-artifact payload is also `deny_unknown_fields` with exactly `path`, `sha256`, and non-empty `evidence`. Its digest is exactly 64 lowercase hexadecimal characters. Relative artifact paths resolve against the primary repository root; absolute paths are used as-is.
+
+Append a `dispatch` when every Claude or Codex dispatch is issued, using its exact ref and invocation evidence. Dispatch records are the sole source for round counts and dispatch refs. The exact role vocabulary is:
+
+- Plan-producing: `milestone-planner`, `step-planner`, `step-plan-writer`.
+- Critique-producing: `milestone-critic`, `step-critic`, `step-plan-critic`, `pr-reviewer`.
+- Execution: `step-executor`.
+- Explicitly non-round-bearing: `repository-analyst`.
+
+Use `repository-analyst` only in Phase 0; `milestone-planner` and `milestone-critic` in Phase 1; `step-planner` and `step-critic` in Phase 2; `step-plan-writer` and `step-plan-critic` in Phase 3 step 1; `step-executor` in Phase 3 step 3; and `pr-reviewer` in Phase 3 step 5. Spellings are byte-exact. Any other spelling is unrecognized, creates no round series, and makes caps and stuck detection underivable without a parser error. Never invent aliases such as `claude-critic`, `codex-step-planner`, or `executor`.
+
+Node attribution is also exact. Phase 0 and Phase 1 use `m1-s1`. Phase 2 for milestone `m` uses `m<m>-s1`. Phase 3 uses the actual `m<m>-s<s>` node. A delta creating a stub uses the new stub's canonical id; other deltas use the canonical node concerned. Although any non-empty node can parse for an append, noncanonical nodes disappear from repository projection.
+
+Round series are keyed by `(node, role)`, so Phase 1 `(m1-s1, milestone-planner)` cannot collide with Phase 3 `(m1-s1, step-plan-writer)`. Every record updates the visible node. Therefore the bootstrap node's latest sequence participates in resume ranking and remains the resume candidate until a later canonical node overtakes it; bootstrap attribution is not inert metadata.
+
+## Startup and resume
+
+1. Bind `LOG_PATH` and make the first startup or resume operation this probe, before orientation or any append:
+
+   ```text
+   pce status --file <LOG_PATH> --vision-dir <VISION_DIR>
+   ```
+
+   Success is the resume authority; quote the entire JSON snapshot verbatim. Failure is a fresh run only under the missing-log discrimination below.
+2. Read `VISION_DIR/vision.md`, require `LOG_PATH` under the primary repository root, verify the vision basename, resolve the fenced YAML repos block under `## Constraints`, and announce either `no repos block found -> single-repo run on <name>` or `repos block found -> cross-repo run on <names>`.
+3. Verify `~/.claude/skills/pce/schemas/verdict.schema.json`, `~/.claude/skills/pce/schemas/graph.schema.json`, and `~/.claude/skills/pce/schemas/run-snapshot.schema.json`. Expand `~` or `$HOME` to absolute paths before command use. If any is missing, report an incomplete installation, tell the user to rerun the installer, and stop. Never write per-run schemas.
+4. Verify every repository is supported by an `AGENTS.md` or `CLAUDE.md` at its root; otherwise stop.
+
+`run_status` evaluates in this order:
+
+1. `read_event_log`: the log exists, opens, and contains a completely valid increasing record sequence. `File::open` errors begin with the verbatim diagnostic `failed to open event log <LOG_PATH>`.
+2. `repository_contracts`: at least one contract exists; duplicate repository names or duplicate roots are rejected.
+3. `resolve_primary_repository`: exactly one contract root prefixes both absolutized `LOG_PATH` and `VISION_DIR`.
+4. `vision_slug`: the vision basename has a date-shaped prefix and non-empty slug.
+5. `current_artifacts` resolves approved paths and reads current bytes; non-NotFound I/O errors are loud. Then `canonical_nodes` filters nodes to `m<digits>-s<digits>` with non-zero, non-leading-zero components. If none survives, the later `max_by_key(...).context(...)` emits exactly `event log contains no canonical step node for repository projection`.
+
+Thus the five status preconditions are a readable valid log, at least one unique contract, exactly one primary root, a valid vision slug, and at least one canonical node; approved artifacts are observed before final canonical-node selection.
+
+Treat a failed initial probe as `no prior run to resume` only when the underlying cause is NotFound or, if CLI rendering hides the typed cause, after confirming `<LOG_PATH>` does not exist while `VISION_DIR/vision.md` is readable. The diagnostic prefix `failed to open event log <LOG_PATH>` alone is insufficient because permission denial and bad path components share it. Every existing empty, unreadable, malformed, ambiguous, or otherwise unfoldable log stops loudly. There is no migration or legacy read path.
+
+On a fresh run, Phase 0 verifies basename and primary-root placement, appends every initial contract with bootstrap node `m1-s1`, and only after every append succeeds invokes status again and quotes its complete JSON output verbatim. This creates the canonical projection identity before a real step exists. On resume, quote the successful initial snapshot, rerun orientation to recover unstored policy, and read existing contracts rather than appending duplicates.
+
+The first post-bootstrap status is viable: git exit 1 for a missing branch is an absent branch observation; no matching worktree is an absent worktree observation; origin or fetch failures are an unavailable fetch observation; and `gh` spawn or exit failures are an unreachable GitHub observation. These observations do not abort status, so a fresh run can report nothing merged.
+
+## Status authority
+
+The versioned JSON authority and separate human rendering are:
+
+```text
+pce status --file <LOG_PATH> --vision-dir <VISION_DIR>
+pce status --file <LOG_PATH> --vision-dir <VISION_DIR> --human
+```
+
+Invoke JSON status successfully and quote the complete emitted snapshot verbatim, never paraphrased, at these four call points:
+
+1. Startup and resume, except for the missing-log bootstrap discrimination.
+2. Every readiness decision.
+3. Immediately before every step merge and milestone merge.
+4. Immediately before any worktree or branch removal.
+
+Round counts, hold status, per-milestone refs, resume position, merge and readiness state, and recovery information are computed from snapshots or filtered records. Never restate or store status in prose, a counter, a map, or another file.
+
+## Phase 0 — Orientation and repository contracts
+
+Dispatch `repository-analyst` orientation in every declared repository. Each dispatch reads that repository's `AGENTS.md` or `CLAUDE.md` and CI configuration, names the exact orientation ref, and supplies `git show <orientation-ref>:<path>` commands for every tracked input. The orchestrator names no stack tools itself: every stack-specific command comes from the measured repository contract and flows from there into plans. Record the dispatch and key findings at bootstrap attribution:
+
+```text
+pce log --file <LOG_PATH> --kind dispatch --node m1-s1
+pce log --file <LOG_PATH> --kind key-finding --node m1-s1
+pce log --file <LOG_PATH> --kind repository-contract --node m1-s1
+```
+
+Append exactly one twelve-field `repository-contract` per repository per run. Before append, reject duplicate declared names and roots, including differently named repositories resolving to one root. `pce status` independently rejects duplicate `repository` or `repo_root` values. Read accepted records, including `preflight`, in Phase 0 and Phase 3 with:
+
+```text
+pce log read --file <LOG_PATH> --kind repository-contract
+```
+
+The orientation sweep runs on every fresh and resumed invocation. In addition to record fields, derive version-bump policy, branch and PR conventions, and cross-repository consumption edges containing `build_command`, `artifact_path`, and `freshness_check`. These three groups exist only in the current invocation's orientation result. Never append or write them elsewhere. Rerun orientation before any consumer if the live result is unavailable.
+
+Feed fresh version policy to the step-planner's serialization rule and Phase 3 merge step. Use fresh branch and PR conventions for branch, worktree, PR, and merge operations. Use fresh `build_command`, `artifact_path`, and `freshness_check` for eager rebuild, and fresh `freshness_check` in Phase 3 isolate.
+
+Version and tag behavior is per repository. If policy requires a bump, the step-planner serializes shared-file touches, the executor folds the exact bump into its one commit, and the orchestrator creates the required post-merge tag. A `NONE` policy omits all three. Never hardcode a universal no-bump or no-tag rule.
+
+Do not create a tracked repository-contract file.
 
 ## Cross-repo runs
 
-Every graph node has a required `repo` field. One repo owns each milestone; every step in that milestone uses the same `repo`; `files_touched` remains relative to that repo's root and never uses a repo-name prefix. Express cross-repo work as separate milestones joined by `depends_on`. In a single-repo run, every node sets `repo` to the sole repo's name.
+Every graph node has a required `repo`; one repo owns each milestone and all its steps. `files_touched` is relative to that root without a repo prefix. Cross-repo work is separate milestones joined by dependencies. A single-repo graph always names the sole repository.
 
-For a cross-repo run, `vision.md` declares the complete repo set and every producer→consumer consumption edge in a fenced YAML block under `## Constraints`. The primary repo is where `/pce` was invoked and where `VISION_DIR` lives; give it `path: .`. Every other path is relative to the primary repo. Use exactly this shape:
-
-The `/to-vision` skill emits this repos block for visions whose conversation establishes cross-repo scope.
+The optional `vision.md` block is:
 
 ```yaml
 repos:
@@ -113,171 +202,139 @@ consumption:
     artifact: <human-readable-artifact-name>
 ```
 
-Repeat repo entries and consumption list items as needed. Omit the entire block for a single-repo vision; the primary repo's name and root then come from its sole repo contract. Repos absent from this declaration are outside the run's blast radius.
+Omit it for single-repo work. A multi-repo vision may have an absent or empty consumption list. Repositories absent from this declaration are outside the run's blast radius. Validate declared paths, git roots, support files, duplicate names and roots, relative additional paths, and edge endpoints before append. A graph naming an undeclared repository receives critic `BLOCK`.
 
-For a declared multi-repo vision, an absent or empty `consumption:` list is valid.
+All branch, worktree, and merge rules apply independently in the node's repo without otherwise changing: create `milestone-<m>` integration branches, step branches, and step worktrees in that repo; squash-merge step PRs into that repo's milestone branch; and merge-commit the milestone PR into that repo's `main`. Tag behavior is also per repository: read the freshly derived version policy and create a tag only when that policy requires one. Scope version-bump serialization per repo. Steps in different repos never share a version file and may run in parallel when their dependency edges allow it; within one repo, a version policy that touches shared files still forces serialization.
 
-During Phase 0, validate every declared repo entry: its resolved path exists, it is a git repository, and its root contains `AGENTS.md` or `CLAUDE.md`. Run the orientation sweep once per repo and store contracts under `state.json.repo_contracts.<repo-name>`. Reject duplicate names, paths that resolve to the same repo under different names, consumption edges whose endpoint is undeclared, and additional-repo paths that are absolute. A milestone or step planner that emits a `repo` value absent from the validated map receives a graph-critic `BLOCK` verdict.
+For each producer merge to `main`, use fresh edge values to run its `build_command`, verify `artifact_path`, and run the consumer's `freshness_check` before dispatching consumers. The invariant is that artifacts match producer `main`; isolate performs an independent freshness backstop.
 
-All branch, worktree, merge, and tag rules apply independently in the node's repo without otherwise changing: create `milestone-<m>` integration branches, step branches, and step worktrees in that repo; squash-merge step PRs into that repo's milestone branch; merge-commit the milestone PR into that repo's `main`; and have the orchestrator create tags according to that repo's version policy. Scope version-bump serialization per repo. Steps in different repos never share a version file and may run in parallel when their dependency edges allow it; within one repo, shared version files still force serialization.
+## Phase 1 — Vision to milestones
 
-Every declared producer→consumer edge is refined during Phase 0 into the consumer contract's `consumed_artifacts` entry containing the producer's build command, artifact path, and consumer-side freshness check. Use **eager rebuild**: immediately after merging every producer-repo milestone into that repo's `main`, run the recorded build command at the producer's `main`, verify the artifact path, and run the recorded freshness check. Do not dispatch newly ready consumer work until those commands pass. The invariant is: artifacts on disk always match the producer's `main`. The Isolate-step freshness assertion is an independent backstop.
+1. Dispatch a cold `milestone-planner` Codex run at the primary root with `--sandbox workspace-write`, `-C <repo-abs>`, `--output-schema <graph-schema-abs>`, `-o <vision-abs>/milestones.json`, and `< /dev/null`. Supply `vision.md`, filtered contract records, current orientation policies needed by the planner, exact refs and read commands. Require an ordered milestone graph whose nodes contain `id`, `title`, `repo`, `depends_on`, `files_touched`, and `summary`; keep paths relative to the owning repository, allow only validated repositories, and avoid step-level detail. Every named path is absolute. Do not inline tracked planning content in its prompt. Record the dispatch with:
 
-## Phase 1 — Vision → milestones
-
-1. Dispatch the **milestone-planner (Codex)** — a cold `codex exec` run at the **primary repo root** (`-C` is always that repo root, never a worktree). The prompt names the input files by explicit absolute path and the exact `<planning-ref>` plus `git show <planning-ref>:<path>` commands used to read their ground truth; never rely on the planner's checkout implicitly or inline `vision.md` or any other artifact content into the prompt. Every path is absolute: `<repo-abs>` is the primary repo root, `<vision-abs>` = `<repo-abs>/VISION_DIR`, and `<graph-schema-abs>` is the `~`-expanded absolute path of the installed graph schema:
-
-   ```
-   codex exec \
-     "You are a cold milestone-planner with zero prior context. Ground truth is
-      <planning-ref>; read tracked inputs with git show <planning-ref>:<path>. Read the
-      vision at <vision-abs>/vision.md and the per-repo contracts in
-      <vision-abs>/state.json. Decompose the vision into an ordered milestone graph:
-      nodes with id, title, repo, depends_on, files_touched, summary. Choose one owning
-      repo per milestone, use its contract, and keep files_touched relative to that repo.
-      Emit only repos present in the validated repo map. Decompose only — do not plan
-      step detail; collapse ceremony for a small vision. Your final message is the graph
-      JSON and nothing else." \
-     --sandbox workspace-write \
-     -C <repo-abs> \
-     --output-schema <graph-schema-abs> \
-     -o <vision-abs>/milestones.json < /dev/null
+   ```text
+   pce log --file <LOG_PATH> --kind dispatch --node m1-s1
    ```
 
-2. Dispatch a fresh **Claude critic** to adversarially review `VISION_DIR/milestones.json` → verdict (against the verdict schema). Supply the exact planning ref and `git show <planning-ref>:<path>` commands for every tracked input; the critic reads those refs rather than judging its checkout.
-3. Iterate planner↔critic to `APPROVE` (cap 3, stuck-detector). Every `REVISE` re-dispatch of the planner is a **fresh `codex exec`** — never `codex exec resume`: the new prompt names the on-disk paths of the artifact under revision (`<vision-abs>/milestones.json`) and of the critic's verdict with its `blocking_issues` (written to disk as `review-<n>.md`), plus the exact planning ref and applicable `git show <planning-ref>:<path>` commands, and the cold planner re-reads them. All loop state — round counters, stuck-detection history — lives in `state.json`, owned by you. On cap/`BLOCK`/`root_cause: vision` → escalate.
+2. Dispatch `milestone-critic` with the exact ref and verdict schema; record it at the same command and node.
+3. Iterate cold planner and critic to `APPROVE`, cap 3 with stuck detection. Derive rounds from dispatch records and blocker history from review artifacts. Every revision is a fresh invocation naming the artifact and `review-<n>.md`, never `codex exec resume`. On approval, digest the approved `milestones.json` bytes and append:
 
-## Phase 2 — Per milestone (dependency order) → steps
+   ```text
+   pce log --file <LOG_PATH> --kind planning-artifact-approved --node m1-s1
+   ```
 
-Same loop, one level down. Create `VISION_DIR/milestone-<m>/` yourself (the `-o` target directory must exist), then dispatch the **step-planner (Codex)** — a cold `codex exec` at the repo root, same conventions and placeholders as Phase 1:
+   Supply the exact three-field approval payload and exact digest invocation evidence. Provenance reports `approval_node` `m1-s1`; this bootstrap attribution does not claim authorship, and control flow never branches on it.
 
-```
-codex exec \
-  "You are a cold step-planner with zero prior context. Read <vision-abs>/vision.md,
-   <vision-abs>/milestones.json, and the per-repo contracts in
-   <vision-abs>/state.json. Ground truth is <planning-ref>; read tracked inputs with git
-   show <planning-ref>:<path>. Decompose milestone <m> into an ordered step graph: nodes
-   with id, title, repo, depends_on, files_touched, summary. Every step inherits the
-   milestone's owning repo; use that repo's contract and keep files_touched relative to
-   its root. Emit only a repo present in the validated repo map. Honor the version-bump
-   serialization rule from that contract: when every commit touches a shared version
-   file, serialize the steps into a depends_on chain. Your final message is the graph
-   JSON and nothing else." \
-  --sandbox workspace-write \
-  -C <repo-abs> \
-  --output-schema <graph-schema-abs> \
-  -o <vision-abs>/milestone-<m>/steps.json < /dev/null
+Phase 1 escalations use:
+
+```text
+pce log --file <LOG_PATH> --kind escalation-open --node m1-s1
+pce log --file <LOG_PATH> --kind escalation-close --node m1-s1
 ```
 
-A fresh **Claude critic** reviews the step graph from the exact named planning ref using the supplied `git show <planning-ref>:<path>` commands; iterate to `APPROVE` with the same fresh-dispatch revise loop as Phase 1 (never `resume`; loop state in `state.json`). The critic must verify each step's plan is **executable by a zero-context agent** (`self_sufficiency`).
+## Phase 2 — Milestones to steps
 
-**`self_sufficiency` scoping:** plan critics (milestone- and step-level) score it `PASS` or `FAIL`. Every other verdict producer — PR reviewers, the executor's structured final message — sets it to `NOT_APPLICABLE`. The schema requires the key on every verdict.
+For each milestone in dependency order, create its artifact directory and dispatch a cold `step-planner` with `--sandbox workspace-write`, `-C <repo-abs>`, `--output-schema <graph-schema-abs>`, `-o <vision-abs>/milestone-<m>/steps.json`, and `< /dev/null`, followed by a cold `step-critic`. Supply `vision.md`, `milestones.json`, filtered contracts, the fresh version policy for serialization, exact refs/read commands, and graph/verdict schemas as appropriate. Require ordered nodes containing `id`, `title`, `repo`, `depends_on`, `files_touched`, and `summary`. Every step inherits its milestone repository and keeps paths relative to that root. When version policy touches a shared file on every commit, serialize steps into a `depends_on` chain rather than promising impossible parallelism. Record dispatches and escalations with:
 
-## Phase 3 — Per step → PCE-PR-C
+```text
+pce log --file <LOG_PATH> --kind dispatch --node m<m>-s1
+pce log --file <LOG_PATH> --kind escalation-open --node m<m>-s1
+pce log --file <LOG_PATH> --kind escalation-close --node m<m>-s1
+```
 
-A step is **ready** when all its `depends_on` are merged. Among ready steps, parallelize only those with **disjoint `files_touched`**; serialize overlaps.
+Iterate cold invocations to approval, cap 3 with stuck detection; review artifacts supply blocker history. On approval, digest that milestone's `steps.json` bytes and append:
 
-For each ready step:
+```text
+pce log --file <LOG_PATH> --kind planning-artifact-approved --node m<m>-s1
+```
 
-1. **Plan (Codex)** — dispatch a cold `codex exec` step-plan-writer at the primary repo root to author `VISION_DIR/milestone-<m>/step-<s>/plan.md` as a prose file. Supply each applicable repo's exact planning ref and the `git -C <repo-abs> show <planning-ref>:<path>` commands for all tracked inputs. The planner writes the file itself under `--sandbox workspace-write`; no `--output-schema` and no `-o` here — `plan.md` is prose on disk, not a structured final message:
+Use the exact approval payload and digest evidence. Provenance `approval_node` `m<m>-s1` is bootstrap attribution, not an authorship claim; no control flow branches on it. Plan critics set `self_sufficiency` to `PASS` or `FAIL`; other verdict producers use `NOT_APPLICABLE`.
 
-   ```
-   codex exec \
-     "You are a cold step-plan-writer with zero prior context. Read <vision-abs>/vision.md,
-      <vision-abs>/milestone-<m>/steps.json (node <s> is your spec), and the per-repo
-      contracts in <vision-abs>/state.json. Ground truth is <planning-ref>; read tracked
-      inputs with git show <planning-ref>:<path>. Select the contract for node <s>'s repo.
-      Write a self-sufficient prose plan to
-      <vision-abs>/milestone-<m>/step-<s>/plan.md listing files to touch, exact
-      acceptance-gate commands taken verbatim from the repo contract, constraints, and
-      done-criteria. The plan is piped via stdin to a zero-context executor inside a git
-      worktree that does NOT contain VISION_DIR — inline verbatim into the plan any
-      content the executor needs from VISION_DIR or from any file not present in the
-      worktree. At minimum, enforce these three self-sufficiency checks:
-      (a) **Write-set completeness:** every file the plan's tests or gates will modify is in files-to-touch — not just the files the feature touches.
-      (b) **Authored-data verbatim:** every data shape the executor must author (fixtures, manifests, schemas) is quoted in full in the plan; mandatory when its source of truth is outside the worktree (routine under cross-repo).
-      (c) **Assertion blast-radius:** every existing assertion the new code will break is either updated in-plan or explicitly proven untouched." \
-     --sandbox workspace-write \
-     -C <repo-abs> < /dev/null
+## Phase 3 — Per step PCE-PR-C
+
+A readiness decision begins with fresh JSON status and a verbatim snapshot. A step is ready when dependencies are merged. Parallelize ready steps only with disjoint `files_touched`.
+
+1. **Plan (Codex)** — dispatch `step-plan-writer` cold with `--sandbox workspace-write`, `-C <repo-abs>`, and `< /dev/null` at the primary root to write the exact step `plan.md` directly; it uses no `--output-schema` and no `-o`. Supply graph artifacts, filtered contracts, necessary live orientation results, exact refs and read commands. Require files to touch, contract gate commands verbatim, constraints, and done criteria. Dispatch `step-plan-critic` against the verdict schema. Record each at the actual node:
+
+   ```text
+   pce log --file <LOG_PATH> --kind dispatch --node m<m>-s<s>
    ```
 
-   **Self-containment rule:** `VISION_DIR` lives under a gitignored planning directory that is absent from step worktrees, and the plan reaches the executor **via stdin** — so any content the executor needs from `VISION_DIR`, or from any file not present in the worktree, must be **inlined into the plan verbatim**. A Claude critic reviews (`self_sufficiency` gate) → iterate to `APPROVE` (cap 3, stuck-detector); every `REVISE` round is a fresh `codex exec` (never `resume`) whose prompt names the on-disk paths of the `plan.md` under revision and of the critic's `review-<n>.md`, the exact planning ref, and the applicable `git show <planning-ref>:<path>` commands; loop state lives in `state.json`.
+   Iterate fresh invocations to `APPROVE`, cap 3 with review-artifact stuck detection. At approval, digest the approved bytes and append:
 
-   When dispatching the fresh **Claude plan critic**, include the plan's exact git ref and read command under the delegation contract and require the following operational definition of `self_sufficiency: PASS`:
-   (a) **Write-set completeness:** every file the plan's tests or gates will modify is in files-to-touch — not just the files the feature touches.
-   (b) **Authored-data verbatim:** every data shape the executor must author (fixtures, manifests, schemas) is quoted in full in the plan; mandatory when its source of truth is outside the worktree (routine under cross-repo).
-   (c) **Assertion blast-radius:** every existing assertion the new code will break is either updated in-plan or explicitly proven untouched.
-   If any item is unmet, set `self_sufficiency` to `FAIL` and name the failed item in `blocking_issues`. The general inline-verbatim self-containment rule remains in force; these checks are the named minimum, not an exhaustive replacement.
-2. **Isolate and preflight** — in the step's designated repo, create branch `pce/<vision-slug>/m<m>-s<s>` off that repo's milestone integration branch head and add a worktree at `.worktrees/<vision-slug>/m<m>-s<s>`. Before dispatching the executor, run `state.json.repo_contracts.<repo-name>.preflight` inside the fresh worktree. For a consumer-repo step, also run every applicable `consumed_artifacts[].freshness_check` and assert the artifact matches the producer repo's `main`. If preflight or freshness fails, the orchestrator may make one direct environment-fix attempt only when the fix requires no commit and no change to tracked files. Re-run the failed checks after that attempt. If the fix requires a tracked-file commit, author a delta node in the owning repo and delegate it to Codex; if the one permitted environment-fix attempt does not clear the failure, escalate. Do not dispatch the executor while any preflight or freshness check is red.
-3. **Execute (Codex)** — the validated invocation shape; every path is absolute, `<verdict-schema-abs>` is the `~`-expanded absolute path of the installed verdict schema, and `<repo-abs>` is expanded to the absolute parent-repository root at dispatch time before the writable-root string is put on the command line, following the Binding-section rule for schema paths. Name the exact `<step-base-ref>` as ground truth and provide `git show <step-base-ref>:<path>` commands for tracked inputs; the executor must not infer truth from a stale checkout:
-
-   ```
-   cat "<abs path to plan.md>" | codex exec \
-     "Ground truth for tracked inputs is <step-base-ref>; read them with git show
-      <step-base-ref>:<path>. Execute the attached plan exactly. Implement it, then make ALL acceptance gates
-      specified in the plan pass, then apply the plan's version bump and create exactly
-      ONE conventional commit with the bump folded in. Write the PR body to pr-body.md
-      at the worktree root and do NOT commit it. Create NO tag, do NOT push, add NO
-      attribution footers. If the plan is infeasible as written, DO NOT work around it
-      and DO NOT open a PR — report verdict=BLOCK, root_cause=step_plan, summary
-      prefixed 'PLAN_INFEASIBLE:'." \
-     --sandbox workspace-write \
-     -c 'sandbox_workspace_write.writable_roots=["<repo-abs>/.git"]' \
-     -C <worktree-abs> \
-     --output-schema <verdict-schema-abs> \
-     -o <worktree-abs>/.codex-result.json
+   ```text
+   pce log --file <LOG_PATH> --kind planning-artifact-approved --node m<m>-s<s>
    ```
 
-   - The plan travels on **stdin**; the instruction string is the prompt.
-   - The parent repository `.git` directory must be writable because "a worktree's git metadata lives under the parent repo's `.git/`, outside the sandbox's default writable root." The writable root must cover the whole parent `.git` directory: narrowing it to `.git/worktrees/<name>` fails because a worktree commit also writes objects under `.git/objects`, its branch ref under `.git/refs/heads/`, and reflogs under `.git/logs/`. This broader residual write surface is accepted; the executor prompt already prohibits tags and pushes.
-   - The executor runs the plan's acceptance gates **before** committing; a red gate is a `REVISE`, never something to bypass.
-   - **Executor policies (binding):** exactly **one** conventional commit with the repo contract's version bump folded in; **no tag** created in the worktree; **no push**; **no attribution footers**; `pr-body.md` written at the worktree root and left **untracked**.
-   - The executor's final message conforms to the verdict schema: success ⇒ `verdict=APPROVE`, `root_cause=execution`, `self_sufficiency=NOT_APPLICABLE`; infeasible plan ⇒ `verdict=BLOCK`, `root_cause=step_plan`, `summary` prefixed `PLAN_INFEASIBLE:`. Read it from `<worktree-abs>/.codex-result.json`.
-4. **PR (you, not Codex)** — in the step's designated repo, `git push` the branch, then `gh pr create --base milestone-<m> --body-file <worktree>/pr-body.md`. Network stays out of the executor's sandbox; you own all remote operations. Copy `pr-body.md` into `VISION_DIR/milestone-<m>/step-<s>/` for the audit trail.
-5. **Review** — dispatch a Claude **PR-reviewer**: inputs = `plan.md` at its exact named ref + the PR diff read with `git diff <base>...<head>`; output = a verdict against the schema (`self_sufficiency = NOT_APPLICABLE`). The reviewer must use the supplied refs and commands, not its local checkout. `REVISE` → dispatch Codex at the exact PR head ref, with `git show <head>:<path>` and the on-disk verdict path, to address `blocking_issues` and update the PR; iterate (cap 3, stuck-detector).
-6. **Merge (you)** — on `APPROVE`: **squash-merge** the PR into `milestone-<m>`, then tag `v<version>` yourself **on the integration branch** (version read from the merged version file per the repo contract). Tagging is orchestrator work: a tag cut inside the step worktree would point at a pre-squash commit and collide with the post-merge tag. Remove the worktree, delete the branch, update `state.json`.
+   The plan is sent to its zero-context executor through standard input. `VISION_DIR` is absent from step worktrees. Quote verbatim into the plan every input the executor needs but cannot read there, including external authored data. At minimum, the critic requires: write-set completeness for every file tests or gates modify; full verbatim authored-data shapes; and every affected existing assertion updated or explicitly proven untouched. A failure sets `self_sufficiency: FAIL` and identifies the item.
+2. **Isolate and preflight** — use fresh branch/PR conventions to create `pce/<vision-slug>/m<m>-s<s>` from that repository's `milestone-<m>` head and add `.worktrees/<vision-slug>/m<m>-s<s>`. Read accepted contracts with `pce log read --file <LOG_PATH> --kind repository-contract`, select the repository, and run its exact `preflight` in the worktree. Read consumer freshness policy from current orientation, rerunning orientation if unavailable, and run every applicable check. One environment-only fix attempt is allowed only when it changes no tracked file and needs no commit; recheck it. A required tracked fix becomes a delegated delta node. Otherwise escalate. Never execute with red preflight or freshness.
+3. **Execute (Codex)** — record a `step-executor` dispatch at the actual node, then use this exact prompt text:
 
-When every step of a milestone is merged, open one PR `milestone-<m> → main` and merge it with a **merge commit** (`gh pr merge --merge`) — never squash — so the step squash-commits and their `v<version>` tags stay reachable from `main`.
+   ```text
+   Execute the attached plan exactly. Implement it, then make ALL acceptance gates specified in the plan pass. Read the current invocation's freshly derived version policy for this repository: when it requires a version bump, apply that exact bump and fold it into the step commit; when its policy is `NONE`, do not change a version. Create exactly ONE conventional commit. Write the PR body to pr-body.md at the worktree root and do NOT commit it. Create NO tag, do NOT push, add NO attribution footers. If the plan is infeasible as written, DO NOT work around it and DO NOT open a PR — report verdict=BLOCK, root_cause=step_plan, summary prefixed 'PLAN_INFEASIBLE:'.
+   ```
+
+   Supply ground-truth refs/read commands, pipe `plan.md` through standard input, run with `--sandbox workspace-write`, `-C <worktree-abs>`, `--output-schema <verdict-schema-abs>`, and `-o <worktree-abs>/.codex-result.json`, and expand every path. Make the whole parent `<repo-abs>/.git` a writable root because commit objects, refs, reflogs, and worktree metadata live there; narrowing it to worktree metadata is insufficient. Gates run before commit. Red gates produce `REVISE`. Read the structured final result from `.codex-result.json`: success uses `verdict=APPROVE`, `root_cause=execution`, and `self_sufficiency=NOT_APPLICABLE`; infeasibility uses `verdict=BLOCK`, `root_cause=step_plan`, and the required summary prefix.
+
+   - **Executor policies (binding):** exactly **one** conventional commit; read the current invocation's freshly derived version policy for the node's repository and fold in its exact version bump only when required, while a `NONE` policy makes no version change; **no tag** created in the worktree; **no push**; **no attribution footers**; `pr-body.md` written at the worktree root and left **untracked**.
+4. **PR (you)** — in the step repository, push the branch and run `gh pr create --base milestone-<m> --body-file <worktree>/pr-body.md`; network and remote operations belong to the orchestrator. Copy the untracked PR body into the step audit-artifact directory.
+5. **Review** — dispatch `pr-reviewer` with exact plan ref and `git diff <base>...<head>`, recording the dispatch at the actual node. `REVISE` dispatches Codex at the exact PR head with `git show <head>:<path>` commands and the on-disk verdict path; require it to address `blocking_issues` and update the PR. Cap 3 with review-artifact stuck detection.
+6. **Merge (you)** — on `APPROVE`, invoke `pce status --file <LOG_PATH> --vision-dir <VISION_DIR>` and quote the emitted snapshot verbatim. If the snapshot permits the merge, **squash-merge** the PR into `milestone-<m>`. Read the current invocation's freshly derived version policy for the node's repository and create its required tag on the integration branch only when that policy requires one; a `NONE` policy creates no tag. A tag is orchestrator work because a tag cut inside the step worktree would point at a pre-squash commit. Immediately before removing the worktree or deleting the branch, invoke status again and quote its emitted snapshot verbatim; then perform the removals.
+
+Phase 3 appends use:
+
+```text
+pce log --file <LOG_PATH> --kind escalation-open --node m<m>-s<s>
+pce log --file <LOG_PATH> --kind escalation-close --node m<m>-s<s>
+pce log --file <LOG_PATH> --kind key-finding --node m<m>-s<s>
+```
+
+When every step of a milestone is merged, invoke JSON status immediately before the milestone merge and quote it verbatim.
+
+When every step of a milestone is merged, open one PR `milestone-<m> → main` and merge it with a **merge commit** (`gh pr merge --merge`) — never squash — so the step squash-commits, and any tags required by the freshly derived repository version policy, stay reachable from `main`.
+
+Invoke and quote status again immediately before removing the milestone branch.
 
 ## Verdict schema
 
-Every verdict — planner critics, PR reviewers, and the executor's structured final message — conforms to the installed schema at `~/.claude/skills/pce/schemas/verdict.schema.json`. Read it once at startup and quote its JSON verbatim into every Claude critic/reviewer prompt. Executor calls pass its absolute path via `--output-schema`; graph-emitting planner calls instead pass the absolute path of the graph schema via `--output-schema`; the step-plan-writer call passes no `--output-schema` because it writes prose directly to `plan.md`. Semantics:
+Every verdict conforms to installed `~/.claude/skills/pce/schemas/verdict.schema.json`. Read it at startup, quote its JSON verbatim into Claude prompts, and pass its absolute path to executor calls. Graph calls use the graph schema; prose writers use no output schema. The installed `~/.claude/skills/pce/schemas/run-snapshot.schema.json` is verified at startup and contracts only the JSON emitted by `pce status`; verdict calls do not use it.
 
 - `verdict`: `APPROVE` | `REVISE` | `BLOCK`.
-- `self_sufficiency`: `PASS`/`FAIL` from plan critics only; `NOT_APPLICABLE` from everyone else.
+- `self_sufficiency`: `PASS`/`FAIL` from plan critics; `NOT_APPLICABLE` otherwise.
 - `root_cause`: `execution` | `step_plan` | `milestone_plan` | `vision`.
-- `blocking_issues[]`: items each with `id`, `severity` (`critical` | `major`), `location`, `problem`, `required_change`.
-- All six top-level keys are required on every verdict.
+- `blocking_issues[]`: `id`, `severity`, `location`, `problem`, `required_change`.
+- `severity`: `critical` | `major`; `non_blocking_notes` and `summary` complete the top-level response.
+- All six top-level keys are required.
 
 ## Graph schema (milestones.json / steps.json)
 
-Both graphs conform to the installed schema at `~/.claude/skills/pce/schemas/graph.schema.json`, handled exactly like the verdict schema: verified at startup, never written per-run, and passed as a `~`-expanded **absolute path** via `--output-schema` on every graph-emitting planner `codex exec` call (executor calls keep passing the verdict schema). Nodes carry `id`, `title`, `repo`, `depends_on`, `files_touched`, `summary`. One repo owns each milestone, every step inherits its milestone's repo, and every `files_touched` path is relative to that repo's root; node repos must belong to the Phase 0 validated map.
+Both graphs conform to installed `~/.claude/skills/pce/schemas/graph.schema.json`, verified at startup and passed as an absolute `--output-schema` path. The installed `~/.claude/skills/pce/schemas/run-snapshot.schema.json` is likewise startup-verified but contracts only status JSON, not graph calls. Nodes carry `id`, `title`, `repo`, `depends_on`, `files_touched`, and `summary`; repository ownership and relative paths follow Phase 0 validation.
 
 ## Routing, caps, and adaptation
 
-- **Verdict routing:** `APPROVE` → proceed. `REVISE` → loop back with `blocking_issues`. `BLOCK` → escalate.
-- **`root_cause` routing:** `execution` → Codex re-fixes from the exact PR head ref, read with `git show <head>:<path>`. `step_plan` → re-dispatch the step-planner — a fresh Codex `codex exec`, never `resume` — with the report's on-disk path, the exact planning ref, and its `git show <planning-ref>:<path>` commands (re-plan budget 2). `milestone_plan` → re-dispatch the milestone-planner — likewise a fresh Codex dispatch with the named ref and read commands — for **remaining, unmerged** work only (budget 1–2); never redo merged work. `vision` → **always escalate**.
-- **Caps:** plan↔critic 3; PR-review↔fix 3. **Stuck-detector:** two consecutive verdicts with substantially identical `blocking_issues` → short-circuit before the cap.
-- **Cap-exhaustion / BLOCK / `root_cause: vision`** → **escalate to the human**: stop, write the situation + `review-<n>.md` history to `state.json.escalations`, and report. Never proceed on an unconverged plan.
-- **Active adaptation:** when you judge reality has diverged (a gating problem needs a new step, a discovery needs a new milestone), **author the node stub yourself** (`id`, `repo`, `depends_on`, `files_touched`, and a `rationale`), record it as a delta in `state.json.deltas`, then **delegate its `plan.md` content** to a Codex planner dispatch (Phase 3 step 1). You restructure the graph; you never write the content. When a cross-component gap surfaces, route the fix to the component whose stated contract is violated, never automatically to the consumer. Record that ownership reasoning in the delta entry in `state.json.deltas`. If no stated contract decides ownership, default to the producer because boundary obligations such as parse-don't-validate live where data is emitted; the delta fix must also write the missing contract into that producer repo's documentation so the ambiguity cannot recur.
+- `APPROVE` proceeds, `REVISE` loops with blocking issues, and `BLOCK` escalates.
+- `execution` re-fixes from exact PR head; `step_plan` re-dispatches `step-plan-writer` cold with budget 2; `milestone_plan` replans remaining unmerged work cold with budget 1–2; `vision` always escalates.
+- Plan/critic and PR/fix caps are 3. Derive rounds from dispatch records. On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the cap. Derive the comparison from review artifacts; do not update separate loop state.
+- Cap exhaustion, `BLOCK`, or vision cause appends `escalation-open` and stops. Resolution appends `escalation-close`. Never proceed on an unconverged plan.
+- Runtime graph adaptation authors only a node stub (`id`, `repo`, `depends_on`, `files_touched`, `rationale`) and appends a delta. A new-stub append is `pce log --file <LOG_PATH> --kind delta --node m<m>-s<s>` using the new id. There is no second durable representation. Delegate its plan. Route cross-component gaps to the violated contract owner. If no contract decides ownership, default to the producer because parse-don't-validate obligations live where data is emitted, and require that delta to document the missing producer contract so the ambiguity cannot recur.
 
-## Conflict & recovery
+## Conflict and recovery
 
-- Unexpected merge conflict → dispatch Codex to rebase/resolve from the named base and head refs, supplying `git diff <base>...<head>` (REVISE-class); if unresolved → escalate.
-- On restart, rehydrate entirely from `state.json` + the on-disk graphs; resume at the first unfinished node. Never redo merged work.
+- Unexpected merge conflict dispatches Codex to rebase and resolve from the named base and head refs, supplying `git diff <base>...<head>`; classify the dispatch as REVISE-class for cap accounting, and escalate if unresolved.
+- Restart begins with the startup status probe and verbatim snapshot, reruns orientation, and reads graph and review artifacts as needed. It never reads or migrates a removed run format and never redoes merged work.
 
 ## Artifacts
 
-```
+```text
 VISION_DIR/
-  vision.md  milestones.json  state.json
+  vision.md  milestones.json  events.jsonl
   milestone-<m>/
     steps.json
     step-<s>/  plan.md  pr-body.md  review-<n>.md
 ```
 
-The verdict and graph schemas are not per-run artifacts; they live in the installed skill directory.
+The verdict, graph, and run-snapshot schemas, including `~/.claude/skills/pce/schemas/run-snapshot.schema.json`, are installed schemas rather than per-run artifacts.
 
 ## Done
 
-All milestones merged into `main`. Post a final summary: milestones/steps delivered, tags cut, any escalations. Then stop.
+All milestones merged into `main`. Post a final summary: milestones/steps delivered, version bumps and tags actually required by each repository's freshly derived version policy, and any escalations. Then stop.
