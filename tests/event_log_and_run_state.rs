@@ -1205,6 +1205,437 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
     assert_eq!(harness.invocations().expect("parse invocations"), expected);
 }
 
+#[test]
+fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status() {
+    let harness = CliHarness::new().expect("create CLI harness");
+    let root = harness.path().join("repo");
+    let vision_dir = root.join("planning/2026-07-27-provenance-mismatch");
+    let log = vision_dir.join("events.jsonl");
+    let artifact = vision_dir.join("milestone-3/step-m3-s3/plan.md");
+    fs::create_dir(&root).expect("create scratch repository root");
+    fs::create_dir_all(artifact.parent().expect("artifact parent"))
+        .expect("create scratch artifact parent");
+    fs::write(&artifact, b"{\"node\":\"m3-s3\",\"status\":\"approved\"}\n")
+        .expect("write approved artifact");
+
+    let contract = json!({
+        "repository": "pce",
+        "repo_root": root,
+        "stack": "Rust provenance fixture",
+        "format": "cargo fmt --all --check",
+        "lint": "cargo clippy --workspace --all-targets",
+        "typecheck": "cargo check --workspace --all-targets",
+        "test": "cargo test --workspace",
+        "build": "cargo build --workspace",
+        "preflight": "cargo check --workspace --all-targets",
+        "gates_rule": "all four fixture gates must pass",
+        "install": "none",
+        "evidence": "fixture repository contract observation"
+    })
+    .to_string();
+    let contract_log = harness
+        .run(
+            vec![
+                OsString::from("log"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--kind"),
+                OsString::from("repository-contract"),
+                OsString::from("--node"),
+                OsString::from("m3-s3"),
+            ],
+            contract.as_bytes(),
+        )
+        .expect("run repository-contract log command");
+    assert!(
+        contract_log.status.success(),
+        "repository-contract stderr: {}",
+        stderr(&contract_log)
+    );
+
+    let approval_log = harness
+        .run(
+            vec![
+                OsString::from("log"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--kind"),
+                OsString::from("planning-artifact-approved"),
+                OsString::from("--node"),
+                OsString::from("m3-s3"),
+            ],
+            br#"{"path":"planning/2026-07-27-provenance-mismatch/milestone-3/step-m3-s3/plan.md","sha256":"624073aa3bbe6d74fc77297baada273ec51cf5a191c1c12fba0d5f3a8a8f6f4c","evidence":"fixture approved artifact sha256"}"#,
+        )
+        .expect("run planning-artifact-approved log command");
+    assert!(
+        approval_log.status.success(),
+        "planning-artifact-approved stderr: {}",
+        stderr(&approval_log)
+    );
+
+    fs::write(
+        &artifact,
+        b"{\"node\":\"m3-s3\",\"status\":\"mutated-after-approval\"}\n",
+    )
+    .expect("mutate approved artifact");
+
+    let root_text = root.to_str().expect("UTF-8 root");
+    // In observe_git, when GitHub reports ZeroExactMatches or OneExactMatch with NotMerged, git is NEVER consulted for merge status - the adapter returns a reachable not-merged observation DIRECTLY without issuing any merge-base call. So if you want a not-merged step, configure NO merge-base response for it, and an unconfigured merge-base call would exit 127 loudly, which you may additionally assert as absent from the recorded invocations. Crucially, that not-merged outcome is CONTINGENT on the selected integration branch's fetch AND its branch-free rev-parse --verify FETCH_HEAD^{commit} BOTH succeeding in the shim: if either fails, git becomes Unreachable and the merge status derives to inconclusive, silently defeating a not-merged assertion.
+    let responses = vec![
+        response(
+            "git",
+            argv(["-C", root_text, "remote", "get-url", "origin"]),
+            0,
+            b"https://example.invalid/provenance-mismatch.git\n",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "fetch",
+                "--no-tags",
+                "origin",
+                "refs/heads/milestone-3",
+            ]),
+            0,
+            b"",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "rev-parse",
+                "--verify",
+                "FETCH_HEAD^{commit}",
+            ]),
+            0,
+            b"fetched-provenance-oid\n",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/milestone-3",
+            ]),
+            0,
+            b"",
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "worktree",
+                "list",
+                "--porcelain",
+            ]),
+            0,
+            format!(
+                "worktree {}/worktrees/m3-s3\nHEAD selected-provenance-worktree-oid\nbranch refs/heads/pce/provenance-mismatch/m3-s3\n",
+                root.display()
+            )
+            .as_bytes(),
+        ),
+        response(
+            "git",
+            argv([
+                "-C",
+                root_text,
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/tags/v0.1.16^{}",
+            ]),
+            1,
+            b"",
+        ),
+        response(
+            "gh",
+            argv([
+                "pr",
+                "list",
+                "--head",
+                "pce/provenance-mismatch/m3-s3",
+                "--base",
+                "milestone-3",
+                "--state",
+                "all",
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,baseRefName,state,mergeCommit",
+            ]),
+            0,
+            b"[{\"number\":303,\"headRefName\":\"pce/provenance-mismatch/m3-s3\",\"baseRefName\":\"milestone-3\",\"state\":\"OPEN\",\"mergeCommit\":null}]\n",
+        ),
+    ];
+    harness
+        .materialize_responses(&responses)
+        .expect("materialize scripted responses");
+
+    let output = harness
+        .run(
+            vec![
+                OsString::from("status"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--vision-dir"),
+                vision_dir.as_os_str().to_owned(),
+            ],
+            b"",
+        )
+        .expect("run provenance mismatch status command");
+    assert!(
+        output.status.success(),
+        "status stderr: {}",
+        stderr(&output)
+    );
+    let snapshot: Value = serde_json::from_slice(&output.stdout).expect("parse status snapshot");
+
+    let exact_fields = [
+        ("/schema_id", json!("pce.run-snapshot")),
+        ("/schema_version", json!(1)),
+        ("/repositories/0/repository", json!("pce")),
+        ("/repositories/0/fetch/state", json!("observed")),
+        (
+            "/repositories/0/fetch/observation_ref",
+            json!("fetched-provenance-oid"),
+        ),
+        ("/repositories/0/branch/name", json!("milestone-3")),
+        ("/repositories/0/branch/state", json!("present")),
+        (
+            "/repositories/0/worktree/identity",
+            json!("pce/provenance-mismatch/m3-s3"),
+        ),
+        ("/repositories/0/worktree/state", json!("present")),
+        ("/repositories/0/tag/name", json!("v0.1.16")),
+        ("/repositories/0/tag/state", json!("absent")),
+        ("/steps/0/node", json!("m3-s3")),
+        ("/steps/0/subject/milestone", json!(3)),
+        ("/steps/0/subject/step", json!(3)),
+        (
+            "/steps/0/subject/head_branch",
+            json!("pce/provenance-mismatch/m3-s3"),
+        ),
+        ("/steps/0/subject/integration_branch", json!("milestone-3")),
+        (
+            "/steps/0/subject/pull_request_selector/head",
+            json!("pce/provenance-mismatch/m3-s3"),
+        ),
+        (
+            "/steps/0/subject/pull_request_selector/base",
+            json!("milestone-3"),
+        ),
+        ("/steps/0/github/availability", json!("reachable")),
+        ("/steps/0/github/cardinality", json!("one-exact-match")),
+        ("/steps/0/github/pull_request/number", json!(303)),
+        (
+            "/steps/0/github/pull_request/selector/head",
+            json!("pce/provenance-mismatch/m3-s3"),
+        ),
+        (
+            "/steps/0/github/pull_request/selector/base",
+            json!("milestone-3"),
+        ),
+        (
+            "/steps/0/github/pull_request/state/status",
+            json!("not-merged"),
+        ),
+        ("/steps/0/git/availability", json!("reachable")),
+        ("/steps/0/git/state", json!("not-merged")),
+        ("/steps/0/merge_status", json!("not-merged")),
+        (
+            "/provenance/0/path",
+            json!("planning/2026-07-27-provenance-mismatch/milestone-3/step-m3-s3/plan.md"),
+        ),
+        (
+            "/provenance/0/approved_sha256",
+            json!("624073aa3bbe6d74fc77297baada273ec51cf5a191c1c12fba0d5f3a8a8f6f4c"),
+        ),
+        ("/provenance/0/approval_node", json!("m3-s3")),
+        ("/provenance/0/approval_sequence", json!(2)),
+        ("/provenance/0/condition/state", json!("digest-mismatch")),
+        (
+            "/provenance/0/condition/approved_sha256",
+            json!("624073aa3bbe6d74fc77297baada273ec51cf5a191c1c12fba0d5f3a8a8f6f4c"),
+        ),
+        (
+            "/provenance/0/condition/current_sha256",
+            json!("5b7a6e39eb5ddac0d9a2bc2fae5a31b563a023f8b5431969d3b1c44cd5b3b72f"),
+        ),
+        ("/resume/state", json!("candidate")),
+        ("/resume/node", json!("m3-s3")),
+        ("/resume/latest_sequence", json!(2)),
+        ("/resume/cycle_position/state", json!("no-round-dispatch")),
+        ("/recovery_digest/facts/entries/0/sequence", json!(1)),
+        ("/recovery_digest/facts/entries/0/node", json!("m3-s3")),
+        (
+            "/recovery_digest/facts/entries/0/kind",
+            json!("repository-contract"),
+        ),
+        (
+            "/recovery_digest/facts/entries/0/evidence",
+            json!("fixture repository contract observation"),
+        ),
+        ("/recovery_digest/facts/entries/1/sequence", json!(2)),
+        ("/recovery_digest/facts/entries/1/node", json!("m3-s3")),
+        (
+            "/recovery_digest/facts/entries/1/kind",
+            json!("planning-artifact-approved"),
+        ),
+        (
+            "/recovery_digest/facts/entries/1/evidence",
+            json!("fixture approved artifact sha256"),
+        ),
+    ];
+    for (pointer, expected) in exact_fields {
+        assert_eq!(at(&snapshot, pointer), &expected, "JSON pointer {pointer}");
+    }
+
+    assert_eq!(
+        at(&snapshot, "/repositories").as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(at(&snapshot, "/steps").as_array().map(Vec::len), Some(1));
+    assert_eq!(at(&snapshot, "/dispatches"), &json!([]));
+    assert_eq!(at(&snapshot, "/rounds"), &json!([]));
+    assert_eq!(at(&snapshot, "/holds"), &json!([]));
+    assert_eq!(
+        at(&snapshot, "/provenance").as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(at(&snapshot, "/recovery_digest/rounds/entries"), &json!([]));
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/rounds/elisions"),
+        &json!([])
+    );
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/open_holds/entries"),
+        &json!([])
+    );
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/open_holds/elisions"),
+        &json!([])
+    );
+    assert_eq!(at(&snapshot, "/recovery_digest/deltas/entries"), &json!([]));
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/deltas/elisions"),
+        &json!([])
+    );
+    assert_eq!(
+        at(&snapshot, "/recovery_digest/facts/entries")
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(at(&snapshot, "/recovery_digest/facts/elisions"), &json!([]));
+    let fetched_at = at(&snapshot, "/repositories/0/fetch/fetched_at")
+        .as_str()
+        .expect("fetched_at string");
+    assert!(
+        is_millisecond_z_timestamp(fetched_at),
+        "fetched_at: {fetched_at}"
+    );
+
+    let root_arg = root.as_os_str().to_owned();
+    let expected = vec![
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "remote".into(),
+                "get-url".into(),
+                "origin".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "fetch".into(),
+                "--no-tags".into(),
+                "origin".into(),
+                "refs/heads/milestone-3".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "rev-parse".into(),
+                "--verify".into(),
+                "FETCH_HEAD^{commit}".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "show-ref".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                "refs/heads/milestone-3".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg.clone(),
+                "worktree".into(),
+                "list".into(),
+                "--porcelain".into(),
+            ],
+        ),
+        invocation(
+            "git",
+            vec![
+                "-C".into(),
+                root_arg,
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                "refs/tags/v0.1.16^{}".into(),
+            ],
+        ),
+        invocation(
+            "gh",
+            argv([
+                "pr",
+                "list",
+                "--head",
+                "pce/provenance-mismatch/m3-s3",
+                "--base",
+                "milestone-3",
+                "--state",
+                "all",
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,baseRefName,state,mergeCommit",
+            ]),
+        ),
+    ];
+    let invocations = harness.invocations().expect("parse invocations");
+    assert_eq!(invocations, expected);
+    assert!(
+        !invocations.iter().any(|item| {
+            item.program == "git" && item.argv.iter().any(|argument| argument == "merge-base")
+        }),
+        "merge-base must not be invoked for an OPEN pull request"
+    );
+}
+
 fn response(program: &str, argv: Vec<OsString>, exit_code: i32, stdout: &[u8]) -> ScriptedResponse {
     ScriptedResponse {
         program: program.into(),
