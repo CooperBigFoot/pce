@@ -6,6 +6,198 @@
 # live. Idempotent: safe to re-run; symlinks are replaced via ln -sfn.
 set -euo pipefail
 
+python=${PCE_TEST_PYTHON:-/usr/bin/python3}
+if [ -x "$python" ]; then
+    python_executable=1
+else
+    python_executable=0
+fi
+
+merge_hook_settings() {
+    settings_path=$1
+    PYTHONDONTWRITEBYTECODE=1 "$python" -c '
+import json
+import os
+import stat
+import sys
+import tempfile
+
+
+def merge(settings_path, command):
+    if os.path.exists(settings_path):
+        with open(settings_path, "r", encoding="utf-8") as source:
+            settings = json.load(source)
+        existing_mode = stat.S_IMODE(os.stat(settings_path).st_mode)
+    else:
+        settings = {}
+        existing_mode = None
+
+    if not isinstance(settings, dict):
+        raise ValueError("settings document must be a JSON object")
+    hooks = settings.get("hooks")
+    if hooks is None:
+        hooks = {}
+        settings["hooks"] = hooks
+    if not isinstance(hooks, dict):
+        raise ValueError("hooks must be a JSON object")
+
+    for event_name, groups in list(hooks.items()):
+        if not isinstance(groups, list):
+            raise ValueError(f"hooks.{event_name} must be an array")
+        retained_groups = []
+        for group in groups:
+            if not isinstance(group, dict):
+                raise ValueError(f"hooks.{event_name} entries must be objects")
+            inner_hooks = group.get("hooks")
+            if inner_hooks is None:
+                retained_groups.append(group)
+                continue
+            if not isinstance(inner_hooks, list):
+                raise ValueError(f"hooks.{event_name} group hooks must be an array")
+            for hook in inner_hooks:
+                if not isinstance(hook, dict):
+                    raise ValueError(f"hooks.{event_name} inner hooks must be objects")
+            filtered = [hook for hook in inner_hooks if hook.get("command") != command]
+            removed_managed = len(filtered) != len(inner_hooks)
+            if removed_managed and not filtered:
+                continue
+            if removed_managed:
+                group["hooks"] = filtered
+            retained_groups.append(group)
+        hooks[event_name] = retained_groups
+
+    session_start = hooks.get("SessionStart")
+    if session_start is None:
+        session_start = []
+        hooks["SessionStart"] = session_start
+    if not isinstance(session_start, list):
+        raise ValueError("hooks.SessionStart must be an array")
+    session_start.append(
+        {
+            "matcher": "resume|compact",
+            "hooks": [{"type": "command", "command": command}],
+        }
+    )
+
+    encoded = (json.dumps(settings, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    parent = os.path.dirname(os.path.abspath(settings_path))
+    os.makedirs(parent, exist_ok=True)
+    descriptor = None
+    temporary_path = None
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            dir=parent, prefix=".settings.json."
+        )
+        with os.fdopen(descriptor, "wb") as destination:
+            descriptor = None
+            destination.write(encoded)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if existing_mode is not None:
+            os.chmod(temporary_path, existing_mode)
+        os.replace(temporary_path, settings_path)
+        temporary_path = None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+
+
+try:
+    merge(sys.argv[1], sys.argv[2])
+except Exception as error:
+    sys.stderr.write(f"ERROR: failed to merge hook settings: {error}\n")
+    sys.exit(1)
+' "$settings_path" '$HOME/.local/bin/pce-rehydrate'
+}
+
+verify_hook_settings() {
+    settings_path=$1
+    PYTHONDONTWRITEBYTECODE=1 "$python" -c '
+import json
+import sys
+
+
+def verify(settings_path, command):
+    with open(settings_path, "r", encoding="utf-8") as source:
+        settings = json.load(source)
+    if not isinstance(settings, dict):
+        raise ValueError("settings document must be a JSON object")
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        raise ValueError("hooks must be a JSON object")
+    session_start = hooks.get("SessionStart")
+    if not isinstance(session_start, list):
+        raise ValueError("hooks.SessionStart must be an array")
+
+    managed_count = 0
+    exact_group_count = 0
+    expected_hooks = [{"type": "command", "command": command}]
+    for group in session_start:
+        if not isinstance(group, dict):
+            raise ValueError("hooks.SessionStart entries must be objects")
+        inner_hooks = group.get("hooks")
+        if inner_hooks is not None and not isinstance(inner_hooks, list):
+            raise ValueError("hooks.SessionStart group hooks must be an array")
+        if isinstance(inner_hooks, list):
+            for hook in inner_hooks:
+                if not isinstance(hook, dict):
+                    raise ValueError("hooks.SessionStart inner hooks must be objects")
+                if hook.get("command") == command:
+                    managed_count += 1
+        if group.get("matcher") == "resume|compact" and inner_hooks == expected_hooks:
+            exact_group_count += 1
+
+    post_compact_count = 0
+    post_compact = hooks.get("PostCompact", [])
+    if not isinstance(post_compact, list):
+        raise ValueError("hooks.PostCompact must be an array")
+    for group in post_compact:
+        if not isinstance(group, dict):
+            raise ValueError("hooks.PostCompact entries must be objects")
+        inner_hooks = group.get("hooks")
+        if inner_hooks is not None and not isinstance(inner_hooks, list):
+            raise ValueError("hooks.PostCompact group hooks must be an array")
+        if isinstance(inner_hooks, list):
+            for hook in inner_hooks:
+                if not isinstance(hook, dict):
+                    raise ValueError("hooks.PostCompact inner hooks must be objects")
+                if hook.get("command") == command:
+                    post_compact_count += 1
+
+    if managed_count != 1:
+        raise ValueError(f"managed SessionStart command count is {managed_count}, expected 1")
+    if exact_group_count != 1:
+        raise ValueError(f"canonical SessionStart group count is {exact_group_count}, expected 1")
+    if post_compact_count != 0:
+        raise ValueError(f"managed PostCompact command count is {post_compact_count}, expected 0")
+
+
+try:
+    verify(sys.argv[1], sys.argv[2])
+except Exception as error:
+    sys.stderr.write(f"ERROR: hook settings verification failed: {error}\n")
+    sys.exit(1)
+' "$settings_path" '$HOME/.local/bin/pce-rehydrate'
+}
+
+if [ "${1:-}" = "--merge-hook-settings" ]; then
+    if [ "$#" -ne 2 ] || [ -z "${2:-}" ]; then
+        echo "ERROR: --merge-hook-settings requires exactly one nonempty settings path." >&2
+        exit 1
+    fi
+    if [ "$python_executable" -ne 1 ]; then
+        echo "ERROR: Python 3 interpreter is missing or not executable: $python" >&2
+        exit 1
+    fi
+    merge_hook_settings "$2"
+    exit 0
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 # --- Build the release binary -------------------------------------------------
@@ -43,10 +235,31 @@ for skill in pce to-vision domain-modeling grill-with-docs chart-program work-ti
     echo "Linked $dst -> $src"
 done
 
-# --- Post-install verification ---------------------------------------------------
+# --- Install the rehydration hook -----------------------------------------------
 status=0
 
-for link in "$BIN_DIR/pce" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DIR/domain-modeling" "$SKILLS_DIR/grill-with-docs" "$SKILLS_DIR/chart-program" "$SKILLS_DIR/work-ticket" "$SKILLS_DIR/land-ticket"; do
+HOOK_LINK="$BIN_DIR/pce-rehydrate"
+HOOK_SOURCE="$REPO_ROOT/hooks/pce-rehydrate.sh"
+if [ -e "$HOOK_LINK" ] && [ ! -L "$HOOK_LINK" ]; then
+    echo "ERROR: $HOOK_LINK already exists and is not a symlink." >&2
+    echo "Refusing to overwrite it. Move it aside, then re-run install.sh." >&2
+    exit 1
+fi
+ln -sfn "$HOOK_SOURCE" "$HOOK_LINK"
+echo "Linked $HOOK_LINK -> $HOOK_SOURCE"
+
+SETTINGS_PATH="$HOME/.claude/settings.json"
+if [ "$python_executable" -eq 1 ]; then
+    if ! merge_hook_settings "$SETTINGS_PATH"; then
+        status=1
+    fi
+else
+    echo "ERROR: Python 3 interpreter is missing or not executable: $python" >&2
+    status=1
+fi
+
+# --- Post-install verification ---------------------------------------------------
+for link in "$BIN_DIR/pce" "$HOOK_LINK" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DIR/domain-modeling" "$SKILLS_DIR/grill-with-docs" "$SKILLS_DIR/chart-program" "$SKILLS_DIR/work-ticket" "$SKILLS_DIR/land-ticket"; do
     if [ -L "$link" ] && [ -e "$link" ]; then
         echo "OK: $link resolves"
     else
@@ -54,6 +267,17 @@ for link in "$BIN_DIR/pce" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DI
         status=1
     fi
 done
+
+if [ ! -x "$HOOK_LINK" ]; then
+    echo "ERROR: $HOOK_LINK is not executable." >&2
+    status=1
+fi
+
+if [ "$python_executable" -eq 1 ]; then
+    if ! verify_hook_settings "$SETTINGS_PATH"; then
+        status=1
+    fi
+fi
 
 for skill in domain-modeling grill-with-docs chart-program work-ticket land-ticket; do
     skill_path="$SKILLS_DIR/$skill/SKILL.md"
