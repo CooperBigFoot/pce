@@ -12,12 +12,13 @@ use pce_core::{
     EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, ExactPullRequestIdentity,
     ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload, MergeSubject, NodeId,
-    PullRequestNumber, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
-    RepositoryName, RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
-    RunSnapshot, Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode, TagName,
-    TagState, TagTarget, UnparsedPayload, VisionName, VisionSlug, WorktreeIdentity, WorktreeState,
-    WriteKind, append_event, create_vision, derive_run_state, event_record_matches,
-    parse_event_line, render_human_snapshot,
+    PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
+    RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+    RepositoryObservationFailure, RepositoryObservationRef, RunSnapshot, Sha256Digest,
+    SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState, TagTarget,
+    UnparsedPayload, VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
+    append_event, create_vision, derive_run_state, event_record_matches, parse_event_line,
+    render_human_snapshot,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -320,7 +321,8 @@ fn run_status(
     let mut repositories = Vec::with_capacity(contracts.len());
     let mut runtimes = Vec::with_capacity(contracts.len());
     for contract in contracts {
-        let (observation, runtime) = observe_repository(contract, &integration_branches, selected)?;
+        let (observation, runtime) =
+            observe_repository(contract, &integration_branches, selected.subject.selector())?;
         repositories.push(observation);
         runtimes.push(runtime);
     }
@@ -599,7 +601,7 @@ fn integration_branches(nodes: &[CanonicalNode], selected_index: usize) -> Vec<S
 fn observe_repository(
     contract: RepositoryContract,
     integration_branches: &[String],
-    selected: &CanonicalNode,
+    selector: &PullRequestSelector,
 ) -> Result<(RepositoryObservation, RepositoryRuntime)> {
     let remote = verify_origin(&contract.root);
     let mut fetches = Vec::with_capacity(integration_branches.len());
@@ -615,7 +617,7 @@ fn observe_repository(
             result,
         });
     }
-    let selected_branch = selected.subject.integration_branch().as_str();
+    let selected_branch = selector.base().as_str();
     let selected_fetch = fetches
         .iter()
         .find(|fetch| fetch.branch == selected_branch)
@@ -632,7 +634,7 @@ fn observe_repository(
         },
     };
     let branch_state = probe_branch(&contract.root, selected_branch)?;
-    let head = selected.subject.head().as_str();
+    let head = selector.head().as_str();
     let worktree_state = probe_worktree(&contract.root, head)?;
     let tag_state = probe_tag(&contract.root)?;
     let observation = RepositoryObservation::new(
@@ -825,8 +827,9 @@ fn observe_authorities(
 ) -> Result<Vec<StepAuthorityObservation>> {
     let mut observations = Vec::with_capacity(nodes.len());
     for node in nodes {
-        let github = observe_github(&primary.root, &node.subject)?;
-        let git = observe_git(primary, &node.subject, &github)?;
+        let selector = node.subject.selector();
+        let github = observe_github(&primary.root, selector)?;
+        let git = observe_git(primary, selector, &github)?;
         observations.push(StepAuthorityObservation::new(
             node.node.clone(),
             github,
@@ -836,21 +839,28 @@ fn observe_authorities(
     Ok(observations)
 }
 
-fn observe_github(root: &Path, subject: &MergeSubject) -> Result<GitHubAuthorityObservation> {
-    let args = vec![
+fn github_pull_request_list_args(selector: &PullRequestSelector) -> Vec<OsString> {
+    vec![
         OsString::from("pr"),
         OsString::from("list"),
         OsString::from("--head"),
-        OsString::from(subject.head().as_str()),
+        OsString::from(selector.head().as_str()),
         OsString::from("--base"),
-        OsString::from(subject.integration_branch().as_str()),
+        OsString::from(selector.base().as_str()),
         OsString::from("--state"),
         OsString::from("all"),
         OsString::from("--limit"),
         OsString::from("1000"),
         OsString::from("--json"),
         OsString::from("number,headRefName,baseRefName,state,mergeCommit"),
-    ];
+    ]
+}
+
+fn observe_github(
+    root: &Path,
+    selector: &PullRequestSelector,
+) -> Result<GitHubAuthorityObservation> {
+    let args = github_pull_request_list_args(selector);
     let result = match execute_process("gh", &args, Some(root)) {
         ProcessAttempt::SpawnFailed { detail } => {
             return unreachable_github(&detail);
@@ -870,9 +880,7 @@ fn observe_github(root: &Path, subject: &MergeSubject) -> Result<GitHubAuthority
     for item in array {
         let parsed = parse_pull_request(item)
             .with_context(|| format!("malformed successful gh output: {}", result.detail()))?;
-        if parsed.head == subject.head().as_str()
-            && parsed.base == subject.integration_branch().as_str()
-        {
+        if parsed.head == selector.head().as_str() && parsed.base == selector.base().as_str() {
             exact.push(parsed);
         }
     }
@@ -881,7 +889,7 @@ fn observe_github(root: &Path, subject: &MergeSubject) -> Result<GitHubAuthority
         [pull_request] => {
             let number = PullRequestNumber::parse(pull_request.number)
                 .context("failed to parse GitHub pull-request number")?;
-            let identity = ExactPullRequestIdentity::from_selector(number, subject.selector());
+            let identity = ExactPullRequestIdentity::from_selector(number, selector);
             let state = match &pull_request.state {
                 ParsedPullRequestState::Merged { oid } => ExactPullRequestState::Merged {
                     squash_commit: SquashCommitOid::parse(oid)
@@ -981,10 +989,10 @@ fn require_exact_keys(object: &Map<String, Value>, expected: &[&str]) -> Result<
 
 fn observe_git(
     primary: &RepositoryRuntime,
-    subject: &MergeSubject,
+    selector: &PullRequestSelector,
     github: &GitHubAuthorityObservation,
 ) -> Result<GitAuthorityObservation> {
-    let branch = subject.integration_branch().as_str();
+    let branch = selector.base().as_str();
     let fetch = primary
         .fetches
         .iter()
@@ -1218,23 +1226,28 @@ fn classify_append_error(error: AppendError<std::io::Error>) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
     use std::io::{Cursor, Read};
     use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
 
     use pce_core::{
         ArtifactPath, BranchState, CurrentArtifactObservation, CurrentArtifactState, EventKindName,
         EventRecordFilter, GitAuthorityObservation, GitHubAuthorityObservation,
-        GitHubPullRequestObservation, GitMergeObservation, KnownPayload, NodeId, ReadKind,
-        ReadPayload, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
-        RepositoryName, RepositoryObservation, RepositoryObservationFailure, RunSnapshot,
-        Sha256Digest, StepAuthorityObservation, TagName, TagState, VisionSlug, WorktreeIdentity,
-        WorktreeState, WriteKind, derive_run_state, parse_event_line, render_human_snapshot,
+        GitHubPullRequestObservation, GitMergeObservation, KnownPayload, MilestoneMergeSubject,
+        MilestoneNode, NodeId, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
+        RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+        RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation, TagName,
+        TagState, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, derive_run_state,
+        parse_event_line, render_human_snapshot,
     };
     use tempfile::tempdir;
 
     use crate::{
-        Command, StatusFormat, parse_command, run, run_log_read, validated_snapshot_value,
+        BranchFetch, Command, FetchResult, RepositoryRuntime, StatusFormat,
+        github_pull_request_list_args, observe_git, parse_command, run, run_log_read,
+        validated_snapshot_value,
     };
 
     const DELTA_PAYLOAD: &str = r#"{"message":"append one validated event"}"#;
@@ -1270,6 +1283,75 @@ mod tests {
             fs::read(path).expect("log should be readable")
         } else {
             Vec::new()
+        }
+    }
+
+    #[test]
+    fn github_command_routing_uses_selector_exact_ordered_pair() {
+        let node = NodeId::parse("m7").expect("milestone node fixture should parse");
+        let milestone =
+            MilestoneNode::parse(&node).expect("milestone node fixture should classify");
+        let subject = MilestoneMergeSubject::derive(milestone);
+        let selector = subject.selector();
+
+        assert_eq!(
+            github_pull_request_list_args(selector),
+            [
+                "pr",
+                "list",
+                "--head",
+                "milestone-7",
+                "--base",
+                "main",
+                "--state",
+                "all",
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,baseRefName,state,mergeCommit",
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn git_fetch_selection_uses_selector_base() {
+        let node = NodeId::parse("m7").expect("milestone node fixture should parse");
+        let milestone =
+            MilestoneNode::parse(&node).expect("milestone node fixture should classify");
+        let subject = MilestoneMergeSubject::derive(milestone);
+        let selector = subject.selector();
+        let runtime = RepositoryRuntime {
+            name: RepositoryName::new("primary"),
+            root: PathBuf::from("unused"),
+            fetches: vec![
+                BranchFetch {
+                    branch: "milestone-7".to_owned(),
+                    result: FetchResult::Observed {
+                        oid: "decoy-head-fetch".to_owned(),
+                        fetched_at: SystemTime::UNIX_EPOCH,
+                    },
+                },
+                BranchFetch {
+                    branch: "main".to_owned(),
+                    result: FetchResult::Unavailable {
+                        detail: "selected-main-fetch".to_owned(),
+                    },
+                },
+            ],
+        };
+        let github = GitHubAuthorityObservation::Reachable {
+            observation: GitHubPullRequestObservation::ZeroExactMatches,
+        };
+
+        let observation =
+            observe_git(&runtime, selector, &github).expect("git observation should derive");
+
+        match observation {
+            GitAuthorityObservation::Unreachable { failure } => {
+                assert_eq!(failure.as_str(), "selected-main-fetch");
+            }
+            other => panic!("expected selected base fetch failure, got {other:?}"),
         }
     }
 
