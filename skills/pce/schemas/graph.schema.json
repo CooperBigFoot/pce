@@ -8,13 +8,23 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "title", "repo", "depends_on", "files_touched", "summary"],
+        "required": ["id", "title", "repo", "depends_on", "summary"],
         "properties": {
           "id": { "type": "string" },
           "title": { "type": "string" },
           "repo": { "type": "string" },
-          "depends_on": { "type": "array", "items": { "type": "string" } },
-          "files_touched": { "type": "array", "items": { "type": "string" } },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "reason"],
+              "properties": {
+                "id": { "type": "string", "minLength": 1 },
+                "reason": { "type": "string", "minLength": 1 }
+              }
+            }
+          },
           "summary": { "type": "string" }
         }
       }
