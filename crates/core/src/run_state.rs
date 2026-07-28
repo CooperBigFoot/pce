@@ -85,6 +85,60 @@ impl MilestoneNumber {
     }
 }
 
+/// A canonical `m<milestone>` event-log node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MilestoneNode {
+    milestone: MilestoneNumber,
+}
+
+impl MilestoneNode {
+    /// Parse a canonical milestone node from a general event-log node identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunStateError::MalformedMilestoneNode`] for a non-canonical shape,
+    /// [`RunStateError::LeadingZeroMilestoneNodeComponent`] for a leading zero,
+    /// [`RunStateError::ZeroMilestoneNodeComponent`] for zero, or
+    /// [`RunStateError::MilestoneNodeComponentOverflow`] when the component exceeds `u64`.
+    #[instrument]
+    pub fn parse(node: &NodeId) -> Result<Self, RunStateError> {
+        let raw = node.as_str();
+        let Some(component) = raw.strip_prefix('m') else {
+            return Err(RunStateError::MalformedMilestoneNode {
+                value: raw.to_owned(),
+            });
+        };
+        if component.is_empty() || component.bytes().any(|byte| !byte.is_ascii_digit()) {
+            return Err(RunStateError::MalformedMilestoneNode {
+                value: raw.to_owned(),
+            });
+        }
+        if component.len() > 1 && component.starts_with('0') {
+            return Err(RunStateError::LeadingZeroMilestoneNodeComponent {
+                value: raw.to_owned(),
+            });
+        }
+        let milestone = component.parse::<u64>().map_err(|_| {
+            RunStateError::MilestoneNodeComponentOverflow {
+                value: raw.to_owned(),
+            }
+        })?;
+        if milestone == 0 {
+            return Err(RunStateError::ZeroMilestoneNodeComponent {
+                value: raw.to_owned(),
+            });
+        }
+        Ok(Self {
+            milestone: MilestoneNumber(milestone),
+        })
+    }
+
+    /// Return the milestone number.
+    pub const fn milestone(&self) -> MilestoneNumber {
+        self.milestone
+    }
+}
+
 /// A positive step number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepNumber(u64);
@@ -154,6 +208,15 @@ impl StepNode {
     }
 }
 
+/// Either valid form of canonical event-log node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalNode {
+    /// A canonical bare milestone node.
+    Milestone(MilestoneNode),
+    /// A canonical milestone step node.
+    Step(StepNode),
+}
+
 fn parse_component(node: &str, component: &'static str, raw: &str) -> Result<u64, RunStateError> {
     if raw.len() > 1 && raw.starts_with('0') {
         return Err(RunStateError::LeadingZeroStepNodeComponent {
@@ -187,7 +250,7 @@ impl HeadBranch {
     }
 }
 
-/// A derived milestone integration branch.
+/// A derived pull-request base branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegrationBranch(String);
 
@@ -257,6 +320,45 @@ impl MergeSubject {
 
     /// Return the derived integration branch.
     pub const fn integration_branch(&self) -> &IntegrationBranch {
+        self.selector.base()
+    }
+}
+
+/// A milestone node and its convention-derived merge identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MilestoneMergeSubject {
+    node: MilestoneNode,
+    selector: PullRequestSelector,
+}
+
+impl MilestoneMergeSubject {
+    /// Derive the merge subject from a canonical milestone node.
+    pub fn derive(node: MilestoneNode) -> Self {
+        let head = HeadBranch(format!("milestone-{}", node.milestone().get()));
+        let base = IntegrationBranch("main".to_owned());
+        Self {
+            node,
+            selector: PullRequestSelector { head, base },
+        }
+    }
+
+    /// Return the canonical milestone node.
+    pub const fn node(&self) -> &MilestoneNode {
+        &self.node
+    }
+
+    /// Return the convention-derived exact pull-request selector.
+    pub const fn selector(&self) -> &PullRequestSelector {
+        &self.selector
+    }
+
+    /// Return the derived head branch.
+    pub const fn head(&self) -> &HeadBranch {
+        self.selector.head()
+    }
+
+    /// Return the derived base branch.
+    pub const fn base(&self) -> &IntegrationBranch {
         self.selector.base()
     }
 }
@@ -433,6 +535,23 @@ pub fn derive_merge_status(
     github: &GitHubAuthorityObservation,
     git: &GitAuthorityObservation,
 ) -> MergeStatus {
+    derive_merge_status_for_selector(subject.selector(), github, git)
+}
+
+/// Derive three-valued merge status from the exact milestone subject and both authorities.
+pub fn derive_milestone_merge_status(
+    subject: &MilestoneMergeSubject,
+    github: &GitHubAuthorityObservation,
+    git: &GitAuthorityObservation,
+) -> MergeStatus {
+    derive_merge_status_for_selector(subject.selector(), github, git)
+}
+
+fn derive_merge_status_for_selector(
+    selector: &PullRequestSelector,
+    github: &GitHubAuthorityObservation,
+    git: &GitAuthorityObservation,
+) -> MergeStatus {
     use GitAuthorityObservation::{Reachable as GitReachable, Unreachable as GitUnreachable};
     use GitHubAuthorityObservation::{Reachable as GhReachable, Unreachable as GhUnreachable};
     use GitHubPullRequestObservation::{MultipleExactMatches, OneExactMatch, ZeroExactMatches};
@@ -537,7 +656,7 @@ pub fn derive_merge_status(
                 observation: GitMergeObservation::NotMerged,
             },
         ) => {
-            if identity.selector() == subject.selector() {
+            if identity.selector() == selector {
                 MergeStatus::NotMerged
             } else {
                 MergeStatus::Inconclusive
@@ -561,7 +680,7 @@ pub fn derive_merge_status(
                     },
             },
         ) => {
-            if identity.selector() == subject.selector() && github_oid == git_oid {
+            if identity.selector() == selector && github_oid == git_oid {
                 MergeStatus::Merged
             } else {
                 MergeStatus::Inconclusive
@@ -2755,6 +2874,18 @@ pub enum RunStateError {
     /// Returned when a date-shaped vision basename has no suffix.
     #[error("vision directory basename has an empty slug suffix: {value}")]
     EmptyVisionSlug { value: String },
+    /// Returned when a milestone node does not have canonical `m<digits>` shape.
+    #[error("milestone node is not canonical m<milestone>: {value}")]
+    MalformedMilestoneNode { value: String },
+    /// Returned when a milestone-node component contains a leading zero.
+    #[error("milestone node component has a leading zero: {value}")]
+    LeadingZeroMilestoneNodeComponent { value: String },
+    /// Returned when a milestone-node component is numerically zero.
+    #[error("milestone node component is zero: {value}")]
+    ZeroMilestoneNodeComponent { value: String },
+    /// Returned when a milestone-node component exceeds the `u64` range.
+    #[error("milestone node component overflows u64: {value}")]
+    MilestoneNodeComponentOverflow { value: String },
     /// Returned when a node does not have canonical `m<digits>-s<digits>` shape.
     #[error("step node is not canonical m<milestone>-s<step>: {value}")]
     MalformedStepNode { value: String },
@@ -2831,16 +2962,17 @@ mod tests {
         Sha256Digest,
     };
     use crate::run_state::{
-        ArtifactProvenanceCondition, AuthorityFailure, BranchState, CurrentArtifactObservation,
-        CurrentArtifactState, CyclePosition, DispatchRoleClass, ExactPullRequestIdentity,
-        ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
-        GitHubPullRequestObservation, GitMergeObservation, HoldStatus, MergeStatus, MergeSubject,
-        PullRequestNumber, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
+        ArtifactProvenanceCondition, AuthorityFailure, BranchState, CanonicalNode,
+        CurrentArtifactObservation, CurrentArtifactState, CyclePosition, DispatchRoleClass,
+        ExactPullRequestIdentity, ExactPullRequestState, GitAuthorityObservation,
+        GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, HoldStatus,
+        MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, PullRequestNumber,
+        PullRequestSelector, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
         RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
         ResumeObservation, RoundCount, RunSnapshot, RunStateError, SquashCommitOid,
         StepAuthorityObservation, StepNode, TagName, TagState, TagTarget, VisionSlug,
         WorktreeIdentity, WorktreeState, checked_round_increment, derive_merge_status,
-        derive_run_state, recovery_command, render_human_snapshot,
+        derive_milestone_merge_status, derive_run_state, recovery_command, render_human_snapshot,
     };
 
     const RUN_SNAPSHOT_SCHEMA: &str =
@@ -2853,10 +2985,12 @@ mod tests {
         Ok(MergeSubject::derive(&slug, node))
     }
 
-    fn identity(subject: &MergeSubject) -> Result<ExactPullRequestIdentity, Box<dyn Error>> {
+    fn identity(
+        selector: &PullRequestSelector,
+    ) -> Result<ExactPullRequestIdentity, Box<dyn Error>> {
         Ok(ExactPullRequestIdentity::from_selector(
             PullRequestNumber::parse(17)?,
-            subject.selector(),
+            selector,
         ))
     }
 
@@ -2944,7 +3078,7 @@ mod tests {
             node_id,
             GitHubAuthorityObservation::Reachable {
                 observation: GitHubPullRequestObservation::OneExactMatch {
-                    identity: identity(&merge_subject)?,
+                    identity: identity(merge_subject.selector())?,
                     state: ExactPullRequestState::Merged {
                         squash_commit: squash_commit.clone(),
                     },
@@ -3163,6 +3297,71 @@ mod tests {
     }
 
     #[test]
+    fn milestone_node_parses_only_strict_canonical_identifiers() -> Result<(), Box<dyn Error>> {
+        let first = MilestoneNode::parse(&NodeId::parse("m1")?)?;
+        assert_eq!(first.milestone().get(), 1);
+
+        let maximum = MilestoneNode::parse(&NodeId::parse("m18446744073709551615")?)?;
+        assert_eq!(maximum.milestone().get(), u64::MAX);
+
+        assert!(matches!(
+            MilestoneNode::parse(&NodeId::parse("m0")?),
+            Err(RunStateError::ZeroMilestoneNodeComponent { value }) if value == "m0"
+        ));
+        for raw in ["m00", "m01"] {
+            assert!(matches!(
+                MilestoneNode::parse(&NodeId::parse(raw)?),
+                Err(RunStateError::LeadingZeroMilestoneNodeComponent { value })
+                    if value == raw
+            ));
+        }
+        for raw in ["m", "m1-s1", "M1", "x1", "mA", "m+1", "m 1", "m١"] {
+            assert!(matches!(
+                MilestoneNode::parse(&NodeId::parse(raw)?),
+                Err(RunStateError::MalformedMilestoneNode { value }) if value == raw
+            ));
+        }
+        assert!(matches!(
+            MilestoneNode::parse(&NodeId::parse("m18446744073709551616")?),
+            Err(RunStateError::MilestoneNodeComponentOverflow { value })
+                if value == "m18446744073709551616"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_node_variants_carry_typed_nodes() -> Result<(), Box<dyn Error>> {
+        let milestone = CanonicalNode::Milestone(MilestoneNode::parse(&NodeId::parse("m2")?)?);
+        let step = CanonicalNode::Step(StepNode::parse(&NodeId::parse("m2-s3")?)?);
+
+        match milestone {
+            CanonicalNode::Milestone(node) => assert_eq!(node.milestone().get(), 2),
+            CanonicalNode::Step(_) => panic!("milestone variant changed"),
+        }
+        match step {
+            CanonicalNode::Step(node) => {
+                assert_eq!(node.milestone().get(), 2);
+                assert_eq!(node.step().get(), 3);
+            }
+            CanonicalNode::Milestone(_) => panic!("step variant changed"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn derives_exact_milestone_merge_subject() -> Result<(), Box<dyn Error>> {
+        let node = MilestoneNode::parse(&NodeId::parse("m2")?)?;
+        let subject = MilestoneMergeSubject::derive(node);
+
+        assert_eq!(subject.node().milestone().get(), 2);
+        assert_eq!(subject.head().as_str(), "milestone-2");
+        assert_eq!(subject.base().as_str(), "main");
+        assert_eq!(subject.selector().head(), subject.head());
+        assert_eq!(subject.selector().base(), subject.base());
+        Ok(())
+    }
+
+    #[test]
     fn vision_slug_rejects_bad_prefix_and_empty_suffix() {
         for malformed in [
             "event-log",
@@ -3210,9 +3409,50 @@ mod tests {
     }
 
     #[test]
+    fn step_node_remains_strict_for_step_identifiers() -> Result<(), Box<dyn Error>> {
+        let step = StepNode::parse(&NodeId::parse("m1-s1")?)?;
+        assert_eq!(step.milestone().get(), 1);
+        assert_eq!(step.step().get(), 1);
+
+        assert!(matches!(
+            StepNode::parse(&NodeId::parse("m1")?),
+            Err(RunStateError::MalformedStepNode { value }) if value == "m1"
+        ));
+        assert!(matches!(
+            StepNode::parse(&NodeId::parse("m0-s1")?),
+            Err(RunStateError::ZeroStepNodeComponent {
+                value,
+                component: "milestone"
+            }) if value == "m0-s1"
+        ));
+        assert!(matches!(
+            StepNode::parse(&NodeId::parse("m1-s0")?),
+            Err(RunStateError::ZeroStepNodeComponent {
+                value,
+                component: "step"
+            }) if value == "m1-s0"
+        ));
+        assert!(matches!(
+            StepNode::parse(&NodeId::parse("m01-s1")?),
+            Err(RunStateError::LeadingZeroStepNodeComponent {
+                value,
+                component: "milestone"
+            }) if value == "m01-s1"
+        ));
+        assert!(matches!(
+            StepNode::parse(&NodeId::parse("m1-s01")?),
+            Err(RunStateError::LeadingZeroStepNodeComponent {
+                value,
+                component: "step"
+            }) if value == "m1-s01"
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn exact_identity_is_constructed_from_subject_selector() -> Result<(), Box<dyn Error>> {
         let subject = subject("2026-07-27-example", "m3-s4")?;
-        let identity = identity(&subject)?;
+        let identity = identity(subject.selector())?;
 
         assert_eq!(identity.number().get(), 17);
         assert_eq!(identity.selector(), subject.selector());
@@ -3242,7 +3482,7 @@ mod tests {
         let failure = AuthorityFailure::parse("unavailable")?;
         let squash_a = SquashCommitOid::parse("A")?;
         let squash_b = SquashCommitOid::parse("B")?;
-        let exact_identity = identity(&subject)?;
+        let exact_identity = identity(subject.selector())?;
         let github = [
             GitHubAuthorityObservation::Unreachable {
                 failure: failure.clone(),
@@ -3325,7 +3565,7 @@ mod tests {
         let other_subject = subject("2026-07-27-other", "m2-s1")?;
         let github = GitHubAuthorityObservation::Reachable {
             observation: GitHubPullRequestObservation::OneExactMatch {
-                identity: identity(&other_subject)?,
+                identity: identity(other_subject.selector())?,
                 state: ExactPullRequestState::NotMerged,
             },
         };
@@ -3335,6 +3575,65 @@ mod tests {
 
         assert_eq!(
             derive_merge_status(&merge_subject, &github, &git),
+            MergeStatus::Inconclusive
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn milestone_merge_status_uses_shared_three_valued_rules() -> Result<(), Box<dyn Error>> {
+        let subject = MilestoneMergeSubject::derive(MilestoneNode::parse(&NodeId::parse("m2")?)?);
+        let squash_a = SquashCommitOid::parse("A")?;
+        let squash_b = SquashCommitOid::parse("B")?;
+        let exact_identity = identity(subject.selector())?;
+
+        let merged_github = GitHubAuthorityObservation::Reachable {
+            observation: GitHubPullRequestObservation::OneExactMatch {
+                identity: exact_identity.clone(),
+                state: ExactPullRequestState::Merged {
+                    squash_commit: squash_a.clone(),
+                },
+            },
+        };
+        let merged_git = GitAuthorityObservation::Reachable {
+            observation: GitMergeObservation::SquashCommitReachable {
+                squash_commit: squash_a,
+            },
+        };
+        assert_eq!(
+            derive_milestone_merge_status(&subject, &merged_github, &merged_git),
+            MergeStatus::Merged
+        );
+
+        let not_merged_github = GitHubAuthorityObservation::Reachable {
+            observation: GitHubPullRequestObservation::OneExactMatch {
+                identity: exact_identity.clone(),
+                state: ExactPullRequestState::NotMerged,
+            },
+        };
+        let not_merged_git = GitAuthorityObservation::Reachable {
+            observation: GitMergeObservation::NotMerged,
+        };
+        assert_eq!(
+            derive_milestone_merge_status(&subject, &not_merged_github, &not_merged_git),
+            MergeStatus::NotMerged
+        );
+
+        let oid_mismatch_github = GitHubAuthorityObservation::Reachable {
+            observation: GitHubPullRequestObservation::OneExactMatch {
+                identity: exact_identity,
+                state: ExactPullRequestState::Merged {
+                    squash_commit: SquashCommitOid::parse("A")?,
+                },
+            },
+        };
+        let oid_mismatch_git = GitAuthorityObservation::Reachable {
+            observation: GitMergeObservation::SquashCommitReachable {
+                squash_commit: squash_b,
+            },
+        };
+        assert_eq!(
+            derive_milestone_merge_status(&subject, &oid_mismatch_github, &oid_mismatch_git),
             MergeStatus::Inconclusive
         );
         Ok(())
@@ -3812,7 +4111,7 @@ mod tests {
         let squash_commit = SquashCommitOid::parse("A")?;
         let github = GitHubAuthorityObservation::Reachable {
             observation: GitHubPullRequestObservation::OneExactMatch {
-                identity: identity(&other_subject)?,
+                identity: identity(other_subject.selector())?,
                 state: ExactPullRequestState::Merged {
                     squash_commit: squash_commit.clone(),
                 },
@@ -4132,7 +4431,7 @@ mod tests {
             NodeId::parse("m2-s1")?,
             GitHubAuthorityObservation::Reachable {
                 observation: GitHubPullRequestObservation::OneExactMatch {
-                    identity: identity(&subject)?,
+                    identity: identity(subject.selector())?,
                     state: ExactPullRequestState::NotMerged,
                 },
             },
