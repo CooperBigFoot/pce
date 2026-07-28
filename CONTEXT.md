@@ -27,6 +27,8 @@
 | Convergence signal | The computed continuation test for a gate loop: blocker count strictly decreasing with no recurring finding. It replaces the round count as the escalation trigger; the round ceiling remains only as a cost backstop. |
 | Enforcement split | The rule assigning each workflow invariant to a layer by its kind: prohibitions are command shapes enforced by hooks, verifications are computations owned by the `pce` binary, durable per-repo facts live in a tracked file read only from the default branch, and context the orchestrator must hold but cannot be relied on to fetch is injected at the harness boundary by a hook that fails open. |
 | Delivery-trust boundary | The human's assertion that a vision was delivered and merged is authoritative and never independently verified. The boundary covers only that assertion; reading the vision, event log, merge commits, and pull requests to ground a landed decision or Fog graduation is required rather than forbidden. |
+| Planning descent | The move from intent to mechanism, performed by the actor that reads the code at the ref. The orchestrator hands down what must become true; the descending actor returns the structure — write-set and genuine ordering — that only reading the source can establish. A level that has not read the code authors neither. |
+| Concurrency admission | The rule deciding whether two ready nodes dispatch together. It is a recovery path, not a prediction: overlap dispatches and the merge absorbs the rebase, because a rule that must predict safety has to be conservative, and a conservative rule never fires on real code. |
 | Domain-modeling | The active discipline of maintaining canonical terms, aliases-to-avoid, relationships, and ambiguities in committed `CONTEXT.md`, plus recording consequential durable decisions sparingly in `docs/adr/`. |
 
 ## Aliases to avoid
@@ -41,6 +43,7 @@
 | Resume instructions | Run snapshot | A written next-action narrative is a maintained claim sitting beside the facts that already imply it; the snapshot computes the resume point from the authorities instead. |
 | Round counter | Dispatch records | A maintained tally drifts from the artifacts it summarizes, which is the observed failure; a round count is the number of dispatch records for that artifact. |
 | Prompt template | Role frame | A template is copied by hand and drifts per dispatch; a frame is composed by the binary and cannot be omitted. |
+| Disjoint write-set rule | Concurrency admission | Naming the rule after its current predicate freezes the predicate; the question is what admits concurrent dispatch, and the disjointness test is one answer that never fired. |
 
 ## Relationships
 
@@ -62,6 +65,7 @@
 | Labelled assertion and the ref | The ref is the only authority and no actor's assertion is transitive, so an assertion is admissible only when it cannot be re-derived at the ref. |
 | Convergence signal and decision hold | The signal decides when a loop stops; the hold defines what an unresolved stop owes the human before it can close. |
 | Delivery-trust boundary and grill grounding | Trusting the delivery assertion does not license knowing nothing else; a landing grill recommends from the delivered artifacts and reserves trust for the merged-and-delivered claim alone. |
+| Planning descent and concurrency admission | The descent produces the structure admission consumes; a write-set authored by a level that read no code cannot support any scheduling decision, whichever rule reads it. |
 
 ## Ambiguities
 
