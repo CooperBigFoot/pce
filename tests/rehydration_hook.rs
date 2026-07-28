@@ -258,6 +258,124 @@ fn malformed_status_and_missing_digest_are_silent_noops_and_preserve_exact_argv(
     }
 }
 
+#[test]
+fn merge_hook_settings_is_isolated_structural_and_idempotent() {
+    const MANAGED_COMMAND: &str = "$HOME/.local/bin/pce-rehydrate";
+
+    let harness = CliHarness::new().expect("create CLI harness");
+    let fake_home = harness.path().join("fake-home");
+    let fake_settings = fake_home.join(".claude/settings.json");
+    fs::create_dir_all(fake_settings.parent().expect("fake settings parent"))
+        .expect("create fake settings parent");
+    let sentinel = b"{\"sentinel\":\"must remain unchanged\"}\n";
+    fs::write(&fake_settings, sentinel).expect("write fake-home sentinel");
+
+    let settings_path = harness.path().join("explicit-target/settings.json");
+    fs::create_dir_all(settings_path.parent().expect("explicit settings parent"))
+        .expect("create explicit settings parent");
+    let unrelated_session_group = json!({
+        "matcher": "startup",
+        "hooks": [{"type": "command", "command": "unrelated-session-command"}],
+        "preserved": true
+    });
+    let unrelated_event = json!([{
+        "matcher": "anything",
+        "hooks": [{"type": "command", "command": "unrelated-event-command"}]
+    }]);
+    let seeded = json!({
+        "unrelated": {"nested": ["value", 7]},
+        "hooks": {
+            "CustomEvent": unrelated_event,
+            "SessionStart": [
+                unrelated_session_group,
+                {
+                    "matcher": "resume",
+                    "hooks": [
+                        {"type": "command", "command": MANAGED_COMMAND},
+                        {"type": "command", "command": MANAGED_COMMAND},
+                        {"type": "command", "command": "preserve-neighbor"}
+                    ]
+                }
+            ],
+            "PostCompact": [{
+                "matcher": "compact",
+                "hooks": [
+                    {"type": "command", "command": MANAGED_COMMAND},
+                    {"type": "command", "command": "preserve-post-compact"}
+                ]
+            }]
+        }
+    });
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&seeded).expect("serialize seeded settings"),
+    )
+    .expect("write seeded settings");
+
+    let first = run_settings_merge(&fake_home, &settings_path, None);
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let after_first = fs::read(&settings_path).expect("read first merge result");
+    let first_value: Value =
+        serde_json::from_slice(&after_first).expect("parse first merge result");
+    assert_eq!(first_value["unrelated"], json!({"nested": ["value", 7]}));
+    assert_eq!(first_value["hooks"]["CustomEvent"], unrelated_event);
+    assert_eq!(
+        first_value["hooks"]["SessionStart"][0],
+        unrelated_session_group
+    );
+    assert_eq!(
+        first_value["hooks"]["SessionStart"][1],
+        json!({
+            "matcher": "resume",
+            "hooks": [{"type": "command", "command": "preserve-neighbor"}]
+        })
+    );
+    assert_eq!(
+        first_value["hooks"]["PostCompact"],
+        json!([{
+            "matcher": "compact",
+            "hooks": [{"type": "command", "command": "preserve-post-compact"}]
+        }])
+    );
+    assert_managed_settings_shape(&first_value, MANAGED_COMMAND);
+    assert_fake_home_untouched(&fake_home, sentinel);
+
+    let second = run_settings_merge(&fake_home, &settings_path, None);
+    assert!(
+        second.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let after_second = fs::read(&settings_path).expect("read second merge result");
+    assert_eq!(after_second, after_first);
+    let second_value: Value =
+        serde_json::from_slice(&after_second).expect("parse second merge result");
+    assert_managed_settings_shape(&second_value, MANAGED_COMMAND);
+    assert_fake_home_untouched(&fake_home, sentinel);
+
+    let before_missing_python = after_second;
+    let missing = run_settings_merge(
+        &fake_home,
+        &settings_path,
+        Some(OsStr::new("/definitely/missing/pce-test-python")),
+    );
+    assert!(!missing.status.success());
+    assert_eq!(missing.stdout, b"");
+    assert_eq!(
+        missing.stderr,
+        b"ERROR: Python 3 interpreter is missing or not executable: /definitely/missing/pce-test-python\n"
+    );
+    assert_eq!(
+        fs::read(&settings_path).expect("read target after missing Python"),
+        before_missing_python
+    );
+    assert_fake_home_untouched(&fake_home, sentinel);
+}
+
 struct Fixture {
     root: PathBuf,
     vision_dir: PathBuf,
@@ -268,6 +386,75 @@ struct RealStatusFixture {
     root: PathBuf,
     log: PathBuf,
     bin_dir: PathBuf,
+}
+
+fn run_settings_merge(fake_home: &Path, settings_path: &Path, python: Option<&OsStr>) -> Output {
+    let mut command = Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh"));
+    command
+        .arg("--merge-hook-settings")
+        .arg(settings_path)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", fake_home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(interpreter) = python {
+        command.env("PCE_TEST_PYTHON", interpreter);
+    }
+    command.output().expect("run isolated settings merge")
+}
+
+fn assert_managed_settings_shape(settings: &Value, managed_command: &str) {
+    let session_start = settings["hooks"]["SessionStart"]
+        .as_array()
+        .expect("SessionStart array");
+    let managed_count = session_start
+        .iter()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter(|hook| hook.get("command").and_then(Value::as_str) == Some(managed_command))
+        .count();
+    assert_eq!(managed_count, 1);
+
+    let canonical_group = json!({
+        "matcher": "resume|compact",
+        "hooks": [{"type": "command", "command": managed_command}]
+    });
+    assert_eq!(
+        session_start
+            .iter()
+            .filter(|group| **group == canonical_group)
+            .count(),
+        1
+    );
+
+    let post_compact_count = settings["hooks"]["PostCompact"]
+        .as_array()
+        .expect("PostCompact array")
+        .iter()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter(|hook| hook.get("command").and_then(Value::as_str) == Some(managed_command))
+        .count();
+    assert_eq!(post_compact_count, 0);
+}
+
+fn assert_fake_home_untouched(fake_home: &Path, sentinel: &[u8]) {
+    let entries = fs::read_dir(fake_home)
+        .expect("read fake home")
+        .map(|entry| entry.expect("read fake-home entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(entries, vec![OsString::from(".claude")]);
+    let claude_dir = fake_home.join(".claude");
+    let claude_entries = fs::read_dir(&claude_dir)
+        .expect("read fake .claude directory")
+        .map(|entry| entry.expect("read fake .claude entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(claude_entries, vec![OsString::from("settings.json")]);
+    assert_eq!(
+        fs::read(claude_dir.join("settings.json")).expect("read fake-home sentinel"),
+        sentinel
+    );
 }
 
 fn selected_fixture(harness: &CliHarness, name: &str, timestamp: &str) -> Fixture {
