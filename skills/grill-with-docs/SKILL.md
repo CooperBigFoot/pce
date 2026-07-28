@@ -1,61 +1,64 @@
 ---
 name: grill-with-docs
-description: Relentlessly interview the user one question at a time about a program, vision, plan, or design while maintaining the project's domain glossary and recording only durable architectural decisions. Use when shared understanding must be sharpened and preserved in CONTEXT.md and sparing ADRs.
+description: Interview the user one question at a time about a program, vision, plan, or design, keeping the project glossary current and writing an ADR only for decisions that are hard to undo. Use when a plan needs stress-testing and the shared understanding needs to survive in CONTEXT.md.
 ---
 
-# Grill with Docs
+# Grill with docs
 
-Compose the existing `/grill-me` interviewer with the `domain-modeling` discipline. This skill does **not** use, invoke, wrap, adopt, or depend on Matt Pocock's `/grilling` interviewer.
+Interview the user one question at a time until both sides understand the plan the same way. Keep the project glossary current as you go. Write an ADR only for decisions that are hard to undo.
 
-## Interview loop
+## The interview
 
-Interview the user relentlessly until the program, vision, plan, or design reaches shared understanding. Walk each branch of the decision tree and resolve dependencies between decisions one by one.
+Work down the decision tree one branch at a time. Settle the decisions that other decisions depend on first.
 
-- Ask exactly one prose question at a time.
-- Keep questions at program/vision altitude: goals, boundaries, domain concepts, durable constraints, alternatives, risks, and success conditions. Do not decompose the work into milestones, implementation steps, or code tasks.
-- With each question, provide a recommended answer and the reason for it.
-- If the codebase or committed documentation can answer a question, inspect those sources instead of asking the user. Surface contradictions between the sources and the user's stated model as a question.
-- Challenge terms that conflict with `CONTEXT.md`, sharpen vague or overloaded language into a canonical term, and use concrete edge-case scenarios to test boundaries and relationships.
-- After each answer, capture any crystallized terminology or qualifying decision before asking the next question.
+Each turn has exactly three parts:
 
-## Documentation decision rule
+1. One question, in prose.
+2. Your recommended answer.
+3. Why you recommend it, in a sentence or two. Be concise, clear, and to the point.
 
-Use the sibling `domain-modeling` skill's `CONTEXT-FORMAT.md` and `ADR-FORMAT.md` as the normative formats. Apply this rule during the interview, not as a batch at the end.
+Rules:
 
-### Update CONTEXT.md for domain language
+- Stay on goals, boundaries, concepts, constraints, alternatives, risks, and what counts as success. Do not break the work into milestones, steps, or code tasks.
+- If the codebase or the committed docs answer a question, go read them instead of asking.
+- If what you read contradicts what the user said, make that the next question.
+- If a word is vague or used two ways, pick one meaning and ask the user to confirm it.
+- Test a boundary with a concrete case, not an abstract one.
+- Never ask a question while a subagent is still gathering context. Wait for it to come back, read what it found, then ask. Otherwise you spend the user's turn on something the subagent was already answering.
 
-Update `CONTEXT.md` immediately when the conversation resolves a project-specific domain term, its tight one- or two-sentence definition, an alias to avoid, a relationship between domain concepts, or a previously flagged ambiguity. Choose one canonical term and list competing words under `_Avoid_`. Keep `CONTEXT.md` a glossary only: exclude implementation details, specifications, scratch notes, general programming concepts, and implementation decisions.
+## Writing things down
 
-Use this shape for a resolved term:
+Follow `../domain-modeling/CONTEXT-FORMAT.md` and `../domain-modeling/ADR-FORMAT.md` exactly. Write files as you go, not in one batch at the end. Do not narrate the writing: no running commentary on what might be glossary-worthy. The user hears about it in the recap.
 
-```markdown
-## Language
+### CONTEXT.md
 
-**Canonical term**:
-A one- or two-sentence definition of what the concept is.
-_Avoid_: Competing term, overloaded alias
-```
+Edit `CONTEXT.md` the moment the interview settles one of these: what a project-specific term means, which of two competing words wins, how two concepts relate, or an ambiguity that is still open.
 
-Preserve existing entries and natural subgroup headings. If no `CONTEXT.md` exists, create the root file lazily when the first term is resolved. If `CONTEXT-MAP.md` exists, use it to select the relevant context; ask which context applies only when the answer cannot be inferred.
+It is a glossary and nothing else. Keep out implementation detail, specs, scratch notes, and general programming ideas.
 
-### Create an ADR for a durable decision
+Create the root file the first time a term is settled. If `CONTEXT-MAP.md` exists, use it to pick the right context, and ask which one applies only if you cannot tell.
 
-Offer an ADR only when all three conditions are true:
+### ADRs
 
-1. The decision is hard to reverse, so changing it later has meaningful cost.
-2. The decision is surprising without context, so a future reader would reasonably ask why it was made.
-3. The decision results from a real trade-off between genuine alternatives chosen for specific reasons.
+Offer an ADR only when all three are true:
 
-If the user accepts the offer, create the ADR immediately in `docs/adr/`, scanning existing files for the highest sequence and using the next `NNNN-short-slug.md` filename. Create the directory lazily when the first ADR is needed. The default ADR is deliberately short:
+1. The decision is hard to undo.
+2. A future reader would ask why it was made.
+3. There was a real choice between real alternatives.
 
-```markdown
-# Short title of the decision
+If the user says yes, write it straight away in `docs/adr/`. Find the highest existing number and use the next one: `NNNN-short-slug.md`. Create the directory if it is missing.
 
-One to three sentences stating the context, the decision, and why it was chosen.
-```
+The default ADR is three sentences or fewer: the situation, the decision, the reason. Add status, options, or consequences only when they earn the space.
 
-Add status frontmatter, considered options, or consequences only when they add genuine value. Easy-to-reverse choices, unsurprising decisions, choices with no meaningful alternative, unresolved hypotheses, and implementation notes get no ADR. A resolved canonical term may update `CONTEXT.md` while the decision behind it separately receives an ADR only if all three ADR conditions also hold.
+No ADR for: easy reversals, obvious calls, decisions with no alternative, open questions, implementation notes.
 
-## Finish
+A settled term goes in `CONTEXT.md` on its own. It needs an ADR only if the three tests above also pass.
 
-Finish only after every relevant branch has been resolved or explicitly left open. Recap the resulting shared understanding, list the `CONTEXT.md` entries updated, list any ADRs created, and identify unresolved questions without inventing answers.
+## Ending
+
+Stop when every branch is resolved or deliberately left open. Then give:
+
+- What you both now understand.
+- Which `CONTEXT.md` entries changed.
+- Which ADRs you wrote.
+- What is still open, without guessing at answers.
