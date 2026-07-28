@@ -7,18 +7,20 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::{
-    AppendError, ArtifactPath, AuthorityFailure, BranchState, CreationDate,
-    CurrentArtifactObservation, CurrentArtifactState, EventBodyRef, EventKindName, EventLogTail,
+    AppendError, ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode,
+    CreationDate, CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate,
+    DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail,
     EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, ExactPullRequestIdentity,
     ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, KnownPayload, MergeSubject, NodeId,
-    PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
-    RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RunSnapshot, Sha256Digest,
-    SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState, TagTarget,
-    UnparsedPayload, VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
-    append_event, create_vision, derive_run_state, event_record_matches, parse_event_line,
-    render_human_snapshot,
+    GitHubPullRequestObservation, GitMergeObservation, KnownPayload, MergeStatus, MergeSubject,
+    MilestoneMergeSubject, MilestoneNode, NodeId, OrderingEdge, PullRequestNumber,
+    PullRequestSelector, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
+    RepositoryName, RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
+    RunSnapshot, Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode, TagName,
+    TagState, TagTarget, UnparsedPayload, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
+    WorktreeState, WriteKind, append_event, compute_dispatchability, create_vision,
+    derive_merge_status, derive_milestone_merge_status, derive_run_state, event_record_matches,
+    parse_event_line, render_human_snapshot,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -27,7 +29,8 @@ const USAGE: &str = concat!(
     "usage: pce vision new \"<name>\"\n",
     "       pce log --file <LOG_PATH> --kind <KIND> --node <NODE>\n",
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
-    "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]"
+    "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
+    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> --policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> [--policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> ...]"
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
@@ -52,6 +55,12 @@ enum Command {
         recovery_log_path: RecoveryLogPath,
         vision_dir: PathBuf,
         format: StatusFormat,
+    },
+    Ready {
+        log_path: PathBuf,
+        recovery_log_path: RecoveryLogPath,
+        vision_dir: PathBuf,
+        version_policies: Vec<(RepositoryName, VersionPolicy)>,
     },
 }
 
@@ -147,6 +156,17 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             vision_dir,
             format,
         } => run_status(&log_path, &recovery_log_path, &vision_dir, format),
+        Command::Ready {
+            log_path,
+            recovery_log_path,
+            vision_dir,
+            version_policies,
+        } => run_ready(
+            &log_path,
+            &recovery_log_path,
+            &vision_dir,
+            &version_policies,
+        ),
     }
 }
 
@@ -159,6 +179,7 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         }
         [verb, action, rest @ ..] if verb == "log" => parse_log_command(action, rest),
         [verb, action, rest @ ..] if verb == "status" => parse_status_command(action, rest),
+        [verb, rest @ ..] if verb == "ready" => parse_ready_command(rest),
         _ => bail!(USAGE),
     }
 }
@@ -248,6 +269,68 @@ fn parse_status_format(trailing: &[String]) -> Result<StatusFormat> {
         [mode] if mode == "--human" => Ok(StatusFormat::Human),
         _ => bail!(USAGE),
     }
+}
+
+fn parse_ready_command(args: &[String]) -> Result<Command> {
+    let [
+        file_flag,
+        raw_path,
+        vision_flag,
+        raw_vision_dir,
+        policies @ ..,
+    ] = args
+    else {
+        bail!(USAGE);
+    };
+    if file_flag != "--file"
+        || vision_flag != "--vision-dir"
+        || !is_value(raw_path)
+        || !is_value(raw_vision_dir)
+        || policies.is_empty()
+        || !policies.len().is_multiple_of(2)
+    {
+        bail!(USAGE);
+    }
+
+    let mut version_policies = Vec::<(RepositoryName, VersionPolicy)>::new();
+    for pair in policies.chunks_exact(2) {
+        if pair[0] != "--policy" || !is_value(&pair[1]) {
+            bail!(USAGE);
+        }
+        let raw_policy = &pair[1];
+        if raw_policy.matches('=').count() != 1 {
+            bail!("ready policy must contain exactly one `=`");
+        }
+        let (raw_repository, raw_value) = raw_policy
+            .split_once('=')
+            .context("ready policy must contain exactly one `=`")?;
+        if raw_repository.is_empty() {
+            bail!("ready policy repository must not be empty");
+        }
+        let repository = RepositoryName::new(raw_repository);
+        if version_policies
+            .iter()
+            .any(|(existing, _)| existing == &repository)
+        {
+            bail!(
+                "duplicate ready policy for repository {}",
+                repository.as_str()
+            );
+        }
+        let policy = match raw_value {
+            "NONE" => VersionPolicy::None,
+            "SERIALIZE_DISPATCHES" => VersionPolicy::SerializeDispatches,
+            _ => bail!("unknown ready policy {raw_value:?}"),
+        };
+        version_policies.push((repository, policy));
+    }
+
+    Ok(Command::Ready {
+        log_path: PathBuf::from(raw_path),
+        recovery_log_path: RecoveryLogPath::new(raw_path),
+        vision_dir: PathBuf::from(raw_vision_dir),
+        version_policies,
+    })
 }
 
 fn is_value(raw: &str) -> bool {
@@ -349,6 +432,317 @@ fn run_status(
             write_human_stdout(&rendered)
         }
     }
+}
+
+#[derive(Debug)]
+struct DispatchGraph {
+    nodes: Vec<DispatchGraphNode>,
+    edges: Vec<OrderingEdge>,
+}
+
+#[derive(Debug)]
+struct DispatchGraphNode {
+    node_id: NodeId,
+    node: DispatchNode,
+    repository: RepositoryName,
+}
+
+fn run_ready(
+    log_path: &Path,
+    recovery_log_path: &RecoveryLogPath,
+    vision_dir: &Path,
+    version_policies: &[(RepositoryName, VersionPolicy)],
+) -> Result<()> {
+    let parsed_lines = read_event_log(log_path)?;
+    let records = parsed_lines
+        .iter()
+        .map(|line| line.record.clone())
+        .collect::<Vec<_>>();
+    let contracts = repository_contracts(&records)?;
+    let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
+    let vision = vision_slug(vision_dir)?;
+
+    let (approval_sequence, artifact_path) = records
+        .iter()
+        .filter_map(|record| {
+            let EventBodyRef::Known(KnownPayload::PlanningArtifactApproved(payload)) =
+                record.body_ref()
+            else {
+                return None;
+            };
+            Some((record.sequence(), payload.path.clone()))
+        })
+        .max_by_key(|(sequence, _)| sequence.get())
+        .context("event log contains no planning-artifact-approved record")?;
+
+    let artifacts = current_artifacts(&records, &contracts[primary_index].root)?;
+    let state = derive_run_state(&records, &vision, recovery_log_path, &artifacts, &[], &[])
+        .context("failed to derive readiness provenance and dispatch history")?;
+    let provenance = state
+        .provenance()
+        .iter()
+        .find(|item| item.approval_sequence() == approval_sequence && item.path() == &artifact_path)
+        .context("latest planning-artifact approval has no derived provenance")?;
+    compute_dispatchability(provenance, &[], &[], &[], &[])
+        .context("selected planning artifact failed preliminary provenance check")?;
+
+    let recorded_path = PathBuf::from(artifact_path.as_str());
+    let resolved_path = if recorded_path.is_absolute() {
+        recorded_path
+    } else {
+        contracts[primary_index].root.join(recorded_path)
+    };
+    let graph_bytes = std::fs::read(&resolved_path)
+        .with_context(|| format!("failed to read selected graph {}", resolved_path.display()))?;
+    let graph = parse_dispatch_graph(&graph_bytes).with_context(|| {
+        format!(
+            "selected artifact {} is not a conforming graph",
+            artifact_path.as_str()
+        )
+    })?;
+
+    for graph_node in &graph.nodes {
+        let matches = contracts
+            .iter()
+            .filter(|contract| contract.name == graph_node.repository)
+            .count();
+        if matches != 1 {
+            bail!(
+                "expected exactly one repository contract for graph repository {}, found {}",
+                graph_node.repository.as_str(),
+                matches
+            );
+        }
+    }
+
+    let candidates = graph
+        .nodes
+        .iter()
+        .filter(|graph_node| !already_dispatched(graph_node, state.dispatches()))
+        .map(|graph_node| {
+            DispatchCandidate::new(graph_node.node.clone(), graph_node.repository.clone())
+        })
+        .collect::<Vec<_>>();
+
+    let mut merge_statuses = Vec::<(DispatchNode, MergeStatus)>::with_capacity(graph.nodes.len());
+    for graph_node in &graph.nodes {
+        let contract = contracts
+            .iter()
+            .find(|contract| contract.name == graph_node.repository)
+            .context("graph repository contract disappeared after resolution")?;
+        let (selector, altitude) = match &graph_node.node {
+            DispatchNode::Milestone(node) => {
+                let subject = MilestoneMergeSubject::derive(node.clone());
+                (
+                    subject.selector().clone(),
+                    ReadyAltitude::Milestone(subject),
+                )
+            }
+            DispatchNode::Step(node) => {
+                let subject = MergeSubject::derive(&vision, node.clone());
+                (subject.selector().clone(), ReadyAltitude::Step(subject))
+            }
+        };
+        let (_, runtime) = observe_repository(
+            RepositoryContract {
+                name: contract.name.clone(),
+                root: contract.root.clone(),
+            },
+            &[selector.base().as_str().to_owned()],
+            &selector,
+        )
+        .with_context(|| {
+            format!(
+                "failed to observe graph node {} in repository {}",
+                graph_node.node_id.as_str(),
+                graph_node.repository.as_str()
+            )
+        })?;
+        let github = observe_github(&runtime.root, &selector)?;
+        let git = observe_git(&runtime, &selector, &github)?;
+        let status = match altitude {
+            ReadyAltitude::Milestone(subject) => {
+                derive_milestone_merge_status(&subject, &github, &git)
+            }
+            ReadyAltitude::Step(subject) => derive_merge_status(&subject, &github, &git),
+        };
+        merge_statuses.push((graph_node.node.clone(), status));
+    }
+
+    let results = compute_dispatchability(
+        provenance,
+        &candidates,
+        &graph.edges,
+        &merge_statuses,
+        version_policies,
+    )
+    .context("failed to compute graph dispatchability")?;
+    let rendered = results
+        .iter()
+        .map(|result| {
+            let (classification, candidate) = match result {
+                DispatchabilityResult::Dispatchable { candidate } => ("ready", candidate),
+                DispatchabilityResult::Waiting { candidate } => ("waiting", candidate),
+                DispatchabilityResult::DependencyInconclusive { candidate } => {
+                    ("dependency-inconclusive", candidate)
+                }
+            };
+            serde_json::json!({
+                "classification": classification,
+                "node": dispatch_node_id(candidate.node()),
+                "repository": candidate.repository().as_str(),
+            })
+        })
+        .collect::<Vec<_>>();
+    write_json_stdout(&serde_json::json!({ "results": rendered }))
+}
+
+enum ReadyAltitude {
+    Milestone(MilestoneMergeSubject),
+    Step(MergeSubject),
+}
+
+fn already_dispatched(
+    graph_node: &DispatchGraphNode,
+    dispatches: &[pce_core::DispatchObservation],
+) -> bool {
+    match &graph_node.node {
+        DispatchNode::Step(_) => dispatches.iter().any(|dispatch| {
+            dispatch.node() == &graph_node.node_id
+                && DispatchRoleClass::classify(dispatch.role()) == DispatchRoleClass::Execution
+        }),
+        DispatchNode::Milestone(node) => dispatches.iter().any(|dispatch| {
+            DispatchRoleClass::classify(dispatch.role()) == DispatchRoleClass::PlanProducing
+                && dispatch.role().as_str() == "step-planner"
+                && StepNode::parse(dispatch.node())
+                    .is_ok_and(|step| step.milestone() == node.milestone())
+        }),
+    }
+}
+
+fn dispatch_node_id(node: &DispatchNode) -> String {
+    match node {
+        DispatchNode::Milestone(node) => format!("m{}", node.milestone().get()),
+        DispatchNode::Step(node) => {
+            format!("m{}-s{}", node.milestone().get(), node.step().get())
+        }
+    }
+}
+
+fn parse_dispatch_graph(bytes: &[u8]) -> Result<DispatchGraph> {
+    let value: Value = serde_json::from_slice(bytes).context("graph is not valid JSON")?;
+    let root = value.as_object().context("graph root must be an object")?;
+    require_exact_keys(root, &["nodes"]).context("graph root has invalid keys")?;
+    let raw_nodes = root["nodes"]
+        .as_array()
+        .context("graph nodes must be an array")?;
+    let mut nodes = Vec::<DispatchGraphNode>::with_capacity(raw_nodes.len());
+
+    for (index, value) in raw_nodes.iter().enumerate() {
+        let object = value
+            .as_object()
+            .with_context(|| format!("graph node {index} must be an object"))?;
+        require_exact_keys(object, &["id", "title", "repo", "depends_on", "summary"])
+            .with_context(|| format!("graph node {index} has invalid keys"))?;
+        let raw_id = object["id"]
+            .as_str()
+            .with_context(|| format!("graph node {index} id must be a string"))?;
+        let node_id = NodeId::parse(raw_id)
+            .with_context(|| format!("graph node {index} id must be non-empty"))?;
+        if nodes.iter().any(|node| node.node_id == node_id) {
+            bail!("graph contains duplicate node id {raw_id}");
+        }
+        object["title"]
+            .as_str()
+            .with_context(|| format!("graph node {raw_id} title must be a string"))?;
+        let raw_repository = object["repo"]
+            .as_str()
+            .with_context(|| format!("graph node {raw_id} repo must be a string"))?;
+        if raw_repository.is_empty() {
+            bail!("graph node {raw_id} repo must be non-empty");
+        }
+        object["summary"]
+            .as_str()
+            .with_context(|| format!("graph node {raw_id} summary must be a string"))?;
+        object["depends_on"]
+            .as_array()
+            .with_context(|| format!("graph node {raw_id} depends_on must be an array"))?;
+
+        let milestone = MilestoneNode::parse(&node_id);
+        let step = StepNode::parse(&node_id);
+        let node = match (milestone, step) {
+            (Ok(node), Err(_)) => DispatchNode::Milestone(node),
+            (Err(_), Ok(node)) => DispatchNode::Step(node),
+            _ => bail!("graph node id {raw_id:?} is not exactly one canonical node form"),
+        };
+        nodes.push(DispatchGraphNode {
+            node_id,
+            node,
+            repository: RepositoryName::new(raw_repository),
+        });
+    }
+
+    let mut edges = Vec::<OrderingEdge>::new();
+    for (index, value) in raw_nodes.iter().enumerate() {
+        let object = value
+            .as_object()
+            .context("previously parsed graph node must remain an object")?;
+        let dependencies = object["depends_on"]
+            .as_array()
+            .context("previously parsed dependencies must remain an array")?;
+        for (dependency_index, dependency) in dependencies.iter().enumerate() {
+            let dependency = dependency.as_object().with_context(|| {
+                format!(
+                    "graph node {} dependency {dependency_index} must be an object",
+                    nodes[index].node_id.as_str()
+                )
+            })?;
+            require_exact_keys(dependency, &["id", "reason"]).with_context(|| {
+                format!(
+                    "graph node {} dependency {dependency_index} has invalid keys",
+                    nodes[index].node_id.as_str()
+                )
+            })?;
+            let raw_id = dependency["id"].as_str().with_context(|| {
+                format!(
+                    "graph node {} dependency {dependency_index} id must be a string",
+                    nodes[index].node_id.as_str()
+                )
+            })?;
+            if raw_id.is_empty() {
+                bail!(
+                    "graph node {} dependency {dependency_index} id must be non-empty",
+                    nodes[index].node_id.as_str()
+                );
+            }
+            let reason = dependency["reason"].as_str().with_context(|| {
+                format!(
+                    "graph node {} dependency {dependency_index} reason must be a string",
+                    nodes[index].node_id.as_str()
+                )
+            })?;
+            if reason.is_empty() {
+                bail!(
+                    "graph node {} dependency {dependency_index} reason must be non-empty",
+                    nodes[index].node_id.as_str()
+                );
+            }
+            let dependency_node = nodes
+                .iter()
+                .find(|node| node.node_id.as_str() == raw_id)
+                .with_context(|| {
+                    format!(
+                        "graph node {} has dangling dependency id {raw_id}",
+                        nodes[index].node_id.as_str()
+                    )
+                })?;
+            edges.push(OrderingEdge::new(
+                nodes[index].node.clone(),
+                dependency_node.node.clone(),
+            ));
+        }
+    }
+    Ok(DispatchGraph { nodes, edges })
 }
 
 #[derive(Debug)]
@@ -1239,15 +1633,15 @@ mod tests {
         MilestoneNode, NodeId, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
         RepositoryFetchObservation, RepositoryName, RepositoryObservation,
         RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation, TagName,
-        TagState, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, derive_run_state,
-        parse_event_line, render_human_snapshot,
+        TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
+        derive_run_state, parse_event_line, render_human_snapshot,
     };
     use tempfile::tempdir;
 
     use crate::{
-        BranchFetch, Command, FetchResult, RepositoryRuntime, StatusFormat,
-        github_pull_request_list_args, observe_git, parse_command, run, run_log_read,
-        validated_snapshot_value,
+        BranchFetch, Command, DispatchGraphNode, DispatchNode, FetchResult, RepositoryRuntime,
+        StatusFormat, already_dispatched, github_pull_request_list_args, observe_git,
+        parse_command, parse_dispatch_graph, run, run_log_read, validated_snapshot_value,
     };
 
     const DELTA_PAYLOAD: &str = r#"{"message":"append one validated event"}"#;
@@ -1621,6 +2015,281 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn ready_parser_accepts_exact_ordered_typed_policies() {
+        let command = parse_command(
+            [
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+                "pce=NONE",
+                "--policy",
+                "docs=SERIALIZE_DISPATCHES",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("exact ready command should parse");
+        let Command::Ready {
+            log_path,
+            recovery_log_path,
+            vision_dir,
+            version_policies,
+        } = command
+        else {
+            panic!("typed ready command expected");
+        };
+        assert_eq!(log_path, PathBuf::from("events.jsonl"));
+        assert_eq!(recovery_log_path.as_str(), "events.jsonl");
+        assert_eq!(
+            VisionSlug::parse(
+                vision_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("vision basename")
+            )
+            .expect("vision slug")
+            .as_str(),
+            "example"
+        );
+        assert_eq!(
+            version_policies,
+            vec![
+                (RepositoryName::new("pce"), VersionPolicy::None),
+                (
+                    RepositoryName::new("docs"),
+                    VersionPolicy::SerializeDispatches
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ready_parser_rejects_every_non_contract_shape() {
+        let invalid = [
+            vec![
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+            ],
+            vec![
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+            ],
+            vec![
+                "ready",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--file",
+                "events.jsonl",
+                "--policy",
+                "pce=NONE",
+            ],
+            vec![
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+                "=NONE",
+            ],
+            vec![
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+                "pceNONE",
+            ],
+            vec![
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+                "pce=NONE=NONE",
+            ],
+            vec![
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+                "pce=none",
+            ],
+            vec![
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+                "pce=NONE",
+                "--policy",
+                "pce=SERIALIZE_DISPATCHES",
+            ],
+            vec![
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+                "pce=NONE",
+                "extra",
+            ],
+            vec![
+                "ready",
+                "--file",
+                "--events",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+                "pce=NONE",
+            ],
+            vec![
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "--vision",
+                "--policy",
+                "pce=NONE",
+            ],
+            vec![
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+                "--value",
+            ],
+        ];
+        for args in invalid {
+            assert!(
+                parse_command(args.into_iter().map(str::to_owned)).is_err(),
+                "invalid ready arguments must fail"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_graph_parser_preserves_altitudes_and_reason_edges() {
+        let graph = parse_dispatch_graph(
+            br#"{"nodes":[{"id":"m1","title":"M","repo":"pce","depends_on":[],"summary":"M"},{"id":"m1-s1","title":"S1","repo":"pce","depends_on":[],"summary":"S1"},{"id":"m1-s2","title":"S2","repo":"docs","depends_on":[{"id":"m1","reason":"milestone base"},{"id":"m1-s1","reason":"required API"}],"summary":"S2"}]}"#,
+        )
+        .expect("closed graph should parse");
+        assert!(matches!(graph.nodes[0].node, DispatchNode::Milestone(_)));
+        assert!(matches!(graph.nodes[1].node, DispatchNode::Step(_)));
+        assert_eq!(graph.edges.len(), 2);
+        assert_eq!(graph.edges[0].dependent(), &graph.nodes[2].node);
+        assert_eq!(graph.edges[0].dependency(), &graph.nodes[0].node);
+        assert_eq!(graph.edges[1].dependent(), &graph.nodes[2].node);
+        assert_eq!(graph.edges[1].dependency(), &graph.nodes[1].node);
+    }
+
+    #[test]
+    fn dispatch_graph_parser_rejects_closed_shape_violations() {
+        let fixtures: &[&[u8]] = &[
+            b"{",
+            b"[]",
+            br#"{"nodes":[],"extra":1}"#,
+            br#"{"nodes":[{"id":"m1","title":"M","repo":"pce","depends_on":[],"summary":"M","extra":1}]}"#,
+            br#"{"nodes":[{"id":"m1","title":"M","repo":"pce","depends_on":[]}]}"#,
+            br#"{"nodes":[{"id":"m1","title":1,"repo":"pce","depends_on":[],"summary":"M"}]}"#,
+            br#"{"nodes":[{"id":"m1","title":"M","repo":"pce","depends_on":[{"id":"","reason":"x"}],"summary":"M"}]}"#,
+            br#"{"nodes":[{"id":"m1","title":"M","repo":"pce","depends_on":[{"id":"m1","reason":""}],"summary":"M"}]}"#,
+            br#"{"nodes":[{"id":"m1","title":"M","repo":"pce","depends_on":[{"id":"m1","reason":"x","extra":1}],"summary":"M"}]}"#,
+            br#"{"nodes":[{"id":"m1","title":"M","repo":"pce","depends_on":[],"summary":"M"},{"id":"m1","title":"M","repo":"pce","depends_on":[],"summary":"M"}]}"#,
+            br#"{"nodes":[{"id":"m1","title":"M","repo":"pce","depends_on":[{"id":"m2","reason":"x"}],"summary":"M"}]}"#,
+            br#"{"nodes":[{"id":"not-canonical","title":"M","repo":"pce","depends_on":[],"summary":"M"}]}"#,
+        ];
+        for fixture in fixtures {
+            assert!(
+                parse_dispatch_graph(fixture).is_err(),
+                "malformed graph fixture must fail: {}",
+                String::from_utf8_lossy(fixture)
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_history_filter_is_altitude_and_role_specific() {
+        let lines = [
+            r#"{"sequence":1,"timestamp":"2026-07-28T12:00:00.000Z","kind":"dispatch","node":"m3-s1","payload":{"role":"step-executor","ref":"1111111111111111111111111111111111111111","evidence":"execution"}}"#,
+            r#"{"sequence":2,"timestamp":"2026-07-28T12:00:01.000Z","kind":"dispatch","node":"m3-s2","payload":{"role":"step-plan-writer","ref":"2222222222222222222222222222222222222222","evidence":"planning"}}"#,
+            r#"{"sequence":3,"timestamp":"2026-07-28T12:00:02.000Z","kind":"dispatch","node":"m3-s2","payload":{"role":"step-critic","ref":"3333333333333333333333333333333333333333","evidence":"critique"}}"#,
+            r#"{"sequence":4,"timestamp":"2026-07-28T12:00:03.000Z","kind":"dispatch","node":"m4-s1","payload":{"role":"step-planner","ref":"4444444444444444444444444444444444444444","evidence":"descent"}}"#,
+            r#"{"sequence":5,"timestamp":"2026-07-28T12:00:04.000Z","kind":"dispatch","node":"m4-s2","payload":{"role":"milestone-planner","ref":"5555555555555555555555555555555555555555","evidence":"other planning"}}"#,
+            r#"{"sequence":6,"timestamp":"2026-07-28T12:00:05.000Z","kind":"dispatch","node":"m5-s1","payload":{"role":"step-plan-writer","ref":"6666666666666666666666666666666666666666","evidence":"other planning"}}"#,
+            r#"{"sequence":7,"timestamp":"2026-07-28T12:00:06.000Z","kind":"dispatch","node":"m6-s1","payload":{"role":"step-critic","ref":"7777777777777777777777777777777777777777","evidence":"critique"}}"#,
+        ];
+        let records = lines
+            .iter()
+            .map(|line| parse_event_line(line).expect("dispatch fixture should parse"))
+            .collect::<Vec<_>>();
+        let state = derive_run_state(
+            &records,
+            &VisionSlug::parse("2026-07-28-example").expect("vision"),
+            &RecoveryLogPath::new("events.jsonl"),
+            &[],
+            &[],
+            &[],
+        )
+        .expect("dispatch projection should derive");
+        let graph_node = |raw: &str, node: DispatchNode| DispatchGraphNode {
+            node_id: NodeId::parse(raw).expect("node id"),
+            node,
+            repository: RepositoryName::new("pce"),
+        };
+        assert!(already_dispatched(
+            &graph_node(
+                "m3-s1",
+                DispatchNode::Step(
+                    pce_core::StepNode::parse(&NodeId::parse("m3-s1").expect("node"))
+                        .expect("step")
+                )
+            ),
+            state.dispatches()
+        ));
+        assert!(!already_dispatched(
+            &graph_node(
+                "m3-s2",
+                DispatchNode::Step(
+                    pce_core::StepNode::parse(&NodeId::parse("m3-s2").expect("node"))
+                        .expect("step")
+                )
+            ),
+            state.dispatches()
+        ));
+        for milestone in [4_u64, 5, 6] {
+            let raw = format!("m{milestone}");
+            let node_id = NodeId::parse(&raw).expect("node");
+            let graph_node = graph_node(
+                &raw,
+                DispatchNode::Milestone(MilestoneNode::parse(&node_id).expect("milestone")),
+            );
+            assert_eq!(
+                already_dispatched(&graph_node, state.dispatches()),
+                milestone == 4
+            );
+        }
     }
 
     #[test]
