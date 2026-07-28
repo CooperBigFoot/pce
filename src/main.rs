@@ -390,7 +390,7 @@ fn run_status(
     let contracts = repository_contracts(&records)?;
     let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
     let vision = vision_slug(vision_dir)?;
-    let artifacts = current_artifacts(&records, &contracts[primary_index].root)?;
+    let (artifacts, _) = current_artifacts(&records, &contracts[primary_index].root)?;
     let canonical_nodes = canonical_nodes(&records, &vision)?;
     let selected_index = canonical_nodes
         .iter()
@@ -462,7 +462,7 @@ fn run_ready(
     let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
     let vision = vision_slug(vision_dir)?;
 
-    let (approval_sequence, artifact_path) = records
+    let mut approvals = records
         .iter()
         .filter_map(|record| {
             let EventBodyRef::Known(KnownPayload::PlanningArtifactApproved(payload)) =
@@ -472,34 +472,49 @@ fn run_ready(
             };
             Some((record.sequence(), payload.path.clone()))
         })
-        .max_by_key(|(sequence, _)| sequence.get())
-        .context("event log contains no planning-artifact-approved record")?;
+        .collect::<Vec<_>>();
+    approvals.sort_by(|(left, _), (right, _)| right.get().cmp(&left.get()));
 
-    let artifacts = current_artifacts(&records, &contracts[primary_index].root)?;
+    let (artifacts, artifact_bytes) = current_artifacts(&records, &contracts[primary_index].root)?;
     let state = derive_run_state(&records, &vision, recovery_log_path, &artifacts, &[], &[])
         .context("failed to derive readiness provenance and dispatch history")?;
+    let mut selected = None;
+    for (approval_sequence, artifact_path) in approvals {
+        let retained = artifact_bytes
+            .iter()
+            .find(|artifact| artifact.path == artifact_path)
+            .context("approved artifact has no retained current observation")?;
+        let Some(bytes) = retained.bytes.as_deref() else {
+            tracing::info!(
+                artifact_path = artifact_path.as_str(),
+                reason = "artifact missing",
+                "skipping approved artifact candidate"
+            );
+            continue;
+        };
+        match parse_dispatch_graph(bytes) {
+            Ok(graph) => {
+                selected = Some((approval_sequence, artifact_path, graph));
+                break;
+            }
+            Err(error) => {
+                tracing::info!(
+                    artifact_path = artifact_path.as_str(),
+                    reason = %format!("{error:#}"),
+                    "skipping approved artifact candidate"
+                );
+            }
+        }
+    }
+    let (approval_sequence, artifact_path, graph) =
+        selected.context("no approved artifact is a conforming graph")?;
     let provenance = state
         .provenance()
         .iter()
         .find(|item| item.approval_sequence() == approval_sequence && item.path() == &artifact_path)
-        .context("latest planning-artifact approval has no derived provenance")?;
+        .context("selected planning-artifact approval has no derived provenance")?;
     compute_dispatchability(provenance, &[], &[], &[], &[])
         .context("selected planning artifact failed preliminary provenance check")?;
-
-    let recorded_path = PathBuf::from(artifact_path.as_str());
-    let resolved_path = if recorded_path.is_absolute() {
-        recorded_path
-    } else {
-        contracts[primary_index].root.join(recorded_path)
-    };
-    let graph_bytes = std::fs::read(&resolved_path)
-        .with_context(|| format!("failed to read selected graph {}", resolved_path.display()))?;
-    let graph = parse_dispatch_graph(&graph_bytes).with_context(|| {
-        format!(
-            "selected artifact {} is not a conforming graph",
-            artifact_path.as_str()
-        )
-    })?;
 
     for graph_node in &graph.nodes {
         let matches = contracts
@@ -897,7 +912,7 @@ fn vision_slug(vision_dir: &Path) -> Result<VisionSlug> {
 fn current_artifacts(
     records: &[EventRecord],
     primary_root: &Path,
-) -> Result<Vec<CurrentArtifactObservation>> {
+) -> Result<(Vec<CurrentArtifactObservation>, Vec<CurrentArtifactBytes>)> {
     let mut paths = Vec::<ArtifactPath>::new();
     for record in records {
         if let EventBodyRef::Known(KnownPayload::PlanningArtifactApproved(payload)) =
@@ -908,39 +923,46 @@ fn current_artifacts(
         }
     }
 
-    paths
-        .into_iter()
-        .map(|path| {
-            let recorded = PathBuf::from(path.as_str());
-            let resolved = if recorded.is_absolute() {
-                recorded
-            } else {
-                primary_root.join(recorded)
-            };
-            let state = match std::fs::read(&resolved) {
-                Ok(bytes) => {
-                    let digest = format!("{:x}", Sha256::digest(bytes));
-                    CurrentArtifactState::Present {
-                        digest: Sha256Digest::parse(&digest).with_context(|| {
-                            format!(
-                                "failed to parse SHA-256 digest for artifact {}",
-                                resolved.display()
-                            )
-                        })?,
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    CurrentArtifactState::Missing
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to read approved artifact {}", resolved.display())
-                    });
-                }
-            };
-            Ok(CurrentArtifactObservation::new(path, state))
-        })
-        .collect()
+    let mut observations = Vec::with_capacity(paths.len());
+    let mut retained_bytes = Vec::with_capacity(paths.len());
+    for path in paths {
+        let recorded = PathBuf::from(path.as_str());
+        let resolved = if recorded.is_absolute() {
+            recorded
+        } else {
+            primary_root.join(recorded)
+        };
+        let (state, bytes) = match std::fs::read(&resolved) {
+            Ok(bytes) => {
+                let digest = format!("{:x}", Sha256::digest(&bytes));
+                let state = CurrentArtifactState::Present {
+                    digest: Sha256Digest::parse(&digest).with_context(|| {
+                        format!(
+                            "failed to parse SHA-256 digest for artifact {}",
+                            resolved.display()
+                        )
+                    })?,
+                };
+                (state, Some(bytes))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (CurrentArtifactState::Missing, None)
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to read approved artifact {}", resolved.display())
+                });
+            }
+        };
+        observations.push(CurrentArtifactObservation::new(path.clone(), state));
+        retained_bytes.push(CurrentArtifactBytes { path, bytes });
+    }
+    Ok((observations, retained_bytes))
+}
+
+struct CurrentArtifactBytes {
+    path: ArtifactPath,
+    bytes: Option<Vec<u8>>,
 }
 
 fn canonical_nodes(records: &[EventRecord], vision: &VisionSlug) -> Result<Vec<CanonicalNode>> {

@@ -245,9 +245,11 @@ fn live_policies_narrow_only_the_selected_repository() {
 
 #[test]
 fn digest_mismatch_fails_before_any_adapter_invocation() {
-    let graph = graph(vec![node("m1-s1", "pce", vec![])]);
-    let fixture = ReadyFixture::new(&graph, &[]);
-    fs::write(fixture.primary.join("graph.json"), b"changed bytes").expect("mutate graph");
+    let original_graph = graph(vec![node("m1-s1", "pce", vec![])]);
+    let fixture = ReadyFixture::new(&original_graph, &[]);
+    let changed_graph =
+        serde_json::to_vec(&graph(vec![node("m1-s2", "pce", vec![])])).expect("changed graph JSON");
+    fs::write(fixture.primary.join("graph.json"), changed_graph).expect("mutate graph");
     fixture
         .harness
         .materialize_responses(&[])
@@ -266,6 +268,190 @@ fn digest_mismatch_fails_before_any_adapter_invocation() {
             .expect("invocations")
             .is_empty()
     );
+}
+
+#[test]
+fn older_graph_survives_newer_missing_and_non_graph_approvals() {
+    let older_graph = graph(vec![node("m2-s1", "pce", vec![])]);
+    let fixture = ReadyFixture::new(&older_graph, &[]);
+    let graph_bytes = fs::read(fixture.primary.join("graph.json")).expect("graph bytes");
+    let graph_digest = format!("{:x}", Sha256::digest(&graph_bytes));
+    let plan_bytes = b"# implementation plan\n";
+    fs::write(fixture.primary.join("plan.md"), plan_bytes).expect("plan fixture");
+    let plan_digest = format!("{:x}", Sha256::digest(plan_bytes));
+    write_records(
+        &fixture.log,
+        &[
+            record(
+                1,
+                "repository-contract",
+                "m1-s1",
+                repository_contract("pce", &fixture.primary),
+            ),
+            record(
+                2,
+                "repository-contract",
+                "m1-s1",
+                repository_contract("docs", &fixture.docs),
+            ),
+            record(
+                3,
+                "planning-artifact-approved",
+                "m2-s1",
+                json!({"path":"graph.json","sha256":graph_digest,"evidence":"older graph"}),
+            ),
+            record(
+                4,
+                "planning-artifact-approved",
+                "m2-s1",
+                json!({
+                    "path":"missing.json",
+                    "sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "evidence":"missing artifact"
+                }),
+            ),
+            record(
+                5,
+                "planning-artifact-approved",
+                "m2-s1",
+                json!({"path":"plan.md","sha256":plan_digest,"evidence":"newer plan"}),
+            ),
+        ],
+    );
+    fixture
+        .harness
+        .materialize_responses(&all_not_merged(&fixture, &older_graph))
+        .expect("responses");
+
+    let output = fixture.run(&[("pce", "NONE")]);
+    assert_success(&output);
+    assert_eq!(
+        stdout_json(&output),
+        json!({"results":[
+            {"classification":"ready","node":"m2-s1","repository":"pce"}
+        ]})
+    );
+    let error = stderr(&output);
+    assert!(error.contains("plan.md"));
+    assert!(error.contains("graph is not valid JSON"));
+    assert!(error.contains("missing.json"));
+    assert!(error.contains("artifact missing"));
+}
+
+#[test]
+fn digest_verdict_belongs_to_selected_older_graph() {
+    let older_graph = graph(vec![node("m2-s2", "pce", vec![])]);
+    let fixture = ReadyFixture::new(&older_graph, &[]);
+    let plan_bytes = b"# matching plan\n";
+    fs::write(fixture.primary.join("plan.md"), plan_bytes).expect("plan fixture");
+    let plan_digest = format!("{:x}", Sha256::digest(plan_bytes));
+    write_records(
+        &fixture.log,
+        &[
+            record(
+                1,
+                "repository-contract",
+                "m1-s1",
+                repository_contract("pce", &fixture.primary),
+            ),
+            record(
+                2,
+                "repository-contract",
+                "m1-s1",
+                repository_contract("docs", &fixture.docs),
+            ),
+            record(
+                3,
+                "planning-artifact-approved",
+                "m2-s2",
+                json!({
+                    "path":"graph.json",
+                    "sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "evidence":"stale graph digest"
+                }),
+            ),
+            record(
+                4,
+                "planning-artifact-approved",
+                "m2-s2",
+                json!({"path":"plan.md","sha256":plan_digest,"evidence":"matching plan"}),
+            ),
+        ],
+    );
+    fixture
+        .harness
+        .materialize_responses(&[])
+        .expect("empty responses");
+
+    let output = fixture.run(&[("pce", "NONE")]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = stderr(&output);
+    assert!(error.contains("digest mismatch"));
+    assert!(error.contains("graph.json"));
+    assert!(!error.contains("planning artifact ArtifactPath(\"plan.md\") digest mismatch"));
+    assert!(
+        fixture
+            .harness
+            .invocations()
+            .expect("invocations")
+            .is_empty()
+    );
+}
+
+#[test]
+fn newest_conforming_graph_wins() {
+    let newer_graph = graph(vec![node("m3-s2", "pce", vec![])]);
+    let fixture = ReadyFixture::new(&newer_graph, &[]);
+    let older_graph = graph(vec![node("m3-s1", "pce", vec![])]);
+    let older_bytes = serde_json::to_vec(&older_graph).expect("older graph JSON");
+    fs::write(fixture.primary.join("older.json"), &older_bytes).expect("older graph fixture");
+    let older_digest = format!("{:x}", Sha256::digest(&older_bytes));
+    let newer_bytes = fs::read(fixture.primary.join("graph.json")).expect("newer graph bytes");
+    let newer_digest = format!("{:x}", Sha256::digest(&newer_bytes));
+    write_records(
+        &fixture.log,
+        &[
+            record(
+                1,
+                "repository-contract",
+                "m1-s1",
+                repository_contract("pce", &fixture.primary),
+            ),
+            record(
+                2,
+                "repository-contract",
+                "m1-s1",
+                repository_contract("docs", &fixture.docs),
+            ),
+            record(
+                3,
+                "planning-artifact-approved",
+                "m3-s1",
+                json!({"path":"older.json","sha256":older_digest,"evidence":"older graph"}),
+            ),
+            record(
+                4,
+                "planning-artifact-approved",
+                "m3-s2",
+                json!({"path":"graph.json","sha256":newer_digest,"evidence":"newer graph"}),
+            ),
+        ],
+    );
+    fixture
+        .harness
+        .materialize_responses(&all_not_merged(&fixture, &newer_graph))
+        .expect("responses");
+
+    let output = fixture.run(&[("pce", "NONE")]);
+    assert_success(&output);
+    assert_eq!(
+        stdout_json(&output),
+        json!({"results":[
+            {"classification":"ready","node":"m3-s2","repository":"pce"}
+        ]})
+    );
+    assert!(!stdout_json(&output).to_string().contains("m3-s1"));
 }
 
 #[test]
@@ -344,6 +530,40 @@ fn malformed_matching_graph_fails_before_adapters() {
         json!({"nodes":[{"id":"m1-s1","title":"x","repo":"pce","depends_on":[],"summary":"x","extra":true}]}),
     ] {
         let fixture = ReadyFixture::new(&graph, &[]);
+        let graph_bytes = fs::read(fixture.primary.join("graph.json")).expect("graph bytes");
+        let graph_digest = format!("{:x}", Sha256::digest(&graph_bytes));
+        let plan_bytes = b"# not a graph\n";
+        fs::write(fixture.primary.join("plan.md"), plan_bytes).expect("plan fixture");
+        let plan_digest = format!("{:x}", Sha256::digest(plan_bytes));
+        write_records(
+            &fixture.log,
+            &[
+                record(
+                    1,
+                    "repository-contract",
+                    "m1-s1",
+                    repository_contract("pce", &fixture.primary),
+                ),
+                record(
+                    2,
+                    "repository-contract",
+                    "m1-s1",
+                    repository_contract("docs", &fixture.docs),
+                ),
+                record(
+                    3,
+                    "planning-artifact-approved",
+                    "m1-s1",
+                    json!({"path":"graph.json","sha256":graph_digest,"evidence":"malformed graph"}),
+                ),
+                record(
+                    4,
+                    "planning-artifact-approved",
+                    "m1-s1",
+                    json!({"path":"plan.md","sha256":plan_digest,"evidence":"non-graph"}),
+                ),
+            ],
+        );
         fixture
             .harness
             .materialize_responses(&[])
@@ -352,6 +572,8 @@ fn malformed_matching_graph_fails_before_adapters() {
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         assert!(stderr(&output).contains("conforming graph"));
+        assert!(stderr(&output).contains("no approved artifact is a conforming graph"));
+        assert_ne!(output.stdout, br#"{"results":[]}"#);
         assert!(
             fixture
                 .harness
