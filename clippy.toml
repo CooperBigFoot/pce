@@ -1,0 +1,3 @@
+# Tests are exempt from the unwrap/expect bans that AGENTS.md section 1 states.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
