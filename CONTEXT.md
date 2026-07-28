@@ -29,6 +29,7 @@
 | Delivery-trust boundary | The human's assertion that a vision was delivered and merged is authoritative and never independently verified. The boundary covers only that assertion; reading the vision, event log, merge commits, and pull requests to ground a landed decision or Fog graduation is required rather than forbidden. |
 | Planning descent | The move from intent to mechanism, performed by the actor that reads the code at the ref. The orchestrator hands down what must become true; the descending actor returns the structure — write-set and genuine ordering — that only reading the source can establish. A level that has not read the code authors neither. |
 | Concurrency admission | The rule deciding whether two ready nodes dispatch together. It is a recovery path, not a prediction: overlap dispatches and the merge absorbs the rebase, because a rule that must predict safety has to be conservative, and a conservative rule never fires on real code. |
+| Vacuity | A check that passes for a reason unrelated to what it claims to test, most often because its own setup already guarantees the outcome. Reading cannot detect it, because the check's text is correct in every instance; only mutating the subject and observing the check stay green exposes it. |
 | Domain-modeling | The active discipline of maintaining canonical terms, aliases-to-avoid, relationships, and ambiguities in committed `CONTEXT.md`, plus recording consequential durable decisions sparingly in `docs/adr/`. |
 
 ## Aliases to avoid
@@ -66,6 +67,7 @@
 | Convergence signal and decision hold | The signal decides when a loop stops; the hold defines what an unresolved stop owes the human before it can close. |
 | Delivery-trust boundary and grill grounding | Trusting the delivery assertion does not license knowing nothing else; a landing grill recommends from the delivered artifacts and reserves trust for the merged-and-delivered claim alone. |
 | Planning descent and concurrency admission | The descent produces the structure admission consumes; a write-set authored by a level that read no code cannot support any scheduling decision, whichever rule reads it. |
+| Vacuity and evidence command | An evidence command records how a claim was produced; vacuity is the failure that survives it, because the command ran and reported success for a reason unrelated to the claim. Provenance and falsifiability are separate obligations. |
 
 ## Ambiguities
 
