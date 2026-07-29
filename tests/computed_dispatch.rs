@@ -137,12 +137,18 @@ fn routes_both_altitudes_through_exact_repository_local_selectors() {
         .materialize_responses(&responses(
             &fixture,
             &[
-                ("m2", "pce", "milestone-2", "main", Authority::NotMerged),
+                (
+                    "m2",
+                    "pce",
+                    "pce/computed/milestone-2",
+                    "main",
+                    Authority::NotMerged,
+                ),
                 (
                     "m2-s3",
                     "docs",
                     "pce/computed/m2-s3",
-                    "milestone-2",
+                    "pce/computed/milestone-2",
                     Authority::NotMerged,
                 ),
             ],
@@ -159,11 +165,12 @@ fn routes_both_altitudes_through_exact_repository_local_selectors() {
         ]})
     );
     let invocations = fixture.harness.invocations().expect("invocations");
-    let mut expected = expected_not_merged_invocations(&fixture.primary, "milestone-2", "main");
+    let mut expected =
+        expected_not_merged_invocations(&fixture.primary, "pce/computed/milestone-2", "main");
     expected.extend(expected_not_merged_invocations(
         &fixture.docs,
         "pce/computed/m2-s3",
-        "milestone-2",
+        "pce/computed/milestone-2",
     ));
     assert_eq!(invocations, expected);
 }
@@ -192,14 +199,14 @@ fn reason_edge_changes_waiting_to_ready_when_dependency_merges() {
                         "m1-s1",
                         "pce",
                         "pce/computed/m1-s1",
-                        "milestone-1",
+                        "pce/computed/milestone-1",
                         authority,
                     ),
                     (
                         "m1-s2",
                         "pce",
                         "pce/computed/m1-s2",
-                        "milestone-1",
+                        "pce/computed/milestone-1",
                         Authority::NotMerged,
                     ),
                 ],
@@ -791,14 +798,14 @@ fn dependency_inconclusive_is_not_collapsed() {
                     "m1-s1",
                     "pce",
                     "pce/computed/m1-s1",
-                    "milestone-1",
+                    "pce/computed/milestone-1",
                     Authority::Unreachable,
                 ),
                 (
                     "m1-s2",
                     "pce",
                     "pce/computed/m1-s2",
-                    "milestone-1",
+                    "pce/computed/milestone-1",
                     Authority::NotMerged,
                 ),
             ],
@@ -1019,14 +1026,14 @@ fn all_not_merged(fixture: &ReadyFixture, graph: &Value) -> Vec<ScriptedResponse
                     id.to_owned(),
                     repository.to_owned(),
                     format!("pce/computed/{id}"),
-                    format!("milestone-{milestone}"),
+                    format!("pce/computed/milestone-{milestone}"),
                     Authority::NotMerged,
                 )
             } else {
                 (
                     id.to_owned(),
                     repository.to_owned(),
-                    format!("milestone-{}", id.trim_start_matches('m')),
+                    format!("pce/computed/milestone-{}", id.trim_start_matches('m')),
                     "main".to_owned(),
                     Authority::NotMerged,
                 )

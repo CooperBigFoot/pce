@@ -117,7 +117,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
                 "fetch",
                 "--no-tags",
                 "origin",
-                "refs/heads/milestone-3",
+                "refs/heads/pce/shim-smoke/milestone-3",
             ]),
             0,
             b"",
@@ -142,7 +142,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
                 "show-ref",
                 "--verify",
                 "--quiet",
-                "refs/heads/milestone-3",
+                "refs/heads/pce/shim-smoke/milestone-3",
             ]),
             0,
             b"",
@@ -184,7 +184,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
                 "--head",
                 "pce/shim-smoke/m3-s1",
                 "--base",
-                "milestone-3",
+                "pce/shim-smoke/milestone-3",
                 "--state",
                 "all",
                 "--limit",
@@ -193,7 +193,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
                 "number,headRefName,baseRefName,state,mergeCommit",
             ]),
             0,
-            b"[{\"number\":17,\"headRefName\":\"pce/shim-smoke/m3-s1\",\"baseRefName\":\"milestone-3\",\"state\":\"MERGED\",\"mergeCommit\":{\"oid\":\"squash-oid\"}}]\n",
+            b"[{\"number\":17,\"headRefName\":\"pce/shim-smoke/m3-s1\",\"baseRefName\":\"pce/shim-smoke/milestone-3\",\"state\":\"MERGED\",\"mergeCommit\":{\"oid\":\"squash-oid\"}}]\n",
         ),
         response(
             "git",
@@ -252,7 +252,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
     );
     assert_eq!(
         at(&snapshot, "/repositories/0/branch/name"),
-        &json!("milestone-3")
+        &json!("pce/shim-smoke/milestone-3")
     );
     assert_eq!(
         at(&snapshot, "/repositories/0/branch/state"),
@@ -284,7 +284,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
     );
     assert_eq!(
         at(&snapshot, "/steps/0/subject/integration_branch"),
-        &json!("milestone-3")
+        &json!("pce/shim-smoke/milestone-3")
     );
     assert_eq!(
         at(&snapshot, "/steps/0/subject/pull_request_selector/head"),
@@ -292,7 +292,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
     );
     assert_eq!(
         at(&snapshot, "/steps/0/subject/pull_request_selector/base"),
-        &json!("milestone-3")
+        &json!("pce/shim-smoke/milestone-3")
     );
     assert_eq!(
         at(&snapshot, "/steps/0/github/availability"),
@@ -370,7 +370,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
                 "fetch".into(),
                 "--no-tags".into(),
                 "origin".into(),
-                "refs/heads/milestone-3".into(),
+                "refs/heads/pce/shim-smoke/milestone-3".into(),
             ],
         ),
         invocation(
@@ -391,7 +391,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
                 "show-ref".into(),
                 "--verify".into(),
                 "--quiet".into(),
-                "refs/heads/milestone-3".into(),
+                "refs/heads/pce/shim-smoke/milestone-3".into(),
             ],
         ),
         invocation(
@@ -423,7 +423,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
                 "--head",
                 "pce/shim-smoke/m3-s1",
                 "--base",
-                "milestone-3",
+                "pce/shim-smoke/milestone-3",
                 "--state",
                 "all",
                 "--limit",
@@ -653,7 +653,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "fetch",
                 "--no-tags",
                 "origin",
-                "refs/heads/milestone-2",
+                "refs/heads/pce/cold-resume/milestone-2",
             ]),
             0,
             b"",
@@ -666,7 +666,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "fetch",
                 "--no-tags",
                 "origin",
-                "refs/heads/milestone-1",
+                "refs/heads/pce/cold-resume/milestone-1",
             ]),
             0,
             b"",
@@ -691,7 +691,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "show-ref",
                 "--verify",
                 "--quiet",
-                "refs/heads/milestone-1",
+                "refs/heads/pce/cold-resume/milestone-1",
             ]),
             0,
             b"",
@@ -733,7 +733,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "--head",
                 "pce/cold-resume/m1-s1",
                 "--base",
-                "milestone-1",
+                "pce/cold-resume/milestone-1",
                 "--state",
                 "all",
                 "--limit",
@@ -742,7 +742,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "number,headRefName,baseRefName,state,mergeCommit",
             ]),
             0,
-            b"[{\"number\":101,\"headRefName\":\"pce/cold-resume/m1-s1\",\"baseRefName\":\"milestone-1\",\"state\":\"MERGED\",\"mergeCommit\":{\"oid\":\"squash-m1-oid\"}}]\n",
+            b"[{\"number\":101,\"headRefName\":\"pce/cold-resume/m1-s1\",\"baseRefName\":\"pce/cold-resume/milestone-1\",\"state\":\"MERGED\",\"mergeCommit\":{\"oid\":\"squash-m1-oid\"}}]\n",
         ),
         response(
             "git",
@@ -765,7 +765,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "--head",
                 "pce/cold-resume/m2-s1",
                 "--base",
-                "milestone-2",
+                "pce/cold-resume/milestone-2",
                 "--state",
                 "all",
                 "--limit",
@@ -774,7 +774,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "number,headRefName,baseRefName,state,mergeCommit",
             ]),
             0,
-            b"[{\"number\":202,\"headRefName\":\"pce/cold-resume/m2-s1\",\"baseRefName\":\"milestone-2\",\"state\":\"OPEN\",\"mergeCommit\":null}]\n",
+            b"[{\"number\":202,\"headRefName\":\"pce/cold-resume/m2-s1\",\"baseRefName\":\"pce/cold-resume/milestone-2\",\"state\":\"OPEN\",\"mergeCommit\":null}]\n",
         ),
     ];
     harness
@@ -809,7 +809,10 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
             "/repositories/0/fetch/observation_ref",
             json!("fetched-integration-oid"),
         ),
-        ("/repositories/0/branch/name", json!("milestone-1")),
+        (
+            "/repositories/0/branch/name",
+            json!("pce/cold-resume/milestone-1"),
+        ),
         ("/repositories/0/branch/state", json!("present")),
         (
             "/repositories/0/worktree/identity",
@@ -825,14 +828,17 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
             "/steps/0/subject/head_branch",
             json!("pce/cold-resume/m1-s1"),
         ),
-        ("/steps/0/subject/integration_branch", json!("milestone-1")),
+        (
+            "/steps/0/subject/integration_branch",
+            json!("pce/cold-resume/milestone-1"),
+        ),
         (
             "/steps/0/subject/pull_request_selector/head",
             json!("pce/cold-resume/m1-s1"),
         ),
         (
             "/steps/0/subject/pull_request_selector/base",
-            json!("milestone-1"),
+            json!("pce/cold-resume/milestone-1"),
         ),
         ("/steps/0/github/availability", json!("reachable")),
         ("/steps/0/github/cardinality", json!("one-exact-match")),
@@ -843,7 +849,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
         ),
         (
             "/steps/0/github/pull_request/selector/base",
-            json!("milestone-1"),
+            json!("pce/cold-resume/milestone-1"),
         ),
         ("/steps/0/github/pull_request/state/status", json!("merged")),
         (
@@ -861,14 +867,17 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
             "/steps/1/subject/head_branch",
             json!("pce/cold-resume/m2-s1"),
         ),
-        ("/steps/1/subject/integration_branch", json!("milestone-2")),
+        (
+            "/steps/1/subject/integration_branch",
+            json!("pce/cold-resume/milestone-2"),
+        ),
         (
             "/steps/1/subject/pull_request_selector/head",
             json!("pce/cold-resume/m2-s1"),
         ),
         (
             "/steps/1/subject/pull_request_selector/base",
-            json!("milestone-2"),
+            json!("pce/cold-resume/milestone-2"),
         ),
         ("/steps/1/github/availability", json!("reachable")),
         ("/steps/1/github/cardinality", json!("one-exact-match")),
@@ -879,7 +888,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
         ),
         (
             "/steps/1/github/pull_request/selector/base",
-            json!("milestone-2"),
+            json!("pce/cold-resume/milestone-2"),
         ),
         (
             "/steps/1/github/pull_request/state/status",
@@ -1090,7 +1099,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "fetch".into(),
                 "--no-tags".into(),
                 "origin".into(),
-                "refs/heads/milestone-2".into(),
+                "refs/heads/pce/cold-resume/milestone-2".into(),
             ],
         ),
         invocation(
@@ -1111,7 +1120,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "fetch".into(),
                 "--no-tags".into(),
                 "origin".into(),
-                "refs/heads/milestone-1".into(),
+                "refs/heads/pce/cold-resume/milestone-1".into(),
             ],
         ),
         invocation(
@@ -1132,7 +1141,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "show-ref".into(),
                 "--verify".into(),
                 "--quiet".into(),
-                "refs/heads/milestone-1".into(),
+                "refs/heads/pce/cold-resume/milestone-1".into(),
             ],
         ),
         invocation(
@@ -1164,7 +1173,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "--head",
                 "pce/cold-resume/m1-s1",
                 "--base",
-                "milestone-1",
+                "pce/cold-resume/milestone-1",
                 "--state",
                 "all",
                 "--limit",
@@ -1192,7 +1201,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
                 "--head",
                 "pce/cold-resume/m2-s1",
                 "--base",
-                "milestone-2",
+                "pce/cold-resume/milestone-2",
                 "--state",
                 "all",
                 "--limit",
@@ -1296,7 +1305,7 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
                 "fetch",
                 "--no-tags",
                 "origin",
-                "refs/heads/milestone-3",
+                "refs/heads/pce/provenance-mismatch/milestone-3",
             ]),
             0,
             b"",
@@ -1321,7 +1330,7 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
                 "show-ref",
                 "--verify",
                 "--quiet",
-                "refs/heads/milestone-3",
+                "refs/heads/pce/provenance-mismatch/milestone-3",
             ]),
             0,
             b"",
@@ -1363,7 +1372,7 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
                 "--head",
                 "pce/provenance-mismatch/m3-s3",
                 "--base",
-                "milestone-3",
+                "pce/provenance-mismatch/milestone-3",
                 "--state",
                 "all",
                 "--limit",
@@ -1372,7 +1381,7 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
                 "number,headRefName,baseRefName,state,mergeCommit",
             ]),
             0,
-            b"[{\"number\":303,\"headRefName\":\"pce/provenance-mismatch/m3-s3\",\"baseRefName\":\"milestone-3\",\"state\":\"OPEN\",\"mergeCommit\":null}]\n",
+            b"[{\"number\":303,\"headRefName\":\"pce/provenance-mismatch/m3-s3\",\"baseRefName\":\"pce/provenance-mismatch/milestone-3\",\"state\":\"OPEN\",\"mergeCommit\":null}]\n",
         ),
     ];
     harness
@@ -1407,7 +1416,10 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
             "/repositories/0/fetch/observation_ref",
             json!("fetched-provenance-oid"),
         ),
-        ("/repositories/0/branch/name", json!("milestone-3")),
+        (
+            "/repositories/0/branch/name",
+            json!("pce/provenance-mismatch/milestone-3"),
+        ),
         ("/repositories/0/branch/state", json!("present")),
         (
             "/repositories/0/worktree/identity",
@@ -1423,14 +1435,17 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
             "/steps/0/subject/head_branch",
             json!("pce/provenance-mismatch/m3-s3"),
         ),
-        ("/steps/0/subject/integration_branch", json!("milestone-3")),
+        (
+            "/steps/0/subject/integration_branch",
+            json!("pce/provenance-mismatch/milestone-3"),
+        ),
         (
             "/steps/0/subject/pull_request_selector/head",
             json!("pce/provenance-mismatch/m3-s3"),
         ),
         (
             "/steps/0/subject/pull_request_selector/base",
-            json!("milestone-3"),
+            json!("pce/provenance-mismatch/milestone-3"),
         ),
         ("/steps/0/github/availability", json!("reachable")),
         ("/steps/0/github/cardinality", json!("one-exact-match")),
@@ -1441,7 +1456,7 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
         ),
         (
             "/steps/0/github/pull_request/selector/base",
-            json!("milestone-3"),
+            json!("pce/provenance-mismatch/milestone-3"),
         ),
         (
             "/steps/0/github/pull_request/state/status",
@@ -1563,7 +1578,7 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
                 "fetch".into(),
                 "--no-tags".into(),
                 "origin".into(),
-                "refs/heads/milestone-3".into(),
+                "refs/heads/pce/provenance-mismatch/milestone-3".into(),
             ],
         ),
         invocation(
@@ -1584,7 +1599,7 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
                 "show-ref".into(),
                 "--verify".into(),
                 "--quiet".into(),
-                "refs/heads/milestone-3".into(),
+                "refs/heads/pce/provenance-mismatch/milestone-3".into(),
             ],
         ),
         invocation(
@@ -1616,7 +1631,7 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
                 "--head",
                 "pce/provenance-mismatch/m3-s3",
                 "--base",
-                "milestone-3",
+                "pce/provenance-mismatch/milestone-3",
                 "--state",
                 "all",
                 "--limit",
@@ -1697,7 +1712,7 @@ fn authority_disagreement_reports_inconclusive() {
                 "fetch",
                 "--no-tags",
                 "origin",
-                "refs/heads/milestone-3",
+                "refs/heads/pce/authority-disagreement/milestone-3",
             ]),
             0,
             b"",
@@ -1722,7 +1737,7 @@ fn authority_disagreement_reports_inconclusive() {
                 "show-ref",
                 "--verify",
                 "--quiet",
-                "refs/heads/milestone-3",
+                "refs/heads/pce/authority-disagreement/milestone-3",
             ]),
             0,
             b"",
@@ -1758,7 +1773,7 @@ fn authority_disagreement_reports_inconclusive() {
                 "--head",
                 "pce/authority-disagreement/m3-s4",
                 "--base",
-                "milestone-3",
+                "pce/authority-disagreement/milestone-3",
                 "--state",
                 "all",
                 "--limit",
@@ -1767,7 +1782,7 @@ fn authority_disagreement_reports_inconclusive() {
                 "number,headRefName,baseRefName,state,mergeCommit",
             ]),
             0,
-            b"[{\"number\":404,\"headRefName\":\"pce/authority-disagreement/m3-s4\",\"baseRefName\":\"milestone-3\",\"state\":\"MERGED\",\"mergeCommit\":{\"oid\":\"squash-disagreement-oid\"}}]\n",
+            b"[{\"number\":404,\"headRefName\":\"pce/authority-disagreement/m3-s4\",\"baseRefName\":\"pce/authority-disagreement/milestone-3\",\"state\":\"MERGED\",\"mergeCommit\":{\"oid\":\"squash-disagreement-oid\"}}]\n",
         ),
         response(
             "git",
@@ -1815,7 +1830,10 @@ fn authority_disagreement_reports_inconclusive() {
             "/repositories/0/fetch/observation_ref",
             json!("fetched-authority-oid"),
         ),
-        ("/repositories/0/branch/name", json!("milestone-3")),
+        (
+            "/repositories/0/branch/name",
+            json!("pce/authority-disagreement/milestone-3"),
+        ),
         ("/repositories/0/branch/state", json!("present")),
         (
             "/repositories/0/worktree/identity",
@@ -1832,14 +1850,17 @@ fn authority_disagreement_reports_inconclusive() {
             "/steps/0/subject/head_branch",
             json!("pce/authority-disagreement/m3-s4"),
         ),
-        ("/steps/0/subject/integration_branch", json!("milestone-3")),
+        (
+            "/steps/0/subject/integration_branch",
+            json!("pce/authority-disagreement/milestone-3"),
+        ),
         (
             "/steps/0/subject/pull_request_selector/head",
             json!("pce/authority-disagreement/m3-s4"),
         ),
         (
             "/steps/0/subject/pull_request_selector/base",
-            json!("milestone-3"),
+            json!("pce/authority-disagreement/milestone-3"),
         ),
         ("/steps/0/github/availability", json!("reachable")),
         ("/steps/0/github/cardinality", json!("one-exact-match")),
@@ -1850,7 +1871,7 @@ fn authority_disagreement_reports_inconclusive() {
         ),
         (
             "/steps/0/github/pull_request/selector/base",
-            json!("milestone-3"),
+            json!("pce/authority-disagreement/milestone-3"),
         ),
         ("/steps/0/github/pull_request/state/status", json!("merged")),
         (
@@ -1941,7 +1962,7 @@ fn authority_disagreement_reports_inconclusive() {
                 "fetch".into(),
                 "--no-tags".into(),
                 "origin".into(),
-                "refs/heads/milestone-3".into(),
+                "refs/heads/pce/authority-disagreement/milestone-3".into(),
             ],
         ),
         invocation(
@@ -1962,7 +1983,7 @@ fn authority_disagreement_reports_inconclusive() {
                 "show-ref".into(),
                 "--verify".into(),
                 "--quiet".into(),
-                "refs/heads/milestone-3".into(),
+                "refs/heads/pce/authority-disagreement/milestone-3".into(),
             ],
         ),
         invocation(
@@ -1994,7 +2015,7 @@ fn authority_disagreement_reports_inconclusive() {
                 "--head",
                 "pce/authority-disagreement/m3-s4",
                 "--base",
-                "milestone-3",
+                "pce/authority-disagreement/milestone-3",
                 "--state",
                 "all",
                 "--limit",
@@ -2079,7 +2100,7 @@ fn merge_base_failure_reports_inconclusive() {
                 "fetch",
                 "--no-tags",
                 "origin",
-                "refs/heads/milestone-3",
+                "refs/heads/pce/authority-unreachable/milestone-3",
             ]),
             0,
             b"",
@@ -2104,7 +2125,7 @@ fn merge_base_failure_reports_inconclusive() {
                 "show-ref",
                 "--verify",
                 "--quiet",
-                "refs/heads/milestone-3",
+                "refs/heads/pce/authority-unreachable/milestone-3",
             ]),
             0,
             b"",
@@ -2140,7 +2161,7 @@ fn merge_base_failure_reports_inconclusive() {
                 "--head",
                 "pce/authority-unreachable/m3-s4",
                 "--base",
-                "milestone-3",
+                "pce/authority-unreachable/milestone-3",
                 "--state",
                 "all",
                 "--limit",
@@ -2149,7 +2170,7 @@ fn merge_base_failure_reports_inconclusive() {
                 "number,headRefName,baseRefName,state,mergeCommit",
             ]),
             0,
-            b"[{\"number\":405,\"headRefName\":\"pce/authority-unreachable/m3-s4\",\"baseRefName\":\"milestone-3\",\"state\":\"MERGED\",\"mergeCommit\":{\"oid\":\"squash-unreachable-oid\"}}]\n",
+            b"[{\"number\":405,\"headRefName\":\"pce/authority-unreachable/m3-s4\",\"baseRefName\":\"pce/authority-unreachable/milestone-3\",\"state\":\"MERGED\",\"mergeCommit\":{\"oid\":\"squash-unreachable-oid\"}}]\n",
         ),
         ScriptedResponse {
             program: "git".into(),
@@ -2202,7 +2223,10 @@ fn merge_base_failure_reports_inconclusive() {
             "/repositories/0/fetch/observation_ref",
             json!("fetched-authority-oid"),
         ),
-        ("/repositories/0/branch/name", json!("milestone-3")),
+        (
+            "/repositories/0/branch/name",
+            json!("pce/authority-unreachable/milestone-3"),
+        ),
         ("/repositories/0/branch/state", json!("present")),
         (
             "/repositories/0/worktree/identity",
@@ -2219,14 +2243,17 @@ fn merge_base_failure_reports_inconclusive() {
             "/steps/0/subject/head_branch",
             json!("pce/authority-unreachable/m3-s4"),
         ),
-        ("/steps/0/subject/integration_branch", json!("milestone-3")),
+        (
+            "/steps/0/subject/integration_branch",
+            json!("pce/authority-unreachable/milestone-3"),
+        ),
         (
             "/steps/0/subject/pull_request_selector/head",
             json!("pce/authority-unreachable/m3-s4"),
         ),
         (
             "/steps/0/subject/pull_request_selector/base",
-            json!("milestone-3"),
+            json!("pce/authority-unreachable/milestone-3"),
         ),
         ("/steps/0/github/availability", json!("reachable")),
         ("/steps/0/github/cardinality", json!("one-exact-match")),
@@ -2237,7 +2264,7 @@ fn merge_base_failure_reports_inconclusive() {
         ),
         (
             "/steps/0/github/pull_request/selector/base",
-            json!("milestone-3"),
+            json!("pce/authority-unreachable/milestone-3"),
         ),
         ("/steps/0/github/pull_request/state/status", json!("merged")),
         (
@@ -2328,7 +2355,7 @@ fn merge_base_failure_reports_inconclusive() {
                 "fetch".into(),
                 "--no-tags".into(),
                 "origin".into(),
-                "refs/heads/milestone-3".into(),
+                "refs/heads/pce/authority-unreachable/milestone-3".into(),
             ],
         ),
         invocation(
@@ -2349,7 +2376,7 @@ fn merge_base_failure_reports_inconclusive() {
                 "show-ref".into(),
                 "--verify".into(),
                 "--quiet".into(),
-                "refs/heads/milestone-3".into(),
+                "refs/heads/pce/authority-unreachable/milestone-3".into(),
             ],
         ),
         invocation(
@@ -2381,7 +2408,7 @@ fn merge_base_failure_reports_inconclusive() {
                 "--head",
                 "pce/authority-unreachable/m3-s4",
                 "--base",
-                "milestone-3",
+                "pce/authority-unreachable/milestone-3",
                 "--state",
                 "all",
                 "--limit",
