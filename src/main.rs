@@ -1031,6 +1031,39 @@ fn run_log_read(path: &Path, filter: &EventRecordFilter, output: &mut dyn Write)
         .with_context(|| format!("failed to flush selected events from {}", path.display()))
 }
 
+fn lexically_normalized_repository_root(root: &str) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    let mut rooted = false;
+    for component in Path::new(root).components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => {
+                normalized.push(component.as_os_str());
+                rooted = true;
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else if !rooted {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    if !rooted && normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
 fn repository_contracts(records: &[EventRecord]) -> Result<Vec<RepositoryContract>> {
     let mut contracts = Vec::<RepositoryContract>::new();
     for record in records {
@@ -1050,18 +1083,38 @@ fn repository_contracts(records: &[EventRecord]) -> Result<Vec<RepositoryContrac
                 record.sequence().get()
             );
         }
-        if contracts
-            .iter()
-            .any(|item| item.name() == contract.name() || item.root() == contract.root())
-        {
-            bail!(
-                "ambiguous duplicate repository contract at sequence {} for repository {} and root {}",
-                record.sequence().get(),
-                contract.name().as_str(),
-                root.display()
-            );
+        let normalized_root = lexically_normalized_repository_root(contract.root());
+        let mut replacement = None;
+        for (index, projected) in contracts.iter().enumerate() {
+            let same_name = projected.name() == contract.name();
+            let same_root =
+                lexically_normalized_repository_root(projected.root()) == normalized_root;
+            if same_name && same_root {
+                replacement = Some(index);
+                break;
+            }
+            if same_name || same_root {
+                bail!(
+                    "ambiguous duplicate repository contract at sequence {} for repository {} and root {}",
+                    record.sequence().get(),
+                    contract.name().as_str(),
+                    root.display()
+                );
+            }
         }
-        contracts.push(contract);
+        if let Some(index) = replacement {
+            if !matches!(
+                (&contracts[index], &contract),
+                (
+                    RepositoryContract::Current(_),
+                    RepositoryContract::Legacy(_)
+                )
+            ) {
+                contracts[index] = contract;
+            }
+        } else {
+            contracts.push(contract);
+        }
     }
     if contracts.is_empty() {
         bail!("event log contains no repository-contract record");
@@ -1861,7 +1914,7 @@ mod tests {
 
     use pce_core::{
         ArtifactPath, BranchState, CurrentArtifactObservation, CurrentArtifactState, EventKindName,
-        EventRecordFilter, GitAuthorityObservation, GitHubAuthorityObservation,
+        EventRecord, EventRecordFilter, GitAuthorityObservation, GitHubAuthorityObservation,
         GitHubPullRequestObservation, GitMergeObservation, KnownPayload, MilestoneMergeSubject,
         MilestoneNode, NodeId, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
         RepositoryFetchObservation, RepositoryName, RepositoryObservation,
@@ -1869,13 +1922,15 @@ mod tests {
         TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
         derive_run_state, parse_event_line, render_human_snapshot,
     };
+    use serde_json::json;
     use tempfile::tempdir;
 
     use crate::{
         BranchFetch, Command, DispatchGraphNode, DispatchNode, FetchResult, RepositoryContract,
         RepositoryRuntime, StatusFormat, USAGE, already_dispatched, github_pull_request_list_args,
-        measure_tracked_contract_at_root, observe_git, parse_command, parse_dispatch_graph,
-        parse_tracked_contract, repository_contracts, run, run_log_read, validated_snapshot_value,
+        lexically_normalized_repository_root, measure_tracked_contract_at_root, observe_git,
+        parse_command, parse_dispatch_graph, parse_tracked_contract, repository_contracts, run,
+        run_log_read, validated_snapshot_value,
     };
 
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
@@ -2134,6 +2189,216 @@ mod tests {
                 .expect("registered output should parse");
             assert_eq!(record.kind(), ReadKind::Known(expected_kind));
         }
+    }
+
+    fn parsed_current_contract_record(
+        sequence: u64,
+        repository: &str,
+        repo_root: &str,
+        test_command: &str,
+    ) -> EventRecord {
+        let evidence = format!(
+            "cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\n{test_command}\ncargo build --release"
+        );
+        let line = json!({
+            "sequence": sequence,
+            "timestamp": "2026-07-27T12:35:04.000Z",
+            "kind": "repository-contract",
+            "node": "m3-s1",
+            "payload": {
+                "repository": repository,
+                "repo_root": repo_root,
+                "stated": {
+                    "format": "cargo fmt --check",
+                    "lint": "cargo clippy --workspace --all-targets",
+                    "typecheck": "cargo check --workspace --all-targets",
+                    "test": test_command,
+                    "build": "cargo build --release",
+                    "version_policy": "NONE",
+                    "branch_convention": "default=main; milestone=pce/{vision}/milestone-{milestone}; step=pce/{vision}/m{milestone}-s{step}",
+                    "pull_request_convention": "step_base=MILESTONE; milestone_base=DEFAULT; merge_method=SQUASH"
+                },
+                "observations": {
+                    "format": 0,
+                    "lint": 0,
+                    "typecheck": 0,
+                    "test": 0,
+                    "build": 0
+                },
+                "workflow_map": {
+                    "ci.yml": "cargo test --workspace",
+                    "release.yml": null
+                },
+                "appendable": {
+                    "environment_hazards": ["pipe Codex stdin from /dev/null"],
+                    "gate_orderings": ["run cargo fmt --check before clippy"],
+                    "lockfile_rules": ["commit Cargo.lock when dependency resolution changes"]
+                },
+                "evidence": evidence
+            }
+        })
+        .to_string();
+        parse_event_line(&line).expect("current contract fixture should parse")
+    }
+
+    fn parsed_legacy_contract_record(
+        sequence: u64,
+        repository: &str,
+        repo_root: &str,
+    ) -> EventRecord {
+        let line = json!({
+            "sequence": sequence,
+            "timestamp": "2026-07-27T12:35:04.000Z",
+            "kind": "repository-contract",
+            "node": "m3-s1",
+            "payload": {
+                "repository": repository,
+                "repo_root": repo_root,
+                "stack": "Rust 2024-edition Cargo workspace",
+                "format": "cargo fmt --all --check",
+                "lint": "cargo clippy --workspace --all-targets",
+                "typecheck": "cargo check --workspace --all-targets",
+                "test": "cargo test --workspace",
+                "build": "cargo build --workspace",
+                "preflight": "cargo check --workspace --all-targets",
+                "gates_rule": "all gates must exit zero",
+                "install": "None required for gates.",
+                "evidence": "rustc --version\ncargo --version\ngit rev-parse --show-toplevel"
+            }
+        })
+        .to_string();
+        parse_event_line(&line).expect("legacy contract fixture should parse")
+    }
+
+    #[test]
+    fn repository_contracts_replaces_same_identity_with_latest_current_record() {
+        let records = [
+            parsed_legacy_contract_record(8, "pce", "/nonexistent/pce/"),
+            parsed_current_contract_record(
+                9,
+                "pce",
+                "/nonexistent/./pce",
+                "cargo test --workspace --first",
+            ),
+            parsed_current_contract_record(
+                10,
+                "pce",
+                "/nonexistent/cache/../pce",
+                "cargo test --workspace --latest",
+            ),
+        ];
+
+        let contracts =
+            repository_contracts(&records).expect("same identity should replace in place");
+        let [RepositoryContract::Current(payload)] = contracts.as_slice() else {
+            panic!("one current repository contract expected");
+        };
+        assert_eq!(payload.stated.test, "cargo test --workspace --latest");
+    }
+
+    #[test]
+    fn repository_contracts_normalizes_nonexistent_roots_without_filesystem_access() {
+        for (left, right) in [
+            ("/nonexistent/pce", "/nonexistent/pce/"),
+            ("/nonexistent/pce", "/nonexistent/./pce"),
+            ("/nonexistent/pce", "/nonexistent/cache/../pce"),
+            ("/nonexistent/pce", "//nonexistent//pce///"),
+        ] {
+            assert_eq!(
+                lexically_normalized_repository_root(left),
+                lexically_normalized_repository_root(right)
+            );
+        }
+        assert_ne!(
+            lexically_normalized_repository_root("/nonexistent/pce"),
+            lexically_normalized_repository_root("/nonexistent/other")
+        );
+
+        let records = [
+            parsed_current_contract_record(
+                9,
+                "pce",
+                "/this/path/must/not/exist/pce/",
+                "cargo test --workspace --first",
+            ),
+            parsed_current_contract_record(
+                10,
+                "pce",
+                "/this/path/must/not/exist/cache/../pce",
+                "cargo test --workspace --latest",
+            ),
+        ];
+        let contracts =
+            repository_contracts(&records).expect("lexically identical roots should replace");
+        let [RepositoryContract::Current(payload)] = contracts.as_slice() else {
+            panic!("one current repository contract expected");
+        };
+        assert_eq!(payload.stated.test, "cargo test --workspace --latest");
+    }
+
+    #[test]
+    fn repository_contracts_rejects_genuine_identity_conflicts() {
+        let same_name = [
+            parsed_current_contract_record(
+                9,
+                "pce",
+                "/nonexistent/pce",
+                "cargo test --workspace --first",
+            ),
+            parsed_current_contract_record(
+                10,
+                "pce",
+                "/nonexistent/other",
+                "cargo test --workspace --latest",
+            ),
+        ];
+        let error =
+            repository_contracts(&same_name).expect_err("same name at another root is ambiguous");
+        assert_eq!(
+            error.to_string(),
+            "ambiguous duplicate repository contract at sequence 10 for repository pce and root /nonexistent/other"
+        );
+
+        let same_root = [
+            parsed_current_contract_record(
+                9,
+                "pce",
+                "/nonexistent/pce",
+                "cargo test --workspace --first",
+            ),
+            parsed_current_contract_record(
+                10,
+                "consumer",
+                "/nonexistent/pce",
+                "cargo test --workspace --latest",
+            ),
+        ];
+        let error = repository_contracts(&same_root)
+            .expect_err("same root under another name is ambiguous");
+        assert_eq!(
+            error.to_string(),
+            "ambiguous duplicate repository contract at sequence 10 for repository consumer and root /nonexistent/pce"
+        );
+    }
+
+    #[test]
+    fn repository_contracts_does_not_demote_current_when_later_legacy_matches_identity() {
+        let records = [
+            parsed_current_contract_record(
+                9,
+                "pce",
+                "/nonexistent/pce",
+                "cargo test --workspace --latest",
+            ),
+            parsed_legacy_contract_record(10, "pce", "/nonexistent/./pce/"),
+        ];
+
+        let contracts =
+            repository_contracts(&records).expect("later legacy must not demote current");
+        let [RepositoryContract::Current(payload)] = contracts.as_slice() else {
+            panic!("one current repository contract expected");
+        };
+        assert_eq!(payload.stated.test, "cargo test --workspace --latest");
     }
 
     #[test]
