@@ -50,7 +50,7 @@ pub use tracked_contract::{
     MilestoneBranchPattern, MilestonePullRequestBase, PullRequestConvention,
     PullRequestMergeMethod, StatedContract, StepBranchPattern, StepPullRequestBase,
     TrackedContractError, TrackedRepositoryContract, WorkflowMapping, WorkflowMappings,
-    WorkflowName, parse_tracked_repository_contract,
+    WorkflowName, parse_tracked_repository_contract, serialize_tracked_repository_contract,
 };
 pub use vision::{
     CreationDate, NewVision, Slug, VisionDir, VisionDirOutcome, VisionError, VisionName,

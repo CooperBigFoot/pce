@@ -11,20 +11,21 @@ use pce_core::{
     AppendError, ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode,
     CreationDate, CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate,
     DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail,
-    EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, ExactPullRequestIdentity,
-    ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
+    EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
+    ExactPullRequestIdentity, ExactPullRequestState, GitAuthorityObservation,
+    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
     OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
     RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RunSnapshot, Sha256Digest,
-    SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState, TagTarget,
-    TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName, VisionSlug,
+    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot,
+    Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState,
+    TagTarget, TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName, VisionSlug,
     WorktreeIdentity, WorktreeState, WriteKind, append_event, compute_dispatchability,
     create_vision, derive_merge_status, derive_milestone_merge_status, derive_run_state,
     event_record_matches, measure_contract_snapshot, parse_event_line,
-    parse_tracked_repository_contract, render_human_snapshot, validate_workflow_coverage,
+    parse_tracked_repository_contract, render_human_snapshot,
+    serialize_tracked_repository_contract, validate_workflow_coverage,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -35,11 +36,13 @@ const USAGE: &str = concat!(
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] --policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> [--policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> ...]\n",
-    "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>"
+    "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>\n",
+    "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>"
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
 const RELEASE_TAG: &str = "v0.1.16";
+const TRACKED_REPOSITORY_CONTRACT_PATH: &str = ".pce/repository-contract.json";
 
 #[derive(Debug)]
 enum Command {
@@ -71,6 +74,11 @@ enum Command {
     ContractCheck {
         contract_path: PathBuf,
         repository_root: PathBuf,
+    },
+    ContractRefresh {
+        log_path: PathBuf,
+        repository_root: PathBuf,
+        node: NodeId,
     },
 }
 
@@ -199,6 +207,11 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             contract_path,
             repository_root,
         } => run_contract_check(&contract_path, &repository_root),
+        Command::ContractRefresh {
+            log_path,
+            repository_root,
+            node,
+        } => run_contract_refresh(&log_path, &repository_root, node),
     }
 }
 
@@ -228,6 +241,30 @@ fn parse_contract_command(action: &str, rest: &[String]) -> Result<Command> {
             Ok(Command::ContractCheck {
                 contract_path: PathBuf::from(raw_contract_path),
                 repository_root: PathBuf::from(raw_repository_root),
+            })
+        }
+        (
+            "refresh",
+            [
+                file_flag,
+                raw_log_path,
+                root_flag,
+                raw_repository_root,
+                node_flag,
+                raw_node,
+            ],
+        ) if file_flag == "--file"
+            && root_flag == "--repo-root"
+            && node_flag == "--node"
+            && is_value(raw_log_path)
+            && is_value(raw_repository_root)
+            && is_value(raw_node) =>
+        {
+            let node = NodeId::parse(raw_node).context("failed to parse contract-refresh node")?;
+            Ok(Command::ContractRefresh {
+                log_path: PathBuf::from(raw_log_path),
+                repository_root: PathBuf::from(raw_repository_root),
+                node,
             })
         }
         _ => bail!(USAGE),
@@ -808,6 +845,156 @@ fn run_contract_check(contract_path: &Path, repository_root: &Path) -> Result<()
     Ok(())
 }
 
+fn run_contract_refresh(log_path: &Path, repository_root: &Path, node: NodeId) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(log_path)
+        .with_context(|| format!("failed to open event log {}", log_path.display()))?;
+    file.lock()
+        .with_context(|| format!("failed to lock event log {}", log_path.display()))?;
+
+    let operation = refresh_locked(&mut file, log_path, repository_root, node);
+    let unlock = file
+        .unlock()
+        .with_context(|| format!("failed to unlock event log {}", log_path.display()));
+
+    match (operation, unlock) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(()), Err(unlock_error)) => Err(unlock_error),
+        (Err(primary), Err(unlock_error)) => Err(primary.context(format!(
+            "additionally, explicit event-log unlock failed: {unlock_error:#}"
+        ))),
+    }
+}
+
+fn refresh_locked(
+    file: &mut File,
+    log_path: &Path,
+    repository_root: &Path,
+    node: NodeId,
+) -> Result<()> {
+    let repository_root_argument = repository_root.to_str().with_context(|| {
+        format!(
+            "raw --repo-root argument is not valid UTF-8: {}",
+            repository_root.display()
+        )
+    })?;
+    let requested_repository_root = RepositoryRoot::new(repository_root_argument.to_owned());
+    let normalized_repository_root =
+        lexically_normalized_repository_root(requested_repository_root.as_str());
+
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek event log {} for read", log_path.display()))?;
+    let parsed_lines = {
+        let mut reader = BufReader::new(&mut *file);
+        read_event_log_lines(&mut reader, log_path)?
+    };
+    let records = parsed_lines
+        .iter()
+        .map(|line| line.record.clone())
+        .collect::<Vec<_>>();
+    let contracts = repository_contracts(&records)?;
+    let mut matching = contracts.iter().filter(|contract| {
+        lexically_normalized_repository_root(contract.root()) == normalized_repository_root
+    });
+    let previous = matching.next().with_context(|| {
+        format!(
+            "event log contains no repository contract for lexically normalized --repo-root {}",
+            normalized_repository_root.display()
+        )
+    })?;
+    if matching.next().is_some() {
+        bail!(
+            "event log contains multiple repository contracts for lexically normalized --repo-root {}",
+            normalized_repository_root.display()
+        );
+    }
+    let RepositoryContract::Current(previous) = previous else {
+        bail!(
+            "event log repository contract for lexically normalized --repo-root {} is legacy and cannot be refreshed",
+            normalized_repository_root.display()
+        );
+    };
+
+    let tracked_bytes =
+        read_at_default_branch_head(repository_root, TRACKED_REPOSITORY_CONTRACT_PATH)?;
+    let tracked = parse_tracked_contract(&tracked_bytes)?;
+    let observed = observed_workflows(repository_root)?;
+    validate_workflow_coverage(tracked.stated().workflows(), &observed)
+        .context("failed to validate tracked workflow coverage")?;
+    let previous_snapshot = previous_measured_snapshot(&tracked, previous)?;
+    let measured =
+        measure_contract_snapshot(tracked.stated(), Some(&previous_snapshot), |command| {
+            execute_gate_command(repository_root, command)
+        })
+        .context("failed to measure tracked repository contract")?;
+    let evidence_text = measured
+        .gates()
+        .iter()
+        .map(|measurement| measurement.command().as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let evidence = Evidence::parse(&evidence_text).context("failed to parse contract evidence")?;
+    let payload = RepositoryContractPayload::from_tracked_measurement(
+        previous.repository.clone(),
+        previous.repo_root.clone(),
+        &tracked,
+        measured.gates(),
+        evidence,
+    );
+    let payload_json = serde_json::to_string(&payload)
+        .context("failed to serialize repository contract payload")?;
+    let canonical_bytes = serialize_tracked_repository_contract(&tracked)
+        .context("failed to serialize tracked repository contract")?;
+    let tracked_path = repository_root.join(TRACKED_REPOSITORY_CONTRACT_PATH);
+    std::fs::write(&tracked_path, canonical_bytes).with_context(|| {
+        format!(
+            "failed to persist tracked repository contract {}",
+            tracked_path.display()
+        )
+    })?;
+    append_locked(
+        file,
+        payload_json,
+        WriteKind::RepositoryContract,
+        node,
+        log_path,
+    )
+}
+
+fn previous_measured_snapshot(
+    tracked: &TrackedRepositoryContract,
+    previous: &RepositoryContractPayload,
+) -> Result<MeasuredContractSnapshot> {
+    (|| {
+        let bytes = serialize_tracked_repository_contract(tracked)?;
+        let mut value: Value = serde_json::from_slice(&bytes)?;
+        for (pointer, command) in [
+            ("/stated/gates/format", previous.stated.format.as_str()),
+            ("/stated/gates/lint", previous.stated.lint.as_str()),
+            (
+                "/stated/gates/typecheck",
+                previous.stated.typecheck.as_str(),
+            ),
+            ("/stated/gates/test", previous.stated.test.as_str()),
+            ("/stated/gates/build", previous.stated.build.as_str()),
+        ] {
+            let slot = value
+                .pointer_mut(pointer)
+                .with_context(|| format!("canonical tracked contract lacks {pointer}"))?;
+            *slot = Value::String(command.to_owned());
+        }
+        let prior_bytes = serde_json::to_vec(&value)?;
+        let prior_tracked = parse_tracked_contract(&prior_bytes)?;
+        MeasuredContractSnapshot::from_observations(prior_tracked.stated(), &previous.observations)
+            .map_err(Error::from)
+    })()
+    .context("failed to reconstruct previous measured contract snapshot")
+}
+
 fn measure_tracked_contract_at_root(
     contract_path: &Path,
     repository_root: &Path,
@@ -1024,6 +1211,10 @@ fn read_event_log(path: &Path) -> Result<Vec<ParsedEventLine>> {
     let file =
         File::open(path).with_context(|| format!("failed to open event log {}", path.display()))?;
     let mut reader = BufReader::new(file);
+    read_event_log_lines(&mut reader, path)
+}
+
+fn read_event_log_lines(reader: &mut dyn BufRead, path: &Path) -> Result<Vec<ParsedEventLine>> {
     let mut lines = Vec::<ParsedEventLine>::new();
     let mut physical_line = 0_u64;
     let mut buffer = String::new();
@@ -1811,25 +2002,34 @@ fn git_args<'a>(root: &Path, args: impl IntoIterator<Item = &'a str>) -> Vec<OsS
 }
 
 fn read_at_default_branch_head(repo_root: &Path, relative_path: &str) -> Result<Vec<u8>> {
-    let symbolic_ref_args = git_args(repo_root, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
-    let symbolic_ref = require_spawn(execute_process("git", &symbolic_ref_args, None))?;
-    if !symbolic_ref.status.success() {
-        bail!("{}", symbolic_ref.detail());
-    }
-    let remote_ref =
-        one_nonempty_line(&symbolic_ref.stdout).with_context(|| symbolic_ref.detail())?;
-    let branch = remote_ref
-        .rsplit('/')
-        .next()
-        .filter(|branch| !branch.is_empty())
-        .with_context(|| symbolic_ref.detail())?;
-    let object = format!("{branch}:{relative_path}");
-    let show_args = git_args(repo_root, ["show", object.as_str()]);
-    let shown = require_spawn(execute_process("git", &show_args, None))?;
-    if !shown.status.success() {
-        bail!("{}", shown.detail());
-    }
-    Ok(shown.stdout)
+    let branch = (|| {
+        let args = git_args(repo_root, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
+        let result = require_spawn(execute_process("git", &args, None))?;
+        if !result.status.success() {
+            bail!("{}", result.detail());
+        }
+        let symbolic_ref = one_nonempty_line(&result.stdout)?;
+        let remote_branch = symbolic_ref
+            .strip_prefix("refs/remotes/origin/")
+            .context("default-branch symbolic ref has unexpected shape")?;
+        remote_branch
+            .split('/')
+            .rfind(|segment| !segment.is_empty())
+            .map(str::to_owned)
+            .context("default-branch symbolic ref has no branch segment")
+    })()
+    .context("failed to resolve default branch from refs/remotes/origin/HEAD")?;
+
+    (|| {
+        let revision_path = format!("{branch}:{relative_path}");
+        let args = git_args(repo_root, ["show", revision_path.as_str()]);
+        let result = require_spawn(execute_process("git", &args, None))?;
+        if !result.status.success() {
+            bail!("{}", result.detail());
+        }
+        Ok(result.stdout)
+    })()
+    .with_context(|| format!("failed to read {relative_path} at default-branch HEAD"))
 }
 
 fn execute_process(program: &str, args: &[OsString], current_dir: Option<&Path>) -> ProcessAttempt {
@@ -1981,6 +2181,7 @@ mod tests {
     use std::fs;
     use std::io::{Cursor, Read};
     use std::path::{Path, PathBuf};
+    use std::process::Command as ProcessCommand;
     use std::time::SystemTime;
 
     use pce_core::{
@@ -2000,8 +2201,8 @@ mod tests {
         BranchFetch, Command, DispatchGraphNode, DispatchNode, FetchResult, RepositoryContract,
         RepositoryRuntime, StatusFormat, USAGE, already_dispatched, github_pull_request_list_args,
         lexically_normalized_repository_root, measure_tracked_contract_at_root, observe_git,
-        parse_command, parse_dispatch_graph, parse_tracked_contract, repository_contracts, run,
-        run_log_read, validated_snapshot_value,
+        parse_command, parse_dispatch_graph, parse_tracked_contract, read_at_default_branch_head,
+        read_event_log, repository_contracts, run, run_log_read, validated_snapshot_value,
     };
 
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
@@ -2063,6 +2264,507 @@ mod tests {
         "\n",
         r#"{"sequence":3,"timestamp":"2026-07-27T12:34:58.000Z","kind":"delta","node":"m2-s2","payload":{"message":"third"}}"#,
     );
+
+    fn tracked_contract_bytes(commands: [&str; 5]) -> Vec<u8> {
+        let value = json!({
+            "stated": {
+                "gates": {
+                    "format": commands[0],
+                    "lint": commands[1],
+                    "typecheck": commands[2],
+                    "test": commands[3],
+                    "build": commands[4]
+                },
+                "version_policy": "NONE",
+                "branches": {
+                    "default": "main",
+                    "milestone": "pce/{vision}/milestone-{milestone}",
+                    "step": "pce/{vision}/m{milestone}-s{step}"
+                },
+                "pull_requests": {
+                    "step_base": "MILESTONE",
+                    "milestone_base": "DEFAULT",
+                    "merge_method": "SQUASH"
+                },
+                "workflows": []
+            },
+            "appendable": {
+                "environment_hazards": [],
+                "gate_orderings": [],
+                "lockfile_rules": []
+            }
+        });
+        let bytes = serde_json::to_vec(&value).expect("tracked contract value should serialize");
+        let tracked = parse_tracked_contract(&bytes).expect("tracked contract should parse");
+        pce_core::serialize_tracked_repository_contract(&tracked)
+            .expect("tracked contract should serialize canonically")
+    }
+
+    fn current_contract_line(root: &Path, commands: [&str; 5]) -> String {
+        let value = json!({
+            "sequence": 1,
+            "timestamp": "2026-07-29T12:00:00.000Z",
+            "kind": "repository-contract",
+            "node": "m3-s1",
+            "payload": {
+                "repository": "pce",
+                "repo_root": root.to_str().expect("fixture root should be UTF-8"),
+                "stated": {
+                    "format": commands[0],
+                    "lint": commands[1],
+                    "typecheck": commands[2],
+                    "test": commands[3],
+                    "build": commands[4],
+                    "version_policy": "NONE",
+                    "branch_convention": "default=main; milestone=pce/{vision}/milestone-{milestone}; step=pce/{vision}/m{milestone}-s{step}",
+                    "pull_request_convention": "step_base=MILESTONE; milestone_base=DEFAULT; merge_method=SQUASH"
+                },
+                "observations": {
+                    "format": 0,
+                    "lint": 0,
+                    "typecheck": 0,
+                    "test": 0,
+                    "build": 0
+                },
+                "workflow_map": {},
+                "appendable": {
+                    "environment_hazards": [],
+                    "gate_orderings": [],
+                    "lockfile_rules": []
+                },
+                "evidence": commands.join("\n")
+            }
+        });
+        format!("{value}\n")
+    }
+
+    fn legacy_contract_line(root: &Path) -> String {
+        let value = json!({
+            "sequence": 6,
+            "timestamp": "2026-07-27T12:35:01.000Z",
+            "kind": "repository-contract",
+            "node": "m1-s1",
+            "payload": {
+                "repository": "pce",
+                "repo_root": root.to_str().expect("fixture root should be UTF-8"),
+                "stack": "Rust 2024-edition Cargo workspace (rustc/cargo 1.93.1)",
+                "format": "cargo fmt --all --check",
+                "lint": "cargo clippy --workspace --all-targets",
+                "typecheck": "cargo check --workspace --all-targets",
+                "test": "cargo test --workspace",
+                "build": "cargo build --workspace",
+                "preflight": "cargo check --workspace --all-targets",
+                "gates_rule": "From the repo root, all four gates must exit zero before committing.",
+                "install": "None required for gates.",
+                "evidence": "rustc --version\ncargo --version\ngit rev-parse --show-toplevel"
+            }
+        });
+        format!("{value}\n")
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = ProcessCommand::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("git fixture command should spawn");
+        assert!(
+            output.status.success(),
+            "git fixture command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn initialize_git_repository(root: &Path) {
+        let output = ProcessCommand::new("git")
+            .args(["init", "-b", "main"])
+            .arg(root)
+            .output()
+            .expect("git init should spawn");
+        assert!(output.status.success(), "git init should succeed");
+        git(root, &["config", "user.name", "PCE Test"]);
+        git(root, &["config", "user.email", "pce-test@example.invalid"]);
+    }
+
+    fn commit_contract(root: &Path, bytes: &[u8], message: &str) {
+        let contract_path = root.join(".pce/repository-contract.json");
+        fs::create_dir_all(contract_path.parent().expect("contract should have parent"))
+            .expect("contract directory should create");
+        fs::write(&contract_path, bytes).expect("contract fixture should write");
+        git(root, &["add", ".pce/repository-contract.json"]);
+        git(root, &["commit", "-m", message]);
+    }
+
+    fn establish_remote_head(root: &Path) {
+        git(
+            root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+    }
+
+    fn refresh_args(log_path: &Path, root: &Path) -> Vec<String> {
+        vec![
+            "contract".to_owned(),
+            "refresh".to_owned(),
+            "--file".to_owned(),
+            log_path.display().to_string(),
+            "--repo-root".to_owned(),
+            root.display().to_string(),
+            "--node".to_owned(),
+            "m3-s2".to_owned(),
+        ]
+    }
+
+    fn invoke_refresh(log_path: &Path, root: &Path) -> anyhow::Result<()> {
+        run(
+            refresh_args(log_path, root).into_iter(),
+            &mut Cursor::new([]),
+        )
+    }
+
+    #[test]
+    fn contract_refresh_reads_default_branch_head_not_feature_worktree() {
+        let directory = tempdir().expect("temporary directory should create");
+        let root = directory.path().join("repository");
+        let log_path = directory.path().join("events.jsonl");
+        let strict = ["true", "true", "true", "exit 23", "true"];
+        let relaxed = ["true", "true", "true", "true", "true"];
+        initialize_git_repository(&root);
+        commit_contract(&root, &tracked_contract_bytes(strict), "initial contract");
+        establish_remote_head(&root);
+        fs::write(&log_path, current_contract_line(&root, relaxed)).expect("event log should seed");
+        git(&root, &["checkout", "-b", "feature"]);
+        commit_contract(&root, &tracked_contract_bytes(relaxed), "relax test gate");
+
+        let worktree_bytes = fs::read(root.join(".pce/repository-contract.json"))
+            .expect("worktree contract should read");
+        let worktree =
+            parse_tracked_contract(&worktree_bytes).expect("worktree contract should parse");
+        assert_eq!(worktree.stated().gates().test().as_str(), "true");
+        let main_bytes = {
+            let output = ProcessCommand::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["show", "main:.pce/repository-contract.json"])
+                .output()
+                .expect("git show should spawn");
+            assert!(output.status.success(), "git show should succeed");
+            output.stdout
+        };
+        let main = parse_tracked_contract(&main_bytes).expect("main contract should parse");
+        assert_eq!(main.stated().gates().test().as_str(), "exit 23");
+        let before = fs::read(&log_path).expect("event log should read");
+
+        let err = invoke_refresh(&log_path, &root).expect_err("strict test gate should fail");
+
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("failed to measure tracked repository contract"));
+        assert!(rendered.contains("stated gate command `exit 23` exited with status 23"));
+        assert_eq!(fs::read(&log_path).expect("event log should read"), before);
+        assert_eq!(
+            read_event_log(&log_path)
+                .expect("event log should parse")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn contract_refresh_rereads_post_merge_command_and_reuses_unchanged_observations() {
+        let directory = tempdir().expect("temporary directory should create");
+        let root = directory.path().join("repository");
+        let log_path = directory.path().join("events.jsonl");
+        let initial = [
+            "touch format-ran",
+            "touch lint-ran",
+            "touch typecheck-ran",
+            "touch old-test-ran",
+            "touch build-ran",
+        ];
+        initialize_git_repository(&root);
+        commit_contract(&root, &tracked_contract_bytes(initial), "initial contract");
+        establish_remote_head(&root);
+        fs::write(&log_path, current_contract_line(&root, initial)).expect("event log should seed");
+
+        invoke_refresh(&log_path, &root).expect("unchanged refresh should succeed");
+        assert_eq!(
+            read_event_log(&log_path)
+                .expect("event log should parse")
+                .len(),
+            2
+        );
+        for marker in [
+            "format-ran",
+            "lint-ran",
+            "typecheck-ran",
+            "old-test-ran",
+            "build-ran",
+        ] {
+            assert!(!root.join(marker).exists(), "{marker} must not exist");
+        }
+
+        let changed = [
+            "touch format-ran",
+            "touch lint-ran",
+            "touch typecheck-ran",
+            "touch new-test-ran",
+            "touch build-ran",
+        ];
+        commit_contract(
+            &root,
+            &tracked_contract_bytes(changed),
+            "change test command",
+        );
+        invoke_refresh(&log_path, &root).expect("changed refresh should succeed");
+
+        let lines = read_event_log(&log_path).expect("event log should parse");
+        assert_eq!(lines.len(), 3);
+        assert!(root.join("new-test-ran").exists());
+        for marker in [
+            "format-ran",
+            "lint-ran",
+            "typecheck-ran",
+            "old-test-ran",
+            "build-ran",
+        ] {
+            assert!(!root.join(marker).exists(), "{marker} must not exist");
+        }
+        let records = lines
+            .iter()
+            .map(|line| line.record.clone())
+            .collect::<Vec<_>>();
+        let contracts = repository_contracts(&records).expect("contracts should project");
+        let [RepositoryContract::Current(latest)] = contracts.as_slice() else {
+            panic!("one latest current contract expected");
+        };
+        assert_eq!(latest.stated.test, "touch new-test-ran");
+        assert_eq!(latest.observations.format.get(), 0);
+        assert_eq!(latest.observations.lint.get(), 0);
+        assert_eq!(latest.observations.typecheck.get(), 0);
+        assert_eq!(latest.observations.test.get(), 0);
+        assert_eq!(latest.observations.build.get(), 0);
+        assert_eq!(
+            fs::read(root.join(".pce/repository-contract.json"))
+                .expect("worktree contract should read"),
+            read_at_default_branch_head(&root, ".pce/repository-contract.json")
+                .expect("default contract should read")
+        );
+    }
+
+    #[test]
+    fn contract_refresh_rejects_absent_default_branch_contract_without_worktree_fallback() {
+        let directory = tempdir().expect("temporary directory should create");
+        let root = directory.path().join("repository");
+        let log_path = directory.path().join("events.jsonl");
+        let commands = [
+            "touch format-ran",
+            "touch lint-ran",
+            "touch typecheck-ran",
+            "touch old-test-ran",
+            "touch build-ran",
+        ];
+        initialize_git_repository(&root);
+        fs::create_dir_all(root.join(".pce")).expect("contract directory should create");
+        fs::write(root.join(".pce/.gitkeep"), []).expect("gitkeep should write");
+        git(&root, &["add", ".pce/.gitkeep"]);
+        git(&root, &["commit", "-m", "initial repository"]);
+        establish_remote_head(&root);
+        git(&root, &["checkout", "-b", "feature"]);
+        let worktree_contract = tracked_contract_bytes(commands);
+        fs::write(
+            root.join(".pce/repository-contract.json"),
+            &worktree_contract,
+        )
+        .expect("worktree contract should write");
+        fs::write(&log_path, current_contract_line(&root, commands))
+            .expect("event log should seed");
+        let log_before = fs::read(&log_path).expect("event log should read");
+
+        let err =
+            invoke_refresh(&log_path, &root).expect_err("missing default contract should fail");
+
+        assert!(
+            format!("{err:#}")
+                .contains("failed to read .pce/repository-contract.json at default-branch HEAD")
+        );
+        assert_eq!(
+            fs::read(&log_path).expect("event log should read"),
+            log_before
+        );
+        assert_eq!(
+            fs::read(root.join(".pce/repository-contract.json"))
+                .expect("worktree contract should read"),
+            worktree_contract
+        );
+    }
+
+    #[test]
+    fn contract_refresh_rejects_legacy_only_prior_event_without_append() {
+        let directory = tempdir().expect("temporary directory should create");
+        let root = directory.path().join("repository");
+        let log_path = directory.path().join("events.jsonl");
+        let commands = [
+            "touch format-ran",
+            "touch lint-ran",
+            "touch typecheck-ran",
+            "touch old-test-ran",
+            "touch build-ran",
+        ];
+        initialize_git_repository(&root);
+        commit_contract(&root, &tracked_contract_bytes(commands), "initial contract");
+        establish_remote_head(&root);
+        fs::write(&log_path, legacy_contract_line(&root)).expect("event log should seed");
+        let before = fs::read(&log_path).expect("event log should read");
+        let normalized_repository_root =
+            lexically_normalized_repository_root(root.to_str().expect("root should be UTF-8"));
+
+        let err = invoke_refresh(&log_path, &root).expect_err("legacy contract should not refresh");
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "event log repository contract for lexically normalized --repo-root {} is legacy and cannot be refreshed",
+                normalized_repository_root.display()
+            )
+        );
+        assert_eq!(fs::read(&log_path).expect("event log should read"), before);
+    }
+
+    #[test]
+    fn contract_refresh_parses_exact_ordered_arguments() {
+        let command = parse_command(
+            [
+                "contract",
+                "refresh",
+                "--file",
+                "events.jsonl",
+                "--repo-root",
+                "/workspace/pce",
+                "--node",
+                "m3-s2",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("exact refresh arguments should parse");
+        let Command::ContractRefresh {
+            log_path,
+            repository_root,
+            node,
+        } = command
+        else {
+            panic!("contract refresh command expected");
+        };
+        assert_eq!(log_path, PathBuf::from("events.jsonl"));
+        assert_eq!(repository_root, PathBuf::from("/workspace/pce"));
+        assert_eq!(node.as_str(), "m3-s2");
+
+        for args in [
+            vec![
+                "contract",
+                "refresh",
+                "--repo-root",
+                "/workspace/pce",
+                "--file",
+                "events.jsonl",
+                "--node",
+                "m3-s2",
+            ],
+            vec![
+                "contract",
+                "refresh",
+                "--file",
+                "events.jsonl",
+                "--repo-root",
+                "/workspace/pce",
+            ],
+            vec![
+                "contract",
+                "refresh",
+                "--file",
+                "events.jsonl",
+                "--repo-root",
+                "/workspace/pce",
+                "--node",
+                "m3-s2",
+                "--extra",
+            ],
+        ] {
+            let err = parse_command(args.into_iter().map(str::to_owned))
+                .expect_err("non-exact refresh arguments should fail");
+            assert_eq!(err.to_string(), USAGE);
+        }
+    }
+
+    // Preservation guard for the orchestrator's existing status and ready vectors.
+    #[test]
+    fn status_and_ready_orchestrator_arguments_remain_accepted() {
+        let status = parse_command(
+            [
+                "status",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/example",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("status orchestrator arguments should remain accepted");
+        let Command::Status {
+            log_path,
+            vision_dir,
+            format,
+            ..
+        } = status
+        else {
+            panic!("status command expected");
+        };
+        assert_eq!(log_path, PathBuf::from("events.jsonl"));
+        assert_eq!(vision_dir, PathBuf::from("planning/example"));
+        assert_eq!(format, StatusFormat::Json);
+
+        let ready = parse_command(
+            [
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/example",
+                "--graph",
+                "planning/example/milestone-3/steps.json",
+                "--policy",
+                "pce=NONE",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("ready orchestrator arguments should remain accepted");
+        let Command::Ready {
+            log_path,
+            vision_dir,
+            graph_path,
+            version_policies,
+            ..
+        } = ready
+        else {
+            panic!("ready command expected");
+        };
+        assert_eq!(log_path, PathBuf::from("events.jsonl"));
+        assert_eq!(vision_dir, PathBuf::from("planning/example"));
+        assert_eq!(
+            graph_path.as_ref().expect("graph should parse").as_str(),
+            "planning/example/milestone-3/steps.json"
+        );
+        assert_eq!(version_policies.len(), 1);
+        assert_eq!(version_policies[0].0.as_str(), "pce");
+        assert_eq!(version_policies[0].1, VersionPolicy::None);
+    }
 
     fn log_args(path: &Path, kind: &str) -> Vec<String> {
         vec![
