@@ -30,7 +30,7 @@ const USAGE: &str = concat!(
     "       pce log --file <LOG_PATH> --kind <KIND> --node <NODE>\n",
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
-    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> --policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> [--policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> ...]"
+    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] --policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> [--policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> ...]"
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
@@ -60,6 +60,7 @@ enum Command {
         log_path: PathBuf,
         recovery_log_path: RecoveryLogPath,
         vision_dir: PathBuf,
+        graph_path: Option<ArtifactPath>,
         version_policies: Vec<(RepositoryName, VersionPolicy)>,
     },
 }
@@ -160,11 +161,13 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             log_path,
             recovery_log_path,
             vision_dir,
+            graph_path,
             version_policies,
         } => run_ready(
             &log_path,
             &recovery_log_path,
             &vision_dir,
+            graph_path.as_ref(),
             &version_policies,
         ),
     }
@@ -277,7 +280,7 @@ fn parse_ready_command(args: &[String]) -> Result<Command> {
         raw_path,
         vision_flag,
         raw_vision_dir,
-        policies @ ..,
+        trailing @ ..,
     ] = args
     else {
         bail!(USAGE);
@@ -286,9 +289,21 @@ fn parse_ready_command(args: &[String]) -> Result<Command> {
         || vision_flag != "--vision-dir"
         || !is_value(raw_path)
         || !is_value(raw_vision_dir)
-        || policies.is_empty()
-        || !policies.len().is_multiple_of(2)
     {
+        bail!(USAGE);
+    }
+
+    let (graph_path, policies) = match trailing {
+        [graph_flag, raw_graph_path, policies @ ..]
+            if graph_flag == "--graph"
+                && is_value(raw_graph_path)
+                && !raw_graph_path.is_empty() =>
+        {
+            (Some(ArtifactPath::new(raw_graph_path)), policies)
+        }
+        _ => (None, trailing),
+    };
+    if policies.is_empty() || !policies.len().is_multiple_of(2) {
         bail!(USAGE);
     }
 
@@ -329,6 +344,7 @@ fn parse_ready_command(args: &[String]) -> Result<Command> {
         log_path: PathBuf::from(raw_path),
         recovery_log_path: RecoveryLogPath::new(raw_path),
         vision_dir: PathBuf::from(raw_vision_dir),
+        graph_path,
         version_policies,
     })
 }
@@ -451,6 +467,7 @@ fn run_ready(
     log_path: &Path,
     recovery_log_path: &RecoveryLogPath,
     vision_dir: &Path,
+    graph_path: Option<&ArtifactPath>,
     version_policies: &[(RepositoryName, VersionPolicy)],
 ) -> Result<()> {
     let parsed_lines = read_event_log(log_path)?;
@@ -478,36 +495,56 @@ fn run_ready(
     let (artifacts, artifact_bytes) = current_artifacts(&records, &contracts[primary_index].root)?;
     let state = derive_run_state(&records, &vision, recovery_log_path, &artifacts, &[], &[])
         .context("failed to derive readiness provenance and dispatch history")?;
-    let mut selected = None;
-    for (approval_sequence, artifact_path) in approvals {
-        let retained = artifact_bytes
+    let (approval_sequence, artifact_path, parsed_graph) = if let Some(requested_path) = graph_path
+    {
+        let (approval_sequence, artifact_path) = approvals
+            .iter()
+            .find(|(_, artifact_path)| artifact_path == requested_path)
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "no planning-artifact-approved record for graph path {}",
+                    requested_path.as_str()
+                )
+            })?;
+        artifact_bytes
             .iter()
             .find(|artifact| artifact.path == artifact_path)
             .context("approved artifact has no retained current observation")?;
-        let Some(bytes) = retained.bytes.as_deref() else {
-            tracing::info!(
-                artifact_path = artifact_path.as_str(),
-                reason = "artifact missing",
-                "skipping approved artifact candidate"
-            );
-            continue;
-        };
-        match parse_dispatch_graph(bytes) {
-            Ok(graph) => {
-                selected = Some((approval_sequence, artifact_path, graph));
-                break;
-            }
-            Err(error) => {
+        (approval_sequence, artifact_path, None)
+    } else {
+        let mut selected = None;
+        for (approval_sequence, artifact_path) in approvals {
+            let retained = artifact_bytes
+                .iter()
+                .find(|artifact| artifact.path == artifact_path)
+                .context("approved artifact has no retained current observation")?;
+            let Some(bytes) = retained.bytes.as_deref() else {
                 tracing::info!(
                     artifact_path = artifact_path.as_str(),
-                    reason = %format!("{error:#}"),
+                    reason = "artifact missing",
                     "skipping approved artifact candidate"
                 );
+                continue;
+            };
+            match parse_dispatch_graph(bytes) {
+                Ok(graph) => {
+                    selected = Some((approval_sequence, artifact_path, graph));
+                    break;
+                }
+                Err(error) => {
+                    tracing::info!(
+                        artifact_path = artifact_path.as_str(),
+                        reason = %format!("{error:#}"),
+                        "skipping approved artifact candidate"
+                    );
+                }
             }
         }
-    }
-    let (approval_sequence, artifact_path, graph) =
-        selected.context("no approved artifact is a conforming graph")?;
+        let (approval_sequence, artifact_path, graph) =
+            selected.context("no approved artifact is a conforming graph")?;
+        (approval_sequence, artifact_path, Some(graph))
+    };
     let provenance = state
         .provenance()
         .iter()
@@ -515,6 +552,25 @@ fn run_ready(
         .context("selected planning-artifact approval has no derived provenance")?;
     compute_dispatchability(provenance, &[], &[], &[], &[])
         .context("selected planning artifact failed preliminary provenance check")?;
+    let graph = match parsed_graph {
+        Some(graph) => graph,
+        None => {
+            let retained = artifact_bytes
+                .iter()
+                .find(|artifact| artifact.path == artifact_path)
+                .context("approved artifact has no retained current observation")?;
+            let bytes = retained
+                .bytes
+                .as_deref()
+                .context("approved artifact has no retained current observation")?;
+            parse_dispatch_graph(bytes).map_err(|error| {
+                anyhow!(
+                    "approved graph path {} is not a conforming graph: {error:#}",
+                    artifact_path.as_str()
+                )
+            })?
+        }
+    };
 
     for graph_node in &graph.nodes {
         let matches = contracts
@@ -2061,6 +2117,7 @@ mod tests {
             log_path,
             recovery_log_path,
             vision_dir,
+            graph_path,
             version_policies,
         } = command
         else {
@@ -2068,6 +2125,7 @@ mod tests {
         };
         assert_eq!(log_path, PathBuf::from("events.jsonl"));
         assert_eq!(recovery_log_path.as_str(), "events.jsonl");
+        assert_eq!(graph_path, None);
         assert_eq!(
             VisionSlug::parse(
                 vision_dir
