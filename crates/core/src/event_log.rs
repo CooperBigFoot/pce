@@ -11,6 +11,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tracing::instrument;
 
+pub use crate::contract_measurement::ObservedExitStatus;
 use crate::run_state::VersionPolicy;
 
 /// Exact unparsed JSON submitted as the payload for one event.
@@ -496,23 +497,6 @@ pub struct StatedRepositoryContract {
     pub branch_convention: String,
     /// The pull-request convention governing integration.
     pub pull_request_convention: String,
-}
-
-/// One measured gate process exit status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ObservedExitStatus(i32);
-
-impl ObservedExitStatus {
-    /// Construct an observed process exit status.
-    pub const fn new(value: i32) -> Self {
-        Self(value)
-    }
-
-    /// Return the measured process exit status.
-    pub const fn get(self) -> i32 {
-        self.0
-    }
 }
 
 /// The measured-authority gate observations for a current repository contract.

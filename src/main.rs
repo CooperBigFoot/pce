@@ -6,6 +6,7 @@ use std::process::{ExitStatus, Output};
 use std::time::SystemTime;
 
 use anyhow::{Context, Error, Result, anyhow, bail};
+use pce_core::GateCommand;
 use pce_core::{
     AppendError, ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode,
     CreationDate, CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate,
@@ -13,15 +14,17 @@ use pce_core::{
     EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, ExactPullRequestIdentity,
     ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
-    LegacyRepositoryContractPayload, MergeStatus, MergeSubject, MilestoneMergeSubject,
-    MilestoneNode, NodeId, OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
-    RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation, RepositoryName,
-    RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef, RunSnapshot,
-    Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState,
-    TagTarget, UnparsedPayload, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
-    WorktreeState, WriteKind, append_event, compute_dispatchability, create_vision,
-    derive_merge_status, derive_milestone_merge_status, derive_run_state, event_record_matches,
-    parse_event_line, render_human_snapshot,
+    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
+    MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
+    OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
+    RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+    RepositoryObservationFailure, RepositoryObservationRef, RunSnapshot, Sha256Digest,
+    SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState, TagTarget,
+    TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName, VisionSlug,
+    WorktreeIdentity, WorktreeState, WriteKind, append_event, compute_dispatchability,
+    create_vision, derive_merge_status, derive_milestone_merge_status, derive_run_state,
+    event_record_matches, measure_contract_snapshot, parse_event_line,
+    parse_tracked_repository_contract, render_human_snapshot, validate_workflow_coverage,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -31,7 +34,8 @@ const USAGE: &str = concat!(
     "       pce log --file <LOG_PATH> --kind <KIND> --node <NODE>\n",
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
-    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] --policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> [--policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> ...]"
+    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] --policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> [--policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> ...]\n",
+    "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>"
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
@@ -63,6 +67,10 @@ enum Command {
         vision_dir: PathBuf,
         graph_path: Option<ArtifactPath>,
         version_policies: Vec<(RepositoryName, VersionPolicy)>,
+    },
+    ContractCheck {
+        contract_path: PathBuf,
+        repository_root: PathBuf,
     },
 }
 
@@ -187,6 +195,10 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             graph_path.as_ref(),
             &version_policies,
         ),
+        Command::ContractCheck {
+            contract_path,
+            repository_root,
+        } => run_contract_check(&contract_path, &repository_root),
     }
 }
 
@@ -200,6 +212,24 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "log" => parse_log_command(action, rest),
         [verb, action, rest @ ..] if verb == "status" => parse_status_command(action, rest),
         [verb, rest @ ..] if verb == "ready" => parse_ready_command(rest),
+        [verb, action, rest @ ..] if verb == "contract" => parse_contract_command(action, rest),
+        _ => bail!(USAGE),
+    }
+}
+
+fn parse_contract_command(action: &str, rest: &[String]) -> Result<Command> {
+    match (action, rest) {
+        ("check", [file_flag, raw_contract_path, root_flag, raw_repository_root])
+            if file_flag == "--file"
+                && root_flag == "--repo-root"
+                && is_value(raw_contract_path)
+                && is_value(raw_repository_root) =>
+        {
+            Ok(Command::ContractCheck {
+                contract_path: PathBuf::from(raw_contract_path),
+                repository_root: PathBuf::from(raw_repository_root),
+            })
+        }
         _ => bail!(USAGE),
     }
 }
@@ -717,6 +747,105 @@ fn dispatch_node_id(node: &DispatchNode) -> String {
         DispatchNode::Step(node) => {
             format!("m{}-s{}", node.milestone().get(), node.step().get())
         }
+    }
+}
+
+pub fn parse_tracked_contract(bytes: &[u8]) -> Result<TrackedRepositoryContract> {
+    parse_tracked_repository_contract(bytes).context("failed to parse tracked repository contract")
+}
+
+fn run_contract_check(contract_path: &Path, repository_root: &Path) -> Result<()> {
+    measure_tracked_contract_at_root(contract_path, repository_root, None)?;
+    Ok(())
+}
+
+fn measure_tracked_contract_at_root(
+    contract_path: &Path,
+    repository_root: &Path,
+    previous: Option<&MeasuredContractSnapshot>,
+) -> Result<MeasuredContractSnapshot> {
+    let bytes = std::fs::read(contract_path).with_context(|| {
+        format!(
+            "failed to read tracked repository contract {}",
+            contract_path.display()
+        )
+    })?;
+    let contract = parse_tracked_contract(&bytes)?;
+    let observed = observed_workflows(repository_root)?;
+    validate_workflow_coverage(contract.stated().workflows(), &observed)
+        .context("failed to validate tracked workflow coverage")?;
+    measure_contract_snapshot(contract.stated(), previous, |command| {
+        execute_gate_command(repository_root, command)
+    })
+    .context("failed to measure tracked repository contract")
+}
+
+fn observed_workflows(repository_root: &Path) -> Result<Vec<ObservedWorkflowName>> {
+    let workflows_directory = repository_root.join(".github/workflows");
+    let entries = match std::fs::read_dir(&workflows_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to read workflow directory {}",
+                    workflows_directory.display()
+                )
+            });
+        }
+    };
+
+    let mut observed = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read entry in workflow directory {}",
+                workflows_directory.display()
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to read workflow file type {}", path.display()))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let extension = Path::new(&file_name).extension();
+        if extension != Some(std::ffi::OsStr::new("yml"))
+            && extension != Some(std::ffi::OsStr::new("yaml"))
+        {
+            continue;
+        }
+        let file_name = file_name
+            .into_string()
+            .map_err(|_| anyhow!("workflow filename at {} is not valid UTF-8", path.display()))?;
+        observed
+            .push(ObservedWorkflowName::parse(&file_name).with_context(|| {
+                format!("failed to parse workflow filename {}", path.display())
+            })?);
+    }
+    observed.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    Ok(observed)
+}
+
+fn execute_gate_command(
+    repository_root: &Path,
+    command: &GateCommand,
+) -> std::io::Result<ObservedExitStatus> {
+    let args = [OsString::from("-c"), OsString::from(command.as_str())];
+    match execute_process("/bin/sh", &args, Some(repository_root)) {
+        ProcessAttempt::SpawnFailed { detail } => Err(std::io::Error::other(detail)),
+        ProcessAttempt::Completed(result) => result
+            .status
+            .code()
+            .map(ObservedExitStatus::from_code)
+            .ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "stated gate command `{}` terminated without an exit-status code",
+                    command.as_str()
+                ))
+            }),
     }
 }
 
@@ -1744,10 +1873,59 @@ mod tests {
 
     use crate::{
         BranchFetch, Command, DispatchGraphNode, DispatchNode, FetchResult, RepositoryContract,
-        RepositoryRuntime, StatusFormat, already_dispatched, github_pull_request_list_args,
-        observe_git, parse_command, parse_dispatch_graph, repository_contracts, run, run_log_read,
-        validated_snapshot_value,
+        RepositoryRuntime, StatusFormat, USAGE, already_dispatched, github_pull_request_list_args,
+        measure_tracked_contract_at_root, observe_git, parse_command, parse_dispatch_graph,
+        parse_tracked_contract, repository_contracts, run, run_log_read, validated_snapshot_value,
     };
+
+    const VALID_TRACKED_CONTRACT: &[u8] = br#"{
+  "stated": {
+    "gates": {
+      "format": "cargo fmt --check",
+      "lint": "cargo clippy --workspace --all-targets",
+      "typecheck": "cargo check --workspace --all-targets",
+      "test": "cargo test --workspace",
+      "build": "cargo build --release"
+    },
+    "version_policy": "NONE",
+    "branches": {
+      "default": "main",
+      "milestone": "pce/{vision}/milestone-{milestone}",
+      "step": "pce/{vision}/m{milestone}-s{step}"
+    },
+    "pull_requests": {
+      "step_base": "MILESTONE",
+      "milestone_base": "DEFAULT",
+      "merge_method": "SQUASH"
+    },
+    "workflows": [
+      {
+        "workflow": "ci.yml",
+        "stand_in": {
+          "kind": "COMMAND",
+          "command": "cargo test --workspace"
+        }
+      },
+      {
+        "workflow": "release.yml",
+        "stand_in": {
+          "kind": "NONE"
+        }
+      }
+    ]
+  },
+  "appendable": {
+    "environment_hazards": [
+      "pipe Codex stdin from /dev/null"
+    ],
+    "gate_orderings": [
+      "run cargo fmt --check before clippy"
+    ],
+    "lockfile_rules": [
+      "commit Cargo.lock when dependency resolution changes"
+    ]
+  }
+}"#;
 
     const DELTA_PAYLOAD: &str = r#"{"message":"append one validated event"}"#;
     const UNKNOWN_TAIL: &str = r#"{"sequence":41,"timestamp":"2026-07-27T12:34:55.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
@@ -1783,6 +1961,34 @@ mod tests {
         } else {
             Vec::new()
         }
+    }
+
+    #[test]
+    fn composition_root_parses_exact_tracked_contract_bytes() {
+        let contract =
+            parse_tracked_contract(VALID_TRACKED_CONTRACT).expect("tracked contract should parse");
+        assert_eq!(
+            contract.stated().gates().test().as_str(),
+            "cargo test --workspace"
+        );
+        assert_eq!(contract.stated().version_policy(), &VersionPolicy::None);
+        assert!(matches!(
+            contract.stated().workflows().as_slice()[1].stand_in(),
+            pce_core::LocalWorkflowStandIn::None
+        ));
+        assert_eq!(
+            contract.appendable().lockfile_rules()[0].as_str(),
+            "commit Cargo.lock when dependency resolution changes"
+        );
+    }
+
+    #[test]
+    fn composition_root_preserves_tracked_contract_error_context() {
+        let err = parse_tracked_contract(b"{\"stated\":{}}")
+            .expect_err("incomplete contract should fail");
+        let message = format!("{err:#}");
+        assert!(message.contains("failed to parse tracked repository contract"));
+        assert!(message.contains("malformed tracked repository contract:"));
     }
 
     #[test]
@@ -2198,6 +2404,145 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn contract_parser_accepts_only_exact_ordered_paths() {
+        let command = parse_command(
+            [
+                "contract",
+                "check",
+                "--file",
+                "contract.json",
+                "--repo-root",
+                "repo",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("exact contract check command should parse");
+        let Command::ContractCheck {
+            contract_path,
+            repository_root,
+        } = command
+        else {
+            panic!("typed contract-check command expected");
+        };
+        assert_eq!(contract_path, PathBuf::from("contract.json"));
+        assert_eq!(repository_root, PathBuf::from("repo"));
+
+        let invalid = [
+            vec![
+                "contract",
+                "check",
+                "--repo-root",
+                "repo",
+                "--file",
+                "contract.json",
+            ],
+            vec!["contract", "check", "--file", "contract.json"],
+            vec![
+                "contract",
+                "check",
+                "--file",
+                "contract.json",
+                "--file",
+                "contract.json",
+            ],
+            vec![
+                "contract",
+                "check",
+                "--file",
+                "contract.json",
+                "--repo-root",
+                "repo",
+                "extra",
+            ],
+            vec![
+                "contract",
+                "inspect",
+                "--file",
+                "contract.json",
+                "--repo-root",
+                "repo",
+            ],
+            vec![
+                "contract",
+                "check",
+                "--file",
+                "--contract",
+                "--repo-root",
+                "repo",
+            ],
+            vec![
+                "contract",
+                "check",
+                "--file",
+                "contract.json",
+                "--repo-root",
+                "--repo",
+            ],
+        ];
+        for args in invalid {
+            let err = parse_command(args.into_iter().map(str::to_owned))
+                .expect_err("non-contract CLI shape should fail");
+            assert_eq!(err.to_string(), USAGE);
+        }
+    }
+
+    #[test]
+    fn successive_contract_measurements_do_not_reexecute_unchanged_gate_commands() {
+        let directory = tempdir().expect("temporary directory should create");
+        let repository_root = directory.path().join("repo");
+        fs::create_dir(&repository_root).expect("repository fixture should create");
+        let contract_path = directory.path().join("contract.json");
+        fs::write(
+            &contract_path,
+            br#"{
+  "stated": {
+    "gates": {
+      "format": "printf x >> gate-runs",
+      "lint": "printf x >> gate-runs",
+      "typecheck": "printf x >> gate-runs",
+      "test": "printf x >> gate-runs",
+      "build": "printf x >> gate-runs"
+    },
+    "version_policy": "NONE",
+    "branches": {
+      "default": "main",
+      "milestone": "pce/{vision}/milestone-{milestone}",
+      "step": "pce/{vision}/m{milestone}-s{step}"
+    },
+    "pull_requests": {
+      "step_base": "MILESTONE",
+      "milestone_base": "DEFAULT",
+      "merge_method": "SQUASH"
+    },
+    "workflows": []
+  },
+  "appendable": {
+    "environment_hazards": [],
+    "gate_orderings": [],
+    "lockfile_rules": []
+  }
+}"#,
+        )
+        .expect("contract fixture should write");
+
+        let first = measure_tracked_contract_at_root(&contract_path, &repository_root, None)
+            .expect("first measurement should succeed");
+        let marker_path = repository_root.join("gate-runs");
+        assert_eq!(
+            fs::read_to_string(&marker_path).expect("marker should read"),
+            "xxxxx"
+        );
+
+        measure_tracked_contract_at_root(&contract_path, &repository_root, Some(&first))
+            .expect("second measurement should reuse prior observations");
+        assert_eq!(
+            fs::read_to_string(marker_path).expect("marker should read"),
+            "xxxxx"
+        );
     }
 
     #[test]

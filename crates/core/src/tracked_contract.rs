@@ -1,0 +1,845 @@
+//! parse_tracked_repository_contract : TrackedContractBytes → TrackedRepositoryContract ∪ TrackedContractError   (pure, deterministic)
+//! This module performs no I/O.
+
+use std::collections::HashSet;
+
+use serde::Deserialize;
+use thiserror::Error;
+use tracing::instrument;
+
+use crate::run_state::VersionPolicy;
+
+/// The typed stated and appendable halves of a tracked repository contract.
+///
+/// The two halves carry structurally distinct authority:
+///
+/// ```rust,compile_fail
+/// use pce_core::{AppendableContract, StatedContract};
+///
+/// fn append_only(_: &AppendableContract) {}
+///
+/// fn cannot_append_to_stated(stated: &StatedContract) {
+///     append_only(stated);
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedRepositoryContract {
+    stated: StatedContract,
+    appendable: AppendableContract,
+}
+
+impl TrackedRepositoryContract {
+    /// Return the falsifiable stated half.
+    pub const fn stated(&self) -> &StatedContract {
+        &self.stated
+    }
+
+    /// Return the inert appendable half.
+    pub const fn appendable(&self) -> &AppendableContract {
+        &self.appendable
+    }
+}
+
+/// The falsifiable repository contract measured by later milestones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatedContract {
+    gates: GateCommands,
+    version_policy: VersionPolicy,
+    branches: BranchConvention,
+    pull_requests: PullRequestConvention,
+    workflows: WorkflowMappings,
+}
+
+impl StatedContract {
+    /// Return the five acceptance-gate commands.
+    pub const fn gates(&self) -> &GateCommands {
+        &self.gates
+    }
+
+    /// Return the repository's version policy.
+    pub const fn version_policy(&self) -> &VersionPolicy {
+        &self.version_policy
+    }
+
+    /// Return the branch convention.
+    pub const fn branches(&self) -> &BranchConvention {
+        &self.branches
+    }
+
+    /// Return the pull-request convention.
+    pub const fn pull_requests(&self) -> &PullRequestConvention {
+        &self.pull_requests
+    }
+
+    /// Return the workflow-to-local-command mappings.
+    pub const fn workflows(&self) -> &WorkflowMappings {
+        &self.workflows
+    }
+}
+
+/// A non-empty command used by an acceptance gate or workflow stand-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateCommand(String);
+
+impl GateCommand {
+    /// Return the command exactly as stated.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The role of one acceptance gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateKind {
+    /// The formatting gate.
+    Format,
+    /// The lint gate.
+    Lint,
+    /// The typecheck gate.
+    Typecheck,
+    /// The test gate.
+    Test,
+    /// The build gate.
+    Build,
+}
+
+/// The five required acceptance-gate commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateCommands {
+    format: GateCommand,
+    lint: GateCommand,
+    typecheck: GateCommand,
+    test: GateCommand,
+    build: GateCommand,
+}
+
+impl GateCommands {
+    /// Return the formatting command.
+    pub const fn format(&self) -> &GateCommand {
+        &self.format
+    }
+
+    /// Return the lint command.
+    pub const fn lint(&self) -> &GateCommand {
+        &self.lint
+    }
+
+    /// Return the typecheck command.
+    pub const fn typecheck(&self) -> &GateCommand {
+        &self.typecheck
+    }
+
+    /// Return the test command.
+    pub const fn test(&self) -> &GateCommand {
+        &self.test
+    }
+
+    /// Return the build command.
+    pub const fn build(&self) -> &GateCommand {
+        &self.build
+    }
+
+    /// Iterate over commands in format, lint, typecheck, test, build order.
+    pub fn iter(&self) -> impl Iterator<Item = (GateKind, &GateCommand)> {
+        [
+            (GateKind::Format, &self.format),
+            (GateKind::Lint, &self.lint),
+            (GateKind::Typecheck, &self.typecheck),
+            (GateKind::Test, &self.test),
+            (GateKind::Build, &self.build),
+        ]
+        .into_iter()
+    }
+}
+
+macro_rules! non_empty_text_type {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Return the text exactly as stated.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    };
+}
+
+non_empty_text_type!(
+    /// The repository's non-empty default branch name.
+    DefaultBranchName
+);
+non_empty_text_type!(
+    /// The non-empty pattern for milestone branches.
+    MilestoneBranchPattern
+);
+non_empty_text_type!(
+    /// The non-empty pattern for step branches.
+    StepBranchPattern
+);
+
+/// The three typed branch roles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchConvention {
+    default: DefaultBranchName,
+    milestone: MilestoneBranchPattern,
+    step: StepBranchPattern,
+}
+
+impl BranchConvention {
+    /// Return the default branch name.
+    pub const fn default(&self) -> &DefaultBranchName {
+        &self.default
+    }
+
+    /// Return the milestone branch pattern.
+    pub const fn milestone(&self) -> &MilestoneBranchPattern {
+        &self.milestone
+    }
+
+    /// Return the step branch pattern.
+    pub const fn step(&self) -> &StepBranchPattern {
+        &self.step
+    }
+}
+
+/// The required base for a step pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum StepPullRequestBase {
+    /// Step pull requests target their milestone branch.
+    Milestone,
+}
+
+/// The required base for a milestone pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MilestonePullRequestBase {
+    /// Milestone pull requests target the default branch.
+    Default,
+}
+
+/// The required pull-request merge method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PullRequestMergeMethod {
+    /// Pull requests are squash-merged.
+    Squash,
+}
+
+/// Pull-request base and merge conventions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestConvention {
+    step_base: StepPullRequestBase,
+    milestone_base: MilestonePullRequestBase,
+    merge_method: PullRequestMergeMethod,
+}
+
+impl PullRequestConvention {
+    /// Return the step pull-request base.
+    pub const fn step_base(&self) -> StepPullRequestBase {
+        self.step_base
+    }
+
+    /// Return the milestone pull-request base.
+    pub const fn milestone_base(&self) -> MilestonePullRequestBase {
+        self.milestone_base
+    }
+
+    /// Return the pull-request merge method.
+    pub const fn merge_method(&self) -> PullRequestMergeMethod {
+        self.merge_method
+    }
+}
+
+non_empty_text_type!(
+    /// A non-empty workflow filename or identity.
+    WorkflowName
+);
+
+/// The explicit local stand-in for one tracked workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalWorkflowStandIn {
+    /// Execute this local command as the workflow stand-in.
+    Command(GateCommand),
+    /// No local stand-in is stated.
+    None,
+}
+
+/// One workflow and its explicit local stand-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowMapping {
+    workflow: WorkflowName,
+    stand_in: LocalWorkflowStandIn,
+}
+
+impl WorkflowMapping {
+    /// Return the workflow name.
+    pub const fn workflow(&self) -> &WorkflowName {
+        &self.workflow
+    }
+
+    /// Return the stated local stand-in.
+    pub const fn stand_in(&self) -> &LocalWorkflowStandIn {
+        &self.stand_in
+    }
+}
+
+/// Unique workflow-to-local-command mappings in tracked order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowMappings(Vec<WorkflowMapping>);
+
+impl WorkflowMappings {
+    /// Return the mappings in tracked order.
+    pub fn as_slice(&self) -> &[WorkflowMapping] {
+        &self.0
+    }
+}
+
+non_empty_text_type!(
+    /// A non-empty environment hazard.
+    EnvironmentHazard
+);
+non_empty_text_type!(
+    /// A non-empty acceptance-gate ordering.
+    GateOrdering
+);
+non_empty_text_type!(
+    /// A non-empty lockfile rule.
+    LockfileRule
+);
+
+/// Inert appendable facts that do not alter the stated contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendableContract {
+    environment_hazards: Vec<EnvironmentHazard>,
+    gate_orderings: Vec<GateOrdering>,
+    lockfile_rules: Vec<LockfileRule>,
+}
+
+impl AppendableContract {
+    /// Return the environment hazards.
+    pub fn environment_hazards(&self) -> &[EnvironmentHazard] {
+        &self.environment_hazards
+    }
+
+    /// Return the gate orderings.
+    pub fn gate_orderings(&self) -> &[GateOrdering] {
+        &self.gate_orderings
+    }
+
+    /// Return the lockfile rules.
+    pub fn lockfile_rules(&self) -> &[LockfileRule] {
+        &self.lockfile_rules
+    }
+}
+
+/// A failure to parse or convert a tracked repository contract.
+#[derive(Debug, Error)]
+pub enum TrackedContractError {
+    /// Fires when JSON syntax or any required closed wire shape is invalid.
+    #[error("malformed tracked repository contract: {source}")]
+    MalformedContract {
+        /// The detailed JSON deserialization failure.
+        source: serde_json::Error,
+    },
+    /// Fires when an invariant-bearing text field is empty or whitespace-only.
+    #[error("tracked repository contract field {field} cannot be empty")]
+    EmptyField {
+        /// The stable path label identifying the empty field.
+        field: &'static str,
+    },
+    /// Fires when a workflow name repeats an earlier byte-identical name.
+    #[error("tracked repository contract repeats workflow {workflow:?}")]
+    DuplicateWorkflow {
+        /// The repeated workflow name.
+        workflow: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTrackedRepositoryContract {
+    stated: RawStatedContract,
+    appendable: RawAppendableContract,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawStatedContract {
+    gates: RawGateCommands,
+    version_policy: RawVersionPolicy,
+    branches: RawBranchConvention,
+    pull_requests: RawPullRequestConvention,
+    workflows: Vec<RawWorkflowMapping>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGateCommands {
+    format: String,
+    lint: String,
+    typecheck: String,
+    test: String,
+    build: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum RawVersionPolicy {
+    None,
+    SerializeDispatches,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBranchConvention {
+    default: String,
+    milestone: String,
+    step: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPullRequestConvention {
+    step_base: StepPullRequestBase,
+    milestone_base: MilestonePullRequestBase,
+    merge_method: PullRequestMergeMethod,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWorkflowMapping {
+    workflow: String,
+    stand_in: RawLocalWorkflowStandIn,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+enum RawLocalWorkflowStandIn {
+    Command { command: String },
+    None {},
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAppendableContract {
+    environment_hazards: Vec<String>,
+    gate_orderings: Vec<String>,
+    lockfile_rules: Vec<String>,
+}
+
+fn non_empty(value: String, field: &'static str) -> Result<String, TrackedContractError> {
+    if value.trim().is_empty() {
+        Err(TrackedContractError::EmptyField { field })
+    } else {
+        Ok(value)
+    }
+}
+
+impl TryFrom<RawTrackedRepositoryContract> for TrackedRepositoryContract {
+    type Error = TrackedContractError;
+
+    fn try_from(raw: RawTrackedRepositoryContract) -> Result<Self, Self::Error> {
+        Ok(Self {
+            stated: raw.stated.try_into()?,
+            appendable: raw.appendable.try_into()?,
+        })
+    }
+}
+
+impl TryFrom<RawStatedContract> for StatedContract {
+    type Error = TrackedContractError;
+
+    fn try_from(raw: RawStatedContract) -> Result<Self, Self::Error> {
+        Ok(Self {
+            gates: raw.gates.try_into()?,
+            version_policy: match raw.version_policy {
+                RawVersionPolicy::None => VersionPolicy::None,
+                RawVersionPolicy::SerializeDispatches => VersionPolicy::SerializeDispatches,
+            },
+            branches: raw.branches.try_into()?,
+            pull_requests: raw.pull_requests.into(),
+            workflows: raw.workflows.try_into()?,
+        })
+    }
+}
+
+impl TryFrom<RawGateCommands> for GateCommands {
+    type Error = TrackedContractError;
+
+    fn try_from(raw: RawGateCommands) -> Result<Self, Self::Error> {
+        Ok(Self {
+            format: GateCommand(non_empty(raw.format, "stated.gates.format")?),
+            lint: GateCommand(non_empty(raw.lint, "stated.gates.lint")?),
+            typecheck: GateCommand(non_empty(raw.typecheck, "stated.gates.typecheck")?),
+            test: GateCommand(non_empty(raw.test, "stated.gates.test")?),
+            build: GateCommand(non_empty(raw.build, "stated.gates.build")?),
+        })
+    }
+}
+
+impl TryFrom<RawBranchConvention> for BranchConvention {
+    type Error = TrackedContractError;
+
+    fn try_from(raw: RawBranchConvention) -> Result<Self, Self::Error> {
+        Ok(Self {
+            default: DefaultBranchName(non_empty(raw.default, "stated.branches.default")?),
+            milestone: MilestoneBranchPattern(non_empty(
+                raw.milestone,
+                "stated.branches.milestone",
+            )?),
+            step: StepBranchPattern(non_empty(raw.step, "stated.branches.step")?),
+        })
+    }
+}
+
+impl From<RawPullRequestConvention> for PullRequestConvention {
+    fn from(raw: RawPullRequestConvention) -> Self {
+        Self {
+            step_base: raw.step_base,
+            milestone_base: raw.milestone_base,
+            merge_method: raw.merge_method,
+        }
+    }
+}
+
+impl TryFrom<Vec<RawWorkflowMapping>> for WorkflowMappings {
+    type Error = TrackedContractError;
+
+    fn try_from(raw: Vec<RawWorkflowMapping>) -> Result<Self, Self::Error> {
+        let mut names = HashSet::with_capacity(raw.len());
+        let mut mappings = Vec::with_capacity(raw.len());
+        for raw_mapping in raw {
+            let workflow = non_empty(raw_mapping.workflow, "stated.workflows[].workflow")?;
+            if !names.insert(workflow.clone()) {
+                return Err(TrackedContractError::DuplicateWorkflow { workflow });
+            }
+            let stand_in = match raw_mapping.stand_in {
+                RawLocalWorkflowStandIn::Command { command } => LocalWorkflowStandIn::Command(
+                    GateCommand(non_empty(command, "stated.workflows[].stand_in.command")?),
+                ),
+                RawLocalWorkflowStandIn::None {} => LocalWorkflowStandIn::None,
+            };
+            mappings.push(WorkflowMapping {
+                workflow: WorkflowName(workflow),
+                stand_in,
+            });
+        }
+        Ok(Self(mappings))
+    }
+}
+
+impl TryFrom<RawAppendableContract> for AppendableContract {
+    type Error = TrackedContractError;
+
+    fn try_from(raw: RawAppendableContract) -> Result<Self, Self::Error> {
+        let environment_hazards = raw
+            .environment_hazards
+            .into_iter()
+            .map(|value| {
+                non_empty(value, "appendable.environment_hazards[]").map(EnvironmentHazard)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let gate_orderings = raw
+            .gate_orderings
+            .into_iter()
+            .map(|value| non_empty(value, "appendable.gate_orderings[]").map(GateOrdering))
+            .collect::<Result<Vec<_>, _>>()?;
+        let lockfile_rules = raw
+            .lockfile_rules
+            .into_iter()
+            .map(|value| non_empty(value, "appendable.lockfile_rules[]").map(LockfileRule))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            environment_hazards,
+            gate_orderings,
+            lockfile_rules,
+        })
+    }
+}
+
+/// Parse tracked repository contract bytes into the typed two-authority model.
+///
+/// # Errors
+///
+/// Returns [`TrackedContractError::MalformedContract`] for invalid JSON or wire
+/// shapes, [`TrackedContractError::EmptyField`] for empty required text, and
+/// [`TrackedContractError::DuplicateWorkflow`] for repeated workflow names.
+#[instrument(skip(bytes))]
+pub fn parse_tracked_repository_contract(
+    bytes: &[u8],
+) -> Result<TrackedRepositoryContract, TrackedContractError> {
+    let raw = serde_json::from_slice::<RawTrackedRepositoryContract>(bytes)
+        .map_err(|source| TrackedContractError::MalformedContract { source })?;
+    raw.try_into()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::TypeId;
+
+    use serde_json::{Value, json};
+
+    use super::{
+        AppendableContract, DefaultBranchName, EnvironmentHazard, GateKind, GateOrdering,
+        LocalWorkflowStandIn, LockfileRule, MilestoneBranchPattern, MilestonePullRequestBase,
+        PullRequestMergeMethod, StatedContract, StepBranchPattern, StepPullRequestBase,
+        TrackedContractError, parse_tracked_repository_contract,
+    };
+    use crate::run_state::VersionPolicy;
+
+    const VALID_TRACKED_CONTRACT: &[u8] = br#"{
+  "stated": {
+    "gates": {
+      "format": "cargo fmt --check",
+      "lint": "cargo clippy --workspace --all-targets",
+      "typecheck": "cargo check --workspace --all-targets",
+      "test": "cargo test --workspace",
+      "build": "cargo build --release"
+    },
+    "version_policy": "NONE",
+    "branches": {
+      "default": "main",
+      "milestone": "pce/{vision}/milestone-{milestone}",
+      "step": "pce/{vision}/m{milestone}-s{step}"
+    },
+    "pull_requests": {
+      "step_base": "MILESTONE",
+      "milestone_base": "DEFAULT",
+      "merge_method": "SQUASH"
+    },
+    "workflows": [
+      {
+        "workflow": "ci.yml",
+        "stand_in": {
+          "kind": "COMMAND",
+          "command": "cargo test --workspace"
+        }
+      },
+      {
+        "workflow": "release.yml",
+        "stand_in": {
+          "kind": "NONE"
+        }
+      }
+    ]
+  },
+  "appendable": {
+    "environment_hazards": [
+      "pipe Codex stdin from /dev/null"
+    ],
+    "gate_orderings": [
+      "run cargo fmt --check before clippy"
+    ],
+    "lockfile_rules": [
+      "commit Cargo.lock when dependency resolution changes"
+    ]
+  }
+}"#;
+
+    fn canonical_value() -> Value {
+        serde_json::from_slice(VALID_TRACKED_CONTRACT).expect("canonical fixture should be JSON")
+    }
+
+    fn malformed_display(value: &Value) -> String {
+        let bytes = serde_json::to_vec(value).expect("mutated fixture should serialize");
+        let err = parse_tracked_repository_contract(&bytes)
+            .expect_err("mutated fixture should be malformed");
+        assert!(matches!(
+            err,
+            TrackedContractError::MalformedContract { .. }
+        ));
+        err.to_string()
+    }
+
+    #[test]
+    fn parses_exact_two_half_tracked_contract() {
+        let contract = parse_tracked_repository_contract(VALID_TRACKED_CONTRACT)
+            .expect("fixture should parse");
+        let stated = contract.stated();
+        let gates = stated
+            .gates()
+            .iter()
+            .map(|(kind, command)| (kind, command.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            gates,
+            [
+                (GateKind::Format, "cargo fmt --check"),
+                (GateKind::Lint, "cargo clippy --workspace --all-targets"),
+                (GateKind::Typecheck, "cargo check --workspace --all-targets"),
+                (GateKind::Test, "cargo test --workspace"),
+                (GateKind::Build, "cargo build --release"),
+            ]
+        );
+        assert_eq!(stated.version_policy(), &VersionPolicy::None);
+        assert_eq!(stated.branches().default().as_str(), "main");
+        assert_eq!(
+            stated.branches().milestone().as_str(),
+            "pce/{vision}/milestone-{milestone}"
+        );
+        assert_eq!(
+            stated.branches().step().as_str(),
+            "pce/{vision}/m{milestone}-s{step}"
+        );
+        assert_eq!(
+            stated.pull_requests().step_base(),
+            StepPullRequestBase::Milestone
+        );
+        assert_eq!(
+            stated.pull_requests().milestone_base(),
+            MilestonePullRequestBase::Default
+        );
+        assert_eq!(
+            stated.pull_requests().merge_method(),
+            PullRequestMergeMethod::Squash
+        );
+        let workflows = stated.workflows().as_slice();
+        assert_eq!(workflows.len(), 2);
+        assert_eq!(workflows[0].workflow().as_str(), "ci.yml");
+        match workflows[0].stand_in() {
+            LocalWorkflowStandIn::Command(command) => {
+                assert_eq!(command.as_str(), "cargo test --workspace");
+            }
+            LocalWorkflowStandIn::None => panic!("ci workflow should have a command"),
+        }
+        assert_eq!(workflows[1].workflow().as_str(), "release.yml");
+        assert!(matches!(
+            workflows[1].stand_in(),
+            LocalWorkflowStandIn::None
+        ));
+
+        let appendable = contract.appendable();
+        assert_eq!(appendable.environment_hazards().len(), 1);
+        assert_eq!(
+            appendable.environment_hazards()[0].as_str(),
+            "pipe Codex stdin from /dev/null"
+        );
+        assert_eq!(appendable.gate_orderings().len(), 1);
+        assert_eq!(
+            appendable.gate_orderings()[0].as_str(),
+            "run cargo fmt --check before clippy"
+        );
+        assert_eq!(appendable.lockfile_rules().len(), 1);
+        assert_eq!(
+            appendable.lockfile_rules()[0].as_str(),
+            "commit Cargo.lock when dependency resolution changes"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_unknown_and_incomplete_contracts() {
+        let err = parse_tracked_repository_contract(b"{")
+            .expect_err("incomplete JSON should be malformed");
+        assert!(matches!(
+            err,
+            TrackedContractError::MalformedContract { .. }
+        ));
+        assert!(err.to_string().contains(
+            "malformed tracked repository contract: EOF while parsing an object at line 1 column 1"
+        ));
+
+        let mut top_level = canonical_value();
+        top_level["unexpected"] = json!(true);
+        assert!(
+            malformed_display(&top_level)
+                .contains("unknown field `unexpected`, expected `stated` or `appendable`")
+        );
+
+        let mut gates = canonical_value();
+        gates["stated"]["gates"]["surprise"] = json!(true);
+        assert!(malformed_display(&gates).contains(
+            "unknown field `surprise`, expected one of `format`, `lint`, `typecheck`, `test`, `build`"
+        ));
+
+        let mut missing = canonical_value();
+        missing
+            .as_object_mut()
+            .expect("fixture root should be an object")
+            .remove("appendable");
+        assert!(malformed_display(&missing).contains("missing field `appendable`"));
+
+        let mut policy = canonical_value();
+        policy["stated"]["version_policy"] = json!("PATCH");
+        assert!(
+            malformed_display(&policy)
+                .contains("unknown variant `PATCH`, expected `NONE` or `SERIALIZE_DISPATCHES`")
+        );
+
+        let mut shell = canonical_value();
+        shell["stated"]["workflows"][0]["stand_in"] =
+            json!({"kind": "SHELL", "command": "cargo test"});
+        assert!(
+            malformed_display(&shell)
+                .contains("unknown variant `SHELL`, expected `COMMAND` or `NONE`")
+        );
+
+        let mut none_with_command = canonical_value();
+        none_with_command["stated"]["workflows"][1]["stand_in"] =
+            json!({"kind": "NONE", "command": "cargo test"});
+        assert!(
+            malformed_display(&none_with_command)
+                .contains("unknown field `command`, there are no fields")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_fields_and_duplicate_workflows() {
+        let mut empty = canonical_value();
+        empty["stated"]["gates"]["test"] = json!("   ");
+        let empty_bytes = serde_json::to_vec(&empty).expect("mutated fixture should serialize");
+        let err = parse_tracked_repository_contract(&empty_bytes)
+            .expect_err("whitespace-only gate should fail");
+        assert_eq!(
+            err.to_string(),
+            "tracked repository contract field stated.gates.test cannot be empty"
+        );
+
+        let mut duplicate = canonical_value();
+        let duplicate_workflow = duplicate["stated"]["workflows"][0].clone();
+        duplicate["stated"]["workflows"]
+            .as_array_mut()
+            .expect("workflows should be an array")
+            .push(duplicate_workflow);
+        let duplicate_bytes =
+            serde_json::to_vec(&duplicate).expect("mutated fixture should serialize");
+        let err = parse_tracked_repository_contract(&duplicate_bytes)
+            .expect_err("duplicate workflow should fail");
+        assert_eq!(
+            err.to_string(),
+            "tracked repository contract repeats workflow \"ci.yml\""
+        );
+    }
+
+    #[test]
+    fn stated_and_appendable_halves_have_distinct_type_identity() {
+        assert_ne!(
+            TypeId::of::<StatedContract>(),
+            TypeId::of::<AppendableContract>()
+        );
+        assert_ne!(
+            TypeId::of::<DefaultBranchName>(),
+            TypeId::of::<MilestoneBranchPattern>()
+        );
+        assert_ne!(
+            TypeId::of::<DefaultBranchName>(),
+            TypeId::of::<StepBranchPattern>()
+        );
+        assert_ne!(
+            TypeId::of::<MilestoneBranchPattern>(),
+            TypeId::of::<StepBranchPattern>()
+        );
+        assert_ne!(
+            TypeId::of::<EnvironmentHazard>(),
+            TypeId::of::<GateOrdering>()
+        );
+        assert_ne!(
+            TypeId::of::<EnvironmentHazard>(),
+            TypeId::of::<LockfileRule>()
+        );
+        assert_ne!(TypeId::of::<GateOrdering>(), TypeId::of::<LockfileRule>());
+    }
+}
