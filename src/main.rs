@@ -12,7 +12,7 @@ use pce_core::{
     CreationDate, CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate,
     DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail,
     EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
-    ExactPullRequestIdentity, ExactPullRequestState, GitAuthorityObservation,
+    ExactPullRequestIdentity, ExactPullRequestState, GateObservations, GitAuthorityObservation,
     GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
@@ -27,7 +27,7 @@ use pce_core::{
     parse_tracked_repository_contract, render_human_snapshot,
     serialize_tracked_repository_contract, validate_workflow_coverage,
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = concat!(
@@ -37,12 +37,34 @@ const USAGE: &str = concat!(
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] --policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> [--policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> ...]\n",
     "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>\n",
+    "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>"
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
 const RELEASE_TAG: &str = "v0.1.16";
 const TRACKED_REPOSITORY_CONTRACT_PATH: &str = ".pce/repository-contract.json";
+const FORMAT_BOOTSTRAP_CANDIDATES: &[&str] = &["cargo fmt --all --check", "cargo fmt --check"];
+const LINT_BOOTSTRAP_CANDIDATES: &[&str] = &[
+    "cargo clippy --workspace --all-targets",
+    "cargo clippy --all-targets",
+    "cargo clippy",
+];
+const TYPECHECK_BOOTSTRAP_CANDIDATES: &[&str] = &[
+    "cargo check --workspace --all-targets",
+    "cargo check --all-targets",
+    "cargo check",
+];
+const TEST_BOOTSTRAP_CANDIDATES: &[&str] = &[
+    "cargo test --workspace",
+    "cargo test --all-targets",
+    "cargo test --lib",
+];
+const BUILD_BOOTSTRAP_CANDIDATES: &[&str] = &[
+    "cargo build --workspace",
+    "cargo build --all-targets",
+    "cargo build",
+];
 
 #[derive(Debug)]
 enum Command {
@@ -79,6 +101,46 @@ enum Command {
         log_path: PathBuf,
         repository_root: PathBuf,
         node: NodeId,
+    },
+    ContractBootstrap {
+        log_path: PathBuf,
+        repository_root: PathBuf,
+        repository: RepositoryName,
+        node: NodeId,
+    },
+}
+
+enum DefaultBranchContract {
+    Present(Vec<u8>),
+    Absent,
+}
+
+enum BootstrapWorkflowStandIn {
+    Command(String),
+    None,
+}
+
+struct BootstrapWorkflow {
+    name: String,
+    stand_in: BootstrapWorkflowStandIn,
+    run_scripts: Vec<String>,
+}
+
+struct BootstrapGateCommands {
+    format: String,
+    lint: String,
+    typecheck: String,
+    test: String,
+    build: String,
+}
+
+enum BootstrapDerivation {
+    Ci {
+        gates: BootstrapGateCommands,
+        workflows: Vec<BootstrapWorkflow>,
+    },
+    CargoFallback {
+        gates: BootstrapGateCommands,
     },
 }
 
@@ -212,6 +274,12 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             repository_root,
             node,
         } => run_contract_refresh(&log_path, &repository_root, node),
+        Command::ContractBootstrap {
+            log_path,
+            repository_root,
+            repository,
+            node,
+        } => run_contract_bootstrap(&log_path, &repository_root, repository, node),
     }
 }
 
@@ -241,6 +309,37 @@ fn parse_contract_command(action: &str, rest: &[String]) -> Result<Command> {
             Ok(Command::ContractCheck {
                 contract_path: PathBuf::from(raw_contract_path),
                 repository_root: PathBuf::from(raw_repository_root),
+            })
+        }
+        (
+            "bootstrap",
+            [
+                file_flag,
+                raw_log_path,
+                root_flag,
+                raw_repository_root,
+                repository_flag,
+                raw_repository,
+                node_flag,
+                raw_node,
+            ],
+        ) if file_flag == "--file"
+            && root_flag == "--repo-root"
+            && repository_flag == "--repository"
+            && node_flag == "--node"
+            && is_value(raw_log_path)
+            && is_value(raw_repository_root)
+            && is_value(raw_repository)
+            && !raw_repository.is_empty()
+            && is_value(raw_node) =>
+        {
+            let node =
+                NodeId::parse(raw_node).context("failed to parse contract-bootstrap node")?;
+            Ok(Command::ContractBootstrap {
+                log_path: PathBuf::from(raw_log_path),
+                repository_root: PathBuf::from(raw_repository_root),
+                repository: RepositoryName::new(raw_repository),
+                node,
             })
         }
         (
@@ -870,6 +969,429 @@ fn run_contract_refresh(log_path: &Path, repository_root: &Path, node: NodeId) -
     }
 }
 
+fn run_contract_bootstrap(
+    log_path: &Path,
+    repository_root: &Path,
+    repository: RepositoryName,
+    node: NodeId,
+) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(log_path)
+        .with_context(|| format!("failed to open event log {}", log_path.display()))?;
+    file.lock()
+        .with_context(|| format!("failed to lock event log {}", log_path.display()))?;
+
+    let operation = bootstrap_locked(&mut file, log_path, repository_root, repository, node);
+    let unlock = file
+        .unlock()
+        .with_context(|| format!("failed to unlock event log {}", log_path.display()));
+
+    match (operation, unlock) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(()), Err(unlock_error)) => Err(unlock_error),
+        (Err(primary), Err(unlock_error)) => Err(primary.context(format!(
+            "additionally, explicit event-log unlock failed: {unlock_error:#}"
+        ))),
+    }
+}
+
+fn bootstrap_locked(
+    file: &mut File,
+    log_path: &Path,
+    repository_root: &Path,
+    repository: RepositoryName,
+    node: NodeId,
+) -> Result<()> {
+    let repository_root_argument = repository_root.to_str().with_context(|| {
+        format!(
+            "raw --repo-root argument is not valid UTF-8: {}",
+            repository_root.display()
+        )
+    })?;
+    let requested_repository_root = RepositoryRoot::new(repository_root_argument.to_owned());
+    let normalized_repository_root =
+        lexically_normalized_repository_root(requested_repository_root.as_str());
+
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek event log {} for read", log_path.display()))?;
+    let parsed_lines = {
+        let mut reader = BufReader::new(&mut *file);
+        read_event_log_lines(&mut reader, log_path)?
+    };
+    let previous =
+        matching_bootstrap_contract(&parsed_lines, &repository, &normalized_repository_root)?;
+
+    let branch = resolve_default_branch(repository_root)?;
+    match tracked_contract_at_branch_head(repository_root, &branch)? {
+        DefaultBranchContract::Present(bytes) => {
+            let _tracked_bytes_at_default_branch_head = bytes;
+            bail!(
+                "tracked repository contract .pce/repository-contract.json is present at default-branch HEAD; use `pce contract refresh`"
+            )
+        }
+        DefaultBranchContract::Absent => {}
+    }
+    let workflow_paths = default_branch_paths(repository_root, &branch, ".github/workflows")?
+        .into_iter()
+        .filter(|path| path.ends_with(".yml") || path.ends_with(".yaml"))
+        .collect::<Vec<_>>();
+    let workflow_identities = workflow_paths
+        .iter()
+        .map(|path| {
+            path.strip_prefix(".github/workflows/")
+                .with_context(|| format!("workflow path `{path}` lacks expected prefix"))
+                .and_then(|identity| {
+                    ObservedWorkflowName::parse(identity)
+                        .with_context(|| format!("failed to parse workflow path `{path}`"))
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let tracked_path = repository_root.join(TRACKED_REPOSITORY_CONTRACT_PATH);
+    let (tracked, measured) = if tracked_path.exists() {
+        let bytes = std::fs::read(&tracked_path).with_context(|| {
+            format!(
+                "failed to read tracked repository contract {}",
+                tracked_path.display()
+            )
+        })?;
+        let tracked = parse_tracked_contract(&bytes)?;
+        validate_workflow_coverage(tracked.stated().workflows(), &workflow_identities)
+            .context("failed to validate tracked workflow coverage")?;
+        let previous_snapshot = previous
+            .as_ref()
+            .map(|prior| previous_measured_snapshot(&tracked, prior))
+            .transpose()?;
+        let measured =
+            measure_contract_snapshot(tracked.stated(), previous_snapshot.as_ref(), |command| {
+                execute_gate_command(repository_root, command)
+            })
+            .context("failed to measure tracked repository contract")?;
+        (tracked, measured)
+    } else {
+        derive_bootstrap_contract(
+            repository_root,
+            &branch,
+            &workflow_paths,
+            &workflow_identities,
+        )?
+    };
+
+    let evidence_text = measured
+        .gates()
+        .iter()
+        .map(|measurement| measurement.command().as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let evidence = Evidence::parse(&evidence_text).context("failed to parse contract evidence")?;
+    let payload = RepositoryContractPayload::from_tracked_measurement(
+        repository,
+        requested_repository_root,
+        &tracked,
+        measured.gates(),
+        evidence,
+    );
+
+    let tracked_directory = repository_root.join(".pce");
+    std::fs::create_dir_all(&tracked_directory).with_context(|| {
+        format!(
+            "failed to create tracked contract directory {}",
+            tracked_directory.display()
+        )
+    })?;
+    let canonical_bytes = serialize_tracked_repository_contract(&tracked)
+        .context("failed to serialize tracked repository contract")?;
+    std::fs::write(&tracked_path, canonical_bytes).with_context(|| {
+        format!(
+            "failed to persist tracked repository contract {}",
+            tracked_path.display()
+        )
+    })?;
+    let payload_json = serde_json::to_string(&payload)
+        .context("failed to serialize repository contract payload")?;
+    append_locked(
+        file,
+        payload_json,
+        WriteKind::RepositoryContract,
+        node,
+        log_path,
+    )
+}
+
+fn matching_bootstrap_contract(
+    lines: &[ParsedEventLine],
+    repository: &RepositoryName,
+    normalized_root: &Path,
+) -> Result<Option<RepositoryContractPayload>> {
+    let mut matching = None;
+    for line in lines {
+        let (name, root, current) = match line.record.body_ref() {
+            EventBodyRef::Known(KnownPayload::RepositoryContract(payload)) => (
+                &payload.repository,
+                payload.repo_root.as_str(),
+                Some(payload),
+            ),
+            EventBodyRef::Known(KnownPayload::LegacyRepositoryContract(payload)) => {
+                (&payload.repository, payload.repo_root.as_str(), None)
+            }
+            _ => continue,
+        };
+        let same_name = name == repository;
+        let same_root = lexically_normalized_repository_root(root) == normalized_root;
+        if same_name != same_root {
+            bail!(
+                "ambiguous duplicate repository contract at sequence {} for repository {} and root {}",
+                line.record.sequence().get(),
+                name.as_str(),
+                root
+            );
+        }
+        if same_name
+            && same_root
+            && let Some(payload) = current
+        {
+            matching = Some(payload.clone());
+        }
+    }
+    Ok(matching)
+}
+
+fn derive_bootstrap_contract(
+    repository_root: &Path,
+    branch: &str,
+    workflow_paths: &[String],
+    workflow_identities: &[ObservedWorkflowName],
+) -> Result<(TrackedRepositoryContract, MeasuredContractSnapshot)> {
+    let derivation = if workflow_paths.is_empty() {
+        if !path_exists_at_default_branch_head(repository_root, branch, "Cargo.toml")? {
+            bail!("cannot bootstrap CI-less repository without Cargo.toml at default-branch HEAD");
+        }
+        BootstrapDerivation::CargoFallback {
+            gates: BootstrapGateCommands {
+                format: select_bootstrap_candidate(
+                    "format",
+                    FORMAT_BOOTSTRAP_CANDIDATES,
+                    |command| execute_shell_gate_command(repository_root, command),
+                )?,
+                lint: select_bootstrap_candidate("lint", LINT_BOOTSTRAP_CANDIDATES, |command| {
+                    execute_shell_gate_command(repository_root, command)
+                })?,
+                typecheck: select_bootstrap_candidate(
+                    "typecheck",
+                    TYPECHECK_BOOTSTRAP_CANDIDATES,
+                    |command| execute_shell_gate_command(repository_root, command),
+                )?,
+                test: select_bootstrap_candidate("test", TEST_BOOTSTRAP_CANDIDATES, |command| {
+                    execute_shell_gate_command(repository_root, command)
+                })?,
+                build: select_bootstrap_candidate(
+                    "build",
+                    BUILD_BOOTSTRAP_CANDIDATES,
+                    |command| execute_shell_gate_command(repository_root, command),
+                )?,
+            },
+        }
+    } else {
+        let workflows = workflow_paths
+            .iter()
+            .map(|path| parse_bootstrap_workflow(repository_root, branch, path))
+            .collect::<Result<Vec<_>>>()?;
+        let names = workflows
+            .iter()
+            .map(|workflow| workflow.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let first = |role: &str, prefix: &str| -> Result<String> {
+            workflows
+                .iter()
+                .flat_map(|workflow| workflow.run_scripts.iter())
+                .flat_map(|script| script.lines())
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .find(|line| {
+                    let mut words = line.split_whitespace();
+                    words.next() == Some("cargo") && words.next() == Some(prefix)
+                })
+                .map(str::to_owned)
+                .with_context(|| {
+                    format!(
+                        "CI-derived bootstrap found no {role} gate command in workflows: {names}"
+                    )
+                })
+        };
+        BootstrapDerivation::Ci {
+            gates: BootstrapGateCommands {
+                format: first("format", "fmt")?,
+                lint: first("lint", "clippy")?,
+                typecheck: first("typecheck", "check")?,
+                test: first("test", "test")?,
+                build: first("build", "build")?,
+            },
+            workflows,
+        }
+    };
+
+    let (gates, workflows) = match &derivation {
+        BootstrapDerivation::Ci { gates, workflows } => (gates, workflows.as_slice()),
+        BootstrapDerivation::CargoFallback { gates } => (gates, &[][..]),
+    };
+    let workflow_values = workflows
+        .iter()
+        .map(|workflow| match &workflow.stand_in {
+            BootstrapWorkflowStandIn::Command(command) => json!({
+                "workflow": workflow.name,
+                "stand_in": {"kind": "COMMAND", "command": command}
+            }),
+            BootstrapWorkflowStandIn::None => json!({
+                "workflow": workflow.name,
+                "stand_in": {"kind": "NONE"}
+            }),
+        })
+        .collect::<Vec<_>>();
+    let raw = json!({
+        "stated": {
+            "gates": {
+                "format": gates.format,
+                "lint": gates.lint,
+                "typecheck": gates.typecheck,
+                "test": gates.test,
+                "build": gates.build
+            },
+            "version_policy": "NONE",
+            "branches": {
+                "default": branch,
+                "milestone": "pce/{vision}/milestone-{milestone}",
+                "step": "pce/{vision}/m{milestone}-s{step}"
+            },
+            "pull_requests": {
+                "step_base": "MILESTONE",
+                "milestone_base": "DEFAULT",
+                "merge_method": "SQUASH"
+            },
+            "workflows": workflow_values
+        },
+        "appendable": {
+            "environment_hazards": [],
+            "gate_orderings": [],
+            "lockfile_rules": []
+        }
+    });
+    let bytes = serde_json::to_vec(&raw).context("failed to serialize bootstrap contract")?;
+    let tracked = parse_tracked_contract(&bytes)?;
+    validate_workflow_coverage(tracked.stated().workflows(), workflow_identities)
+        .context("failed to validate tracked workflow coverage")?;
+    let measured = match derivation {
+        BootstrapDerivation::Ci { .. } => {
+            measure_contract_snapshot(tracked.stated(), None, |command| {
+                execute_gate_command(repository_root, command)
+            })
+            .context("failed to measure tracked repository contract")?
+        }
+        BootstrapDerivation::CargoFallback { .. } => {
+            let observations = GateObservations {
+                format: ObservedExitStatus::from_code(0),
+                lint: ObservedExitStatus::from_code(0),
+                typecheck: ObservedExitStatus::from_code(0),
+                test: ObservedExitStatus::from_code(0),
+                build: ObservedExitStatus::from_code(0),
+            };
+            MeasuredContractSnapshot::from_observations(tracked.stated(), &observations)
+                .context("failed to construct bootstrap observations")?
+        }
+    };
+    Ok((tracked, measured))
+}
+
+fn parse_bootstrap_workflow(
+    repository_root: &Path,
+    branch: &str,
+    path: &str,
+) -> Result<BootstrapWorkflow> {
+    let bytes = read_at_branch_head(repository_root, branch, path)?;
+    let value: serde_yaml::Value = serde_yaml::from_slice(&bytes)
+        .with_context(|| format!("failed to parse workflow `{path}` as YAML"))?;
+    let mut run_scripts = Vec::new();
+    if let Some(root) = value.as_mapping()
+        && let Some(jobs_value) = root.get(serde_yaml::Value::String("jobs".to_owned()))
+    {
+        let jobs = jobs_value
+            .as_mapping()
+            .with_context(|| format!("workflow `{path}` jobs must be a mapping"))?;
+        let mut sorted_jobs = jobs
+            .iter()
+            .map(|(key, value)| {
+                key.as_str()
+                    .map(|name| (name, value))
+                    .with_context(|| format!("workflow `{path}` contains a non-string job key"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        sorted_jobs.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (_, job) in sorted_jobs {
+            let Some(job) = job.as_mapping() else {
+                continue;
+            };
+            let Some(steps) = job.get(serde_yaml::Value::String("steps".to_owned())) else {
+                continue;
+            };
+            let steps = steps
+                .as_sequence()
+                .with_context(|| format!("workflow `{path}` steps must be a sequence"))?;
+            for step in steps {
+                let Some(step) = step.as_mapping() else {
+                    continue;
+                };
+                let Some(run) = step.get(serde_yaml::Value::String("run".to_owned())) else {
+                    continue;
+                };
+                let command = run.as_str().with_context(|| {
+                    format!("workflow `{path}` contains a non-string run command")
+                })?;
+                run_scripts.push(command.to_owned());
+            }
+        }
+    }
+    let name = path
+        .strip_prefix(".github/workflows/")
+        .with_context(|| format!("workflow path `{path}` lacks expected prefix"))?
+        .to_owned();
+    let stand_in = if run_scripts.is_empty() {
+        BootstrapWorkflowStandIn::None
+    } else {
+        BootstrapWorkflowStandIn::Command(run_scripts.join("\n"))
+    };
+    Ok(BootstrapWorkflow {
+        name,
+        stand_in,
+        run_scripts,
+    })
+}
+
+fn select_bootstrap_candidate(
+    role: &str,
+    candidates: &[&str],
+    mut execute: impl FnMut(&str) -> std::io::Result<ObservedExitStatus>,
+) -> Result<String> {
+    let mut attempted = Vec::new();
+    for candidate in candidates {
+        attempted.push(*candidate);
+        let status = execute(candidate)
+            .with_context(|| format!("failed to execute bootstrap candidate `{candidate}`"))?;
+        if status.code() == 0 {
+            return Ok((*candidate).to_owned());
+        }
+    }
+    let rendered = attempted
+        .iter()
+        .map(|command| format!("`{command}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!("no passing bootstrap candidate for {role}; attempted commands: {rendered}")
+}
+
 fn refresh_locked(
     file: &mut File,
     log_path: &Path,
@@ -919,8 +1441,12 @@ fn refresh_locked(
         );
     };
 
-    let tracked_bytes =
-        read_at_default_branch_head(repository_root, TRACKED_REPOSITORY_CONTRACT_PATH)?;
+    let tracked_bytes = match tracked_contract_at_default_branch_head(repository_root)? {
+        DefaultBranchContract::Present(bytes) => bytes,
+        DefaultBranchContract::Absent => {
+            read_at_default_branch_head(repository_root, TRACKED_REPOSITORY_CONTRACT_PATH)?
+        }
+    };
     let tracked = parse_tracked_contract(&tracked_bytes)?;
     let observed = observed_workflows(repository_root)?;
     validate_workflow_coverage(tracked.stated().workflows(), &observed)
@@ -1069,7 +1595,14 @@ fn execute_gate_command(
     repository_root: &Path,
     command: &GateCommand,
 ) -> std::io::Result<ObservedExitStatus> {
-    let args = [OsString::from("-c"), OsString::from(command.as_str())];
+    execute_shell_gate_command(repository_root, command.as_str())
+}
+
+fn execute_shell_gate_command(
+    repository_root: &Path,
+    command: &str,
+) -> std::io::Result<ObservedExitStatus> {
+    let args = [OsString::from("-c"), OsString::from(command)];
     match execute_process("/bin/sh", &args, Some(repository_root)) {
         ProcessAttempt::SpawnFailed { detail } => Err(std::io::Error::other(detail)),
         ProcessAttempt::Completed(result) => result
@@ -1079,7 +1612,7 @@ fn execute_gate_command(
             .ok_or_else(|| {
                 std::io::Error::other(format!(
                     "stated gate command `{}` terminated without an exit-status code",
-                    command.as_str()
+                    command
                 ))
             }),
     }
@@ -2001,8 +2534,8 @@ fn git_args<'a>(root: &Path, args: impl IntoIterator<Item = &'a str>) -> Vec<OsS
     result
 }
 
-fn read_at_default_branch_head(repo_root: &Path, relative_path: &str) -> Result<Vec<u8>> {
-    let branch = (|| {
+fn resolve_default_branch(repo_root: &Path) -> Result<String> {
+    (|| {
         let args = git_args(repo_root, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
         let result = require_spawn(execute_process("git", &args, None))?;
         if !result.status.success() {
@@ -2018,8 +2551,10 @@ fn read_at_default_branch_head(repo_root: &Path, relative_path: &str) -> Result<
             .map(str::to_owned)
             .context("default-branch symbolic ref has no branch segment")
     })()
-    .context("failed to resolve default branch from refs/remotes/origin/HEAD")?;
+    .context("failed to resolve default branch from refs/remotes/origin/HEAD")
+}
 
+fn read_at_branch_head(repo_root: &Path, branch: &str, relative_path: &str) -> Result<Vec<u8>> {
     (|| {
         let revision_path = format!("{branch}:{relative_path}");
         let args = git_args(repo_root, ["show", revision_path.as_str()]);
@@ -2030,6 +2565,68 @@ fn read_at_default_branch_head(repo_root: &Path, relative_path: &str) -> Result<
         Ok(result.stdout)
     })()
     .with_context(|| format!("failed to read {relative_path} at default-branch HEAD"))
+}
+
+fn read_at_default_branch_head(repo_root: &Path, relative_path: &str) -> Result<Vec<u8>> {
+    let branch = resolve_default_branch(repo_root)?;
+    read_at_branch_head(repo_root, &branch, relative_path)
+}
+
+fn default_branch_paths(repository_root: &Path, branch: &str, prefix: &str) -> Result<Vec<String>> {
+    let args = git_args(
+        repository_root,
+        ["ls-tree", "-r", "--name-only", branch, "--", prefix],
+    );
+    let result = require_spawn(execute_process("git", &args, None))?;
+    if !result.status.success() {
+        bail!("{}", result.detail());
+    }
+    let stdout = std::str::from_utf8(&result.stdout).context("command output is not UTF-8")?;
+    let mut paths = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+fn path_exists_at_default_branch_head(
+    repository_root: &Path,
+    branch: &str,
+    relative_path: &str,
+) -> Result<bool> {
+    Ok(
+        default_branch_paths(repository_root, branch, relative_path)?
+            .iter()
+            .any(|path| path == relative_path),
+    )
+}
+
+fn tracked_contract_at_default_branch_head(
+    repository_root: &Path,
+) -> Result<DefaultBranchContract> {
+    let branch = resolve_default_branch(repository_root)?;
+    tracked_contract_at_branch_head(repository_root, &branch)
+}
+
+fn tracked_contract_at_branch_head(
+    repository_root: &Path,
+    branch: &str,
+) -> Result<DefaultBranchContract> {
+    if path_exists_at_default_branch_head(
+        repository_root,
+        branch,
+        TRACKED_REPOSITORY_CONTRACT_PATH,
+    )? {
+        Ok(DefaultBranchContract::Present(read_at_branch_head(
+            repository_root,
+            branch,
+            TRACKED_REPOSITORY_CONTRACT_PATH,
+        )?))
+    } else {
+        Ok(DefaultBranchContract::Absent)
+    }
 }
 
 fn execute_process(program: &str, args: &[OsString], current_dir: Option<&Path>) -> ProcessAttempt {
@@ -2188,8 +2785,8 @@ mod tests {
         ArtifactPath, BranchState, CurrentArtifactObservation, CurrentArtifactState, EventKindName,
         EventRecord, EventRecordFilter, GitAuthorityObservation, GitHubAuthorityObservation,
         GitHubPullRequestObservation, GitMergeObservation, KnownPayload, MilestoneMergeSubject,
-        MilestoneNode, NodeId, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
-        RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+        MilestoneNode, NodeId, ObservedExitStatus, ReadKind, ReadPayload, RecoveryLogPath,
+        RepositoryBranchName, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
         RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation, TagName,
         TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
         derive_run_state, parse_event_line, render_human_snapshot,
@@ -2198,11 +2795,12 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        BranchFetch, Command, DispatchGraphNode, DispatchNode, FetchResult, RepositoryContract,
-        RepositoryRuntime, StatusFormat, USAGE, already_dispatched, github_pull_request_list_args,
-        lexically_normalized_repository_root, measure_tracked_contract_at_root, observe_git,
-        parse_command, parse_dispatch_graph, parse_tracked_contract, read_at_default_branch_head,
-        read_event_log, repository_contracts, run, run_log_read, validated_snapshot_value,
+        BranchFetch, Command, DispatchGraphNode, DispatchNode, FORMAT_BOOTSTRAP_CANDIDATES,
+        FetchResult, RepositoryContract, RepositoryRuntime, StatusFormat, USAGE,
+        already_dispatched, github_pull_request_list_args, lexically_normalized_repository_root,
+        measure_tracked_contract_at_root, observe_git, parse_command, parse_dispatch_graph,
+        parse_tracked_contract, read_at_default_branch_head, read_event_log, repository_contracts,
+        run, run_log_read, select_bootstrap_candidate, validated_snapshot_value,
     };
 
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
@@ -2298,6 +2896,145 @@ mod tests {
         let tracked = parse_tracked_contract(&bytes).expect("tracked contract should parse");
         pce_core::serialize_tracked_repository_contract(&tracked)
             .expect("tracked contract should serialize canonically")
+    }
+
+    #[test]
+    fn contract_bootstrap_parses_exact_ordered_arguments() {
+        let command = parse_command(
+            [
+                "contract",
+                "bootstrap",
+                "--file",
+                "events.jsonl",
+                "--repo-root",
+                "/workspace/pce",
+                "--repository",
+                "pce",
+                "--node",
+                "m3-s3",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("exact bootstrap arguments should parse");
+        let Command::ContractBootstrap {
+            log_path,
+            repository_root,
+            repository,
+            node,
+        } = command
+        else {
+            panic!("expected contract-bootstrap command");
+        };
+        assert_eq!(log_path, PathBuf::from("events.jsonl"));
+        assert_eq!(repository_root, PathBuf::from("/workspace/pce"));
+        assert_eq!(repository.as_str(), "pce");
+        assert_eq!(node.as_str(), "m3-s3");
+
+        for rejected in [
+            vec![
+                "contract",
+                "bootstrap",
+                "--repo-root",
+                "/workspace/pce",
+                "--file",
+                "events.jsonl",
+                "--repository",
+                "pce",
+                "--node",
+                "m3-s3",
+            ],
+            vec![
+                "contract",
+                "bootstrap",
+                "--file",
+                "events.jsonl",
+                "--repo-root",
+                "/workspace/pce",
+                "--node",
+                "m3-s3",
+            ],
+            vec![
+                "contract",
+                "bootstrap",
+                "--file",
+                "events.jsonl",
+                "--repo-root",
+                "/workspace/pce",
+                "--repository",
+                "",
+                "--node",
+                "m3-s3",
+            ],
+            vec![
+                "contract",
+                "bootstrap",
+                "--file",
+                "events.jsonl",
+                "--repo-root",
+                "/workspace/pce",
+                "--repository",
+                "--node",
+                "--node",
+                "m3-s3",
+            ],
+            vec![
+                "contract",
+                "bootstrap",
+                "--file",
+                "events.jsonl",
+                "--repo-root",
+                "/workspace/pce",
+                "--repository",
+                "pce",
+            ],
+            vec![
+                "contract",
+                "bootstrap",
+                "--file",
+                "events.jsonl",
+                "--repo-root",
+                "/workspace/pce",
+                "--repository",
+                "pce",
+                "--node",
+                "m3-s3",
+                "trailing",
+            ],
+        ] {
+            let err = parse_command(rejected.into_iter().map(str::to_owned))
+                .expect_err("invalid bootstrap arguments should be rejected");
+            assert_eq!(err.to_string(), USAGE);
+        }
+    }
+
+    #[test]
+    fn cargo_bootstrap_candidates_stop_at_first_passing_command() {
+        let mut calls = Vec::new();
+        let selected =
+            select_bootstrap_candidate("format", FORMAT_BOOTSTRAP_CANDIDATES, |command| {
+                calls.push(command.to_owned());
+                match command {
+                    "cargo fmt --all --check" => Ok(ObservedExitStatus::from_code(31)),
+                    "cargo fmt --check" => Ok(ObservedExitStatus::from_code(0)),
+                    _ => panic!("candidate selection continued after success"),
+                }
+            })
+            .expect("second format candidate should pass");
+        assert_eq!(selected, "cargo fmt --check");
+        assert_eq!(calls, vec!["cargo fmt --all --check", "cargo fmt --check"]);
+    }
+
+    #[test]
+    fn cargo_bootstrap_candidates_name_role_and_attempts_when_none_pass() {
+        let err = select_bootstrap_candidate("format", FORMAT_BOOTSTRAP_CANDIDATES, |_| {
+            Ok(ObservedExitStatus::from_code(31))
+        })
+        .expect_err("all format candidates should fail");
+        assert_eq!(
+            err.to_string(),
+            "no passing bootstrap candidate for format; attempted commands: `cargo fmt --all --check`, `cargo fmt --check`"
+        );
     }
 
     fn current_contract_line(root: &Path, commands: [&str; 5]) -> String {
