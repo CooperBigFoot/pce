@@ -1,6 +1,7 @@
 //! decode : EventLogLine → KnownEvent ∪ UnknownEvent; append : AppendInput → AppendIntent; select : EventRecord × EventRecordFilter → Bool.
 //! This module is pure domain logic and performs no I/O.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::SystemTime;
 
@@ -9,6 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use thiserror::Error;
 use tracing::instrument;
+
+use crate::run_state::VersionPolicy;
 
 /// Exact unparsed JSON submitted as the payload for one event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -473,10 +476,114 @@ pub struct KeyFindingPayload {
     pub evidence: Evidence,
 }
 
-/// The complete payload for `repository-contract`.
+/// The complete stated-authority half of a current repository contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatedRepositoryContract {
+    /// The format gate command.
+    pub format: String,
+    /// The lint gate command.
+    pub lint: String,
+    /// The typecheck gate command.
+    pub typecheck: String,
+    /// The test gate command.
+    pub test: String,
+    /// The build gate command.
+    pub build: String,
+    /// The version policy governing dispatch admission.
+    pub version_policy: VersionPolicy,
+    /// The branch convention governing step work.
+    pub branch_convention: String,
+    /// The pull-request convention governing integration.
+    pub pull_request_convention: String,
+}
+
+/// One measured gate process exit status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ObservedExitStatus(i32);
+
+impl ObservedExitStatus {
+    /// Construct an observed process exit status.
+    pub const fn new(value: i32) -> Self {
+        Self(value)
+    }
+
+    /// Return the measured process exit status.
+    pub const fn get(self) -> i32 {
+        self.0
+    }
+}
+
+/// The measured-authority gate observations for a current repository contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateObservations {
+    /// The format gate exit status.
+    pub format: ObservedExitStatus,
+    /// The lint gate exit status.
+    pub lint: ObservedExitStatus,
+    /// The typecheck gate exit status.
+    pub typecheck: ObservedExitStatus,
+    /// The test gate exit status.
+    pub test: ObservedExitStatus,
+    /// The build gate exit status.
+    pub build: ObservedExitStatus,
+}
+
+/// Exact local stand-ins keyed by repository workflow path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkflowMap(BTreeMap<String, Option<String>>);
+
+impl WorkflowMap {
+    /// Construct an exact workflow-path mapping.
+    pub const fn new(value: BTreeMap<String, Option<String>>) -> Self {
+        Self(value)
+    }
+
+    /// Borrow the exact workflow-path mapping.
+    pub const fn as_map(&self) -> &BTreeMap<String, Option<String>> {
+        &self.0
+    }
+}
+
+/// The appendable-authority half of a current repository contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppendableRepositoryContract {
+    /// Environment hazards discovered while measuring the repository.
+    pub environment_hazards: Vec<String>,
+    /// Required orderings among repository gates.
+    pub gate_orderings: Vec<String>,
+    /// Rules governing repository lockfiles.
+    pub lockfile_rules: Vec<String>,
+}
+
+/// The complete current payload for `repository-contract`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryContractPayload {
+    /// The repository name.
+    pub repository: RepositoryName,
+    /// The measured repository root.
+    pub repo_root: RepositoryRoot,
+    /// The stated repository contract.
+    pub stated: StatedRepositoryContract,
+    /// The measured gate observations.
+    pub observations: GateObservations,
+    /// The exact workflow-path mapping.
+    pub workflow_map: WorkflowMap,
+    /// The appendable repository-contract authority.
+    pub appendable: AppendableRepositoryContract,
+    /// The multi-line invocation that measured the contract.
+    pub evidence: Evidence,
+}
+
+/// A persisted legacy twelve-field repository contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyRepositoryContractPayload {
     /// The repository name.
     pub repository: RepositoryName,
     /// The measured repository root.
@@ -532,6 +639,8 @@ pub enum KnownPayload {
     KeyFinding(KeyFindingPayload),
     /// A `repository-contract` payload.
     RepositoryContract(RepositoryContractPayload),
+    /// A persisted legacy `repository-contract` payload.
+    LegacyRepositoryContract(LegacyRepositoryContractPayload),
     /// A `planning-artifact-approved` payload.
     PlanningArtifactApproved(PlanningArtifactApprovedPayload),
 }
@@ -546,6 +655,7 @@ impl KnownPayload {
             Self::EscalationClose(_) => WriteKind::EscalationClose,
             Self::KeyFinding(_) => WriteKind::KeyFinding,
             Self::RepositoryContract(_) => WriteKind::RepositoryContract,
+            Self::LegacyRepositoryContract(_) => WriteKind::RepositoryContract,
             Self::PlanningArtifactApproved(_) => WriteKind::PlanningArtifactApproved,
         }
     }
@@ -564,6 +674,7 @@ impl Serialize for KnownPayload {
             Self::EscalationClose(payload) => payload.serialize(serializer),
             Self::KeyFinding(payload) => payload.serialize(serializer),
             Self::RepositoryContract(payload) => payload.serialize(serializer),
+            Self::LegacyRepositoryContract(payload) => payload.serialize(serializer),
             Self::PlanningArtifactApproved(payload) => payload.serialize(serializer),
         }
     }
@@ -803,7 +914,8 @@ pub fn parse_event_line(line: &str) -> Result<EventRecord, EventLogError> {
         Err(error) => return Err(error),
     };
 
-    let payload = validate_and_decode_known_payload(kind, raw.payload)?;
+    let payload =
+        validate_and_decode_known_payload(kind, raw.payload, PayloadDecodeContext::PersistedRead)?;
 
     Ok(EventRecord {
         sequence: raw.sequence,
@@ -847,8 +959,12 @@ where
 {
     let payload_value = serde_json::from_str(&payload.0)
         .map_err(|source| AppendError::MalformedSubmittedPayload { source })?;
-    let known_payload = validate_and_decode_known_payload(kind, payload_value)
-        .map_err(|source| AppendError::InvalidSubmittedPayload { source })?;
+    let known_payload = validate_and_decode_known_payload(
+        kind,
+        payload_value,
+        PayloadDecodeContext::SubmittedAppend,
+    )
+    .map_err(|source| AppendError::InvalidSubmittedPayload { source })?;
 
     let sequence = match tail {
         EventLogTail::Empty => Sequence::first(),
@@ -878,6 +994,7 @@ where
 fn validate_and_decode_known_payload(
     kind: WriteKind,
     payload: Value,
+    context: PayloadDecodeContext,
 ) -> Result<KnownPayload, EventLogError> {
     let object = payload
         .as_object()
@@ -891,10 +1008,46 @@ fn validate_and_decode_known_payload(
         EvidencePresence::Absent
     };
     validate_evidence_policy(kind, presence)?;
-    decode_known_payload(kind, payload)
+    decode_known_payload(kind, payload, context)
 }
 
-fn decode_known_payload(kind: WriteKind, payload: Value) -> Result<KnownPayload, EventLogError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PayloadDecodeContext {
+    PersistedRead,
+    SubmittedAppend,
+}
+
+fn decode_known_payload(
+    kind: WriteKind,
+    payload: Value,
+    context: PayloadDecodeContext,
+) -> Result<KnownPayload, EventLogError> {
+    if kind == WriteKind::RepositoryContract {
+        return match context {
+            PayloadDecodeContext::SubmittedAppend => serde_json::from_value(payload)
+                .map(KnownPayload::RepositoryContract)
+                .map_err(|source| EventLogError::InvalidKnownPayload {
+                    kind,
+                    detail: source.to_string(),
+                }),
+            PayloadDecodeContext::PersistedRead => {
+                let current =
+                    serde_json::from_value(payload.clone()).map(KnownPayload::RepositoryContract);
+                match current {
+                    Ok(payload) => Ok(payload),
+                    Err(current_source) => serde_json::from_value(payload)
+                        .map(KnownPayload::LegacyRepositoryContract)
+                        .map_err(|legacy_source| EventLogError::InvalidKnownPayload {
+                            kind,
+                            detail: format!(
+                                "current schema: {current_source}; legacy schema: {legacy_source}"
+                            ),
+                        }),
+                }
+            }
+        };
+    }
+
     let decoded = match kind {
         WriteKind::Dispatch => serde_json::from_value(payload).map(KnownPayload::Dispatch),
         WriteKind::Delta => serde_json::from_value(payload).map(KnownPayload::Delta),
@@ -905,9 +1058,7 @@ fn decode_known_payload(kind: WriteKind, payload: Value) -> Result<KnownPayload,
             serde_json::from_value(payload).map(KnownPayload::EscalationClose)
         }
         WriteKind::KeyFinding => serde_json::from_value(payload).map(KnownPayload::KeyFinding),
-        WriteKind::RepositoryContract => {
-            serde_json::from_value(payload).map(KnownPayload::RepositoryContract)
-        }
+        WriteKind::RepositoryContract => unreachable!("repository contract decoded above"),
         WriteKind::PlanningArtifactApproved => {
             serde_json::from_value(payload).map(KnownPayload::PlanningArtifactApproved)
         }
@@ -1058,6 +1209,7 @@ mod tests {
         Sequence, Sha256Digest, UnparsedPayload, WriteKind, append_event, event_record_matches,
         parse_event_line, serialize_event_line, validate_evidence_policy,
     };
+    use crate::run_state::VersionPolicy;
 
     const APPEND_TIME_SECONDS: u64 = 1_785_155_696;
     const VALID_DELTA_PAYLOAD: &str = r#"{"message":"append one validated event"}"#;
@@ -1085,6 +1237,7 @@ mod tests {
         r#"{"sequence":7,"timestamp":"2026-07-27T12:35:02.000Z","kind":"planning-artifact-approved","node":"m1-s1","payload":{"path":"planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","evidence":"shasum -a 256 planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json"}}"#,
     ];
     const UNKNOWN_LINE: &str = r#"{"sequence":8,"timestamp":"2026-07-27T12:35:03.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
+    const CURRENT_REPOSITORY_CONTRACT_LINE: &str = r#"{"sequence":9,"timestamp":"2026-07-27T12:35:04.000Z","kind":"repository-contract","node":"m2-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stated":{"format":"cargo fmt --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --release","version_policy":"NONE","branch_convention":"pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>","pull_request_convention":"step head targets the matching milestone integration branch"},"observations":{"format":0,"lint":0,"typecheck":0,"test":0,"build":0},"workflow_map":{"ci.yml":"cargo test --workspace","docs.yml":null},"appendable":{"environment_hazards":["stdin is reserved for event payload input"],"gate_orderings":["format before lint before typecheck before test before build"],"lockfile_rules":["Cargo.lock must remain synchronized with Cargo.toml"]},"evidence":"cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release"}}"#;
 
     #[test]
     fn raw_record_filters_match_known_and_unknown_kinds_exactly() -> Result<(), EventLogError> {
@@ -1166,6 +1319,36 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert_eq!(recorded.borrow().as_slice(), SECOND_APPEND.as_bytes());
         assert_eq!(intent.as_bytes(), SECOND_APPEND.as_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn append_after_legacy_repository_contract_tail_uses_successor_sequence()
+    -> Result<(), EventLogError> {
+        let expected = concat!(
+            r#"{"sequence":7,"timestamp":"2026-07-27T12:34:56.000Z","kind":"delta","node":"m1-s2","payload":{"message":"append one validated event"}}"#,
+            "\n"
+        );
+        let calls = Cell::new(0);
+        let recorded = RefCell::new(Vec::new());
+
+        let intent = append_event(
+            WriteKind::Delta,
+            UnparsedPayload::new(VALID_DELTA_PAYLOAD),
+            EventLogTail::Present(EventLogTailLine::new(KNOWN_LINES[5])),
+            NodeId::parse("m1-s2")?,
+            append_time(),
+            |bytes| {
+                calls.set(calls.get() + 1);
+                recorded.borrow_mut().extend_from_slice(bytes);
+                Ok::<(), io::Error>(())
+            },
+        )
+        .map_err(append_test_error)?;
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(recorded.borrow().as_slice(), expected.as_bytes());
+        assert_eq!(intent.as_bytes(), expected.as_bytes());
         Ok(())
     }
 
@@ -1393,7 +1576,10 @@ mod tests {
                     | (2, ReadPayload::Known(KnownPayload::EscalationOpen(_)))
                     | (3, ReadPayload::Known(KnownPayload::EscalationClose(_)))
                     | (4, ReadPayload::Known(KnownPayload::KeyFinding(_)))
-                    | (5, ReadPayload::Known(KnownPayload::RepositoryContract(_)))
+                    | (
+                        5,
+                        ReadPayload::Known(KnownPayload::LegacyRepositoryContract(_))
+                    )
                     | (
                         6,
                         ReadPayload::Known(KnownPayload::PlanningArtifactApproved(_))
@@ -1417,7 +1603,10 @@ mod tests {
                     | (2, EventBodyRef::Known(KnownPayload::EscalationOpen(_)))
                     | (3, EventBodyRef::Known(KnownPayload::EscalationClose(_)))
                     | (4, EventBodyRef::Known(KnownPayload::KeyFinding(_)))
-                    | (5, EventBodyRef::Known(KnownPayload::RepositoryContract(_)))
+                    | (
+                        5,
+                        EventBodyRef::Known(KnownPayload::LegacyRepositoryContract(_))
+                    )
                     | (
                         6,
                         EventBodyRef::Known(KnownPayload::PlanningArtifactApproved(_))
@@ -1516,7 +1705,8 @@ mod tests {
     #[test]
     fn preserves_multiline_live_invocation_evidence() -> Result<(), EventLogError> {
         let record = parse_event_line(KNOWN_LINES[5])?;
-        let ReadPayload::Known(KnownPayload::RepositoryContract(payload)) = record.payload() else {
+        let ReadPayload::Known(KnownPayload::LegacyRepositoryContract(payload)) = record.payload()
+        else {
             panic!("repository contract payload expected");
         };
         assert_eq!(
@@ -1550,6 +1740,110 @@ mod tests {
         let reparsed = parse_event_line(&line)?;
         assert_eq!(reparsed, record);
         Ok(())
+    }
+
+    #[test]
+    fn legacy_repository_contract_line_remains_readable_and_exactly_serializable()
+    -> Result<(), EventLogError> {
+        let record = parse_event_line(KNOWN_LINES[5])?;
+        assert_eq!(
+            record.kind(),
+            ReadKind::Known(WriteKind::RepositoryContract)
+        );
+        let ReadPayload::Known(KnownPayload::LegacyRepositoryContract(payload)) = record.payload()
+        else {
+            panic!("legacy repository contract expected");
+        };
+        assert_eq!(payload.repository.as_str(), "pce");
+        assert_eq!(payload.repo_root.as_str(), "/workspace/pce");
+        assert_eq!(
+            payload.evidence.as_str(),
+            "rustc --version\ncargo --version\ngit rev-parse --show-toplevel"
+        );
+        assert_eq!(serialize_event_line(&record)?, KNOWN_LINES[5]);
+        Ok(())
+    }
+
+    #[test]
+    fn current_repository_contract_round_trips_every_two_authority_field()
+    -> Result<(), EventLogError> {
+        let record = parse_event_line(CURRENT_REPOSITORY_CONTRACT_LINE)?;
+        let ReadPayload::Known(KnownPayload::RepositoryContract(payload)) = record.payload() else {
+            panic!("current repository contract expected");
+        };
+        assert_eq!(payload.repository.as_str(), "pce");
+        assert_eq!(payload.repo_root.as_str(), "/workspace/pce");
+        assert_eq!(payload.stated.format, "cargo fmt --check");
+        assert_eq!(
+            payload.stated.lint,
+            "cargo clippy --workspace --all-targets"
+        );
+        assert_eq!(
+            payload.stated.typecheck,
+            "cargo check --workspace --all-targets"
+        );
+        assert_eq!(payload.stated.test, "cargo test --workspace");
+        assert_eq!(payload.stated.build, "cargo build --release");
+        assert_eq!(payload.stated.version_policy, VersionPolicy::None);
+        assert_eq!(
+            payload.stated.branch_convention,
+            "pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>"
+        );
+        assert_eq!(
+            payload.stated.pull_request_convention,
+            "step head targets the matching milestone integration branch"
+        );
+        assert_eq!(payload.observations.format.get(), 0);
+        assert_eq!(payload.observations.lint.get(), 0);
+        assert_eq!(payload.observations.typecheck.get(), 0);
+        assert_eq!(payload.observations.test.get(), 0);
+        assert_eq!(payload.observations.build.get(), 0);
+        assert_eq!(
+            payload.workflow_map.as_map().get("ci.yml"),
+            Some(&Some("cargo test --workspace".to_owned()))
+        );
+        assert_eq!(payload.workflow_map.as_map().get("docs.yml"), Some(&None));
+        assert_eq!(
+            payload.appendable.environment_hazards,
+            ["stdin is reserved for event payload input"]
+        );
+        assert_eq!(
+            payload.appendable.gate_orderings,
+            ["format before lint before typecheck before test before build"]
+        );
+        assert_eq!(
+            payload.appendable.lockfile_rules,
+            ["Cargo.lock must remain synchronized with Cargo.toml"]
+        );
+        assert_eq!(
+            payload.evidence.as_str(),
+            "cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release"
+        );
+
+        let serialized = serialize_event_line(&record)?;
+        assert_eq!(serialized, CURRENT_REPOSITORY_CONTRACT_LINE);
+        assert_eq!(parse_event_line(&serialized)?, record);
+        Ok(())
+    }
+
+    #[test]
+    fn current_repository_contract_rejects_unknown_fields() {
+        let mut top_level: Value =
+            serde_json::from_str(CURRENT_REPOSITORY_CONTRACT_LINE).expect("fixture must parse");
+        top_level["payload"]["stack"] = json!("Rust");
+        let mut nested = serde_json::from_str::<Value>(CURRENT_REPOSITORY_CONTRACT_LINE)
+            .expect("fixture must parse");
+        nested["payload"]["stated"]["preflight"] = json!("cargo check");
+
+        for line in [top_level.to_string(), nested.to_string()] {
+            assert!(matches!(
+                parse_event_line(&line),
+                Err(EventLogError::InvalidKnownPayload {
+                    kind: WriteKind::RepositoryContract,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
