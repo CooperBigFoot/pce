@@ -378,7 +378,11 @@ impl MergeSubject {
             node.milestone().get(),
             node.step().get()
         ));
-        let base = IntegrationBranch(format!("milestone-{}", node.milestone().get()));
+        let base = IntegrationBranch(format!(
+            "pce/{}/milestone-{}",
+            vision.as_str(),
+            node.milestone().get()
+        ));
         Self {
             node,
             selector: PullRequestSelector { head, base },
@@ -414,9 +418,13 @@ pub struct MilestoneMergeSubject {
 }
 
 impl MilestoneMergeSubject {
-    /// Derive the merge subject from a canonical milestone node.
-    pub fn derive(node: MilestoneNode) -> Self {
-        let head = HeadBranch(format!("milestone-{}", node.milestone().get()));
+    /// Derive the merge subject from a parsed vision slug and canonical milestone node.
+    pub fn derive(vision: &VisionSlug, node: MilestoneNode) -> Self {
+        let head = HeadBranch(format!(
+            "pce/{}/milestone-{}",
+            vision.as_str(),
+            node.milestone().get()
+        ));
         let base = IntegrationBranch("main".to_owned());
         Self {
             node,
@@ -3515,10 +3523,12 @@ mod tests {
             RepositoryObservation::new(
                 RepositoryName::new("pce"),
                 RepositoryFetchObservation::Observed {
-                    observation_ref: RepositoryObservationRef::parse("origin/milestone-2")?,
+                    observation_ref: RepositoryObservationRef::parse(
+                        "origin/pce/event-log-and-derived-run-state/milestone-2",
+                    )?,
                     fetched_at,
                 },
-                RepositoryBranchName::parse("milestone-2")?,
+                RepositoryBranchName::parse("pce/event-log-and-derived-run-state/milestone-2")?,
                 BranchState::Present,
                 WorktreeIdentity::parse("pce/event-log-and-derived-run-state/m2-s6")?,
                 WorktreeState::Absent,
@@ -3532,7 +3542,7 @@ mod tests {
                 RepositoryFetchObservation::Unavailable {
                     failure: RepositoryObservationFailure::parse("offline")?,
                 },
-                RepositoryBranchName::parse("milestone-2")?,
+                RepositoryBranchName::parse("pce/event-log-and-derived-run-state/milestone-2")?,
                 BranchState::Absent,
                 WorktreeIdentity::parse("pce/event-log-and-derived-run-state/m2-s6")?,
                 WorktreeState::Present,
@@ -3897,7 +3907,10 @@ mod tests {
             subject.head().as_str(),
             "pce/event-log-and-derived-run-state/m2-s1"
         );
-        assert_eq!(subject.integration_branch().as_str(), "milestone-2");
+        assert_eq!(
+            subject.integration_branch().as_str(),
+            "pce/event-log-and-derived-run-state/milestone-2"
+        );
         assert_eq!(subject.selector().head(), subject.head());
         assert_eq!(subject.selector().base(), subject.integration_branch());
         Ok(())
@@ -3957,14 +3970,30 @@ mod tests {
 
     #[test]
     fn derives_exact_milestone_merge_subject() -> Result<(), Box<dyn Error>> {
+        let vision = VisionSlug::parse("2026-07-27-event-log-and-derived-run-state")?;
         let node = MilestoneNode::parse(&NodeId::parse("m2")?)?;
-        let subject = MilestoneMergeSubject::derive(node);
+        let subject = MilestoneMergeSubject::derive(&vision, node);
 
         assert_eq!(subject.node().milestone().get(), 2);
-        assert_eq!(subject.head().as_str(), "milestone-2");
+        assert_eq!(
+            subject.head().as_str(),
+            "pce/event-log-and-derived-run-state/milestone-2"
+        );
         assert_eq!(subject.base().as_str(), "main");
         assert_eq!(subject.selector().head(), subject.head());
         assert_eq!(subject.selector().base(), subject.base());
+        Ok(())
+    }
+
+    #[test]
+    fn milestone_merge_subject_selectors_differ_across_visions() -> Result<(), Box<dyn Error>> {
+        let first_vision = VisionSlug::parse("2026-07-27-first")?;
+        let second_vision = VisionSlug::parse("2026-07-27-second")?;
+        let node = MilestoneNode::parse(&NodeId::parse("m2")?)?;
+        let first = MilestoneMergeSubject::derive(&first_vision, node.clone());
+        let second = MilestoneMergeSubject::derive(&second_vision, node);
+
+        assert_ne!(first.selector(), second.selector());
         Ok(())
     }
 
@@ -4189,7 +4218,9 @@ mod tests {
 
     #[test]
     fn milestone_merge_status_uses_shared_three_valued_rules() -> Result<(), Box<dyn Error>> {
-        let subject = MilestoneMergeSubject::derive(MilestoneNode::parse(&NodeId::parse("m2")?)?);
+        let vision = VisionSlug::parse("2026-07-27-example")?;
+        let subject =
+            MilestoneMergeSubject::derive(&vision, MilestoneNode::parse(&NodeId::parse("m2")?)?);
         let squash_a = SquashCommitOid::parse("A")?;
         let squash_b = SquashCommitOid::parse("B")?;
         let exact_identity = identity(subject.selector())?;
@@ -4479,7 +4510,7 @@ mod tests {
                 observation_ref: RepositoryObservationRef::parse("abc")?,
                 fetched_at: timestamp,
             },
-            RepositoryBranchName::parse("milestone-2")?,
+            RepositoryBranchName::parse("pce/example/milestone-2")?,
             BranchState::Present,
             WorktreeIdentity::parse("m2-s2")?,
             WorktreeState::Present,
@@ -4530,7 +4561,10 @@ mod tests {
         let step = &state.steps()[0];
         assert_eq!(step.node().as_str(), "m2-s3");
         assert_eq!(step.subject().head().as_str(), "pce/example/m2-s3");
-        assert_eq!(step.subject().integration_branch().as_str(), "milestone-2");
+        assert_eq!(
+            step.subject().integration_branch().as_str(),
+            "pce/example/milestone-2"
+        );
         assert_eq!(step.status(), MergeStatus::NotMerged);
 
         assert!(matches!(
@@ -4984,10 +5018,10 @@ mod tests {
         let repository = RepositoryObservation::new(
             RepositoryName::new("pce"),
             RepositoryFetchObservation::Observed {
-                observation_ref: RepositoryObservationRef::parse("origin/milestone-2")?,
+                observation_ref: RepositoryObservationRef::parse("origin/pce/example/milestone-2")?,
                 fetched_at: EventTimestamp::parse("2026-07-27T12:34:56.123Z")?,
             },
-            RepositoryBranchName::parse("milestone-2")?,
+            RepositoryBranchName::parse("pce/example/milestone-2")?,
             BranchState::Present,
             WorktreeIdentity::parse("m2-s3")?,
             WorktreeState::Present,
@@ -5283,29 +5317,29 @@ mod tests {
                 "pce status (pce.run-snapshot v1)\n",
                 "repositories (2)\n",
                 "  repository 1: name=\"pce\"\n",
-                "    fetch observed: ref=\"origin/milestone-2\" fetched-at=\"2026-07-27T12:34:56.123Z\"\n",
-                "    branch: name=\"milestone-2\" state=present\n",
+                "    fetch observed: ref=\"origin/pce/event-log-and-derived-run-state/milestone-2\" fetched-at=\"2026-07-27T12:34:56.123Z\"\n",
+                "    branch: name=\"pce/event-log-and-derived-run-state/milestone-2\" state=present\n",
                 "    worktree: identity=\"pce/event-log-and-derived-run-state/m2-s6\" state=absent\n",
                 "    tag: name=\"v0.1.16\" state=points-to target=\"release-oid\"\n",
                 "  repository 2: name=\"docs\"\n",
                 "    fetch unavailable: failure=\"offline\"\n",
-                "    branch: name=\"milestone-2\" state=absent\n",
+                "    branch: name=\"pce/event-log-and-derived-run-state/milestone-2\" state=absent\n",
                 "    worktree: identity=\"pce/event-log-and-derived-run-state/m2-s6\" state=present\n",
                 "    tag: name=\"v0.1.16\" state=absent\n",
                 "steps (3)\n",
                 "  step 1: node=\"m2-s1\" merge-status=merged\n",
-                "    subject: milestone=2 step=1 head=\"pce/event-log-and-derived-run-state/m2-s1\" integration=\"milestone-2\"\n",
-                "    selector: head=\"pce/event-log-and-derived-run-state/m2-s1\" base=\"milestone-2\"\n",
-                "    github reachable: cardinality=one-exact-match pr=53 head=\"pce/event-log-and-derived-run-state/m2-s1\" base=\"milestone-2\" status=merged squash=\"merge-oid\"\n",
+                "    subject: milestone=2 step=1 head=\"pce/event-log-and-derived-run-state/m2-s1\" integration=\"pce/event-log-and-derived-run-state/milestone-2\"\n",
+                "    selector: head=\"pce/event-log-and-derived-run-state/m2-s1\" base=\"pce/event-log-and-derived-run-state/milestone-2\"\n",
+                "    github reachable: cardinality=one-exact-match pr=53 head=\"pce/event-log-and-derived-run-state/m2-s1\" base=\"pce/event-log-and-derived-run-state/milestone-2\" status=merged squash=\"merge-oid\"\n",
                 "    git reachable: state=squash-commit-reachable squash=\"merge-oid\"\n",
                 "  step 2: node=\"m2-s2\" merge-status=not-merged\n",
-                "    subject: milestone=2 step=2 head=\"pce/event-log-and-derived-run-state/m2-s2\" integration=\"milestone-2\"\n",
-                "    selector: head=\"pce/event-log-and-derived-run-state/m2-s2\" base=\"milestone-2\"\n",
+                "    subject: milestone=2 step=2 head=\"pce/event-log-and-derived-run-state/m2-s2\" integration=\"pce/event-log-and-derived-run-state/milestone-2\"\n",
+                "    selector: head=\"pce/event-log-and-derived-run-state/m2-s2\" base=\"pce/event-log-and-derived-run-state/milestone-2\"\n",
                 "    github reachable: cardinality=zero-exact-matches\n",
                 "    git reachable: state=not-merged\n",
                 "  step 3: node=\"m2-s3\" merge-status=inconclusive\n",
-                "    subject: milestone=2 step=3 head=\"pce/event-log-and-derived-run-state/m2-s3\" integration=\"milestone-2\"\n",
-                "    selector: head=\"pce/event-log-and-derived-run-state/m2-s3\" base=\"milestone-2\"\n",
+                "    subject: milestone=2 step=3 head=\"pce/event-log-and-derived-run-state/m2-s3\" integration=\"pce/event-log-and-derived-run-state/milestone-2\"\n",
+                "    selector: head=\"pce/event-log-and-derived-run-state/m2-s3\" base=\"pce/event-log-and-derived-run-state/milestone-2\"\n",
                 "    github unreachable: failure=\"gh offline\"\n",
                 "    git unreachable: failure=\"GitHub authority unavailable before git reachability selection\"\n",
                 "dispatches (2)\n",
@@ -5447,7 +5481,7 @@ mod tests {
         for (authority, expected) in [
             (
                 one_not_merged,
-                "github reachable: cardinality=one-exact-match pr=19 head=\"pce/example/m2-s1\" base=\"milestone-2\" status=not-merged",
+                "github reachable: cardinality=one-exact-match pr=19 head=\"pce/example/m2-s1\" base=\"pce/example/milestone-2\" status=not-merged",
             ),
             (
                 multiple,

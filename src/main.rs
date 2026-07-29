@@ -603,7 +603,7 @@ fn run_ready(
             .context("graph repository contract disappeared after resolution")?;
         let (selector, altitude) = match &graph_node.node {
             DispatchNode::Milestone(node) => {
-                let subject = MilestoneMergeSubject::derive(node.clone());
+                let subject = MilestoneMergeSubject::derive(&vision, node.clone());
                 (
                     subject.selector().clone(),
                     ReadyAltitude::Milestone(subject),
@@ -1760,10 +1760,12 @@ mod tests {
 
     #[test]
     fn github_command_routing_uses_selector_exact_ordered_pair() {
+        let vision =
+            VisionSlug::parse("2026-07-27-example").expect("vision slug fixture should parse");
         let node = NodeId::parse("m7").expect("milestone node fixture should parse");
         let milestone =
             MilestoneNode::parse(&node).expect("milestone node fixture should classify");
-        let subject = MilestoneMergeSubject::derive(milestone);
+        let subject = MilestoneMergeSubject::derive(&vision, milestone);
         let selector = subject.selector();
 
         assert_eq!(
@@ -1772,7 +1774,7 @@ mod tests {
                 "pr",
                 "list",
                 "--head",
-                "milestone-7",
+                "pce/example/milestone-7",
                 "--base",
                 "main",
                 "--state",
@@ -1788,17 +1790,19 @@ mod tests {
 
     #[test]
     fn git_fetch_selection_uses_selector_base() {
+        let vision =
+            VisionSlug::parse("2026-07-27-example").expect("vision slug fixture should parse");
         let node = NodeId::parse("m7").expect("milestone node fixture should parse");
         let milestone =
             MilestoneNode::parse(&node).expect("milestone node fixture should classify");
-        let subject = MilestoneMergeSubject::derive(milestone);
+        let subject = MilestoneMergeSubject::derive(&vision, milestone);
         let selector = subject.selector();
         let runtime = RepositoryRuntime {
             name: RepositoryName::new("primary"),
             root: PathBuf::from("unused"),
             fetches: vec![
                 BranchFetch {
-                    branch: "milestone-7".to_owned(),
+                    branch: "pce/example/milestone-7".to_owned(),
                     result: FetchResult::Observed {
                         oid: "decoy-head-fetch".to_owned(),
                         fetched_at: SystemTime::UNIX_EPOCH,
@@ -2708,7 +2712,8 @@ mod tests {
                 failure: RepositoryObservationFailure::parse("offline")
                     .expect("failure fixture should parse"),
             },
-            RepositoryBranchName::parse("milestone-2").expect("branch fixture should parse"),
+            RepositoryBranchName::parse("pce/event-log/milestone-2")
+                .expect("branch fixture should parse"),
             BranchState::Present,
             WorktreeIdentity::parse("pce/event-log/m2-s4").expect("worktree fixture should parse"),
             WorktreeState::Present,

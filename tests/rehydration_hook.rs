@@ -568,6 +568,10 @@ fn payload(root: &Path, event: &str, source: &str) -> Vec<u8> {
 
 fn status_responses(root: &Path, head: &str) -> Vec<ScriptedResponse> {
     let root_text = root.to_str().expect("UTF-8 root");
+    let vision = head
+        .strip_suffix("/m5-s1")
+        .expect("step head fixture should end in its node");
+    let integration = format!("{vision}/milestone-5");
     vec![
         response(
             "git",
@@ -583,7 +587,7 @@ fn status_responses(root: &Path, head: &str) -> Vec<ScriptedResponse> {
                 "fetch",
                 "--no-tags",
                 "origin",
-                "refs/heads/milestone-5",
+                &format!("refs/heads/{integration}"),
             ]),
             0,
             b"",
@@ -608,7 +612,7 @@ fn status_responses(root: &Path, head: &str) -> Vec<ScriptedResponse> {
                 "show-ref",
                 "--verify",
                 "--quiet",
-                "refs/heads/milestone-5",
+                &format!("refs/heads/{integration}"),
             ]),
             0,
             b"",
@@ -644,7 +648,7 @@ fn status_responses(root: &Path, head: &str) -> Vec<ScriptedResponse> {
                 "--head",
                 head,
                 "--base",
-                "milestone-5",
+                &integration,
                 "--state",
                 "all",
                 "--limit",
@@ -654,7 +658,7 @@ fn status_responses(root: &Path, head: &str) -> Vec<ScriptedResponse> {
             ]),
             0,
             format!(
-                "[{{\"number\":501,\"headRefName\":\"{head}\",\"baseRefName\":\"milestone-5\",\"state\":\"OPEN\",\"mergeCommit\":null}}]\n"
+                "[{{\"number\":501,\"headRefName\":\"{head}\",\"baseRefName\":\"{integration}\",\"state\":\"OPEN\",\"mergeCommit\":null}}]\n"
             )
             .as_bytes(),
         ),
@@ -663,6 +667,10 @@ fn status_responses(root: &Path, head: &str) -> Vec<ScriptedResponse> {
 
 fn expected_invocations(root: &Path, head: &str) -> Vec<Invocation> {
     let root_arg = root.as_os_str().to_owned();
+    let vision = head
+        .strip_suffix("/m5-s1")
+        .expect("step head fixture should end in its node");
+    let integration = format!("{vision}/milestone-5");
     vec![
         invocation(
             "git",
@@ -682,7 +690,7 @@ fn expected_invocations(root: &Path, head: &str) -> Vec<Invocation> {
                 "fetch".into(),
                 "--no-tags".into(),
                 "origin".into(),
-                "refs/heads/milestone-5".into(),
+                format!("refs/heads/{integration}").into(),
             ],
         ),
         invocation(
@@ -703,7 +711,7 @@ fn expected_invocations(root: &Path, head: &str) -> Vec<Invocation> {
                 "show-ref".into(),
                 "--verify".into(),
                 "--quiet".into(),
-                "refs/heads/milestone-5".into(),
+                format!("refs/heads/{integration}").into(),
             ],
         ),
         invocation(
@@ -735,7 +743,7 @@ fn expected_invocations(root: &Path, head: &str) -> Vec<Invocation> {
                 "--head",
                 head,
                 "--base",
-                "milestone-5",
+                &integration,
                 "--state",
                 "all",
                 "--limit",
