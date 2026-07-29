@@ -5,6 +5,7 @@ pub mod event_log;
 pub mod run_state;
 pub mod tracked_contract;
 pub mod vision;
+pub mod workflow_coverage;
 
 pub use contract_measurement::{
     ContractMeasurementError, GateMeasurement, GateMeasurements, MeasuredContractSnapshot,
@@ -53,4 +54,8 @@ pub use tracked_contract::{
 pub use vision::{
     CreationDate, NewVision, Slug, VisionDir, VisionDirOutcome, VisionError, VisionName,
     create_vision, render_vision_stub,
+};
+pub use workflow_coverage::{
+    ObservedWorkflowName, ObservedWorkflowNameError, WorkflowCoverageError,
+    validate_workflow_coverage,
 };
