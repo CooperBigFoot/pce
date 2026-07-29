@@ -554,7 +554,7 @@ fn contract_record(root: &Path, timestamp: &str) -> Vec<u8> {
     let root = serde_json::to_string(root.to_str().expect("UTF-8 root"))
         .expect("JSON-escape repository root");
     format!(
-        "{{\"sequence\":1,\"timestamp\":\"{timestamp}\",\"kind\":\"repository-contract\",\"node\":\"m5-s1\",\"payload\":{{\"repository\":\"pce\",\"repo_root\":{root},\"stack\":\"Rust rehydration fixture\",\"format\":\"cargo fmt --all --check\",\"lint\":\"cargo clippy --workspace --all-targets\",\"typecheck\":\"cargo check --workspace --all-targets\",\"test\":\"cargo test --workspace\",\"build\":\"cargo build --workspace\",\"preflight\":\"cargo check --workspace --all-targets\",\"gates_rule\":\"all four fixture gates must pass\",\"install\":\"none\",\"evidence\":\"rehydration fixture repository contract\"}}}}\n"
+        "{{\"sequence\":1,\"timestamp\":\"{timestamp}\",\"kind\":\"repository-contract\",\"node\":\"m5-s1\",\"payload\":{{\"repository\":\"pce\",\"repo_root\":{root},\"stated\":{{\"format\":\"cargo fmt --check\",\"lint\":\"cargo clippy --workspace --all-targets\",\"typecheck\":\"cargo check --workspace --all-targets\",\"test\":\"cargo test --workspace\",\"build\":\"cargo build --release\",\"version_policy\":\"NONE\",\"branch_convention\":\"pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>\",\"pull_request_convention\":\"step head targets the matching milestone integration branch\"}},\"observations\":{{\"format\":0,\"lint\":0,\"typecheck\":0,\"test\":0,\"build\":0}},\"workflow_map\":{{}},\"appendable\":{{\"environment_hazards\":[],\"gate_orderings\":[],\"lockfile_rules\":[]}},\"evidence\":\"rehydration fixture repository contract\"}}}}\n"
     )
     .into_bytes()
 }

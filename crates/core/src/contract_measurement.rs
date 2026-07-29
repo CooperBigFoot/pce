@@ -3,19 +3,31 @@
 
 use std::fmt::{self, Display, Formatter};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
 use crate::tracked_contract::{GateCommand, GateKind, StatedContract};
 
 /// An exit-status code observed by the injected gate execution capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct ObservedExitStatus(i32);
 
 impl ObservedExitStatus {
+    /// Construct a measured process exit status.
+    pub const fn new(value: i32) -> Self {
+        Self(value)
+    }
+
     /// Construct an observation from the capability's exit-status code.
     pub const fn from_code(code: i32) -> Self {
         Self(code)
+    }
+
+    /// Return the measured process exit status.
+    pub const fn get(self) -> i32 {
+        self.0
     }
 
     /// Return the observed exit-status code.

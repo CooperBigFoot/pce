@@ -83,23 +83,39 @@ pce log --file <LOG_PATH> --kind repository-contract --node <NODE>
 {
   "repository": "<REPOSITORY_NAME>",
   "repo_root": "<ABSOLUTE_REPOSITORY_ROOT>",
-  "stack": "<MEASURED_STACK>",
-  "format": "<EXACT_FORMAT_COMMAND>",
-  "lint": "<EXACT_LINT_COMMAND>",
-  "typecheck": "<EXACT_TYPECHECK_COMMAND>",
-  "test": "<EXACT_TEST_COMMAND>",
-  "build": "<EXACT_BUILD_COMMAND>",
-  "preflight": "<EXACT_PREFLIGHT_COMMAND>",
-  "gates_rule": "<GATES_RULE>",
-  "install": "<INSTALL_REQUIREMENT>",
-  "evidence": "<NON_EMPTY_EXACT_ORIENTATION_INVOCATION>"
+  "stated": {
+    "format": "<EXACT_FORMAT_COMMAND>",
+    "lint": "<EXACT_LINT_COMMAND>",
+    "typecheck": "<EXACT_TYPECHECK_COMMAND>",
+    "test": "<EXACT_TEST_COMMAND>",
+    "build": "<EXACT_BUILD_COMMAND>",
+    "version_policy": "<NONE_OR_SERIALIZE_DISPATCHES>",
+    "branch_convention": "<BRANCH_CONVENTION>",
+    "pull_request_convention": "<PULL_REQUEST_CONVENTION>"
+  },
+  "observations": {
+    "format": "<OBSERVED_EXIT_STATUS>",
+    "lint": "<OBSERVED_EXIT_STATUS>",
+    "typecheck": "<OBSERVED_EXIT_STATUS>",
+    "test": "<OBSERVED_EXIT_STATUS>",
+    "build": "<OBSERVED_EXIT_STATUS>"
+  },
+  "workflow_map": {
+    "<WORKFLOW_PATH>": "<EXACT_LOCAL_STAND_IN_COMMAND_OR_NULL>"
+  },
+  "appendable": {
+    "environment_hazards": ["<ENVIRONMENT_HAZARD>"],
+    "gate_orderings": ["<GATE_ORDERING>"],
+    "lockfile_rules": ["<LOCKFILE_RULE>"]
+  },
+  "evidence": "<NON_EMPTY_EXACT_MEASUREMENT_INVOCATION>"
 }
 
 pce log --file <LOG_PATH> --kind planning-artifact-approved --node <NODE>
 {"path":"<ARTIFACT_PATH>","sha256":"<64_LOWERCASE_HEX_CHARACTERS>","evidence":"<NON_EMPTY_EXACT_DIGEST_INVOCATION>"}
 ```
 
-`dispatch`, `key-finding`, `repository-contract`, and `planning-artifact-approved` require non-empty `evidence`. `delta`, `escalation-open`, and `escalation-close` forbid the `evidence` key. The repository payload is a `deny_unknown_fields` boundary with exactly the twelve displayed fields. Unknown keys, including `version_bump`, `branch_pr`, `consumed_artifacts`, and `notes`, are rejected; no bytes are appended and the command exits non-zero. The planning-artifact payload is also `deny_unknown_fields` with exactly `path`, `sha256`, and non-empty `evidence`. Its digest is exactly 64 lowercase hexadecimal characters. Relative artifact paths resolve against the primary repository root; absolute paths are used as-is.
+`dispatch`, `key-finding`, `repository-contract`, and `planning-artifact-approved` require non-empty `evidence`. `delta`, `escalation-open`, and `escalation-close` forbid the `evidence` key. The current repository payload is a `deny_unknown_fields` boundary with exactly seven top-level keys: `repository`, `repo_root`, `stated`, `observations`, `workflow_map`, `appendable`, and `evidence`. `stated` has exactly `format`, `lint`, `typecheck`, `test`, `build`, `version_policy`, `branch_convention`, and `pull_request_convention`; `observations` has exactly `format`, `lint`, `typecheck`, `test`, and `build`; `appendable` has exactly `environment_hazards`, `gate_orderings`, and `lockfile_rules`. Every observation is a JSON integer. Every workflow-map value is either an exact JSON string command or the JSON literal `null`; an absent key differs from an explicit `null`. Arrays may be empty. Non-empty `evidence` remains required. Unknown fields such as top-level `stack`, `preflight`, `gates_rule`, `install`, or any unknown nested key are rejected; no bytes are appended and the command exits non-zero. Legacy twelve-field repository payloads are read-only compatibility data: they are accepted only while reading persisted logs and are rejected for new appends without writing bytes. The planning-artifact payload is also `deny_unknown_fields` with exactly `path`, `sha256`, and non-empty `evidence`. Its digest is exactly 64 lowercase hexadecimal characters. Relative artifact paths resolve against the primary repository root; absolute paths are used as-is.
 
 Append a `dispatch` when every Claude or Codex dispatch is issued, using its exact ref and invocation evidence. Dispatch records are the sole source for round counts and dispatch refs. The exact role vocabulary is:
 
@@ -176,9 +192,9 @@ Append exactly one twelve-field `repository-contract` per repository per run. Be
 pce log read --file <LOG_PATH> --kind repository-contract
 ```
 
-The orientation sweep runs on every fresh and resumed invocation. In addition to record fields, derive version-bump policy, branch and PR conventions, and cross-repository consumption edges containing `build_command`, `artifact_path`, and `freshness_check`. These three groups exist only in the current invocation's orientation result. Never append or write them elsewhere. Rerun orientation before any consumer if the live result is unavailable.
+The orientation sweep runs on every fresh and resumed invocation. In addition to record fields, derive version-bump policy, branch and PR conventions, and cross-repository consumption edges containing `build_command` and `artifact_path`. These three groups exist only in the current invocation's orientation result. Never append or write them elsewhere. Rerun orientation before any consumer if the live orientation-only result is unavailable; consumer test commands are not orientation results.
 
-Supply fresh per-repository version policy to `pce ready` through repeatable `--policy` arguments and to the existing Phase 3 execution, merge, and tag behavior. Do not supply it to either planner or either graph critic for edge creation or review. Use fresh branch and PR conventions for branch, worktree, PR, and merge operations. Use fresh `build_command`, `artifact_path`, and `freshness_check` for eager rebuild, and fresh `freshness_check` in Phase 3 isolate.
+Supply fresh per-repository version policy to `pce ready` through repeatable `--policy` arguments and to the existing Phase 3 execution, merge, and tag behavior. Do not supply it to either planner or either graph critic for edge creation or review. Use fresh branch and PR conventions for branch, worktree, PR, and merge operations. Use fresh `build_command` and `artifact_path` for eager rebuild. Resolve every consumer test only from accepted records read with `pce log read --file <LOG_PATH> --kind repository-contract`: select the consumer's repository record and use its exact `test` field for producer-merge freshness and Phase 3 isolate. Never source a consumer test from orientation or from a tracked repository-contract file.
 
 Version and tag behavior is per repository. If policy requires a bump, the executor folds the exact bump into its one commit, and the orchestrator creates the required post-merge tag. A `NONE` policy omits both. Never hardcode a universal no-bump or no-tag rule.
 
@@ -206,7 +222,7 @@ Omit it for single-repo work. A multi-repo vision may have an absent or empty co
 
 All branch, worktree, and merge rules apply independently in the node's repo without otherwise changing: create `pce/<vision-slug>/milestone-<m>` integration branches, step branches, and step worktrees in that repo; squash-merge step PRs into that repo's milestone branch; and merge-commit the milestone PR into that repo's `main`. Tag behavior is also per repository: read the freshly derived version policy and create a tag only when that policy requires one.
 
-For each producer merge to `main`, use fresh edge values to run its `build_command`, verify `artifact_path`, and run the consumer's `freshness_check` before dispatching consumers. The invariant is that artifacts match producer `main`; isolate performs an independent freshness backstop.
+For each producer merge to `main`, read accepted records with `pce log read --file <LOG_PATH> --kind repository-contract`, select each consumer's repository record, and run its exact `test` at the consumer's pre-producer-merge base before merging the producer. Retain that observed result. After the producer merge, use fresh edge values to run its `build_command` and verify `artifact_path`, then rerun the same accepted consumer `test`. Report a test red in both observations as `pre-existing`, not as a `producer regression`; report a test green at base and red after the producer merge and artifact rebuild as a `producer regression`. A red observation remains red and does not authorize consumer dispatch. The invariant is that artifacts match producer `main`; isolate performs an independent freshness backstop.
 
 ## Phase 1 — Vision to milestones
 
@@ -271,7 +287,7 @@ Use the verb at both altitudes: the approved milestone graph controls step-plann
    ```
 
    The plan is sent to its zero-context executor through standard input. `VISION_DIR` is absent from step worktrees. Quote verbatim into the plan every input the executor needs but cannot read there, including external authored data. At minimum, the critic requires: write-set completeness for every file tests or gates modify; full verbatim authored-data shapes; and every affected existing assertion updated or explicitly proven untouched. A failure sets `self_sufficiency: FAIL` and identifies the item.
-2. **Isolate and preflight** — use fresh branch/PR conventions to create `pce/<vision-slug>/m<m>-s<s>` from that repository's `pce/<vision-slug>/milestone-<m>` head and add `.worktrees/<vision-slug>/m<m>-s<s>`. Read accepted contracts with `pce log read --file <LOG_PATH> --kind repository-contract`, select the repository, and run its exact `preflight` in the worktree. Read consumer freshness policy from current orientation, rerunning orientation if unavailable, and run every applicable check. One environment-only fix attempt is allowed only when it changes no tracked file and needs no commit; recheck it. A required tracked fix becomes a delegated delta node. Otherwise escalate. Never execute with red preflight or freshness.
+2. **Isolate and preflight** — use fresh branch/PR conventions to create `pce/<vision-slug>/m<m>-s<s>` from that repository's `pce/<vision-slug>/milestone-<m>` head and add `.worktrees/<vision-slug>/m<m>-s<s>`. Read accepted contracts with `pce log read --file <LOG_PATH> --kind repository-contract`, select the repository, and run its exact `preflight` in the worktree. For every consumer freshness check applicable to the node, select the consumer's accepted repository record and run its exact `test`; never source a consumer test from orientation or from a tracked repository-contract file. One environment-only fix attempt is allowed only when it changes no tracked file and needs no commit; recheck it. A required tracked fix becomes a delegated delta node. Otherwise escalate. Never execute with red preflight or consumer test.
 3. **Execute (Codex)** — record a `step-executor` dispatch at the actual node, then use this exact prompt text:
 
    ```text

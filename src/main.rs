@@ -13,10 +13,11 @@ use pce_core::{
     DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail,
     EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, ExactPullRequestIdentity,
     ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, KnownPayload, MeasuredContractSnapshot,
-    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus,
-    ObservedWorkflowName, OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
-    RepositoryBranchName, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+    GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
+    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
+    MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
+    OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
+    RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RunSnapshot, Sha256Digest,
     SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState, TagTarget,
     TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName, VisionSlug,
@@ -79,10 +80,26 @@ enum StatusFormat {
     Human,
 }
 
-#[derive(Debug)]
-struct RepositoryContract {
-    name: RepositoryName,
-    root: PathBuf,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RepositoryContract {
+    Current(RepositoryContractPayload),
+    Legacy(LegacyRepositoryContractPayload),
+}
+
+impl RepositoryContract {
+    fn name(&self) -> &RepositoryName {
+        match self {
+            Self::Current(payload) => &payload.repository,
+            Self::Legacy(payload) => &payload.repository,
+        }
+    }
+
+    fn root(&self) -> &str {
+        match self {
+            Self::Current(payload) => payload.repo_root.as_str(),
+            Self::Legacy(payload) => payload.repo_root.as_str(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -436,7 +453,7 @@ fn run_status(
     let contracts = repository_contracts(&records)?;
     let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
     let vision = vision_slug(vision_dir)?;
-    let (artifacts, _) = current_artifacts(&records, &contracts[primary_index].root)?;
+    let (artifacts, _) = current_artifacts(&records, Path::new(contracts[primary_index].root()))?;
     let canonical_nodes = canonical_nodes(&records, &vision)?;
     let selected_index = canonical_nodes
         .iter()
@@ -450,8 +467,12 @@ fn run_status(
     let mut repositories = Vec::with_capacity(contracts.len());
     let mut runtimes = Vec::with_capacity(contracts.len());
     for contract in contracts {
-        let (observation, runtime) =
-            observe_repository(contract, &integration_branches, selected.subject.selector())?;
+        let (observation, runtime) = observe_repository(
+            contract.name().clone(),
+            PathBuf::from(contract.root()),
+            &integration_branches,
+            selected.subject.selector(),
+        )?;
         repositories.push(observation);
         runtimes.push(runtime);
     }
@@ -522,7 +543,8 @@ fn run_ready(
         .collect::<Vec<_>>();
     approvals.sort_by(|(left, _), (right, _)| right.get().cmp(&left.get()));
 
-    let (artifacts, artifact_bytes) = current_artifacts(&records, &contracts[primary_index].root)?;
+    let (artifacts, artifact_bytes) =
+        current_artifacts(&records, Path::new(contracts[primary_index].root()))?;
     let state = derive_run_state(&records, &vision, recovery_log_path, &artifacts, &[], &[])
         .context("failed to derive readiness provenance and dispatch history")?;
     let (approval_sequence, artifact_path, parsed_graph) = if let Some(requested_path) = graph_path
@@ -605,7 +627,7 @@ fn run_ready(
     for graph_node in &graph.nodes {
         let matches = contracts
             .iter()
-            .filter(|contract| contract.name == graph_node.repository)
+            .filter(|contract| contract.name() == &graph_node.repository)
             .count();
         if matches != 1 {
             bail!(
@@ -629,7 +651,7 @@ fn run_ready(
     for graph_node in &graph.nodes {
         let contract = contracts
             .iter()
-            .find(|contract| contract.name == graph_node.repository)
+            .find(|contract| contract.name() == &graph_node.repository)
             .context("graph repository contract disappeared after resolution")?;
         let (selector, altitude) = match &graph_node.node {
             DispatchNode::Milestone(node) => {
@@ -645,10 +667,8 @@ fn run_ready(
             }
         };
         let (_, runtime) = observe_repository(
-            RepositoryContract {
-                name: contract.name.clone(),
-                root: contract.root.clone(),
-            },
+            contract.name().clone(),
+            PathBuf::from(contract.root()),
             &[selector.base().as_str().to_owned()],
             &selector,
         )
@@ -1014,30 +1034,34 @@ fn run_log_read(path: &Path, filter: &EventRecordFilter, output: &mut dyn Write)
 fn repository_contracts(records: &[EventRecord]) -> Result<Vec<RepositoryContract>> {
     let mut contracts = Vec::<RepositoryContract>::new();
     for record in records {
-        if let EventBodyRef::Known(KnownPayload::RepositoryContract(payload)) = record.body_ref() {
-            let root = PathBuf::from(payload.repo_root.as_str());
-            if root.as_os_str().is_empty() {
-                bail!(
-                    "repository contract at sequence {} has an empty repo_root",
-                    record.sequence().get()
-                );
+        let contract = match record.body_ref() {
+            EventBodyRef::Known(KnownPayload::RepositoryContract(payload)) => {
+                RepositoryContract::Current(payload.clone())
             }
-            if contracts
-                .iter()
-                .any(|item| item.name == payload.repository || item.root == root)
-            {
-                bail!(
-                    "ambiguous duplicate repository contract at sequence {} for repository {} and root {}",
-                    record.sequence().get(),
-                    payload.repository.as_str(),
-                    root.display()
-                );
+            EventBodyRef::Known(KnownPayload::LegacyRepositoryContract(payload)) => {
+                RepositoryContract::Legacy(payload.clone())
             }
-            contracts.push(RepositoryContract {
-                name: payload.repository.clone(),
-                root,
-            });
+            _ => continue,
+        };
+        let root = Path::new(contract.root());
+        if root.as_os_str().is_empty() {
+            bail!(
+                "repository contract at sequence {} has an empty repo_root",
+                record.sequence().get()
+            );
         }
+        if contracts
+            .iter()
+            .any(|item| item.name() == contract.name() || item.root() == contract.root())
+        {
+            bail!(
+                "ambiguous duplicate repository contract at sequence {} for repository {} and root {}",
+                record.sequence().get(),
+                contract.name().as_str(),
+                root.display()
+            );
+        }
+        contracts.push(contract);
     }
     if contracts.is_empty() {
         bail!("event log contains no repository-contract record");
@@ -1054,10 +1078,11 @@ fn resolve_primary_repository(
     let vision = absolute_path(vision_dir)?;
     let mut matches = Vec::<usize>::new();
     for (index, contract) in contracts.iter().enumerate() {
-        let root = absolute_path(&contract.root).with_context(|| {
+        let contract_root = Path::new(contract.root());
+        let root = absolute_path(contract_root).with_context(|| {
             format!(
                 "failed to resolve repository root {}",
-                contract.root.display()
+                contract_root.display()
             )
         })?;
         if log.starts_with(&root) && vision.starts_with(&root) {
@@ -1200,15 +1225,16 @@ fn integration_branches(nodes: &[CanonicalNode], selected_index: usize) -> Vec<S
 }
 
 fn observe_repository(
-    contract: RepositoryContract,
+    name: RepositoryName,
+    root: PathBuf,
     integration_branches: &[String],
     selector: &PullRequestSelector,
 ) -> Result<(RepositoryObservation, RepositoryRuntime)> {
-    let remote = verify_origin(&contract.root);
+    let remote = verify_origin(&root);
     let mut fetches = Vec::with_capacity(integration_branches.len());
     for branch in integration_branches {
         let result = match &remote {
-            Ok(()) => fetch_branch(&contract.root, branch),
+            Ok(()) => fetch_branch(&root, branch),
             Err(detail) => FetchResult::Unavailable {
                 detail: detail.clone(),
             },
@@ -1234,12 +1260,12 @@ fn observe_repository(
                 .context("failed to parse repository fetch failure")?,
         },
     };
-    let branch_state = probe_branch(&contract.root, selected_branch)?;
+    let branch_state = probe_branch(&root, selected_branch)?;
     let head = selector.head().as_str();
-    let worktree_state = probe_worktree(&contract.root, head)?;
-    let tag_state = probe_tag(&contract.root)?;
+    let worktree_state = probe_worktree(&root, head)?;
+    let tag_state = probe_tag(&root)?;
     let observation = RepositoryObservation::new(
-        contract.name.clone(),
+        name.clone(),
         fetch,
         RepositoryBranchName::parse(selected_branch)
             .context("failed to parse repository branch name")?,
@@ -1252,8 +1278,8 @@ fn observe_repository(
     Ok((
         observation,
         RepositoryRuntime {
-            name: contract.name,
-            root: contract.root,
+            name,
+            root,
             fetches,
         },
     ))
@@ -1846,10 +1872,10 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        BranchFetch, Command, DispatchGraphNode, DispatchNode, FetchResult, RepositoryRuntime,
-        StatusFormat, USAGE, already_dispatched, github_pull_request_list_args,
+        BranchFetch, Command, DispatchGraphNode, DispatchNode, FetchResult, RepositoryContract,
+        RepositoryRuntime, StatusFormat, USAGE, already_dispatched, github_pull_request_list_args,
         measure_tracked_contract_at_root, observe_git, parse_command, parse_dispatch_graph,
-        parse_tracked_contract, run, run_log_read, validated_snapshot_value,
+        parse_tracked_contract, repository_contracts, run, run_log_read, validated_snapshot_value,
     };
 
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
@@ -2090,7 +2116,7 @@ mod tests {
             ),
             (
                 "repository-contract",
-                r#"{"repository":"pce","repo_root":"/workspace/pce","stack":"Rust 2024-edition Cargo workspace (rustc/cargo 1.93.1)","format":"cargo fmt --all --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --workspace","preflight":"cargo check --workspace --all-targets","gates_rule":"From the repo root, all four gates must exit zero before committing.","install":"None required for gates.","evidence":"rustc --version\ncargo --version\ngit rev-parse --show-toplevel"}"#,
+                r#"{"repository":"pce","repo_root":"/workspace/pce","stated":{"format":"cargo fmt --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --release","version_policy":"NONE","branch_convention":"pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>","pull_request_convention":"step head targets the matching milestone integration branch"},"observations":{"format":0,"lint":0,"typecheck":0,"test":0,"build":0},"workflow_map":{"ci.yml":"cargo test --workspace","docs.yml":null},"appendable":{"environment_hazards":["stdin is reserved for event payload input"],"gate_orderings":["format before lint before typecheck before test before build"],"lockfile_rules":["Cargo.lock must remain synchronized with Cargo.toml"]},"evidence":"cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release"}"#,
                 WriteKind::RepositoryContract,
             ),
             (
@@ -2108,6 +2134,80 @@ mod tests {
                 .expect("registered output should parse");
             assert_eq!(record.kind(), ReadKind::Known(expected_kind));
         }
+    }
+
+    #[test]
+    fn repository_contracts_retains_current_fields_and_legacy_identity() {
+        let current_line = r#"{"sequence":9,"timestamp":"2026-07-27T12:35:04.000Z","kind":"repository-contract","node":"m2-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stated":{"format":"cargo fmt --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --release","version_policy":"NONE","branch_convention":"pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>","pull_request_convention":"step head targets the matching milestone integration branch"},"observations":{"format":0,"lint":0,"typecheck":0,"test":0,"build":0},"workflow_map":{"ci.yml":"cargo test --workspace","docs.yml":null},"appendable":{"environment_hazards":["stdin is reserved for event payload input"],"gate_orderings":["format before lint before typecheck before test before build"],"lockfile_rules":["Cargo.lock must remain synchronized with Cargo.toml"]},"evidence":"cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release"}}"#;
+        let legacy_line = r#"{"sequence":6,"timestamp":"2026-07-27T12:35:01.000Z","kind":"repository-contract","node":"m1-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stack":"Rust 2024-edition Cargo workspace (rustc/cargo 1.93.1)","format":"cargo fmt --all --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --workspace","preflight":"cargo check --workspace --all-targets","gates_rule":"From the repo root, all four gates must exit zero before committing.","install":"None required for gates.","evidence":"rustc --version\ncargo --version\ngit rev-parse --show-toplevel"}}"#;
+
+        let current_record = parse_event_line(current_line).expect("current contract should parse");
+        let current =
+            repository_contracts(&[current_record]).expect("current projection should succeed");
+        let [RepositoryContract::Current(payload)] = current.as_slice() else {
+            panic!("current repository contract expected");
+        };
+        assert_eq!(payload.repository.as_str(), "pce");
+        assert_eq!(payload.repo_root.as_str(), "/workspace/pce");
+        assert_eq!(payload.stated.format, "cargo fmt --check");
+        assert_eq!(
+            payload.stated.lint,
+            "cargo clippy --workspace --all-targets"
+        );
+        assert_eq!(
+            payload.stated.typecheck,
+            "cargo check --workspace --all-targets"
+        );
+        assert_eq!(payload.stated.test, "cargo test --workspace");
+        assert_eq!(payload.stated.build, "cargo build --release");
+        assert_eq!(payload.stated.version_policy, VersionPolicy::None);
+        assert_eq!(
+            payload.stated.branch_convention,
+            "pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>"
+        );
+        assert_eq!(
+            payload.stated.pull_request_convention,
+            "step head targets the matching milestone integration branch"
+        );
+        assert_eq!(payload.observations.format.get(), 0);
+        assert_eq!(payload.observations.lint.get(), 0);
+        assert_eq!(payload.observations.typecheck.get(), 0);
+        assert_eq!(payload.observations.test.get(), 0);
+        assert_eq!(payload.observations.build.get(), 0);
+        assert_eq!(
+            payload.workflow_map.as_map().get("ci.yml"),
+            Some(&Some("cargo test --workspace".to_owned()))
+        );
+        assert_eq!(payload.workflow_map.as_map().get("docs.yml"), Some(&None));
+        assert_eq!(
+            payload.appendable.environment_hazards,
+            ["stdin is reserved for event payload input"]
+        );
+        assert_eq!(
+            payload.appendable.gate_orderings,
+            ["format before lint before typecheck before test before build"]
+        );
+        assert_eq!(
+            payload.appendable.lockfile_rules,
+            ["Cargo.lock must remain synchronized with Cargo.toml"]
+        );
+        assert_eq!(
+            payload.evidence.as_str(),
+            "cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release"
+        );
+
+        let legacy_record = parse_event_line(legacy_line).expect("legacy contract should parse");
+        let legacy =
+            repository_contracts(&[legacy_record]).expect("legacy projection should succeed");
+        let [RepositoryContract::Legacy(payload)] = legacy.as_slice() else {
+            panic!("legacy repository contract expected");
+        };
+        assert_eq!(payload.repository.as_str(), "pce");
+        assert_eq!(payload.repo_root.as_str(), "/workspace/pce");
+        assert_eq!(
+            payload.evidence.as_str(),
+            "rustc --version\ncargo --version\ngit rev-parse --show-toplevel"
+        );
     }
 
     #[test]

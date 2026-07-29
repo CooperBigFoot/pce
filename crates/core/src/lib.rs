@@ -12,14 +12,15 @@ pub use contract_measurement::{
     ObservedExitStatus, measure_contract_snapshot,
 };
 pub use event_log::{
-    AppendError, AppendIntent, ArtifactPath, DeltaPayload, DispatchPayload, DispatchRef,
-    DispatchRole, EscalationClosePayload, EscalationKey, EscalationOpenPayload, EventBodyRef,
-    EventKindName, EventLogError, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
-    EventTimestamp, Evidence, EvidencePolicy, EvidencePresence, KeyFindingPayload, KnownPayload,
-    NodeId, PlanningArtifactApprovedPayload, ReadKind, ReadPayload, RepositoryContractPayload,
-    RepositoryName, RepositoryRoot, Sequence, Sha256Digest, UnparsedPayload, WriteKind,
-    append_event, event_record_matches, parse_event_line, serialize_event_line,
-    validate_evidence_policy,
+    AppendError, AppendIntent, AppendableRepositoryContract, ArtifactPath, DeltaPayload,
+    DispatchPayload, DispatchRef, DispatchRole, EscalationClosePayload, EscalationKey,
+    EscalationOpenPayload, EventBodyRef, EventKindName, EventLogError, EventLogTail,
+    EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence, EvidencePolicy,
+    EvidencePresence, GateObservations, KeyFindingPayload, KnownPayload,
+    LegacyRepositoryContractPayload, NodeId, PlanningArtifactApprovedPayload, ReadKind,
+    ReadPayload, RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence, Sha256Digest,
+    StatedRepositoryContract, UnparsedPayload, WorkflowMap, WriteKind, append_event,
+    event_record_matches, parse_event_line, serialize_event_line, validate_evidence_policy,
 };
 pub use run_state::{
     ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BranchSnapshot, BranchState,
