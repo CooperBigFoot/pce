@@ -6,6 +6,37 @@ use std::fs;
 use serde_json::{Value, json};
 use support::{CliHarness, Invocation, ScriptedResponse};
 
+fn current_repository_contract(root: &std::path::Path, evidence: &str) -> Value {
+    json!({
+        "repository": "pce",
+        "repo_root": root,
+        "stated": {
+            "format": "cargo fmt --check",
+            "lint": "cargo clippy --workspace --all-targets",
+            "typecheck": "cargo check --workspace --all-targets",
+            "test": "cargo test --workspace",
+            "build": "cargo build --release",
+            "version_policy": "NONE",
+            "branch_convention": "pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>",
+            "pull_request_convention": "step head targets the matching milestone integration branch"
+        },
+        "observations": {
+            "format": 0,
+            "lint": 0,
+            "typecheck": 0,
+            "test": 0,
+            "build": 0
+        },
+        "workflow_map": {},
+        "appendable": {
+            "environment_hazards": [],
+            "gate_orderings": [],
+            "lockfile_rules": []
+        },
+        "evidence": evidence
+    })
+}
+
 #[test]
 fn missing_evidence_rejection_appends_zero_bytes() {
     let harness = CliHarness::new().expect("create CLI harness");
@@ -63,6 +94,63 @@ fn missing_evidence_rejection_appends_zero_bytes() {
 }
 
 #[test]
+fn legacy_repository_contract_append_is_rejected_without_writing_bytes() {
+    let harness = CliHarness::new().expect("create CLI harness");
+    let log = harness.path().join("events.jsonl");
+
+    let seed = harness
+        .run(
+            [
+                OsString::from("log"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--kind"),
+                OsString::from("delta"),
+                OsString::from("--node"),
+                OsString::from("m2-s1"),
+            ],
+            br#"{"message":"seed before rejected legacy contract"}"#,
+        )
+        .expect("run seed log command");
+    assert!(seed.status.success(), "seed stderr: {}", stderr(&seed));
+    let length_before = fs::metadata(&log).expect("read seeded log metadata").len();
+
+    let rejected = harness
+        .run(
+            [
+                OsString::from("log"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--kind"),
+                OsString::from("repository-contract"),
+                OsString::from("--node"),
+                OsString::from("m2-s1"),
+            ],
+            br#"{"repository":"pce","repo_root":"/workspace/pce","stack":"Rust 2024-edition Cargo workspace (rustc/cargo 1.93.1)","format":"cargo fmt --all --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --workspace","preflight":"cargo check --workspace --all-targets","gates_rule":"From the repo root, all four gates must exit zero before committing.","install":"None required for gates.","evidence":"rustc --version\ncargo --version\ngit rev-parse --show-toplevel"}"#,
+        )
+        .expect("run rejected legacy repository-contract command");
+
+    assert!(!rejected.status.success());
+    let rejected_stderr = stderr(&rejected);
+    assert!(
+        rejected_stderr.contains("failed to validate submitted event payload"),
+        "rejection stderr: {rejected_stderr}"
+    );
+    assert!(
+        rejected_stderr.contains(
+            "submitted event payload is invalid: invalid payload for known event kind repository-contract"
+        ),
+        "rejection stderr: {rejected_stderr}"
+    );
+    assert_eq!(
+        fs::metadata(&log)
+            .expect("read rejected log metadata")
+            .len(),
+        length_before
+    );
+}
+
+#[test]
 fn status_smoke_uses_every_isolated_adapter_path() {
     let harness = CliHarness::new().expect("create CLI harness");
     let root = harness.path().join("repo");
@@ -70,21 +158,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
     let log = vision_dir.join("events.jsonl");
     fs::create_dir_all(&vision_dir).expect("create scratch vision directory");
 
-    let contract = json!({
-        "repository": "pce",
-        "repo_root": root,
-        "stack": "Rust test fixture",
-        "format": "cargo fmt --all --check",
-        "lint": "cargo clippy --workspace --all-targets",
-        "typecheck": "cargo check --workspace --all-targets",
-        "test": "cargo test --workspace",
-        "build": "cargo build --workspace",
-        "preflight": "cargo check --workspace --all-targets",
-        "gates_rule": "all four fixture gates must pass",
-        "install": "none",
-        "evidence": "fixture repository contract"
-    })
-    .to_string();
+    let contract = current_repository_contract(&root, "fixture repository contract").to_string();
     let seed = harness
         .run(
             [
@@ -479,21 +553,8 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
     )
     .expect("write milestone-2 artifact");
 
-    let contract = json!({
-        "repository": "pce",
-        "repo_root": root,
-        "stack": "Rust cold-resume fixture",
-        "format": "cargo fmt --all --check",
-        "lint": "cargo clippy --workspace --all-targets",
-        "typecheck": "cargo check --workspace --all-targets",
-        "test": "cargo test --workspace",
-        "build": "cargo build --workspace",
-        "preflight": "cargo check --workspace --all-targets",
-        "gates_rule": "all four fixture gates must pass",
-        "install": "none",
-        "evidence": "fixture repository contract observation"
-    })
-    .to_string();
+    let contract =
+        current_repository_contract(&root, "fixture repository contract observation").to_string();
     let repository_contract = harness
         .run(
             [
@@ -1227,21 +1288,8 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
     fs::write(&artifact, b"{\"node\":\"m3-s3\",\"status\":\"approved\"}\n")
         .expect("write approved artifact");
 
-    let contract = json!({
-        "repository": "pce",
-        "repo_root": root,
-        "stack": "Rust provenance fixture",
-        "format": "cargo fmt --all --check",
-        "lint": "cargo clippy --workspace --all-targets",
-        "typecheck": "cargo check --workspace --all-targets",
-        "test": "cargo test --workspace",
-        "build": "cargo build --workspace",
-        "preflight": "cargo check --workspace --all-targets",
-        "gates_rule": "all four fixture gates must pass",
-        "install": "none",
-        "evidence": "fixture repository contract observation"
-    })
-    .to_string();
+    let contract =
+        current_repository_contract(&root, "fixture repository contract observation").to_string();
     let contract_log = harness
         .run(
             vec![
@@ -1659,21 +1707,8 @@ fn authority_disagreement_reports_inconclusive() {
     let log = vision_dir.join("events.jsonl");
     fs::create_dir_all(&vision_dir).expect("create scratch vision directory");
 
-    let contract = json!({
-        "repository": "pce",
-        "repo_root": root,
-        "stack": "Rust authority disagreement fixture",
-        "format": "cargo fmt --all --check",
-        "lint": "cargo clippy --workspace --all-targets",
-        "typecheck": "cargo check --workspace --all-targets",
-        "test": "cargo test --workspace",
-        "build": "cargo build --workspace",
-        "preflight": "cargo check --workspace --all-targets",
-        "gates_rule": "all four fixture gates must pass",
-        "install": "none",
-        "evidence": "fixture disagreement repository contract"
-    })
-    .to_string();
+    let contract =
+        current_repository_contract(&root, "fixture disagreement repository contract").to_string();
     let seed = harness
         .run(
             [
@@ -2047,21 +2082,8 @@ fn merge_base_failure_reports_inconclusive() {
     let log = vision_dir.join("events.jsonl");
     fs::create_dir_all(&vision_dir).expect("create scratch vision directory");
 
-    let contract = json!({
-        "repository": "pce",
-        "repo_root": root,
-        "stack": "Rust authority unreachability fixture",
-        "format": "cargo fmt --all --check",
-        "lint": "cargo clippy --workspace --all-targets",
-        "typecheck": "cargo check --workspace --all-targets",
-        "test": "cargo test --workspace",
-        "build": "cargo build --workspace",
-        "preflight": "cargo check --workspace --all-targets",
-        "gates_rule": "all four fixture gates must pass",
-        "install": "none",
-        "evidence": "fixture unreachable repository contract"
-    })
-    .to_string();
+    let contract =
+        current_repository_contract(&root, "fixture unreachable repository contract").to_string();
     let seed = harness
         .run(
             [

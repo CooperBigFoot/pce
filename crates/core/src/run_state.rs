@@ -2,7 +2,7 @@
 //! This module performs no I/O.
 
 use chrono::SecondsFormat;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
@@ -269,11 +269,13 @@ impl DispatchCandidate {
 }
 
 /// The live version policy governing dispatch admission in one repository.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VersionPolicy {
     /// The live `NONE` policy, which does not narrow otherwise-dispatchable candidates.
+    #[serde(rename = "NONE")]
     None,
     /// A representative non-`NONE` policy admitting only the first otherwise-dispatchable candidate.
+    #[serde(rename = "SERIALIZE_DISPATCHES")]
     SerializeDispatches,
 }
 
@@ -2788,6 +2790,13 @@ pub fn derive_run_state(
                 ));
             }
             EventBodyRef::Known(KnownPayload::RepositoryContract(payload)) => {
+                recovery_facts.push(recovery_fact(
+                    record,
+                    "repository-contract",
+                    payload.evidence.as_str(),
+                ));
+            }
+            EventBodyRef::Known(KnownPayload::LegacyRepositoryContract(payload)) => {
                 recovery_facts.push(recovery_fact(
                     record,
                     "repository-contract",
