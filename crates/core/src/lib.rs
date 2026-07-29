@@ -1,10 +1,15 @@
 //! Core domain logic for PCE workflows.
 
+pub mod contract_measurement;
 pub mod event_log;
 pub mod run_state;
 pub mod tracked_contract;
 pub mod vision;
 
+pub use contract_measurement::{
+    ContractMeasurementError, GateMeasurement, GateMeasurements, MeasuredContractSnapshot,
+    ObservedExitStatus, measure_contract_snapshot,
+};
 pub use event_log::{
     AppendError, AppendIntent, ArtifactPath, DeltaPayload, DispatchPayload, DispatchRef,
     DispatchRole, EscalationClosePayload, EscalationKey, EscalationOpenPayload, EventBodyRef,
