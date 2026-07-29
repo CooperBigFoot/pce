@@ -2,6 +2,7 @@
 
 pub mod event_log;
 pub mod run_state;
+pub mod tracked_contract;
 pub mod vision;
 
 pub use event_log::{
@@ -35,6 +36,14 @@ pub use run_state::{
     TagName, TagSnapshot, TagState, TagTarget, VersionPolicy, VisionSlug, WorktreeIdentity,
     WorktreeSnapshot, WorktreeState, compute_dispatchability, derive_merge_status,
     derive_milestone_merge_status, derive_run_state, render_human_snapshot,
+};
+pub use tracked_contract::{
+    AppendableContract, BranchConvention, DefaultBranchName, EnvironmentHazard, GateCommand,
+    GateCommands, GateKind, GateOrdering, LocalWorkflowStandIn, LockfileRule,
+    MilestoneBranchPattern, MilestonePullRequestBase, PullRequestConvention,
+    PullRequestMergeMethod, StatedContract, StepBranchPattern, StepPullRequestBase,
+    TrackedContractError, TrackedRepositoryContract, WorkflowMapping, WorkflowMappings,
+    WorkflowName, parse_tracked_repository_contract,
 };
 pub use vision::{
     CreationDate, NewVision, Slug, VisionDir, VisionDirOutcome, VisionError, VisionName,

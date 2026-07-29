@@ -17,10 +17,11 @@ use pce_core::{
     PullRequestSelector, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
     RepositoryName, RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
     RunSnapshot, Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode, TagName,
-    TagState, TagTarget, UnparsedPayload, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
-    WorktreeState, WriteKind, append_event, compute_dispatchability, create_vision,
-    derive_merge_status, derive_milestone_merge_status, derive_run_state, event_record_matches,
-    parse_event_line, render_human_snapshot,
+    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName,
+    VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, append_event, compute_dispatchability,
+    create_vision, derive_merge_status, derive_milestone_merge_status, derive_run_state,
+    event_record_matches, parse_event_line, parse_tracked_repository_contract,
+    render_human_snapshot,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -698,6 +699,10 @@ fn dispatch_node_id(node: &DispatchNode) -> String {
             format!("m{}-s{}", node.milestone().get(), node.step().get())
         }
     }
+}
+
+pub fn parse_tracked_contract(bytes: &[u8]) -> Result<TrackedRepositoryContract> {
+    parse_tracked_repository_contract(bytes).context("failed to parse tracked repository contract")
 }
 
 fn parse_dispatch_graph(bytes: &[u8]) -> Result<DispatchGraph> {
@@ -1719,8 +1724,58 @@ mod tests {
     use crate::{
         BranchFetch, Command, DispatchGraphNode, DispatchNode, FetchResult, RepositoryRuntime,
         StatusFormat, already_dispatched, github_pull_request_list_args, observe_git,
-        parse_command, parse_dispatch_graph, run, run_log_read, validated_snapshot_value,
+        parse_command, parse_dispatch_graph, parse_tracked_contract, run, run_log_read,
+        validated_snapshot_value,
     };
+
+    const VALID_TRACKED_CONTRACT: &[u8] = br#"{
+  "stated": {
+    "gates": {
+      "format": "cargo fmt --check",
+      "lint": "cargo clippy --workspace --all-targets",
+      "typecheck": "cargo check --workspace --all-targets",
+      "test": "cargo test --workspace",
+      "build": "cargo build --release"
+    },
+    "version_policy": "NONE",
+    "branches": {
+      "default": "main",
+      "milestone": "pce/{vision}/milestone-{milestone}",
+      "step": "pce/{vision}/m{milestone}-s{step}"
+    },
+    "pull_requests": {
+      "step_base": "MILESTONE",
+      "milestone_base": "DEFAULT",
+      "merge_method": "SQUASH"
+    },
+    "workflows": [
+      {
+        "workflow": "ci.yml",
+        "stand_in": {
+          "kind": "COMMAND",
+          "command": "cargo test --workspace"
+        }
+      },
+      {
+        "workflow": "release.yml",
+        "stand_in": {
+          "kind": "NONE"
+        }
+      }
+    ]
+  },
+  "appendable": {
+    "environment_hazards": [
+      "pipe Codex stdin from /dev/null"
+    ],
+    "gate_orderings": [
+      "run cargo fmt --check before clippy"
+    ],
+    "lockfile_rules": [
+      "commit Cargo.lock when dependency resolution changes"
+    ]
+  }
+}"#;
 
     const DELTA_PAYLOAD: &str = r#"{"message":"append one validated event"}"#;
     const UNKNOWN_TAIL: &str = r#"{"sequence":41,"timestamp":"2026-07-27T12:34:55.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
@@ -1756,6 +1811,34 @@ mod tests {
         } else {
             Vec::new()
         }
+    }
+
+    #[test]
+    fn composition_root_parses_exact_tracked_contract_bytes() {
+        let contract =
+            parse_tracked_contract(VALID_TRACKED_CONTRACT).expect("tracked contract should parse");
+        assert_eq!(
+            contract.stated().gates().test().as_str(),
+            "cargo test --workspace"
+        );
+        assert_eq!(contract.stated().version_policy(), &VersionPolicy::None);
+        assert!(matches!(
+            contract.stated().workflows().as_slice()[1].stand_in(),
+            pce_core::LocalWorkflowStandIn::None
+        ));
+        assert_eq!(
+            contract.appendable().lockfile_rules()[0].as_str(),
+            "commit Cargo.lock when dependency resolution changes"
+        );
+    }
+
+    #[test]
+    fn composition_root_preserves_tracked_contract_error_context() {
+        let err = parse_tracked_contract(b"{\"stated\":{}}")
+            .expect_err("incomplete contract should fail");
+        let message = format!("{err:#}");
+        assert!(message.contains("failed to parse tracked repository contract"));
+        assert!(message.contains("malformed tracked repository contract:"));
     }
 
     #[test]
