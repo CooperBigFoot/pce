@@ -556,7 +556,7 @@ fn run_ready(
     recovery_log_path: &RecoveryLogPath,
     vision_dir: &Path,
     graph_path: Option<&ArtifactPath>,
-    version_policies: &[(RepositoryName, VersionPolicy)],
+    _compatibility_version_policies: &[(RepositoryName, VersionPolicy)],
 ) -> Result<()> {
     let parsed_lines = read_event_log(log_path)?;
     let records = parsed_lines
@@ -683,6 +683,7 @@ fn run_ready(
             DispatchCandidate::new(graph_node.node.clone(), graph_node.repository.clone())
         })
         .collect::<Vec<_>>();
+    let effective_version_policies = readiness_version_policies(&candidates, &contracts)?;
 
     let mut merge_statuses = Vec::<(DispatchNode, MergeStatus)>::with_capacity(graph.nodes.len());
     for graph_node in &graph.nodes {
@@ -732,7 +733,7 @@ fn run_ready(
         &candidates,
         &graph.edges,
         &merge_statuses,
-        version_policies,
+        &effective_version_policies,
     )
     .context("failed to compute graph dispatchability")?;
     let rendered = results
@@ -753,6 +754,54 @@ fn run_ready(
         })
         .collect::<Vec<_>>();
     write_json_stdout(&serde_json::json!({ "results": rendered }))
+}
+
+fn readiness_version_policies(
+    candidates: &[DispatchCandidate],
+    contracts: &[RepositoryContract],
+) -> Result<Vec<(RepositoryName, VersionPolicy)>> {
+    let mut policies = Vec::<(RepositoryName, VersionPolicy)>::new();
+    for candidate in candidates {
+        if policies
+            .iter()
+            .any(|(repository, _)| repository == candidate.repository())
+        {
+            continue;
+        }
+        let contract = contracts
+            .iter()
+            .find(|contract| contract.name() == candidate.repository())
+            .with_context(|| {
+                format!(
+                    "candidate repository {} has no projected repository contract",
+                    candidate.repository().as_str()
+                )
+            })?;
+        let policy = match contract {
+            RepositoryContract::Current(payload) => payload.stated.version_policy.clone(),
+            RepositoryContract::Legacy(payload) => {
+                match read_at_default_branch_head(
+                    Path::new(payload.repo_root.as_str()),
+                    ".pce/repository-contract.json",
+                ) {
+                    Ok(bytes) => parse_tracked_contract(&bytes)
+                        .with_context(|| {
+                            format!(
+                                "failed to resolve readiness policy for repository {} from \
+                                 .pce/repository-contract.json at default-branch HEAD",
+                                payload.repository.as_str()
+                            )
+                        })?
+                        .stated()
+                        .version_policy()
+                        .clone(),
+                    Err(_) => VersionPolicy::None,
+                }
+            }
+        };
+        policies.push((candidate.repository().clone(), policy));
+    }
+    Ok(policies)
 }
 
 enum ReadyAltitude {
@@ -3534,8 +3583,9 @@ mod tests {
         );
     }
 
+    /// Preservation guard for accepted-and-superseded compatibility policies.
     #[test]
-    fn ready_parser_accepts_exact_ordered_typed_policies() {
+    fn ready_parser_accepts_compatibility_policies_for_supersession() {
         let command = parse_command(
             [
                 "ready",
@@ -3585,6 +3635,31 @@ mod tests {
                     VersionPolicy::SerializeDispatches
                 ),
             ]
+        );
+
+        let single = parse_command(
+            [
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--policy",
+                "pce=NONE",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("single compatibility policy should parse");
+        let Command::Ready {
+            version_policies, ..
+        } = single
+        else {
+            panic!("typed ready command expected");
+        };
+        assert_eq!(
+            version_policies,
+            vec![(RepositoryName::new("pce"), VersionPolicy::None)]
         );
     }
 

@@ -26,6 +26,19 @@ struct ReadyFixture {
 
 impl ReadyFixture {
     fn new(graph: &Value, dispatches: &[(&str, &str)]) -> Self {
+        Self::new_with_contracts(graph, dispatches, |primary, docs| {
+            vec![
+                repository_contract("pce", primary),
+                repository_contract("docs", docs),
+            ]
+        })
+    }
+
+    fn new_with_contracts(
+        graph: &Value,
+        dispatches: &[(&str, &str)],
+        contracts: impl FnOnce(&Path, &Path) -> Vec<Value>,
+    ) -> Self {
         let harness = CliHarness::new().expect("CLI harness");
         let primary = harness.path().join("pce");
         let docs = harness.path().join("docs");
@@ -38,23 +51,18 @@ impl ReadyFixture {
         fs::write(&graph_path, &bytes).expect("graph fixture");
         let digest = format!("{:x}", Sha256::digest(&bytes));
 
-        let mut records = vec![
-            record(
-                1,
-                "repository-contract",
-                "m1-s1",
-                repository_contract("pce", &primary),
-            ),
-            record(
-                2,
-                "repository-contract",
-                "m1-s1",
-                repository_contract("docs", &docs),
-            ),
-        ];
+        let contract_payloads = contracts(&primary, &docs);
+        let mut records = contract_payloads
+            .into_iter()
+            .enumerate()
+            .map(|(offset, payload)| {
+                record(1 + offset as u64, "repository-contract", "m1-s1", payload)
+            })
+            .collect::<Vec<_>>();
+        let first_dispatch_sequence = 1 + records.len() as u64;
         for (offset, (node, role)) in dispatches.iter().enumerate() {
             records.push(record(
-                3 + offset as u64,
+                first_dispatch_sequence + offset as u64,
                 "dispatch",
                 node,
                 json!({
@@ -65,7 +73,7 @@ impl ReadyFixture {
             ));
         }
         records.push(record(
-            3 + dispatches.len() as u64,
+            first_dispatch_sequence + dispatches.len() as u64,
             "planning-artifact-approved",
             "m1-s1",
             json!({
@@ -122,6 +130,21 @@ impl ReadyFixture {
             args.push(OsString::from(format!("{repository}={policy}")));
         }
         self.harness.run(args, b"").expect("run ready")
+    }
+
+    fn run_status(&self) -> std::process::Output {
+        self.harness
+            .run(
+                [
+                    OsString::from("status"),
+                    OsString::from("--file"),
+                    self.log.as_os_str().to_owned(),
+                    OsString::from("--vision-dir"),
+                    self.vision.as_os_str().to_owned(),
+                ],
+                b"",
+            )
+            .expect("run status")
     }
 }
 
@@ -220,31 +243,38 @@ fn reason_edge_changes_waiting_to_ready_when_dependency_merges() {
 }
 
 #[test]
-fn live_policies_narrow_only_the_selected_repository() {
+fn contract_policies_narrow_only_the_selected_repository() {
     let graph = graph(vec![
         node("m1-s1", "pce", vec![]),
         node("m1-s2", "pce", vec![]),
         node("m1-s3", "docs", vec![]),
         node("m1-s4", "docs", vec![]),
     ]);
-    for (pce_policy, docs_policy, expected) in [
+    for (pce_policy, docs_policy, compatibility_policies, expected) in [
         (
             "SERIALIZE_DISPATCHES",
             "NONE",
+            vec![("pce", "NONE"), ("docs", "SERIALIZE_DISPATCHES")],
             vec!["ready", "waiting", "ready", "ready"],
         ),
         (
             "NONE",
             "SERIALIZE_DISPATCHES",
+            vec![("pce", "SERIALIZE_DISPATCHES"), ("docs", "NONE")],
             vec!["ready", "ready", "ready", "waiting"],
         ),
     ] {
-        let fixture = ReadyFixture::new(&graph, &[]);
+        let fixture = ReadyFixture::new_with_contracts(&graph, &[], |primary, docs| {
+            vec![
+                repository_contract_with_policy("pce", primary, pce_policy),
+                repository_contract_with_policy("docs", docs, docs_policy),
+            ]
+        });
         fixture
             .harness
             .materialize_responses(&all_not_merged(&fixture, &graph))
             .expect("responses");
-        let output = fixture.run(&[("pce", pce_policy), ("docs", docs_policy)]);
+        let output = fixture.run(&compatibility_policies);
         assert_success(&output);
         let value = stdout_json(&output);
         let actual = value["results"]
@@ -262,9 +292,186 @@ fn live_policies_narrow_only_the_selected_repository() {
         .materialize_responses(&all_not_merged(&fixture, &graph))
         .expect("responses");
     let output = fixture.run(&[("pce", "NONE")]);
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(stderr(&output).contains("docs"));
+    assert_success(&output);
+    assert_eq!(
+        stdout_json(&output)["results"]
+            .as_array()
+            .expect("results")
+            .len(),
+        4
+    );
+}
+
+#[test]
+fn latest_current_contract_policy_supersedes_compatibility_policy() {
+    let graph = two_pce_node_graph();
+    let fixture = ReadyFixture::new_with_contracts(&graph, &[], |primary, _| {
+        vec![
+            repository_contract_with_policy("pce", primary, "NONE"),
+            repository_contract_with_policy("pce", primary, "SERIALIZE_DISPATCHES"),
+        ]
+    });
+    fixture
+        .harness
+        .materialize_responses(&all_not_merged(&fixture, &graph))
+        .expect("responses");
+
+    let output = fixture.run(&[("pce", "NONE")]);
+    assert_success(&output);
+    assert_eq!(
+        stdout_json(&output),
+        json!({"results":[
+            {"classification":"ready","node":"m1-s1","repository":"pce"},
+            {"classification":"waiting","node":"m1-s2","repository":"pce"}
+        ]})
+    );
+}
+
+#[test]
+fn legacy_only_history_reads_none_policy_at_default_branch_head() {
+    let graph = two_pce_node_graph();
+    let fixture = ReadyFixture::new_with_contracts(&graph, &[], |primary, _| {
+        vec![legacy_repository_contract("pce", primary)]
+    });
+    let mut scripted = tracked_contract_responses(&fixture.primary, 0, tracked_contract_none());
+    scripted.extend(all_not_merged(&fixture, &graph));
+    fixture
+        .harness
+        .materialize_responses(&scripted)
+        .expect("responses");
+
+    let output = fixture.run(&[("pce", "SERIALIZE_DISPATCHES")]);
+    assert_success(&output);
+    let invocations = fixture.harness.invocations().expect("invocations");
+    assert_eq!(
+        &invocations[..2],
+        &[
+            invocation(
+                "git",
+                git_args(
+                    &fixture.primary,
+                    &["symbolic-ref", "refs/remotes/origin/HEAD"]
+                )
+            ),
+            invocation(
+                "git",
+                git_args(
+                    &fixture.primary,
+                    &["show", "main:.pce/repository-contract.json"]
+                )
+            )
+        ]
+    );
+    assert_eq!(
+        stdout_json(&output),
+        json!({"results":[
+            {"classification":"ready","node":"m1-s1","repository":"pce"},
+            {"classification":"ready","node":"m1-s2","repository":"pce"}
+        ]})
+    );
+}
+
+#[test]
+fn legacy_only_history_defaults_to_none_when_tracked_contract_is_unreachable() {
+    let graph = two_pce_node_graph();
+    let fixture = ReadyFixture::new_with_contracts(&graph, &[], |primary, _| {
+        vec![legacy_repository_contract("pce", primary)]
+    });
+    let mut scripted = tracked_contract_responses(
+        &fixture.primary,
+        128,
+        b"fatal: path '.pce/repository-contract.json' does not exist in 'main'\n",
+    );
+    scripted.extend(all_not_merged(&fixture, &graph));
+    fixture
+        .harness
+        .materialize_responses(&scripted)
+        .expect("responses");
+
+    let output = fixture.run(&[("pce", "SERIALIZE_DISPATCHES")]);
+    assert_success(&output);
+    let invocations = fixture.harness.invocations().expect("invocations");
+    assert_eq!(
+        &invocations[..2],
+        &[
+            invocation(
+                "git",
+                git_args(
+                    &fixture.primary,
+                    &["symbolic-ref", "refs/remotes/origin/HEAD"]
+                )
+            ),
+            invocation(
+                "git",
+                git_args(
+                    &fixture.primary,
+                    &["show", "main:.pce/repository-contract.json"]
+                )
+            )
+        ]
+    );
+    assert!(
+        invocations[2..]
+            .iter()
+            .any(|invocation| invocation.program == OsStr::new("gh"))
+    );
+    assert_eq!(
+        stdout_json(&output),
+        json!({"results":[
+            {"classification":"ready","node":"m1-s1","repository":"pce"},
+            {"classification":"ready","node":"m1-s2","repository":"pce"}
+        ]})
+    );
+}
+
+/// Preservation guard for replacement projection and live command shapes.
+#[test]
+fn legacy_then_current_history_keeps_status_and_ready_operational() {
+    let graph = graph(vec![node("m1-s1", "pce", vec![])]);
+    let fixture = ReadyFixture::new_with_contracts(&graph, &[], |primary, _| {
+        vec![
+            legacy_repository_contract("pce", primary),
+            repository_contract_with_policy("pce", primary, "NONE"),
+        ]
+    });
+    fixture
+        .harness
+        .materialize_responses(&all_not_merged(&fixture, &graph))
+        .expect("responses");
+
+    let status = fixture.run_status();
+    assert!(
+        status.status.success(),
+        "status failed with stderr: {}",
+        stderr(&status)
+    );
+    assert_eq!(
+        stdout_json(&status).pointer("/repositories/0/repository"),
+        Some(&json!("pce"))
+    );
+
+    let ready = fixture.run_with_graph("graph.json", &[("pce", "NONE")]);
+    assert_success(&ready);
+    assert_eq!(
+        stdout_json(&ready),
+        json!({"results":[
+            {"classification":"ready","node":"m1-s1","repository":"pce"}
+        ]})
+    );
+    let invocations = fixture.harness.invocations().expect("invocations");
+    assert!(!invocations.iter().any(|invocation| {
+        invocation.program == OsStr::new("git")
+            && (invocation.argv
+                == git_args(
+                    &fixture.primary,
+                    &["symbolic-ref", "refs/remotes/origin/HEAD"],
+                )
+                || invocation.argv
+                    == git_args(
+                        &fixture.primary,
+                        &["show", "main:.pce/repository-contract.json"],
+                    ))
+    }));
 }
 
 #[test]
@@ -967,6 +1174,13 @@ fn graph(nodes: Vec<Value>) -> Value {
     json!({ "nodes": nodes })
 }
 
+fn two_pce_node_graph() -> Value {
+    graph(vec![
+        node("m1-s1", "pce", vec![]),
+        node("m1-s2", "pce", vec![]),
+    ])
+}
+
 fn node(id: &str, repository: &str, depends_on: Vec<Value>) -> Value {
     json!({
         "id": id,
@@ -978,6 +1192,10 @@ fn node(id: &str, repository: &str, depends_on: Vec<Value>) -> Value {
 }
 
 fn repository_contract(repository: &str, root: &Path) -> Value {
+    repository_contract_with_policy(repository, root, "NONE")
+}
+
+fn repository_contract_with_policy(repository: &str, root: &Path, policy: &str) -> Value {
     json!({
         "repository": repository,
         "repo_root": root.to_str().expect("UTF-8 root"),
@@ -987,7 +1205,7 @@ fn repository_contract(repository: &str, root: &Path) -> Value {
             "typecheck": "cargo check --workspace --all-targets",
             "test": "cargo test --workspace",
             "build": "cargo build --release",
-            "version_policy": "NONE",
+            "version_policy": policy,
             "branch_convention": "pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>",
             "pull_request_convention": "step head targets the matching milestone integration branch"
         },
@@ -1006,6 +1224,85 @@ fn repository_contract(repository: &str, root: &Path) -> Value {
         },
         "evidence": "fixture"
     })
+}
+
+fn legacy_repository_contract(repository: &str, root: &Path) -> Value {
+    json!({
+        "repository": repository,
+        "repo_root": root.to_str().expect("UTF-8 root"),
+        "stack": "Rust 2024-edition Cargo workspace (rustc/cargo 1.93.1)",
+        "format": "cargo fmt --all --check",
+        "lint": "cargo clippy --workspace --all-targets",
+        "typecheck": "cargo check --workspace --all-targets",
+        "test": "cargo test --workspace",
+        "build": "cargo build --workspace",
+        "preflight": "cargo check --workspace --all-targets",
+        "gates_rule": "From the repo root, all four gates must exit zero before committing.",
+        "install": "None required for gates.",
+        "evidence": "rustc --version\ncargo --version\ngit rev-parse --show-toplevel"
+    })
+}
+
+fn tracked_contract_none() -> &'static [u8] {
+    br#"{
+  "stated": {
+    "gates": {
+      "format": "cargo fmt --check",
+      "lint": "cargo clippy --workspace --all-targets",
+      "typecheck": "cargo check --workspace --all-targets",
+      "test": "cargo test --workspace",
+      "build": "cargo build --release"
+    },
+    "version_policy": "NONE",
+    "branches": {
+      "default": "main",
+      "milestone": "pce/{vision}/milestone-{milestone}",
+      "step": "pce/{vision}/m{milestone}-s{step}"
+    },
+    "pull_requests": {
+      "step_base": "MILESTONE",
+      "milestone_base": "DEFAULT",
+      "merge_method": "SQUASH"
+    },
+    "workflows": []
+  },
+  "appendable": {
+    "environment_hazards": [],
+    "gate_orderings": [],
+    "lockfile_rules": []
+  }
+}"#
+}
+
+fn tracked_contract_responses(
+    root: &Path,
+    show_exit_code: i32,
+    show_output: &[u8],
+) -> Vec<ScriptedResponse> {
+    vec![
+        response(
+            "git",
+            git_args(root, &["symbolic-ref", "refs/remotes/origin/HEAD"]),
+            0,
+            b"refs/remotes/origin/main\n",
+        ),
+        if show_exit_code == 0 {
+            response(
+                "git",
+                git_args(root, &["show", "main:.pce/repository-contract.json"]),
+                0,
+                show_output,
+            )
+        } else {
+            response_with_stderr(
+                "git",
+                git_args(root, &["show", "main:.pce/repository-contract.json"]),
+                show_exit_code,
+                b"",
+                show_output,
+            )
+        },
+    ]
 }
 
 fn record(sequence: u64, kind: &str, node: &str, payload: Value) -> Value {
