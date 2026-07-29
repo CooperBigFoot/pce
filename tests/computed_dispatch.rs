@@ -981,15 +981,29 @@ fn repository_contract(repository: &str, root: &Path) -> Value {
     json!({
         "repository": repository,
         "repo_root": root.to_str().expect("UTF-8 root"),
-        "stack": "Rust",
-        "format": "cargo fmt",
-        "lint": "cargo clippy",
-        "typecheck": "cargo check",
-        "test": "cargo test",
-        "build": "cargo build",
-        "preflight": "cargo check",
-        "gates_rule": "all gates pass",
-        "install": "none",
+        "stated": {
+            "format": "cargo fmt --check",
+            "lint": "cargo clippy --workspace --all-targets",
+            "typecheck": "cargo check --workspace --all-targets",
+            "test": "cargo test --workspace",
+            "build": "cargo build --release",
+            "version_policy": "NONE",
+            "branch_convention": "pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>",
+            "pull_request_convention": "step head targets the matching milestone integration branch"
+        },
+        "observations": {
+            "format": 0,
+            "lint": 0,
+            "typecheck": 0,
+            "test": 0,
+            "build": 0
+        },
+        "workflow_map": {},
+        "appendable": {
+            "environment_hazards": [],
+            "gate_orderings": [],
+            "lockfile_rules": []
+        },
         "evidence": "fixture"
     })
 }

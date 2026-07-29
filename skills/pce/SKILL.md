@@ -83,23 +83,39 @@ pce log --file <LOG_PATH> --kind repository-contract --node <NODE>
 {
   "repository": "<REPOSITORY_NAME>",
   "repo_root": "<ABSOLUTE_REPOSITORY_ROOT>",
-  "stack": "<MEASURED_STACK>",
-  "format": "<EXACT_FORMAT_COMMAND>",
-  "lint": "<EXACT_LINT_COMMAND>",
-  "typecheck": "<EXACT_TYPECHECK_COMMAND>",
-  "test": "<EXACT_TEST_COMMAND>",
-  "build": "<EXACT_BUILD_COMMAND>",
-  "preflight": "<EXACT_PREFLIGHT_COMMAND>",
-  "gates_rule": "<GATES_RULE>",
-  "install": "<INSTALL_REQUIREMENT>",
-  "evidence": "<NON_EMPTY_EXACT_ORIENTATION_INVOCATION>"
+  "stated": {
+    "format": "<EXACT_FORMAT_COMMAND>",
+    "lint": "<EXACT_LINT_COMMAND>",
+    "typecheck": "<EXACT_TYPECHECK_COMMAND>",
+    "test": "<EXACT_TEST_COMMAND>",
+    "build": "<EXACT_BUILD_COMMAND>",
+    "version_policy": "<NONE_OR_SERIALIZE_DISPATCHES>",
+    "branch_convention": "<BRANCH_CONVENTION>",
+    "pull_request_convention": "<PULL_REQUEST_CONVENTION>"
+  },
+  "observations": {
+    "format": "<OBSERVED_EXIT_STATUS>",
+    "lint": "<OBSERVED_EXIT_STATUS>",
+    "typecheck": "<OBSERVED_EXIT_STATUS>",
+    "test": "<OBSERVED_EXIT_STATUS>",
+    "build": "<OBSERVED_EXIT_STATUS>"
+  },
+  "workflow_map": {
+    "<WORKFLOW_PATH>": "<EXACT_LOCAL_STAND_IN_COMMAND_OR_NULL>"
+  },
+  "appendable": {
+    "environment_hazards": ["<ENVIRONMENT_HAZARD>"],
+    "gate_orderings": ["<GATE_ORDERING>"],
+    "lockfile_rules": ["<LOCKFILE_RULE>"]
+  },
+  "evidence": "<NON_EMPTY_EXACT_MEASUREMENT_INVOCATION>"
 }
 
 pce log --file <LOG_PATH> --kind planning-artifact-approved --node <NODE>
 {"path":"<ARTIFACT_PATH>","sha256":"<64_LOWERCASE_HEX_CHARACTERS>","evidence":"<NON_EMPTY_EXACT_DIGEST_INVOCATION>"}
 ```
 
-`dispatch`, `key-finding`, `repository-contract`, and `planning-artifact-approved` require non-empty `evidence`. `delta`, `escalation-open`, and `escalation-close` forbid the `evidence` key. The repository payload is a `deny_unknown_fields` boundary with exactly the twelve displayed fields. Unknown keys, including `version_bump`, `branch_pr`, `consumed_artifacts`, and `notes`, are rejected; no bytes are appended and the command exits non-zero. The planning-artifact payload is also `deny_unknown_fields` with exactly `path`, `sha256`, and non-empty `evidence`. Its digest is exactly 64 lowercase hexadecimal characters. Relative artifact paths resolve against the primary repository root; absolute paths are used as-is.
+`dispatch`, `key-finding`, `repository-contract`, and `planning-artifact-approved` require non-empty `evidence`. `delta`, `escalation-open`, and `escalation-close` forbid the `evidence` key. The current repository payload is a `deny_unknown_fields` boundary with exactly seven top-level keys: `repository`, `repo_root`, `stated`, `observations`, `workflow_map`, `appendable`, and `evidence`. `stated` has exactly `format`, `lint`, `typecheck`, `test`, `build`, `version_policy`, `branch_convention`, and `pull_request_convention`; `observations` has exactly `format`, `lint`, `typecheck`, `test`, and `build`; `appendable` has exactly `environment_hazards`, `gate_orderings`, and `lockfile_rules`. Every observation is a JSON integer. Every workflow-map value is either an exact JSON string command or the JSON literal `null`; an absent key differs from an explicit `null`. Arrays may be empty. Non-empty `evidence` remains required. Unknown fields such as top-level `stack`, `preflight`, `gates_rule`, `install`, or any unknown nested key are rejected; no bytes are appended and the command exits non-zero. Legacy twelve-field repository payloads are read-only compatibility data: they are accepted only while reading persisted logs and are rejected for new appends without writing bytes. The planning-artifact payload is also `deny_unknown_fields` with exactly `path`, `sha256`, and non-empty `evidence`. Its digest is exactly 64 lowercase hexadecimal characters. Relative artifact paths resolve against the primary repository root; absolute paths are used as-is.
 
 Append a `dispatch` when every Claude or Codex dispatch is issued, using its exact ref and invocation evidence. Dispatch records are the sole source for round counts and dispatch refs. The exact role vocabulary is:
 
