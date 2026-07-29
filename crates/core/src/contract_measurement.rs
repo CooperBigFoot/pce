@@ -1,4 +1,4 @@
-//! measure_contract_snapshot : StatedContract × PreviousMeasuredContractSnapshot? × ExecuteGate → MeasuredContractSnapshot ∪ ContractMeasurementError
+//! measure_contract_snapshot : StatedContract × PreviousMeasuredContractSnapshot? × ExecuteGate → MeasuredContractSnapshot ∪ ContractMeasurementError; rehydrate_measured_contract_snapshot : StatedContract × GateObservations → MeasuredContractSnapshot ∪ ContractSnapshotRehydrationError
 //! This module performs no ambient I/O; only the injected execution capability may observe a gate.
 
 use std::fmt::{self, Display, Formatter};
@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
+use crate::event_log::GateObservations;
 use crate::tracked_contract::{GateCommand, GateKind, StatedContract};
 
 /// An exit-status code observed by the injected gate execution capability.
@@ -114,6 +115,35 @@ pub struct MeasuredContractSnapshot {
 }
 
 impl MeasuredContractSnapshot {
+    /// Pair persisted role-specific statuses with commands from the supplied stated contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractSnapshotRehydrationError::NonZeroGate`] when a persisted observation
+    /// is not successful.
+    #[instrument(skip(stated, observations))]
+    pub fn from_observations(
+        stated: &StatedContract,
+        observations: &GateObservations,
+    ) -> Result<Self, ContractSnapshotRehydrationError> {
+        let commands = stated.gates();
+        let gates = GateMeasurements {
+            format: rehydrate_gate(GateKind::Format, commands.format(), observations.format)?,
+            lint: rehydrate_gate(GateKind::Lint, commands.lint(), observations.lint)?,
+            typecheck: rehydrate_gate(
+                GateKind::Typecheck,
+                commands.typecheck(),
+                observations.typecheck,
+            )?,
+            test: rehydrate_gate(GateKind::Test, commands.test(), observations.test)?,
+            build: rehydrate_gate(GateKind::Build, commands.build(), observations.build)?,
+        };
+        Ok(Self {
+            stated: stated.clone(),
+            gates,
+        })
+    }
+
     /// Return the current stated contract represented by this snapshot.
     pub const fn stated(&self) -> &StatedContract {
         &self.stated
@@ -123,6 +153,21 @@ impl MeasuredContractSnapshot {
     pub const fn gates(&self) -> &GateMeasurements {
         &self.gates
     }
+}
+
+/// A failure to rehydrate a successful measured snapshot from persisted observations.
+#[derive(Debug, Error)]
+pub enum ContractSnapshotRehydrationError {
+    /// Fires when a persisted observation cannot inhabit a successful measured snapshot.
+    #[error(
+        "persisted observation for stated gate command `{command}` has non-zero status {status}"
+    )]
+    NonZeroGate {
+        /// The exact stated command paired with the rejected observation.
+        command: String,
+        /// The persisted non-zero exit status.
+        status: ObservedExitStatus,
+    },
 }
 
 /// A failure to obtain a complete successful measured-contract snapshot.
@@ -148,6 +193,24 @@ where
         /// The observed non-zero status.
         status: ObservedExitStatus,
     },
+}
+
+fn rehydrate_gate(
+    kind: GateKind,
+    command: &GateCommand,
+    status: ObservedExitStatus,
+) -> Result<GateMeasurement, ContractSnapshotRehydrationError> {
+    if !status.is_success() {
+        return Err(ContractSnapshotRehydrationError::NonZeroGate {
+            command: command.as_str().to_owned(),
+            status,
+        });
+    }
+    Ok(GateMeasurement {
+        kind,
+        command: command.clone(),
+        status,
+    })
 }
 
 /// Measure all changed stated gates and retain same-role byte-identical observations.
@@ -247,7 +310,11 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{ContractMeasurementError, ObservedExitStatus, measure_contract_snapshot};
+    use super::{
+        ContractMeasurementError, ContractSnapshotRehydrationError, MeasuredContractSnapshot,
+        ObservedExitStatus, measure_contract_snapshot,
+    };
+    use crate::event_log::GateObservations;
     use crate::tracked_contract::{
         GateKind, TrackedRepositoryContract, parse_tracked_repository_contract,
     };
@@ -510,5 +577,76 @@ mod tests {
             "failed to execute stated gate command `cargo fmt --check`: executor unavailable"
         );
         assert_eq!(calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn rehydrates_persisted_gate_observations_for_previous_snapshot_reuse() {
+        let contract = parsed_contract(VALID_TRACKED_CONTRACT);
+        let observations = GateObservations {
+            format: ObservedExitStatus::from_code(0),
+            lint: ObservedExitStatus::from_code(0),
+            typecheck: ObservedExitStatus::from_code(0),
+            test: ObservedExitStatus::from_code(0),
+            build: ObservedExitStatus::from_code(0),
+        };
+
+        let previous =
+            MeasuredContractSnapshot::from_observations(contract.stated(), &observations)
+                .expect("successful observations should rehydrate");
+        assert_eq!(previous.stated(), contract.stated());
+        let measured = previous
+            .gates()
+            .iter()
+            .map(|gate| (gate.kind(), gate.command().as_str(), gate.status().code()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            measured,
+            [
+                (GateKind::Format, "cargo fmt --check", 0),
+                (GateKind::Lint, "cargo clippy --workspace --all-targets", 0),
+                (
+                    GateKind::Typecheck,
+                    "cargo check --workspace --all-targets",
+                    0,
+                ),
+                (GateKind::Test, "cargo test --workspace", 0),
+                (GateKind::Build, "cargo build --release", 0),
+            ]
+        );
+
+        let calls = RefCell::new(0);
+        let reused = measure_contract_snapshot(contract.stated(), Some(&previous), |_command| {
+            *calls.borrow_mut() += 1;
+            Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
+        })
+        .expect("unchanged rehydrated gates should be reused");
+        assert_eq!(*calls.borrow(), 0);
+        assert_eq!(reused.gates(), previous.gates());
+    }
+
+    #[test]
+    fn rejects_nonzero_persisted_observation_during_rehydration() {
+        let contract = parsed_contract(VALID_TRACKED_CONTRACT);
+        let observations = GateObservations {
+            format: ObservedExitStatus::from_code(0),
+            lint: ObservedExitStatus::from_code(0),
+            typecheck: ObservedExitStatus::from_code(0),
+            test: ObservedExitStatus::from_code(17),
+            build: ObservedExitStatus::from_code(0),
+        };
+
+        let error = MeasuredContractSnapshot::from_observations(contract.stated(), &observations)
+            .expect_err("non-zero persisted observations must be rejected");
+        let display = error.to_string();
+        match error {
+            ContractSnapshotRehydrationError::NonZeroGate { command, status } => {
+                assert_eq!(command, "cargo test --workspace");
+                assert_eq!(status.code(), 17);
+            }
+        }
+        assert_eq!(
+            display,
+            "persisted observation for stated gate command `cargo test --workspace` has non-zero status 17"
+        );
     }
 }

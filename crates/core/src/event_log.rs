@@ -1,4 +1,4 @@
-//! decode : EventLogLine → KnownEvent ∪ UnknownEvent; append : AppendInput → AppendIntent; select : EventRecord × EventRecordFilter → Bool.
+//! decode : EventLogLine → KnownEvent ∪ UnknownEvent; append : AppendInput → AppendIntent; select : EventRecord × EventRecordFilter → Bool; persist_contract : RepositoryName × RepositoryRoot × TrackedRepositoryContract × GateMeasurements × Evidence → RepositoryContractPayload.
 //! This module is pure domain logic and performs no I/O.
 
 use std::collections::BTreeMap;
@@ -11,8 +11,13 @@ use serde_json::Value;
 use thiserror::Error;
 use tracing::instrument;
 
+use crate::contract_measurement::GateMeasurements;
 pub use crate::contract_measurement::ObservedExitStatus;
 use crate::run_state::VersionPolicy;
+use crate::tracked_contract::{
+    LocalWorkflowStandIn, MilestonePullRequestBase, PullRequestMergeMethod, StepPullRequestBase,
+    TrackedRepositoryContract,
+};
 
 /// Exact unparsed JSON submitted as the payload for one event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -562,6 +567,103 @@ pub struct RepositoryContractPayload {
     pub appendable: AppendableRepositoryContract,
     /// The multi-line invocation that measured the contract.
     pub evidence: Evidence,
+}
+
+impl RepositoryContractPayload {
+    /// Convert typed stated, appendable, and measured authorities into the current payload.
+    pub fn from_tracked_measurement(
+        repository: RepositoryName,
+        repo_root: RepositoryRoot,
+        tracked: &TrackedRepositoryContract,
+        gates: &GateMeasurements,
+        evidence: Evidence,
+    ) -> Self {
+        let stated = tracked.stated();
+        let commands = stated.gates();
+        let observations = GateObservations {
+            format: gates
+                .get(crate::tracked_contract::GateKind::Format)
+                .status(),
+            lint: gates.get(crate::tracked_contract::GateKind::Lint).status(),
+            typecheck: gates
+                .get(crate::tracked_contract::GateKind::Typecheck)
+                .status(),
+            test: gates.get(crate::tracked_contract::GateKind::Test).status(),
+            build: gates.get(crate::tracked_contract::GateKind::Build).status(),
+        };
+        let workflow_map = stated
+            .workflows()
+            .as_slice()
+            .iter()
+            .map(|mapping| {
+                let stand_in = match mapping.stand_in() {
+                    LocalWorkflowStandIn::Command(command) => Some(command.as_str().to_owned()),
+                    LocalWorkflowStandIn::None => None,
+                };
+                (mapping.workflow().as_str().to_owned(), stand_in)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let appendable = tracked.appendable();
+
+        Self {
+            repository,
+            repo_root,
+            stated: StatedRepositoryContract {
+                format: commands.format().as_str().to_owned(),
+                lint: commands.lint().as_str().to_owned(),
+                typecheck: commands.typecheck().as_str().to_owned(),
+                test: commands.test().as_str().to_owned(),
+                build: commands.build().as_str().to_owned(),
+                version_policy: stated.version_policy().clone(),
+                branch_convention: render_branch_convention(stated.branches()),
+                pull_request_convention: render_pull_request_convention(stated.pull_requests()),
+            },
+            observations,
+            workflow_map: WorkflowMap::new(workflow_map),
+            appendable: AppendableRepositoryContract {
+                environment_hazards: appendable
+                    .environment_hazards()
+                    .iter()
+                    .map(|fact| fact.as_str().to_owned())
+                    .collect(),
+                gate_orderings: appendable
+                    .gate_orderings()
+                    .iter()
+                    .map(|fact| fact.as_str().to_owned())
+                    .collect(),
+                lockfile_rules: appendable
+                    .lockfile_rules()
+                    .iter()
+                    .map(|fact| fact.as_str().to_owned())
+                    .collect(),
+            },
+            evidence,
+        }
+    }
+}
+
+fn render_branch_convention(branches: &crate::tracked_contract::BranchConvention) -> String {
+    format!(
+        "default={}; milestone={}; step={}",
+        branches.default().as_str(),
+        branches.milestone().as_str(),
+        branches.step().as_str()
+    )
+}
+
+fn render_pull_request_convention(
+    pull_requests: &crate::tracked_contract::PullRequestConvention,
+) -> String {
+    let step_base = match pull_requests.step_base() {
+        StepPullRequestBase::Milestone => "MILESTONE",
+    };
+    let milestone_base = match pull_requests.milestone_base() {
+        MilestonePullRequestBase::Default => "DEFAULT",
+    };
+    let merge_method = match pull_requests.merge_method() {
+        PullRequestMergeMethod::Squash => "SQUASH",
+    };
+    format!("step_base={step_base}; milestone_base={milestone_base}; merge_method={merge_method}")
 }
 
 /// A persisted legacy twelve-field repository contract.
@@ -1182,18 +1284,22 @@ pub enum AppendError<E> {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::error::Error;
     use std::io;
     use std::time::{Duration, SystemTime};
 
     use serde_json::{Value, json};
 
+    use crate::contract_measurement::{ObservedExitStatus, measure_contract_snapshot};
     use crate::event_log::{
         AppendError, EventBodyRef, EventKindName, EventLogError, EventLogTail, EventLogTailLine,
-        EventRecordFilter, Evidence, EvidencePresence, KnownPayload, NodeId, ReadKind, ReadPayload,
+        EventRecord, EventRecordFilter, EventTimestamp, Evidence, EvidencePresence, KnownPayload,
+        NodeId, ReadKind, ReadPayload, RepositoryContractPayload, RepositoryName, RepositoryRoot,
         Sequence, Sha256Digest, UnparsedPayload, WriteKind, append_event, event_record_matches,
         parse_event_line, serialize_event_line, validate_evidence_policy,
     };
     use crate::run_state::VersionPolicy;
+    use crate::tracked_contract::{GateKind, parse_tracked_repository_contract};
 
     const APPEND_TIME_SECONDS: u64 = 1_785_155_696;
     const VALID_DELTA_PAYLOAD: &str = r#"{"message":"append one validated event"}"#;
@@ -1222,6 +1328,140 @@ mod tests {
     ];
     const UNKNOWN_LINE: &str = r#"{"sequence":8,"timestamp":"2026-07-27T12:35:03.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
     const CURRENT_REPOSITORY_CONTRACT_LINE: &str = r#"{"sequence":9,"timestamp":"2026-07-27T12:35:04.000Z","kind":"repository-contract","node":"m2-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stated":{"format":"cargo fmt --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --release","version_policy":"NONE","branch_convention":"pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>","pull_request_convention":"step head targets the matching milestone integration branch"},"observations":{"format":0,"lint":0,"typecheck":0,"test":0,"build":0},"workflow_map":{"ci.yml":"cargo test --workspace","docs.yml":null},"appendable":{"environment_hazards":["stdin is reserved for event payload input"],"gate_orderings":["format before lint before typecheck before test before build"],"lockfile_rules":["Cargo.lock must remain synchronized with Cargo.toml"]},"evidence":"cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release"}}"#;
+    const TRACKED_CONTRACT: &[u8] = br#"{
+  "stated": {
+    "gates": {
+      "format": "cargo fmt --check",
+      "lint": "cargo clippy --workspace --all-targets",
+      "typecheck": "cargo check --workspace --all-targets",
+      "test": "cargo test --workspace",
+      "build": "cargo build --release"
+    },
+    "version_policy": "NONE",
+    "branches": {
+      "default": "main",
+      "milestone": "pce/{vision}/milestone-{milestone}",
+      "step": "pce/{vision}/m{milestone}-s{step}"
+    },
+    "pull_requests": {
+      "step_base": "MILESTONE",
+      "milestone_base": "DEFAULT",
+      "merge_method": "SQUASH"
+    },
+    "workflows": [
+      {
+        "workflow": "ci.yml",
+        "stand_in": {
+          "kind": "COMMAND",
+          "command": "cargo test --workspace"
+        }
+      },
+      {
+        "workflow": "release.yml",
+        "stand_in": {
+          "kind": "NONE"
+        }
+      }
+    ]
+  },
+  "appendable": {
+    "environment_hazards": ["pipe Codex stdin from /dev/null"],
+    "gate_orderings": ["run cargo fmt --check before clippy"],
+    "lockfile_rules": ["commit Cargo.lock when dependency resolution changes"]
+  }
+}"#;
+
+    #[test]
+    fn tracked_measurement_round_trips_every_current_payload_field() -> Result<(), Box<dyn Error>> {
+        let tracked = parse_tracked_repository_contract(TRACKED_CONTRACT)?;
+        let snapshot = measure_contract_snapshot(tracked.stated(), None, |_command| {
+            Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
+        })?;
+        let evidence = "cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release";
+        let payload = RepositoryContractPayload::from_tracked_measurement(
+            RepositoryName::new("pce"),
+            RepositoryRoot::new("/workspace/pce"),
+            &tracked,
+            snapshot.gates(),
+            Evidence::parse(evidence)?,
+        );
+        let record = EventRecord::known(
+            Sequence::parse(9)?,
+            EventTimestamp::parse("2026-07-27T12:35:04.000Z")?,
+            NodeId::parse("m3-s1")?,
+            KnownPayload::RepositoryContract(payload),
+        );
+        let line = serialize_event_line(&record)?;
+        let reparsed = parse_event_line(&line)?;
+        let EventBodyRef::Known(KnownPayload::RepositoryContract(payload)) = reparsed.body_ref()
+        else {
+            panic!("current repository contract expected");
+        };
+
+        assert_eq!(
+            serde_json::to_value(payload)?,
+            json!({
+                "repository": "pce",
+                "repo_root": "/workspace/pce",
+                "stated": {
+                    "format": "cargo fmt --check",
+                    "lint": "cargo clippy --workspace --all-targets",
+                    "typecheck": "cargo check --workspace --all-targets",
+                    "test": "cargo test --workspace",
+                    "build": "cargo build --release",
+                    "version_policy": "NONE",
+                    "branch_convention": "default=main; milestone=pce/{vision}/milestone-{milestone}; step=pce/{vision}/m{milestone}-s{step}",
+                    "pull_request_convention": "step_base=MILESTONE; milestone_base=DEFAULT; merge_method=SQUASH"
+                },
+                "observations": {
+                    "format": 0,
+                    "lint": 0,
+                    "typecheck": 0,
+                    "test": 0,
+                    "build": 0
+                },
+                "workflow_map": {
+                    "ci.yml": "cargo test --workspace",
+                    "release.yml": null
+                },
+                "appendable": {
+                    "environment_hazards": ["pipe Codex stdin from /dev/null"],
+                    "gate_orderings": ["run cargo fmt --check before clippy"],
+                    "lockfile_rules": ["commit Cargo.lock when dependency resolution changes"]
+                },
+                "evidence": evidence
+            })
+        );
+        assert_eq!(payload.repository.as_str(), "pce");
+        assert_eq!(payload.repo_root.as_str(), "/workspace/pce");
+        assert_eq!(payload.stated.version_policy, VersionPolicy::None);
+        for kind in [
+            GateKind::Format,
+            GateKind::Lint,
+            GateKind::Typecheck,
+            GateKind::Test,
+            GateKind::Build,
+        ] {
+            let status = match kind {
+                GateKind::Format => payload.observations.format,
+                GateKind::Lint => payload.observations.lint,
+                GateKind::Typecheck => payload.observations.typecheck,
+                GateKind::Test => payload.observations.test,
+                GateKind::Build => payload.observations.build,
+            };
+            assert_eq!(status.code(), 0);
+        }
+        assert_eq!(
+            payload.workflow_map.as_map().get("ci.yml"),
+            Some(&Some("cargo test --workspace".to_owned()))
+        );
+        assert_eq!(
+            payload.workflow_map.as_map().get("release.yml"),
+            Some(&None)
+        );
+        assert_eq!(payload.evidence.as_str(), evidence);
+        Ok(())
+    }
 
     #[test]
     fn raw_record_filters_match_known_and_unknown_kinds_exactly() -> Result<(), EventLogError> {

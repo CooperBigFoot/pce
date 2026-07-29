@@ -8,8 +8,8 @@ pub mod vision;
 pub mod workflow_coverage;
 
 pub use contract_measurement::{
-    ContractMeasurementError, GateMeasurement, GateMeasurements, MeasuredContractSnapshot,
-    ObservedExitStatus, measure_contract_snapshot,
+    ContractMeasurementError, ContractSnapshotRehydrationError, GateMeasurement, GateMeasurements,
+    MeasuredContractSnapshot, ObservedExitStatus, measure_contract_snapshot,
 };
 pub use event_log::{
     AppendError, AppendIntent, AppendableRepositoryContract, ArtifactPath, DeltaPayload,
