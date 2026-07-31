@@ -336,9 +336,8 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
     else {
         panic!("second record is not completion")
     };
+    let sleeping_duration_ms = completion.duration_ms.get();
     assert_eq!(completion.issuance_sequence, records[0].sequence());
-    assert!(completion.duration_ms.get() >= 100);
-    assert!(Duration::from_millis(completion.duration_ms.get()) <= elapsed);
     assert_eq!(
         completion.exit_status,
         DispatchExitStatus::Exited {
@@ -373,6 +372,58 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
         String::from_utf8(filtered.stdout).expect("UTF-8 read output"),
         format!("{}\n", lines.lines().nth(1).expect("completion line"))
     );
+
+    let fast_record_root = harness.path().join("fast-lifecycle-records");
+    fs::create_dir(&fast_record_root).expect("create fast records");
+    let fast_log_path = harness.path().join("fast-events.jsonl");
+    let fast_environment =
+        child_environment(&harness, &fast_record_root, &stdout_path, &stderr_path, 0);
+    let mut fast_argv = dispatch_argv(&cwd, &fast_environment, None, Some(&plan_path), "-");
+    let delimiter = fast_argv.len() - 2;
+    fast_argv.splice(
+        delimiter..delimiter,
+        [
+            "--log-file".to_owned(),
+            fast_log_path.display().to_string(),
+            "--node".to_owned(),
+            "m3-s1".to_owned(),
+            "--role".to_owned(),
+            "step-executor".to_owned(),
+            "--ref".to_owned(),
+            "abc123".to_owned(),
+            "--evidence".to_owned(),
+            "fixture invocation without sleep".to_owned(),
+        ],
+    );
+    let fast_started = Instant::now();
+    let fast_output = harness.run(&fast_argv, b"").expect("run fast lifecycle");
+    let fast_elapsed = fast_started.elapsed();
+    assert!(
+        fast_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fast_output.stderr)
+    );
+    let fast_records = fs::read_to_string(&fast_log_path)
+        .expect("read fast lifecycle log")
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse fast record"))
+        .collect::<Vec<_>>();
+    assert_eq!(fast_records.len(), 2);
+    let EventBodyRef::Known(KnownPayload::DispatchCompletion(fast_completion)) =
+        fast_records[1].body_ref()
+    else {
+        panic!("second fast record is not completion")
+    };
+    let fast_duration_ms = fast_completion.duration_ms.get();
+    assert!(
+        sleeping_duration_ms
+            .checked_sub(fast_duration_ms)
+            .is_some_and(|difference| difference >= 150),
+        "sleeping duration was {sleeping_duration_ms} ms, fast duration was {fast_duration_ms} ms"
+    );
+    assert!(sleeping_duration_ms >= 100);
+    assert!(Duration::from_millis(sleeping_duration_ms) <= elapsed);
+    assert!(Duration::from_millis(fast_duration_ms) <= fast_elapsed);
 }
 
 #[test]
@@ -409,11 +460,6 @@ fn records_failed_and_absent_terminal_reasons_before_reporting_exit() {
         let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref() else { panic!("missing completion") };
         assert_eq!(completion.usage, CodexTokenUsage::Absent { reason });
         assert_eq!(completion.exit_status, DispatchExitStatus::Exited { code: pce_core::ExitCode::new(code as u64) });
-        assert!(
-            completion.duration_ms.get() < 100,
-            "{name} duration was {} ms",
-            completion.duration_ms.get()
-        );
         assert!(Duration::from_millis(completion.duration_ms.get()) <= elapsed);
         if matches!(reason, UsageAbsenceReason::MalformedTerminalData | UsageAbsenceReason::DuplicateTerminalData | UsageAbsenceReason::ContradictoryTerminalData) {
             assert!(String::from_utf8_lossy(&output.stderr).contains(usage_reason_name(reason)));
