@@ -1794,7 +1794,12 @@ fn measure_tracked_contract_at_root(
     let observed = observed_workflows(repository_root)?;
     validate_workflow_coverage(contract.stated().workflows(), &observed)
         .context("failed to validate tracked workflow coverage")?;
+    let mut seatbelt_capability_verified = false;
     measure_contract_snapshot(contract.stated(), previous, |command| {
+        if !seatbelt_capability_verified {
+            verify_seatbelt_execution_capability(repository_root)?;
+            seatbelt_capability_verified = true;
+        }
         execute_sandboxed_gate_command(repository_root, command)
     })
     .context("failed to measure tracked repository contract")
@@ -1861,6 +1866,40 @@ fn execute_sandboxed_gate_command(
     command: &GateCommand,
 ) -> std::io::Result<ObservedExitStatus> {
     execute_sandboxed_gate_text(repository_root, command.as_str())
+}
+
+fn verify_seatbelt_execution_capability(repository_root: &Path) -> std::io::Result<()> {
+    let canonical_root = std::fs::canonicalize(repository_root).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to canonicalize Seatbelt probe working directory {}: {error}",
+            repository_root.display()
+        ))
+    })?;
+    let envelope = DispatchEnvelope::new(
+        Executable::parse("/usr/bin/sandbox-exec")
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        AbsoluteWorkingDirectory::parse(canonical_root)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        StdinBinding::Null,
+    )
+    .with_arguments(ArgumentVector::new(vec![
+        "-p".to_owned(),
+        "(version 1)(allow default)".to_owned(),
+        "--".to_owned(),
+        "/usr/bin/true".to_owned(),
+    ]))
+    .with_environment(ChildEnvironment::new(BTreeMap::new()));
+    let status = spawn_envelope(&envelope).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to verify Seatbelt execution capability: {error:#}"
+        ))
+    })?;
+    if status.code() != 0 {
+        return Err(std::io::Error::other(format!(
+            "failed to verify Seatbelt execution capability: permissive profile probe exited with status {status}"
+        )));
+    }
+    Ok(())
 }
 
 fn execute_sandboxed_gate_text(

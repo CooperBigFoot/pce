@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use support::CliHarness;
@@ -240,6 +241,20 @@ fn run_seatbelt_fixture(fixture: &SeatbeltFixture) -> std::process::Output {
         .expect("contract check should run")
 }
 
+fn run_seatbelt_fixture_inside_seatbelt(fixture: &SeatbeltFixture) -> std::process::Output {
+    Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "--"])
+        .arg(env!("CARGO_BIN_EXE_pce"))
+        .args(contract_check_args(
+            &fixture.contract_path,
+            &fixture.repository_root,
+        ))
+        .env_clear()
+        .env("PATH", fixture.harness.shim_path())
+        .output()
+        .expect("outer Seatbelt process should run")
+}
+
 fn assert_uv_status_and_invocation(fixture: &SeatbeltFixture, output: std::process::Output) {
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
     assert!(
@@ -269,6 +284,66 @@ fn seatbelt_profile_permits_repository_write_and_denies_external_probe() {
     let fixture = seatbelt_fixture();
     let output = run_seatbelt_fixture(&fixture);
     assert_uv_status_and_invocation(&fixture, output);
+}
+
+#[test]
+fn seatbelt_apply_failure_is_execution_failure_not_gate_status() {
+    let fixture = seatbelt_fixture();
+    let output = run_seatbelt_fixture_inside_seatbelt(&fixture);
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("failed to verify Seatbelt execution capability"),
+        "stderr was: {stderr}"
+    );
+    assert!(
+        !stderr.contains("stated gate command `uv build` exited with status"),
+        "Seatbelt failure must not be attributed to the tracked command; stderr was: {stderr}"
+    );
+    assert!(
+        !fixture.invocation_log.exists(),
+        "tracked gate must not run after capability failure"
+    );
+}
+
+#[test]
+fn seatbelt_probe_success_preserves_legitimate_gate_status_71() {
+    let harness = CliHarness::new().expect("CLI harness should create");
+    let repository_root = harness.path().join("repo");
+    fs::create_dir(&repository_root).expect("repository fixture should create");
+    let invocation_log = repository_root.join("status-71-invocations.bin");
+    let shim = repository_root.join("status-71");
+    let source = format!(
+        "#!/bin/sh\nprintf invoked > '{}' || exit 74\nexit 71\n",
+        invocation_log.display()
+    );
+    fs::write(&shim, source).expect("status shim should write");
+    let mut permissions = fs::metadata(&shim)
+        .expect("status shim metadata should read")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shim, permissions).expect("status shim should be executable");
+    let command = shim.display().to_string();
+    let contract_path = harness.path().join("contract.json");
+    fs::write(&contract_path, gate_contract(&command)).expect("contract fixture should write");
+
+    let output = harness
+        .run(contract_check_args(&contract_path, &repository_root), b"")
+        .expect("CLI should run");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains(&format!(
+            "stated gate command `{command}` exited with status 71"
+        )),
+        "stderr was: {stderr}"
+    );
+    assert_eq!(
+        fs::read(invocation_log).expect("status-71 invocation log should read"),
+        b"invoked"
+    );
 }
 
 #[test]
