@@ -36,7 +36,7 @@ const USAGE: &str = concat!(
     "       pce log --file <LOG_PATH> --kind <KIND> --node <NODE>\n",
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
-    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] --policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> [--policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> ...]\n",
+    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>]\n",
     "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>\n",
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
@@ -93,7 +93,6 @@ enum Command {
         recovery_log_path: RecoveryLogPath,
         vision_dir: PathBuf,
         graph_path: Option<ArtifactPath>,
-        version_policies: Vec<(RepositoryName, VersionPolicy)>,
     },
     ContractCheck {
         contract_path: PathBuf,
@@ -266,13 +265,11 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             recovery_log_path,
             vision_dir,
             graph_path,
-            version_policies,
         } => run_ready(
             &log_path,
             &recovery_log_path,
             &vision_dir,
             graph_path.as_ref(),
-            &version_policies,
         ),
         Command::ContractCheck {
             contract_path,
@@ -534,59 +531,23 @@ fn parse_ready_command(args: &[String]) -> Result<Command> {
         bail!(USAGE);
     }
 
-    let (graph_path, policies) = match trailing {
-        [graph_flag, raw_graph_path, policies @ ..]
+    let graph_path = match trailing {
+        [] => None,
+        [graph_flag, raw_graph_path]
             if graph_flag == "--graph"
                 && is_value(raw_graph_path)
                 && !raw_graph_path.is_empty() =>
         {
-            (Some(ArtifactPath::new(raw_graph_path)), policies)
+            Some(ArtifactPath::new(raw_graph_path))
         }
-        _ => (None, trailing),
+        _ => bail!(USAGE),
     };
-    if policies.is_empty() || !policies.len().is_multiple_of(2) {
-        bail!(USAGE);
-    }
-
-    let mut version_policies = Vec::<(RepositoryName, VersionPolicy)>::new();
-    for pair in policies.chunks_exact(2) {
-        if pair[0] != "--policy" || !is_value(&pair[1]) {
-            bail!(USAGE);
-        }
-        let raw_policy = &pair[1];
-        if raw_policy.matches('=').count() != 1 {
-            bail!("ready policy must contain exactly one `=`");
-        }
-        let (raw_repository, raw_value) = raw_policy
-            .split_once('=')
-            .context("ready policy must contain exactly one `=`")?;
-        if raw_repository.is_empty() {
-            bail!("ready policy repository must not be empty");
-        }
-        let repository = RepositoryName::new(raw_repository);
-        if version_policies
-            .iter()
-            .any(|(existing, _)| existing == &repository)
-        {
-            bail!(
-                "duplicate ready policy for repository {}",
-                repository.as_str()
-            );
-        }
-        let policy = match raw_value {
-            "NONE" => VersionPolicy::None,
-            "SERIALIZE_DISPATCHES" => VersionPolicy::SerializeDispatches,
-            _ => bail!("unknown ready policy {raw_value:?}"),
-        };
-        version_policies.push((repository, policy));
-    }
 
     Ok(Command::Ready {
         log_path: PathBuf::from(raw_path),
         recovery_log_path: RecoveryLogPath::new(raw_path),
         vision_dir: PathBuf::from(raw_vision_dir),
         graph_path,
-        version_policies,
     })
 }
 
@@ -713,7 +674,6 @@ fn run_ready(
     recovery_log_path: &RecoveryLogPath,
     vision_dir: &Path,
     graph_path: Option<&ArtifactPath>,
-    _compatibility_version_policies: &[(RepositoryName, VersionPolicy)],
 ) -> Result<()> {
     let parsed_lines = read_event_log(log_path)?;
     let records = parsed_lines
@@ -952,7 +912,10 @@ fn readiness_version_policies(
                         .stated()
                         .version_policy()
                         .clone(),
-                    Err(_) => VersionPolicy::None,
+                    Err(_) => bail!(
+                        "repository {} has neither a current repository-contract record nor .pce/repository-contract.json at default-branch HEAD",
+                        payload.repository.as_str()
+                    ),
                 }
             }
         };
@@ -2990,9 +2953,9 @@ mod tests {
         GitMergeObservation, KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId,
         ObservedExitStatus, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
         RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-        RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation, TagName,
-        TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
-        derive_run_state, parse_event_line, render_human_snapshot,
+        RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation,
+        StepNode, TagName, TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
+        WriteKind, derive_run_state, parse_event_line, render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -3002,8 +2965,9 @@ mod tests {
         FetchResult, RepositoryContract, RepositoryRuntime, StatusFormat, USAGE,
         already_dispatched, github_pull_request_list_args, lexically_normalized_repository_root,
         measure_tracked_contract_at_root, observe_git, parse_command, parse_dispatch_graph,
-        parse_tracked_contract, read_at_default_branch_head, read_event_log, repository_contracts,
-        run, run_log_read, select_bootstrap_candidate, validated_snapshot_value,
+        parse_tracked_contract, read_at_default_branch_head, read_event_log,
+        readiness_version_policies, repository_contracts, run, run_log_read,
+        select_bootstrap_candidate, validated_snapshot_value,
     };
 
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
@@ -3791,7 +3755,7 @@ mod tests {
 
     // Preservation guard for the orchestrator's existing status and ready vectors.
     #[test]
-    fn status_and_ready_orchestrator_arguments_remain_accepted() {
+    fn status_and_policy_free_ready_orchestrator_arguments_are_accepted() {
         let status = parse_command(
             [
                 "status",
@@ -3826,8 +3790,6 @@ mod tests {
                 "planning/example",
                 "--graph",
                 "planning/example/milestone-3/steps.json",
-                "--policy",
-                "pce=NONE",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -3837,7 +3799,6 @@ mod tests {
             log_path,
             vision_dir,
             graph_path,
-            version_policies,
             ..
         } = ready
         else {
@@ -3849,9 +3810,6 @@ mod tests {
             graph_path.as_ref().expect("graph should parse").as_str(),
             "planning/example/milestone-3/steps.json"
         );
-        assert_eq!(version_policies.len(), 1);
-        assert_eq!(version_policies[0].0.as_str(), "pce");
-        assert_eq!(version_policies[0].1, VersionPolicy::None);
     }
 
     fn log_args(path: &Path, kind: &str) -> Vec<String> {
@@ -4129,6 +4087,34 @@ mod tests {
         })
         .to_string();
         parse_event_line(&line).expect("legacy contract fixture should parse")
+    }
+
+    #[test]
+    fn legacy_contract_without_tracked_file_fails_readiness_loudly() {
+        let repository_root = tempdir().expect("temporary repository root should exist");
+        let records = [parsed_legacy_contract_record(
+            1,
+            "pce",
+            repository_root
+                .path()
+                .to_str()
+                .expect("UTF-8 repository root"),
+        )];
+        let contracts = repository_contracts(&records).expect("legacy contract should project");
+        let candidate = pce_core::DispatchCandidate::new(
+            DispatchNode::Step(
+                StepNode::parse(&NodeId::parse("m1-s1").expect("canonical node id"))
+                    .expect("canonical step node"),
+            ),
+            RepositoryName::new("pce"),
+        );
+
+        let error = readiness_version_policies(&[candidate], &contracts)
+            .expect_err("missing current and tracked contracts must fail");
+        assert_eq!(
+            error.to_string(),
+            "repository pce has neither a current repository-contract record nor .pce/repository-contract.json at default-branch HEAD"
+        );
     }
 
     #[test]
@@ -4671,9 +4657,8 @@ mod tests {
         );
     }
 
-    /// Preservation guard for accepted-and-superseded compatibility policies.
     #[test]
-    fn ready_parser_accepts_compatibility_policies_for_supersession() {
+    fn ready_parser_accepts_policy_free_shapes() {
         let command = parse_command(
             [
                 "ready",
@@ -4681,10 +4666,6 @@ mod tests {
                 "events.jsonl",
                 "--vision-dir",
                 "planning/2026-07-28-example",
-                "--policy",
-                "pce=NONE",
-                "--policy",
-                "docs=SERIALIZE_DISPATCHES",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -4695,7 +4676,6 @@ mod tests {
             recovery_log_path,
             vision_dir,
             graph_path,
-            version_policies,
         } = command
         else {
             panic!("typed ready command expected");
@@ -4714,45 +4694,35 @@ mod tests {
             .as_str(),
             "example"
         );
-        assert_eq!(
-            version_policies,
-            vec![
-                (RepositoryName::new("pce"), VersionPolicy::None),
-                (
-                    RepositoryName::new("docs"),
-                    VersionPolicy::SerializeDispatches
-                ),
-            ]
-        );
-
-        let single = parse_command(
+        let with_graph = parse_command(
             [
                 "ready",
                 "--file",
                 "events.jsonl",
                 "--vision-dir",
                 "planning/2026-07-28-example",
-                "--policy",
-                "pce=NONE",
+                "--graph",
+                "planning/2026-07-28-example/milestone-3/steps.json",
             ]
             .into_iter()
             .map(str::to_owned),
         )
-        .expect("single compatibility policy should parse");
+        .expect("ready command with graph should parse");
         let Command::Ready {
-            version_policies, ..
-        } = single
+            graph_path: Some(graph_path),
+            ..
+        } = with_graph
         else {
             panic!("typed ready command expected");
         };
         assert_eq!(
-            version_policies,
-            vec![(RepositoryName::new("pce"), VersionPolicy::None)]
+            graph_path.as_str(),
+            "planning/2026-07-28-example/milestone-3/steps.json"
         );
     }
 
     #[test]
-    fn ready_parser_rejects_every_non_contract_shape() {
+    fn ready_parser_rejects_policy_and_non_contract_shapes() {
         let invalid = [
             vec![
                 "ready",
@@ -4760,21 +4730,6 @@ mod tests {
                 "events.jsonl",
                 "--vision-dir",
                 "planning/2026-07-28-example",
-            ],
-            vec![
-                "ready",
-                "--file",
-                "events.jsonl",
-                "--vision-dir",
-                "planning/2026-07-28-example",
-                "--policy",
-            ],
-            vec![
-                "ready",
-                "--vision-dir",
-                "planning/2026-07-28-example",
-                "--file",
-                "events.jsonl",
                 "--policy",
                 "pce=NONE",
             ],
@@ -4784,56 +4739,14 @@ mod tests {
                 "events.jsonl",
                 "--vision-dir",
                 "planning/2026-07-28-example",
-                "--policy",
-                "=NONE",
+                "--graph",
             ],
             vec![
                 "ready",
-                "--file",
-                "events.jsonl",
                 "--vision-dir",
                 "planning/2026-07-28-example",
-                "--policy",
-                "pceNONE",
-            ],
-            vec![
-                "ready",
                 "--file",
                 "events.jsonl",
-                "--vision-dir",
-                "planning/2026-07-28-example",
-                "--policy",
-                "pce=NONE=NONE",
-            ],
-            vec![
-                "ready",
-                "--file",
-                "events.jsonl",
-                "--vision-dir",
-                "planning/2026-07-28-example",
-                "--policy",
-                "pce=none",
-            ],
-            vec![
-                "ready",
-                "--file",
-                "events.jsonl",
-                "--vision-dir",
-                "planning/2026-07-28-example",
-                "--policy",
-                "pce=NONE",
-                "--policy",
-                "pce=SERIALIZE_DISPATCHES",
-            ],
-            vec![
-                "ready",
-                "--file",
-                "events.jsonl",
-                "--vision-dir",
-                "planning/2026-07-28-example",
-                "--policy",
-                "pce=NONE",
-                "extra",
             ],
             vec![
                 "ready",
@@ -4841,8 +4754,6 @@ mod tests {
                 "--events",
                 "--vision-dir",
                 "planning/2026-07-28-example",
-                "--policy",
-                "pce=NONE",
             ],
             vec![
                 "ready",
@@ -4850,17 +4761,6 @@ mod tests {
                 "events.jsonl",
                 "--vision-dir",
                 "--vision",
-                "--policy",
-                "pce=NONE",
-            ],
-            vec![
-                "ready",
-                "--file",
-                "events.jsonl",
-                "--vision-dir",
-                "planning/2026-07-28-example",
-                "--policy",
-                "--value",
             ],
         ];
         for args in invalid {
