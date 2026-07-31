@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,13 @@ use support::{CliHarness, CodexInvocation};
 
 const INHERITED_MARKER: (&str, &str) = ("PCE_INHERITED_ONLY", "must-not-reach-codex");
 const CHILD_MARKER: (&str, &str) = ("PCE_CHILD_MARKER", "explicit-child-value");
+static DISPATCH_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn dispatch_test_guard() -> MutexGuard<'static, ()> {
+    DISPATCH_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 struct DispatchCase<'a> {
     name: &'a str,
@@ -67,6 +75,7 @@ fn dispatches_structured_plan_with_exact_plan_stdin() {
 }
 
 fn assert_dispatch(case: DispatchCase<'_>) {
+    let _guard = dispatch_test_guard();
     let harness = CliHarness::new().expect("create CLI harness");
     let cwd = fs::canonicalize(harness.path()).expect("canonicalize child cwd");
     let record_root = harness.path().join(format!("{}-records", case.name));
@@ -122,7 +131,27 @@ fn assert_dispatch(case: DispatchCase<'_>) {
     );
     assert_eq!(output.stdout, expected_stdout);
     assert!(output.stderr.ends_with(&expected_stderr));
-    assert!(!cwd.join("unexpected-dispatch-log").exists());
+    assert_no_jsonl_files(harness.path());
+}
+
+fn assert_no_jsonl_files(root: &Path) {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("read harness directory") {
+            let entry = entry.expect("read harness entry");
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                assert_ne!(
+                    path.extension().and_then(|extension| extension.to_str()),
+                    Some("jsonl"),
+                    "logging-absent dispatch created {}",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 fn child_environment(
@@ -228,6 +257,7 @@ fn assert_invocation(
 
 #[test]
 fn records_measured_dispatch_lifecycle_with_exact_correlation() {
+    let _guard = dispatch_test_guard();
     let harness = CliHarness::new().expect("create lifecycle harness");
     let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
     let record_root = harness.path().join("lifecycle-records");
@@ -235,12 +265,15 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
     let stdout_path = harness.path().join("lifecycle.stdout");
     let stderr_path = harness.path().join("lifecycle.stderr");
     let log_path = harness.path().join("events.jsonl");
+    let plan_path = harness.path().join("approved.plan");
+    let plan = b"approved plan bytes\0with exact stdin";
     let fixture = b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":101,\"cached_input_tokens\":23,\"output_tokens\":17,\"reasoning_output_tokens\":5}}\n";
     fs::write(&stdout_path, fixture).expect("write stdout");
     fs::write(&stderr_path, []).expect("write stderr");
+    fs::write(&plan_path, plan).expect("write plan");
     let mut environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
     environment.push(("PCE_CODEX_SLEEP_SECONDS".to_owned(), "0.2".to_owned()));
-    let mut argv = dispatch_argv(&cwd, &environment, None, None, "PROMPT");
+    let mut argv = dispatch_argv(&cwd, &environment, None, Some(&plan_path), "-");
     let delimiter = argv.len() - 2;
     argv.splice(
         delimiter..delimiter,
@@ -268,6 +301,11 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, fixture);
+    let invocations = harness
+        .codex_invocations(&record_root)
+        .expect("read Codex invocation");
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(invocations[0].stdin, plan);
     let lines = fs::read_to_string(&log_path).expect("read lifecycle log");
     let records = lines
         .lines()
@@ -339,6 +377,7 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
 
 #[test]
 fn records_failed_and_absent_terminal_reasons_before_reporting_exit() {
+    let _guard = dispatch_test_guard();
     for (name, fixture, code, reason) in [
         ("failed", b"{\"type\":\"turn.failed\"}\n".as_slice(), 41, UsageAbsenceReason::TurnFailed),
         ("absent", b"{}\n".as_slice(), 42, UsageAbsenceReason::NoTerminalTurn),
@@ -355,7 +394,9 @@ fn records_failed_and_absent_terminal_reasons_before_reporting_exit() {
         let log_path = harness.path().join(format!("{name}.jsonl"));
         fs::write(&stdout_path, fixture).expect("write stdout");
         fs::write(&stderr_path, []).expect("write stderr");
-        let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, code);
+        let mut environment =
+            child_environment(&harness, &record_root, &stdout_path, &stderr_path, code);
+        environment.push(("PCE_CODEX_SKIP_RECORDING".to_owned(), "1".to_owned()));
         let mut argv = dispatch_argv(&cwd, &environment, None, None, "PROMPT");
         let delimiter = argv.len() - 2;
         argv.splice(delimiter..delimiter, ["--log-file", log_path.to_str().expect("path"), "--node", "m3-s1", "--role", "step-executor", "--ref", "abc", "--evidence", "fixture"].map(str::to_owned));
@@ -368,11 +409,79 @@ fn records_failed_and_absent_terminal_reasons_before_reporting_exit() {
         let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref() else { panic!("missing completion") };
         assert_eq!(completion.usage, CodexTokenUsage::Absent { reason });
         assert_eq!(completion.exit_status, DispatchExitStatus::Exited { code: pce_core::ExitCode::new(code as u64) });
+        assert!(
+            completion.duration_ms.get() < 100,
+            "{name} duration was {} ms",
+            completion.duration_ms.get()
+        );
         assert!(Duration::from_millis(completion.duration_ms.get()) <= elapsed);
         if matches!(reason, UsageAbsenceReason::MalformedTerminalData | UsageAbsenceReason::DuplicateTerminalData | UsageAbsenceReason::ContradictoryTerminalData) {
             assert!(String::from_utf8_lossy(&output.stderr).contains(usage_reason_name(reason)));
         }
     }
+}
+
+#[test]
+fn accepts_additive_usage_fields_and_blank_jsonl_lines() {
+    let _guard = dispatch_test_guard();
+    let harness = CliHarness::new().expect("create additive usage harness");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
+    let record_root = harness.path().join("additive-usage-records");
+    fs::create_dir(&record_root).expect("create records");
+    let stdout_path = harness.path().join("additive-usage.stdout");
+    let stderr_path = harness.path().join("additive-usage.stderr");
+    let log_path = harness.path().join("additive-usage.jsonl");
+    let fixture = b"{\"type\":\"thread.started\"}\n \t\n{\"type\":\"turn.completed\",\"usage\":{\"total_tokens\":146,\"input_tokens\":101,\"cached_input_tokens\":23,\"output_tokens\":17,\"reasoning_output_tokens\":5}}\n";
+    fs::write(&stdout_path, fixture).expect("write stdout");
+    fs::write(&stderr_path, []).expect("write stderr");
+    let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+    let mut argv = dispatch_argv(&cwd, &environment, None, None, "PROMPT");
+    let delimiter = argv.len() - 2;
+    argv.splice(
+        delimiter..delimiter,
+        [
+            "--log-file",
+            log_path.to_str().expect("path"),
+            "--node",
+            "m3-s1",
+            "--role",
+            "step-executor",
+            "--ref",
+            "abc",
+            "--evidence",
+            "fixture",
+        ]
+        .map(str::to_owned),
+    );
+
+    let output = harness
+        .run(&argv, b"")
+        .expect("run additive usage lifecycle");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, fixture);
+    let records = fs::read_to_string(&log_path)
+        .expect("read log")
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref()
+    else {
+        panic!("missing completion")
+    };
+    assert_eq!(
+        completion.usage,
+        CodexTokenUsage::Measured {
+            input_tokens: pce_core::InputTokens::new(101),
+            cached_input_tokens: pce_core::CachedInputTokens::new(23),
+            output_tokens: pce_core::OutputTokens::new(17),
+            reasoning_output_tokens: pce_core::ReasoningOutputTokens::new(5),
+        }
+    );
 }
 
 fn usage_reason_name(reason: UsageAbsenceReason) -> &'static str {
@@ -387,6 +496,7 @@ fn usage_reason_name(reason: UsageAbsenceReason) -> &'static str {
 
 #[test]
 fn records_signal_and_no_terminal_usage_without_fabricating_exit_zero() {
+    let _guard = dispatch_test_guard();
     let harness = CliHarness::new().expect("create signal harness");
     let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
     let record_root = harness.path().join("signal-records");
@@ -444,6 +554,7 @@ fn records_signal_and_no_terminal_usage_without_fabricating_exit_zero() {
 
 #[test]
 fn releases_log_lock_while_child_runs_and_keeps_exact_issuance_identity() {
+    let _guard = dispatch_test_guard();
     let harness = CliHarness::new().expect("create interleaving harness");
     let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
     let record_root = harness.path().join("interleaving-records");
@@ -572,6 +683,7 @@ fn wait_for_path(path: &Path) {
 
 #[test]
 fn interruption_leaves_only_durable_issuance() {
+    let _guard = dispatch_test_guard();
     let harness = CliHarness::new().expect("create interruption harness");
     let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
     let record_root = harness.path().join("interruption-records");
@@ -638,6 +750,7 @@ fn interruption_leaves_only_durable_issuance() {
 
 #[test]
 fn propagates_nonzero_codex_status() {
+    let _guard = dispatch_test_guard();
     let (harness, cwd, record_root, stdin_path, environment) = failure_fixture("nonzero", 37);
     let argv = dispatch_argv(&cwd, &environment, None, None, "PROMPT");
     let output = harness
@@ -656,6 +769,7 @@ fn propagates_nonzero_codex_status() {
 
 #[test]
 fn reports_codex_spawn_failure() {
+    let _guard = dispatch_test_guard();
     let (harness, cwd, record_root, stdin_path, mut environment) = failure_fixture("spawn", 0);
     environment
         .iter_mut()
@@ -702,6 +816,7 @@ fn failure_fixture(
 
 #[test]
 fn rejects_invalid_dispatch_inputs_before_invocation() {
+    let _guard = dispatch_test_guard();
     let harness = CliHarness::new().expect("create harness");
     let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
     let stdin_path = harness.path().join("parser.stdin");

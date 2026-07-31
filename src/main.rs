@@ -3025,16 +3025,23 @@ fn spawn_dispatch(
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to spawn `{executable}`"))?;
-    if let StdinBinding::PlanBytes(bytes) = envelope.stdin() {
+    let stdin_writer = if let StdinBinding::PlanBytes(bytes) = envelope.stdin() {
         let mut child_stdin = child
             .stdin
             .take()
             .ok_or_else(|| anyhow!("`{executable}` child stdin was not piped"))?;
-        child_stdin
-            .write_all(bytes)
-            .with_context(|| format!("failed to write plan bytes to `{executable}`"))?;
-        drop(child_stdin);
-    }
+        let bytes = bytes.clone();
+        let executable = executable.to_owned();
+        Some(std::thread::spawn(move || -> Result<()> {
+            child_stdin
+                .write_all(&bytes)
+                .with_context(|| format!("failed to write plan bytes to `{executable}`"))?;
+            drop(child_stdin);
+            Ok(())
+        }))
+    } else {
+        None
+    };
     let child_stdout = child
         .stdout
         .take()
@@ -3057,7 +3064,14 @@ fn spawn_dispatch(
         parent_stdout
             .flush()
             .context("failed to flush Codex JSONL")?;
-        observations.push(observe_terminal_line(&line));
+        if !line.iter().all(u8::is_ascii_whitespace) {
+            observations.push(observe_terminal_line(&line));
+        }
+    }
+    if let Some(writer) = stdin_writer {
+        writer
+            .join()
+            .map_err(|_| anyhow!("plan stdin writer thread panicked"))??;
     }
     let status = child
         .wait()
@@ -3107,10 +3121,7 @@ fn observe_terminal_line(line: &[u8]) -> TerminalObservation {
     };
     match object.get("type").and_then(Value::as_str) {
         Some("turn.completed") => {
-            let usage = object
-                .get("usage")
-                .and_then(Value::as_object)
-                .filter(|usage| usage.len() == 4);
+            let usage = object.get("usage").and_then(Value::as_object);
             let usage = usage.and_then(|usage| {
                 Some(TerminalUsage {
                     input_tokens: usage.get("input_tokens")?.as_u64()?,
@@ -3321,15 +3332,17 @@ mod tests {
     use std::time::SystemTime;
 
     use pce_core::{
-        AppendableFinding, ArtifactPath, BranchState, CurrentArtifactObservation,
-        CurrentArtifactState, EventKindName, EventRecord, EventRecordFilter,
-        GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
-        GitMergeObservation, KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId,
-        ObservedExitStatus, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
-        RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+        AppendableFinding, ArtifactPath, BranchState, CachedInputTokens, CodexTokenUsage,
+        CurrentArtifactObservation, CurrentArtifactState, DispatchExitStatus, EventKindName,
+        EventRecord, EventRecordFilter, ExitCode, GitAuthorityObservation,
+        GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, InputTokens,
+        KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus,
+        OutputTokens, ReadKind, ReadPayload, ReasoningOutputTokens, RecoveryLogPath,
+        RepositoryBranchName, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
         RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation,
-        StepNode, TagName, TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
-        WriteKind, derive_run_state, parse_event_line, render_human_snapshot,
+        StepNode, TagName, TagState, TerminalObservation, VersionPolicy, VisionSlug,
+        WorktreeIdentity, WorktreeState, WriteKind, classify_terminal_usage, derive_run_state,
+        parse_event_line, render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -3338,8 +3351,8 @@ mod tests {
         BranchFetch, Command, DispatchGraphNode, DispatchNode, FORMAT_BOOTSTRAP_CANDIDATES,
         FetchResult, RepositoryContract, RepositoryRuntime, StatusFormat, USAGE,
         already_dispatched, github_pull_request_list_args, lexically_normalized_repository_root,
-        measure_tracked_contract_at_root, observe_git, parse_command, parse_dispatch_graph,
-        parse_tracked_contract, read_at_default_branch_head, read_event_log,
+        measure_tracked_contract_at_root, observe_git, observe_terminal_line, parse_command,
+        parse_dispatch_graph, parse_tracked_contract, read_at_default_branch_head, read_event_log,
         readiness_version_policies, repository_contracts, run, run_log_read,
         select_bootstrap_candidate, validated_snapshot_value,
     };
@@ -5691,6 +5704,73 @@ mod tests {
             let args = prefix.into_iter().chain(suffix).map(str::to_owned);
             let error = parse_command(args).expect_err("partial group must fail");
             assert!(format!("{error:#}").contains("dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence"));
+        }
+
+        let misordered = prefix
+            .into_iter()
+            .chain([
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--role",
+                "step-executor",
+                "--node",
+                "m3-s1",
+                "--ref",
+                "abc",
+                "--evidence",
+                "fixture",
+                "--",
+                "PROMPT",
+            ])
+            .map(str::to_owned);
+        let error = parse_command(misordered).expect_err("misordered complete group must fail");
+        assert!(format!("{error:#}").contains("dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence"));
+
+        let before_plan = prefix
+            .into_iter()
+            .chain([
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--node",
+                "m3-s1",
+                "--role",
+                "step-executor",
+                "--ref",
+                "abc",
+                "--evidence",
+                "fixture",
+                "--plan-file",
+                "/tmp/plan.md",
+                "--",
+                "-",
+            ])
+            .map(str::to_owned);
+        let error = parse_command(before_plan).expect_err("logging before plan must fail");
+        assert!(format!("{error:#}").contains("dispatch arguments require the `--` delimiter"));
+    }
+
+    #[test]
+    fn terminal_observation_ignores_additive_usage_and_non_object_json() {
+        let observation = observe_terminal_line(br#"{"type":"turn.completed","usage":{"total_tokens":146,"input_tokens":101,"cached_input_tokens":23,"output_tokens":17,"reasoning_output_tokens":5}}"#);
+        assert_eq!(
+            classify_terminal_usage(
+                &[observation],
+                DispatchExitStatus::Exited {
+                    code: ExitCode::new(0)
+                }
+            ),
+            Ok(CodexTokenUsage::Measured {
+                input_tokens: InputTokens::new(101),
+                cached_input_tokens: CachedInputTokens::new(23),
+                output_tokens: OutputTokens::new(17),
+                reasoning_output_tokens: ReasoningOutputTokens::new(5),
+            })
+        );
+        for fixture in [b"5".as_slice(), b"\"x\"".as_slice(), b"[]".as_slice()] {
+            assert_eq!(
+                observe_terminal_line(fixture),
+                TerminalObservation::NonTerminal
+            );
         }
     }
 }

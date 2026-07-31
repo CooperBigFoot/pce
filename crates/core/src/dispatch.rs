@@ -26,7 +26,8 @@ pub struct DispatchLogging {
 pub enum TerminalObservation {
     /// The physical line did not parse as JSON.
     MalformedLine,
-    /// A parseable object has no known terminal `type`; absence of `type` is non-terminal.
+    /// A parseable JSON value other than an object, or an object with no known terminal `type`,
+    /// is non-terminal rather than malformed.
     NonTerminal,
     /// A completed turn with either exact counters or malformed usage.
     TurnCompleted(Option<TerminalUsage>),

@@ -71,6 +71,10 @@ exit 127
 const CODEX_SHIM: &str = r#"#!/bin/sh
 program=codex
 root=${PCE_CODEX_RECORD_ROOT:?PCE_CODEX_RECORD_ROOT is required}
+if [ "${PCE_CODEX_SKIP_RECORDING:-}" = 1 ]; then
+    while IFS= read -r line; do printf '%s\n' "$line"; done < "$PCE_CODEX_STDOUT_FILE"
+    exit "$PCE_CODEX_EXIT_CODE"
+fi
 mkdir "$root/invocation" || exit 126
 {
     printf '%s\0' "$program" "$#"
