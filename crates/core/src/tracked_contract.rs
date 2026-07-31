@@ -1,9 +1,9 @@
-//! parse_tracked_repository_contract : TrackedContractBytes → TrackedRepositoryContract ∪ TrackedContractError   (pure, deterministic)
+//! parse_tracked_repository_contract : TrackedContractBytes → TrackedRepositoryContract ∪ TrackedContractError; serialize_tracked_repository_contract : TrackedRepositoryContract → CanonicalTrackedContractBytes ∪ serde_json::Error; admit_recurrent_finding : TrackedRepositoryContract × AppendableFinding × CurrentRunFindingTexts × PriorRunFindingTexts → TrackedRepositoryContract × FindingAdmission   (pure, deterministic)
 //! This module performs no I/O.
 
 use std::collections::HashSet;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
@@ -311,6 +311,105 @@ non_empty_text_type!(
     LockfileRule
 );
 
+/// The closed set of appendable fact categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendableCategory {
+    /// An environmental hazard.
+    EnvironmentHazard,
+    /// An acceptance-gate ordering.
+    GateOrdering,
+    /// A lockfile rule.
+    LockfileRule,
+}
+
+impl AppendableCategory {
+    /// Parse an exact appendable category spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrackedContractError::UnknownAppendableCategory`] for every
+    /// string outside the closed category set.
+    pub fn parse(raw: &str) -> Result<Self, TrackedContractError> {
+        match raw {
+            "environment-hazard" => Ok(Self::EnvironmentHazard),
+            "gate-ordering" => Ok(Self::GateOrdering),
+            "lockfile-rule" => Ok(Self::LockfileRule),
+            _ => Err(TrackedContractError::UnknownAppendableCategory {
+                category: raw.to_owned(),
+            }),
+        }
+    }
+
+    /// Return the exact CLI spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EnvironmentHazard => "environment-hazard",
+            Self::GateOrdering => "gate-ordering",
+            Self::LockfileRule => "lockfile-rule",
+        }
+    }
+}
+
+/// A non-empty finding selected for exactly one appendable category.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppendableFinding {
+    /// An environmental hazard.
+    EnvironmentHazard(EnvironmentHazard),
+    /// An acceptance-gate ordering.
+    GateOrdering(GateOrdering),
+    /// A lockfile rule.
+    LockfileRule(LockfileRule),
+}
+
+impl AppendableFinding {
+    /// Parse a finding under a typed category choice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrackedContractError::EmptyField`] when the finding is empty
+    /// or whitespace-only.
+    pub fn parse(
+        category: AppendableCategory,
+        finding: String,
+    ) -> Result<Self, TrackedContractError> {
+        match category {
+            AppendableCategory::EnvironmentHazard => {
+                non_empty(finding, "appendable.environment_hazards[]")
+                    .map(EnvironmentHazard)
+                    .map(Self::EnvironmentHazard)
+            }
+            AppendableCategory::GateOrdering => non_empty(finding, "appendable.gate_orderings[]")
+                .map(GateOrdering)
+                .map(Self::GateOrdering),
+            AppendableCategory::LockfileRule => non_empty(finding, "appendable.lockfile_rules[]")
+                .map(LockfileRule)
+                .map(Self::LockfileRule),
+        }
+    }
+
+    /// Return the finding text exactly as parsed.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::EnvironmentHazard(finding) => finding.as_str(),
+            Self::GateOrdering(finding) => finding.as_str(),
+            Self::LockfileRule(finding) => finding.as_str(),
+        }
+    }
+}
+
+/// The result of checking and admitting a finding by recurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingAdmission {
+    /// The selected text does not occur in the current run.
+    CurrentOccurrenceMissing,
+    /// The selected text occurs in the current run but not the prior run.
+    FirstOccurrence,
+    /// The recurrent text was appended to its selected category.
+    Appended,
+    /// The recurrent text was already present in its selected category.
+    AlreadyPresent,
+}
+
 /// Inert appendable facts that do not alter the stated contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendableContract {
@@ -356,6 +455,14 @@ pub enum TrackedContractError {
     DuplicateWorkflow {
         /// The repeated workflow name.
         workflow: String,
+    },
+    /// Fires for every CLI category outside the closed appendable category set.
+    #[error(
+        "unknown appendable category {category:?}; expected environment-hazard, gate-ordering, or lockfile-rule"
+    )]
+    UnknownAppendableCategory {
+        /// The rejected category string.
+        category: String,
     },
 }
 
@@ -561,6 +668,70 @@ impl TryFrom<RawAppendableContract> for AppendableContract {
     }
 }
 
+/// Admit a finding only when byte-identical text occurs in both run inputs.
+pub fn admit_recurrent_finding(
+    contract: &mut TrackedRepositoryContract,
+    finding: AppendableFinding,
+    current_run_findings: &[&str],
+    prior_run_findings: &[&str],
+) -> FindingAdmission {
+    let selected = finding.as_str().as_bytes().to_owned();
+    if !current_run_findings
+        .iter()
+        .any(|candidate| candidate.as_bytes() == selected)
+    {
+        return FindingAdmission::CurrentOccurrenceMissing;
+    }
+    if !prior_run_findings
+        .iter()
+        .any(|candidate| candidate.as_bytes() == selected)
+    {
+        return FindingAdmission::FirstOccurrence;
+    }
+
+    match finding {
+        AppendableFinding::EnvironmentHazard(finding) => {
+            if contract
+                .appendable
+                .environment_hazards
+                .iter()
+                .any(|existing| existing.as_str().as_bytes() == selected)
+            {
+                FindingAdmission::AlreadyPresent
+            } else {
+                contract.appendable.environment_hazards.push(finding);
+                FindingAdmission::Appended
+            }
+        }
+        AppendableFinding::GateOrdering(finding) => {
+            if contract
+                .appendable
+                .gate_orderings
+                .iter()
+                .any(|existing| existing.as_str().as_bytes() == selected)
+            {
+                FindingAdmission::AlreadyPresent
+            } else {
+                contract.appendable.gate_orderings.push(finding);
+                FindingAdmission::Appended
+            }
+        }
+        AppendableFinding::LockfileRule(finding) => {
+            if contract
+                .appendable
+                .lockfile_rules
+                .iter()
+                .any(|existing| existing.as_str().as_bytes() == selected)
+            {
+                FindingAdmission::AlreadyPresent
+            } else {
+                contract.appendable.lockfile_rules.push(finding);
+                FindingAdmission::Appended
+            }
+        }
+    }
+}
+
 /// Parse tracked repository contract bytes into the typed two-authority model.
 ///
 /// # Errors
@@ -577,6 +748,182 @@ pub fn parse_tracked_repository_contract(
     raw.try_into()
 }
 
+#[derive(Serialize)]
+struct CanonicalTrackedRepositoryContract<'a> {
+    stated: CanonicalStatedContract<'a>,
+    appendable: CanonicalAppendableContract<'a>,
+}
+
+#[derive(Serialize)]
+struct CanonicalStatedContract<'a> {
+    gates: CanonicalGateCommands<'a>,
+    version_policy: CanonicalVersionPolicy,
+    branches: CanonicalBranchConvention<'a>,
+    pull_requests: CanonicalPullRequestConvention,
+    workflows: Vec<CanonicalWorkflowMapping<'a>>,
+}
+
+#[derive(Serialize)]
+struct CanonicalGateCommands<'a> {
+    format: &'a str,
+    lint: &'a str,
+    typecheck: &'a str,
+    test: &'a str,
+    build: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum CanonicalVersionPolicy {
+    None,
+    SerializeDispatches,
+}
+
+#[derive(Serialize)]
+struct CanonicalBranchConvention<'a> {
+    default: &'a str,
+    milestone: &'a str,
+    step: &'a str,
+}
+
+#[derive(Serialize)]
+struct CanonicalPullRequestConvention {
+    step_base: CanonicalStepPullRequestBase,
+    milestone_base: CanonicalMilestonePullRequestBase,
+    merge_method: CanonicalPullRequestMergeMethod,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum CanonicalStepPullRequestBase {
+    Milestone,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum CanonicalMilestonePullRequestBase {
+    Default,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum CanonicalPullRequestMergeMethod {
+    Squash,
+}
+
+#[derive(Serialize)]
+struct CanonicalWorkflowMapping<'a> {
+    workflow: &'a str,
+    stand_in: CanonicalLocalWorkflowStandIn<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+enum CanonicalLocalWorkflowStandIn<'a> {
+    Command { command: &'a str },
+    None {},
+}
+
+#[derive(Serialize)]
+struct CanonicalAppendableContract<'a> {
+    environment_hazards: Vec<&'a str>,
+    gate_orderings: Vec<&'a str>,
+    lockfile_rules: Vec<&'a str>,
+}
+
+impl<'a> From<&'a TrackedRepositoryContract> for CanonicalTrackedRepositoryContract<'a> {
+    fn from(contract: &'a TrackedRepositoryContract) -> Self {
+        let stated = contract.stated();
+        let gates = stated.gates();
+        let branches = stated.branches();
+        let pull_requests = stated.pull_requests();
+        let appendable = contract.appendable();
+        Self {
+            stated: CanonicalStatedContract {
+                gates: CanonicalGateCommands {
+                    format: gates.format().as_str(),
+                    lint: gates.lint().as_str(),
+                    typecheck: gates.typecheck().as_str(),
+                    test: gates.test().as_str(),
+                    build: gates.build().as_str(),
+                },
+                version_policy: match stated.version_policy() {
+                    VersionPolicy::None => CanonicalVersionPolicy::None,
+                    VersionPolicy::SerializeDispatches => {
+                        CanonicalVersionPolicy::SerializeDispatches
+                    }
+                },
+                branches: CanonicalBranchConvention {
+                    default: branches.default().as_str(),
+                    milestone: branches.milestone().as_str(),
+                    step: branches.step().as_str(),
+                },
+                pull_requests: CanonicalPullRequestConvention {
+                    step_base: match pull_requests.step_base() {
+                        StepPullRequestBase::Milestone => CanonicalStepPullRequestBase::Milestone,
+                    },
+                    milestone_base: match pull_requests.milestone_base() {
+                        MilestonePullRequestBase::Default => {
+                            CanonicalMilestonePullRequestBase::Default
+                        }
+                    },
+                    merge_method: match pull_requests.merge_method() {
+                        PullRequestMergeMethod::Squash => CanonicalPullRequestMergeMethod::Squash,
+                    },
+                },
+                workflows: stated
+                    .workflows()
+                    .as_slice()
+                    .iter()
+                    .map(|mapping| CanonicalWorkflowMapping {
+                        workflow: mapping.workflow().as_str(),
+                        stand_in: match mapping.stand_in() {
+                            LocalWorkflowStandIn::Command(command) => {
+                                CanonicalLocalWorkflowStandIn::Command {
+                                    command: command.as_str(),
+                                }
+                            }
+                            LocalWorkflowStandIn::None => CanonicalLocalWorkflowStandIn::None {},
+                        },
+                    })
+                    .collect(),
+            },
+            appendable: CanonicalAppendableContract {
+                environment_hazards: appendable
+                    .environment_hazards()
+                    .iter()
+                    .map(EnvironmentHazard::as_str)
+                    .collect(),
+                gate_orderings: appendable
+                    .gate_orderings()
+                    .iter()
+                    .map(GateOrdering::as_str)
+                    .collect(),
+                lockfile_rules: appendable
+                    .lockfile_rules()
+                    .iter()
+                    .map(LockfileRule::as_str)
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// Serialize a typed tracked repository contract into canonical JSON bytes.
+///
+/// # Errors
+///
+/// Returns [`serde_json::Error`] if canonical JSON encoding fails.
+#[instrument(skip(contract))]
+pub fn serialize_tracked_repository_contract(
+    contract: &TrackedRepositoryContract,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let wire = CanonicalTrackedRepositoryContract::from(contract);
+    let mut bytes = serde_json::to_vec_pretty(&wire)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use std::any::TypeId;
@@ -584,10 +931,12 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        AppendableContract, DefaultBranchName, EnvironmentHazard, GateKind, GateOrdering,
-        LocalWorkflowStandIn, LockfileRule, MilestoneBranchPattern, MilestonePullRequestBase,
-        PullRequestMergeMethod, StatedContract, StepBranchPattern, StepPullRequestBase,
-        TrackedContractError, parse_tracked_repository_contract,
+        AppendableCategory, AppendableContract, AppendableFinding, DefaultBranchName,
+        EnvironmentHazard, FindingAdmission, GateKind, GateOrdering, LocalWorkflowStandIn,
+        LockfileRule, MilestoneBranchPattern, MilestonePullRequestBase, PullRequestMergeMethod,
+        StatedContract, StepBranchPattern, StepPullRequestBase, TrackedContractError,
+        admit_recurrent_finding, parse_tracked_repository_contract,
+        serialize_tracked_repository_contract,
     };
     use crate::run_state::VersionPolicy;
 
@@ -639,6 +988,90 @@ mod tests {
     ]
   }
 }"#;
+
+    const NON_EMPTY_SERIALIZATION_FIXTURE: &[u8] = br#"{
+  "stated": {
+    "gates": {
+      "format": "cargo fmt --check",
+      "lint": "cargo clippy --workspace --all-targets",
+      "typecheck": "cargo check --workspace --all-targets",
+      "test": "cargo test --workspace",
+      "build": "cargo build --release"
+    },
+    "version_policy": "SERIALIZE_DISPATCHES",
+    "branches": {
+      "default": "trunk",
+      "milestone": "integration/{vision}/{milestone}",
+      "step": "work/{vision}/{milestone}/{step}"
+    },
+    "pull_requests": {
+      "step_base": "MILESTONE",
+      "milestone_base": "DEFAULT",
+      "merge_method": "SQUASH"
+    },
+    "workflows": [
+      {
+        "workflow": "ci.yml",
+        "stand_in": {
+          "kind": "COMMAND",
+          "command": "cargo test --workspace"
+        }
+      },
+      {
+        "workflow": "release.yml",
+        "stand_in": {
+          "kind": "NONE"
+        }
+      }
+    ]
+  },
+  "appendable": {
+    "environment_hazards": [
+      "pipe Codex stdin from /dev/null"
+    ],
+    "gate_orderings": [
+      "run format before lint"
+    ],
+    "lockfile_rules": [
+      "commit Cargo.lock with dependency changes"
+    ]
+  }
+}"#;
+
+    #[test]
+    fn tracked_contract_serializer_is_byte_identical_to_committed_contract() {
+        let committed = include_bytes!("../../../.pce/repository-contract.json");
+        let parsed =
+            parse_tracked_repository_contract(committed).expect("committed contract should parse");
+        let serialized = serialize_tracked_repository_contract(&parsed)
+            .expect("committed contract should serialize");
+        assert_eq!(serialized, committed);
+        let reparsed = parse_tracked_repository_contract(&serialized)
+            .expect("serialized contract should parse");
+        assert_eq!(reparsed, parsed);
+    }
+
+    #[test]
+    fn tracked_contract_serializer_round_trips_both_authority_halves() {
+        let parsed = parse_tracked_repository_contract(NON_EMPTY_SERIALIZATION_FIXTURE)
+            .expect("non-empty contract should parse");
+        let serialized = serialize_tracked_repository_contract(&parsed)
+            .expect("non-empty contract should serialize");
+        let reparsed = parse_tracked_repository_contract(&serialized)
+            .expect("serialized contract should parse");
+        assert_eq!(reparsed, parsed);
+
+        let fixture_value: Value = serde_json::from_slice(NON_EMPTY_SERIALIZATION_FIXTURE)
+            .expect("fixture should be JSON");
+        let serialized_value: Value =
+            serde_json::from_slice(&serialized).expect("serialized contract should be JSON");
+        assert_eq!(serialized_value, fixture_value);
+        assert!(
+            serialized_value["stated"]["workflows"][1]["stand_in"]
+                .get("command")
+                .is_none()
+        );
+    }
 
     fn canonical_value() -> Value {
         serde_json::from_slice(VALID_TRACKED_CONTRACT).expect("canonical fixture should be JSON")
@@ -841,5 +1274,127 @@ mod tests {
             TypeId::of::<LockfileRule>()
         );
         assert_ne!(TypeId::of::<GateOrdering>(), TypeId::of::<LockfileRule>());
+    }
+
+    #[test]
+    fn appendable_category_accepts_only_the_three_exact_spellings() {
+        for (raw, expected) in [
+            ("environment-hazard", AppendableCategory::EnvironmentHazard),
+            ("gate-ordering", AppendableCategory::GateOrdering),
+            ("lockfile-rule", AppendableCategory::LockfileRule),
+        ] {
+            let parsed = AppendableCategory::parse(raw).expect("exact category should parse");
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.as_str(), raw);
+        }
+
+        let err = AppendableCategory::parse("environment_hazards")
+            .expect_err("non-canonical category should fail");
+        assert_eq!(
+            err.to_string(),
+            "unknown appendable category \"environment_hazards\"; expected environment-hazard, \
+             gate-ordering, or lockfile-rule"
+        );
+    }
+
+    #[test]
+    fn recurrent_finding_requires_byte_exact_text_in_both_run_inputs() {
+        let mut contract = parse_tracked_repository_contract(VALID_TRACKED_CONTRACT)
+            .expect("fixture should parse");
+        let original = contract.clone();
+        let finding = AppendableFinding::parse(
+            AppendableCategory::LockfileRule,
+            "regenerate Cargo.lock".to_owned(),
+        )
+        .expect("finding should parse");
+
+        assert_eq!(
+            admit_recurrent_finding(
+                &mut contract,
+                finding.clone(),
+                &["other"],
+                &["regenerate Cargo.lock"]
+            ),
+            FindingAdmission::CurrentOccurrenceMissing
+        );
+        assert_eq!(contract, original);
+        assert_eq!(
+            admit_recurrent_finding(
+                &mut contract,
+                finding.clone(),
+                &["regenerate Cargo.lock"],
+                &["Regenerate Cargo.lock"]
+            ),
+            FindingAdmission::FirstOccurrence
+        );
+        assert_eq!(contract, original);
+        assert_eq!(
+            admit_recurrent_finding(
+                &mut contract,
+                finding.clone(),
+                &["regenerate Cargo.lock"],
+                &["regenerate Cargo.lock "]
+            ),
+            FindingAdmission::FirstOccurrence
+        );
+        assert_eq!(contract, original);
+
+        let composed =
+            AppendableFinding::parse(AppendableCategory::EnvironmentHazard, "café".to_owned())
+                .expect("Unicode finding should parse");
+        assert_eq!(
+            admit_recurrent_finding(&mut contract, composed, &["café"], &["cafe\u{301}"]),
+            FindingAdmission::FirstOccurrence
+        );
+        assert_eq!(contract, original);
+
+        assert_eq!(
+            admit_recurrent_finding(
+                &mut contract,
+                finding,
+                &["regenerate Cargo.lock"],
+                &["regenerate Cargo.lock"]
+            ),
+            FindingAdmission::Appended
+        );
+        assert_eq!(contract.appendable().lockfile_rules().len(), 2);
+        assert_eq!(
+            contract.appendable().lockfile_rules()[1].as_str(),
+            "regenerate Cargo.lock"
+        );
+    }
+
+    #[test]
+    fn recurrent_finding_routes_each_category_once() {
+        let mut contract = parse_tracked_repository_contract(VALID_TRACKED_CONTRACT)
+            .expect("fixture should parse");
+        let stated_before =
+            serde_json::to_value(&canonical_value()["stated"]).expect("stated should serialize");
+
+        for (category, text) in [
+            (AppendableCategory::EnvironmentHazard, "environment two"),
+            (AppendableCategory::GateOrdering, "ordering two"),
+            (AppendableCategory::LockfileRule, "lockfile two"),
+        ] {
+            let finding =
+                AppendableFinding::parse(category, text.to_owned()).expect("finding should parse");
+            assert_eq!(
+                admit_recurrent_finding(&mut contract, finding.clone(), &[text], &[text]),
+                FindingAdmission::Appended
+            );
+            assert_eq!(
+                admit_recurrent_finding(&mut contract, finding, &[text], &[text]),
+                FindingAdmission::AlreadyPresent
+            );
+        }
+
+        assert_eq!(contract.appendable().environment_hazards().len(), 2);
+        assert_eq!(contract.appendable().gate_orderings().len(), 2);
+        assert_eq!(contract.appendable().lockfile_rules().len(), 2);
+        let serialized = serialize_tracked_repository_contract(&contract)
+            .expect("admitted contract should serialize");
+        let serialized_value: Value =
+            serde_json::from_slice(&serialized).expect("serialized contract should be JSON");
+        assert_eq!(serialized_value["stated"], stated_before);
     }
 }
