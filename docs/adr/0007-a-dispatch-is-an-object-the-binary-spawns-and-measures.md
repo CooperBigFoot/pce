@@ -39,6 +39,12 @@ completion when the child exits, carrying wall-clock, token usage, exit status, 
 artifact the binary validated. A missing or non-conforming verdict artifact means the dispatch
 produced nothing; the child's transcript is never read as a fallback.
 
+The m3-s1 cutover makes this lifecycle opt-in through the complete logging flag group. Issuance and
+completion use separate lock acquisitions, and completion names the issuance sequence rather than
+assuming adjacency. Codex stdout is teed as JSONL. Terminal classification distinguishes measured
+completion, failed turns, absent turns, malformed data, duplicates, and contradictions; Unix signal
+termination counts as nonzero. Artifact outcome remains `not-validated` until m4.
+
 ## Consequences
 
 The alternative for the gate half was to keep subagents and have the binary register the expected

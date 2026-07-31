@@ -2,20 +2,23 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::GateCommand;
 use pce_core::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
-    AppendableCategory, AppendableFinding, ArgumentVector, ArtifactPath, AuthorityFailure,
-    BranchState, CanonicalNode as DispatchNode, ChildEnvironment, CreationDate,
-    CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchEnvelope,
+    AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath,
+    AuthorityFailure, BranchState, CanonicalNode as DispatchNode, ChildEnvironment,
+    CodexTokenUsage, CreationDate, CurrentArtifactObservation, CurrentArtifactState,
+    DispatchCandidate, DispatchCompletionPayload, DispatchDuration, DispatchEnvelope,
+    DispatchExitStatus, DispatchLogging, DispatchPayload, DispatchRef, DispatchRole,
     DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail,
     EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
-    ExactPullRequestIdentity, ExactPullRequestState, Executable, FindingAdmission,
+    ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode, FindingAdmission,
     GateObservations, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
@@ -23,9 +26,10 @@ use pce_core::{
     OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
     RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot, Sandbox,
-    Sha256Digest, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode, TagName,
-    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName,
-    VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
+    Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
+    TagName, TagState, TagTarget, TerminalObservation, TerminalUsage, TrackedRepositoryContract,
+    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
+    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_terminal_usage,
     compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
     derive_run_state, event_record_matches, measure_contract_snapshot, parse_event_line,
     parse_tracked_repository_contract, render_human_snapshot,
@@ -44,7 +48,7 @@ const USAGE: &str = concat!(
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
-    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] -- <CODEX_ARGUMENT>..."
+    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE>] -- <CODEX_ARGUMENT>..."
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
@@ -74,7 +78,10 @@ const BUILD_BOOTSTRAP_CANDIDATES: &[&str] = &[
 
 #[derive(Debug)]
 enum Command {
-    Dispatch(DispatchEnvelope),
+    Dispatch {
+        envelope: DispatchEnvelope,
+        logging: Option<(PathBuf, DispatchLogging)>,
+    },
     VisionNew {
         name: VisionName,
     },
@@ -252,7 +259,7 @@ fn main() -> Result<()> {
 
 fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
     match parse_command(args)? {
-        Command::Dispatch(envelope) => spawn_dispatch(&envelope),
+        Command::Dispatch { envelope, logging } => spawn_dispatch(&envelope, logging.as_ref()),
         Command::VisionNew { name } => run_vision_new(&name),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
@@ -369,6 +376,33 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         None
     };
 
+    const LOGGING_DIAGNOSTIC: &str = "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence";
+    let logging_raw = if rest
+        .get(position)
+        .is_some_and(|value| value == "--log-file")
+    {
+        let parsed = (|| -> Result<(&str, &str, &str, &str, &str)> {
+            Ok((
+                required_option(rest, &mut position, "--log-file")?,
+                required_option(rest, &mut position, "--node")?,
+                required_option(rest, &mut position, "--role")?,
+                required_option(rest, &mut position, "--ref")?,
+                required_option(rest, &mut position, "--evidence")?,
+            ))
+        })();
+        match parsed {
+            Ok(values) => Some(values),
+            Err(_) => bail!(LOGGING_DIAGNOSTIC),
+        }
+    } else if rest
+        .get(position)
+        .is_some_and(|value| matches!(value.as_str(), "--node" | "--role" | "--ref" | "--evidence"))
+    {
+        bail!(LOGGING_DIAGNOSTIC)
+    } else {
+        None
+    };
+
     if rest.get(position).is_none_or(|value| value != "--") {
         bail!("dispatch arguments require the `--` delimiter");
     }
@@ -399,7 +433,21 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
                     .context("failed to parse dispatch output path")?,
             );
     }
-    Ok(Command::Dispatch(envelope))
+    let logging = logging_raw
+        .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
+            Ok((
+                PathBuf::from(path),
+                DispatchLogging {
+                    node: NodeId::parse(node).context("failed to parse dispatch logging node")?,
+                    role: DispatchRole::new(role),
+                    dispatch_ref: DispatchRef::new(dispatch_ref),
+                    evidence: Evidence::parse(evidence)
+                        .context("failed to parse dispatch logging evidence")?,
+                },
+            ))
+        })
+        .transpose()?;
+    Ok(Command::Dispatch { envelope, logging })
 }
 
 fn required_option<'a>(rest: &'a [String], position: &mut usize, flag: &str) -> Result<&'a str> {
@@ -695,6 +743,30 @@ fn run_log(path: &Path, kind: WriteKind, node: NodeId, input: &mut dyn Read) -> 
         (Ok(()), Err(unlock_error)) => Err(unlock_error),
         (Err(primary), Err(unlock_error)) => Err(primary.context(format!(
             "additionally, explicit event-log unlock failed: {unlock_error:#}"
+        ))),
+    }
+}
+
+fn append_one(path: &Path, kind: WriteKind, node: NodeId, payload: String) -> Result<EventRecord> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("failed to open or create event log {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("failed to lock event log {}", path.display()))?;
+    let operation = append_locked_record(&mut file, payload, kind, node, path);
+    let unlock = file
+        .unlock()
+        .with_context(|| format!("failed to unlock event log {}", path.display()));
+    match (operation, unlock) {
+        (Ok(record), Ok(())) => Ok(record),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(primary), Err(error)) => Err(primary.context(format!(
+            "additionally, explicit event-log unlock failed: {error:#}"
         ))),
     }
 }
@@ -2899,10 +2971,29 @@ fn tracked_contract_at_branch_head(
     }
 }
 
-fn spawn_dispatch(envelope: &DispatchEnvelope) -> Result<()> {
+fn spawn_dispatch(
+    envelope: &DispatchEnvelope,
+    logging: Option<&(PathBuf, DispatchLogging)>,
+) -> Result<()> {
+    let issuance = logging
+        .map(|(path, metadata)| {
+            let payload = DispatchPayload {
+                role: metadata.role.clone(),
+                r#ref: metadata.dispatch_ref.clone(),
+                evidence: metadata.evidence.clone(),
+            };
+            append_one(
+                path,
+                WriteKind::Dispatch,
+                metadata.node.clone(),
+                serde_json::to_string(&payload).context("failed to serialize dispatch issuance")?,
+            )
+        })
+        .transpose()?;
     let executable = envelope.executable().as_str();
     let mut command = std::process::Command::new(executable);
     command.arg("exec");
+    command.arg("--json");
     command
         .arg("-C")
         .arg(envelope.working_directory().as_path());
@@ -2927,29 +3018,152 @@ fn spawn_dispatch(envelope: &DispatchEnvelope) -> Result<()> {
             command.stdin(Stdio::piped());
         }
     }
-    command.stdout(Stdio::inherit());
+    command.stdout(Stdio::piped());
     command.stderr(Stdio::inherit());
 
+    let started = Instant::now();
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to spawn `{executable}`"))?;
-    if let StdinBinding::PlanBytes(bytes) = envelope.stdin() {
+    let stdin_writer = if let StdinBinding::PlanBytes(bytes) = envelope.stdin() {
         let mut child_stdin = child
             .stdin
             .take()
             .ok_or_else(|| anyhow!("`{executable}` child stdin was not piped"))?;
-        child_stdin
-            .write_all(bytes)
-            .with_context(|| format!("failed to write plan bytes to `{executable}`"))?;
-        drop(child_stdin);
+        let bytes = bytes.clone();
+        let executable = executable.to_owned();
+        Some(std::thread::spawn(move || -> Result<()> {
+            child_stdin
+                .write_all(&bytes)
+                .with_context(|| format!("failed to write plan bytes to `{executable}`"))?;
+            drop(child_stdin);
+            Ok(())
+        }))
+    } else {
+        None
+    };
+    let child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("`{executable}` child stdout was not piped"))?;
+    let mut reader = BufReader::new(child_stdout);
+    let stdout = std::io::stdout();
+    let mut parent_stdout = stdout.lock();
+    let mut observations = Vec::new();
+    loop {
+        let mut line = Vec::new();
+        let count = reader
+            .read_until(b'\n', &mut line)
+            .with_context(|| format!("failed to read JSONL from `{executable}`"))?;
+        if count == 0 {
+            break;
+        }
+        parent_stdout
+            .write_all(&line)
+            .context("failed to tee Codex JSONL to stdout")?;
+        parent_stdout
+            .flush()
+            .context("failed to flush Codex JSONL")?;
+        if !line.iter().all(u8::is_ascii_whitespace) {
+            observations.push(observe_terminal_line(&line));
+        }
+    }
+    if let Some(writer) = stdin_writer {
+        writer
+            .join()
+            .map_err(|_| anyhow!("plan stdin writer thread panicked"))??;
     }
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for `{executable}`"))?;
+    let duration_ms = u64::try_from(started.elapsed().as_millis())
+        .context("dispatch duration in milliseconds exceeds u64")?;
+    let exit_status = dispatch_exit_status(status)?;
+    let classification = classify_terminal_usage(&observations, exit_status);
+    if let (Some((path, metadata)), Some(issuance)) = (logging, issuance) {
+        let usage = classification
+            .clone()
+            .unwrap_or_else(|reason| CodexTokenUsage::Absent { reason });
+        let completion = DispatchCompletionPayload {
+            issuance_sequence: issuance.sequence(),
+            duration_ms: DispatchDuration::new(duration_ms),
+            usage,
+            exit_status,
+            artifact_outcome: ArtifactOutcome::NotValidated,
+        };
+        append_one(
+            path,
+            WriteKind::DispatchCompletion,
+            metadata.node.clone(),
+            serde_json::to_string(&completion)
+                .context("failed to serialize dispatch completion")?,
+        )
+        .context("failed to append dispatch completion after child exit")?;
+    }
+    if let Err(reason) = classification {
+        bail!(
+            "invalid Codex terminal data: {}",
+            usage_absence_name(reason)
+        );
+    }
     if !status.success() {
         bail!("`{executable}` child exited with status {status}");
     }
     Ok(())
+}
+
+fn observe_terminal_line(line: &[u8]) -> TerminalObservation {
+    let Ok(value) = serde_json::from_slice::<Value>(line) else {
+        return TerminalObservation::MalformedLine;
+    };
+    let Some(object) = value.as_object() else {
+        return TerminalObservation::NonTerminal;
+    };
+    match object.get("type").and_then(Value::as_str) {
+        Some("turn.completed") => {
+            let usage = object.get("usage").and_then(Value::as_object);
+            let usage = usage.and_then(|usage| {
+                Some(TerminalUsage {
+                    input_tokens: usage.get("input_tokens")?.as_u64()?,
+                    cached_input_tokens: usage.get("cached_input_tokens")?.as_u64()?,
+                    output_tokens: usage.get("output_tokens")?.as_u64()?,
+                    reasoning_output_tokens: usage.get("reasoning_output_tokens")?.as_u64()?,
+                })
+            });
+            TerminalObservation::TurnCompleted(usage)
+        }
+        Some("turn.failed") => TerminalObservation::TurnFailed {
+            usage_present: object.contains_key("usage"),
+        },
+        _ => TerminalObservation::NonTerminal,
+    }
+}
+
+fn dispatch_exit_status(status: ExitStatus) -> Result<DispatchExitStatus> {
+    if let Some(code) = status.code() {
+        let code = u64::try_from(code).context("negative child exit code cannot be represented")?;
+        return Ok(DispatchExitStatus::Exited {
+            code: ExitCode::new(code),
+        });
+    }
+    if let Some(signal) = status.signal() {
+        let signal =
+            u64::try_from(signal).context("negative signal number cannot be represented")?;
+        return Ok(DispatchExitStatus::Signaled {
+            signal: SignalNumber::new(signal),
+        });
+    }
+    bail!("child exit status has neither an exit code nor a Unix signal")
+}
+
+fn usage_absence_name(reason: UsageAbsenceReason) -> &'static str {
+    match reason {
+        UsageAbsenceReason::TurnFailed => "turn-failed",
+        UsageAbsenceReason::NoTerminalTurn => "no-terminal-turn",
+        UsageAbsenceReason::MalformedTerminalData => "malformed-terminal-data",
+        UsageAbsenceReason::DuplicateTerminalData => "duplicate-terminal-data",
+        UsageAbsenceReason::ContradictoryTerminalData => "contradictory-terminal-data",
+    }
 }
 
 fn execute_process(program: &str, args: &[OsString], current_dir: Option<&Path>) -> ProcessAttempt {
@@ -3048,6 +3262,16 @@ fn append_locked(
     node: NodeId,
     path: &Path,
 ) -> Result<()> {
+    append_locked_record(file, payload, kind, node, path).map(|_| ())
+}
+
+fn append_locked_record(
+    file: &mut File,
+    payload: String,
+    kind: WriteKind,
+    node: NodeId,
+    path: &Path,
+) -> Result<EventRecord> {
     file.seek(SeekFrom::Start(0))
         .with_context(|| format!("failed to seek event log {} for tail read", path.display()))?;
     let mut content = Vec::new();
@@ -3061,7 +3285,7 @@ fn append_locked(
         None => EventLogTail::Present(EventLogTailLine::new("")),
     };
 
-    append_event::<std::io::Error, _>(
+    let intent = append_event::<std::io::Error, _>(
         kind,
         UnparsedPayload::new(payload),
         tail,
@@ -3076,7 +3300,10 @@ fn append_locked(
 
     file.sync_all()
         .with_context(|| format!("failed to sync event log {}", path.display()))?;
-    Ok(())
+    let line = std::str::from_utf8(intent.as_bytes())
+        .context("new event record is not UTF-8")?
+        .trim_end_matches('\n');
+    parse_event_line(line).context("failed to parse just-appended production event record")
 }
 
 fn classify_append_error(error: AppendError<std::io::Error>) -> Error {
@@ -3105,15 +3332,17 @@ mod tests {
     use std::time::SystemTime;
 
     use pce_core::{
-        AppendableFinding, ArtifactPath, BranchState, CurrentArtifactObservation,
-        CurrentArtifactState, EventKindName, EventRecord, EventRecordFilter,
-        GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
-        GitMergeObservation, KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId,
-        ObservedExitStatus, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
-        RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+        AppendableFinding, ArtifactPath, BranchState, CachedInputTokens, CodexTokenUsage,
+        CurrentArtifactObservation, CurrentArtifactState, DispatchExitStatus, EventKindName,
+        EventRecord, EventRecordFilter, ExitCode, GitAuthorityObservation,
+        GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, InputTokens,
+        KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus,
+        OutputTokens, ReadKind, ReadPayload, ReasoningOutputTokens, RecoveryLogPath,
+        RepositoryBranchName, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
         RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation,
-        StepNode, TagName, TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
-        WriteKind, derive_run_state, parse_event_line, render_human_snapshot,
+        StepNode, TagName, TagState, TerminalObservation, VersionPolicy, VisionSlug,
+        WorktreeIdentity, WorktreeState, WriteKind, classify_terminal_usage, derive_run_state,
+        parse_event_line, render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -3122,8 +3351,8 @@ mod tests {
         BranchFetch, Command, DispatchGraphNode, DispatchNode, FORMAT_BOOTSTRAP_CANDIDATES,
         FetchResult, RepositoryContract, RepositoryRuntime, StatusFormat, USAGE,
         already_dispatched, github_pull_request_list_args, lexically_normalized_repository_root,
-        measure_tracked_contract_at_root, observe_git, parse_command, parse_dispatch_graph,
-        parse_tracked_contract, read_at_default_branch_head, read_event_log,
+        measure_tracked_contract_at_root, observe_git, observe_terminal_line, parse_command,
+        parse_dispatch_graph, parse_tracked_contract, read_at_default_branch_head, read_event_log,
         readiness_version_policies, repository_contracts, run, run_log_read,
         select_bootstrap_candidate, validated_snapshot_value,
     };
@@ -4118,13 +4347,18 @@ mod tests {
     }
 
     #[test]
-    fn accepts_all_seven_registered_payload_schemas() {
+    fn accepts_all_eight_registered_payload_schemas() {
         let directory = tempdir().expect("temporary directory should create");
         let fixtures = [
             (
                 "dispatch",
                 r#"{"role":"step-executor","ref":"ca9788ded3daec9b9e9fd7679caa24e7c64a8193","evidence":"git rev-parse HEAD"}"#,
                 WriteKind::Dispatch,
+            ),
+            (
+                "dispatch-completion",
+                r#"{"issuance_sequence":1,"duration_ms":200,"usage":{"availability":"absent","reason":"no-terminal-turn"},"exit_status":{"kind":"exited","code":42},"artifact_outcome":"not-validated"}"#,
+                WriteKind::DispatchCompletion,
             ),
             (
                 "delta",
@@ -5417,5 +5651,126 @@ mod tests {
             value["recovery_digest"]["facts"]["entries"][0]["kind"],
             "planning-artifact-approved"
         );
+    }
+
+    #[test]
+    fn dispatch_logging_group_is_exact_ordered_and_all_or_none() {
+        let prefix = [
+            "dispatch",
+            "codex",
+            "--cwd",
+            "/tmp",
+            "--sandbox",
+            "workspace-write",
+        ];
+        let complete = prefix
+            .into_iter()
+            .chain([
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--node",
+                "m3-s1",
+                "--role",
+                "step-executor",
+                "--ref",
+                "abc",
+                "--evidence",
+                "fixture",
+                "--",
+                "PROMPT",
+            ])
+            .map(str::to_owned);
+        let command = parse_command(complete).expect("parse complete logging group");
+        let Command::Dispatch { logging, .. } = command else {
+            panic!("parsed another command")
+        };
+        let (path, metadata) = logging.expect("logging metadata");
+        assert_eq!(path, PathBuf::from("/tmp/events.jsonl"));
+        assert_eq!(metadata.node.as_str(), "m3-s1");
+        assert_eq!(metadata.role.as_str(), "step-executor");
+
+        for suffix in [
+            vec!["--log-file", "/tmp/events.jsonl", "--"],
+            vec!["--node", "m3-s1", "--"],
+            vec![
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--role",
+                "step-executor",
+                "--",
+            ],
+            vec!["--evidence", "fixture", "--"],
+        ] {
+            let args = prefix.into_iter().chain(suffix).map(str::to_owned);
+            let error = parse_command(args).expect_err("partial group must fail");
+            assert!(format!("{error:#}").contains("dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence"));
+        }
+
+        let misordered = prefix
+            .into_iter()
+            .chain([
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--role",
+                "step-executor",
+                "--node",
+                "m3-s1",
+                "--ref",
+                "abc",
+                "--evidence",
+                "fixture",
+                "--",
+                "PROMPT",
+            ])
+            .map(str::to_owned);
+        let error = parse_command(misordered).expect_err("misordered complete group must fail");
+        assert!(format!("{error:#}").contains("dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence"));
+
+        let before_plan = prefix
+            .into_iter()
+            .chain([
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--node",
+                "m3-s1",
+                "--role",
+                "step-executor",
+                "--ref",
+                "abc",
+                "--evidence",
+                "fixture",
+                "--plan-file",
+                "/tmp/plan.md",
+                "--",
+                "-",
+            ])
+            .map(str::to_owned);
+        let error = parse_command(before_plan).expect_err("logging before plan must fail");
+        assert!(format!("{error:#}").contains("dispatch arguments require the `--` delimiter"));
+    }
+
+    #[test]
+    fn terminal_observation_ignores_additive_usage_and_non_object_json() {
+        let observation = observe_terminal_line(br#"{"type":"turn.completed","usage":{"total_tokens":146,"input_tokens":101,"cached_input_tokens":23,"output_tokens":17,"reasoning_output_tokens":5}}"#);
+        assert_eq!(
+            classify_terminal_usage(
+                &[observation],
+                DispatchExitStatus::Exited {
+                    code: ExitCode::new(0)
+                }
+            ),
+            Ok(CodexTokenUsage::Measured {
+                input_tokens: InputTokens::new(101),
+                cached_input_tokens: CachedInputTokens::new(23),
+                output_tokens: OutputTokens::new(17),
+                reasoning_output_tokens: ReasoningOutputTokens::new(5),
+            })
+        );
+        for fixture in [b"5".as_slice(), b"\"x\"".as_slice(), b"[]".as_slice()] {
+            assert_eq!(
+                observe_terminal_line(fixture),
+                TerminalObservation::NonTerminal
+            );
+        }
     }
 }

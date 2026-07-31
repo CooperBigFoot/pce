@@ -26,6 +26,13 @@ codex exec "summarize the repository structure and list the top 5 risky areas"
 
 While `codex exec` runs, Codex streams progress to `stderr` and prints only the final agent message to `stdout`. This makes it straightforward to redirect or pipe the final result:
 
+`pce dispatch codex` always adds `--json`, so its stdout is instead the byte-preserved live JSONL
+event stream. Stderr remains live progress. Use `-o` with `--output-schema` for the final-message
+file channel. Supplying the complete `--log-file`, `--node`, `--role`, `--ref`, and `--evidence`
+group opts into two durable records: issuance before spawn and measured completion after exit.
+The completion correlates by the exact issuance sequence, records elapsed milliseconds, terminal
+usage or an explicit absence reason, normal exit or Unix signal, and `not-validated` artifact state.
+
 ```bash
 codex exec "generate release notes for the last 10 commits" | tee release-notes.md
 ```
