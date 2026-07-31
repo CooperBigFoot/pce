@@ -726,6 +726,7 @@ dependencies = [
  "chrono",
  "jsonschema",
  "pce-core",
+ "serde",
  "serde_json",
  "serde_yaml",
  "sha2",

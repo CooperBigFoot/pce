@@ -1,11 +1,384 @@
-//! DispatchEnvelope = Executable × ArgumentVector × AbsoluteWorkingDirectory × ChildEnvironment × StdinBinding × Option<Sandbox> × Option<AbsoluteSchemaPath> × Option<AbsoluteOutputPath>   (pure, deterministic)
+//! dispatch projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; terminal_usage : JSONL observations × ExitStatus → CodexTokenUsage   (pure, deterministic)
 //! This provisional module describes child invocations; the binary adapter performs all I/O and process work and will test the shape against the real tool surface in m2-s2.
 
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
+
+use crate::event_log::{
+    ArtifactOutcome, CachedInputTokens, CodexTokenUsage, DispatchCompletionPayload,
+    DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef, DispatchRole, EventLogTail,
+    EventLogTailError, EventTimestamp, Evidence, InputTokens, NodeId, OutputTokens,
+    ReasoningOutputTokens, Sequence, UsageAbsenceReason, WriteKind, successor_sequence,
+};
+
+/// Typed log metadata carried beside, rather than inside, a child envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchLogging {
+    pub node: NodeId,
+    pub role: DispatchRole,
+    pub dispatch_ref: DispatchRef,
+    pub evidence: Evidence,
+}
+
+/// Construct the shared concrete dispatch issuance payload.
+pub fn dispatch_payload(logging: &DispatchLogging) -> DispatchPayload {
+    DispatchPayload {
+        role: logging.role.clone(),
+        r#ref: logging.dispatch_ref.clone(),
+        evidence: logging.evidence.clone(),
+    }
+}
+
+/// Construct the shared concrete m3 dispatch completion payload.
+pub fn dispatch_completion_payload(
+    issuance_sequence: Sequence,
+    duration_ms: DispatchDuration,
+    usage: CodexTokenUsage,
+    exit_status: DispatchExitStatus,
+) -> DispatchCompletionPayload {
+    DispatchCompletionPayload {
+        issuance_sequence,
+        duration_ms,
+        usage,
+        exit_status,
+        artifact_outcome: ArtifactOutcome::NotValidated,
+    }
+}
+
+/// A typed prospective value that cannot carry a fabricated observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deferred<T> {
+    state: DeferredState,
+    #[serde(skip)]
+    marker: PhantomData<fn() -> T>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum DeferredState {
+    Deferred,
+}
+
+impl<T> Default for Deferred<T> {
+    fn default() -> Self {
+        Self {
+            state: DeferredState::Deferred,
+            marker: PhantomData,
+        }
+    }
+}
+
+/// The exact stdin portion of an ordered shell-free invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DispatchInvocationStdin {
+    binding: &'static str,
+    bytes: Option<Vec<u8>>,
+}
+
+/// The complete ordered shell-free child invocation shared by live and projection paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DispatchInvocation {
+    executable: String,
+    argv: Vec<String>,
+    cwd: String,
+    environment: BTreeMap<String, String>,
+    stdin: DispatchInvocationStdin,
+    schema_path: Option<String>,
+    output_path: Option<String>,
+}
+
+impl DispatchInvocation {
+    /// Return the program name passed directly to the process adapter.
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+    /// Borrow the complete ordered child argument vector.
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+    /// Return the exact working-directory spelling.
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+    /// Borrow the complete explicit child environment.
+    pub fn environment(&self) -> &BTreeMap<String, String> {
+        &self.environment
+    }
+    /// Borrow exact plan bytes, or return `None` for null stdin.
+    pub fn stdin_bytes(&self) -> Option<&[u8]> {
+        self.stdin.bytes.as_deref()
+    }
+}
+
+/// Render the complete ordered child invocation from an envelope.
+pub fn dispatch_invocation(envelope: &DispatchEnvelope) -> DispatchInvocation {
+    let cwd = envelope.working_directory().as_path().display().to_string();
+    let mut argv = vec![
+        "exec".to_owned(),
+        "--json".to_owned(),
+        "-C".to_owned(),
+        cwd.clone(),
+    ];
+    if let Some(sandbox) = envelope.sandbox() {
+        argv.extend(["--sandbox".to_owned(), sandbox.as_str().to_owned()]);
+    }
+    if let Some(path) = envelope.schema_path() {
+        argv.extend([
+            "--output-schema".to_owned(),
+            path.as_path().display().to_string(),
+        ]);
+    }
+    if let Some(path) = envelope.output_path() {
+        argv.extend(["-o".to_owned(), path.as_path().display().to_string()]);
+    }
+    argv.extend(envelope.arguments().as_slice().iter().cloned());
+    let environment = envelope
+        .environment()
+        .iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect();
+    let stdin = match envelope.stdin() {
+        StdinBinding::Null => DispatchInvocationStdin {
+            binding: "null",
+            bytes: None,
+        },
+        StdinBinding::PlanBytes(bytes) => DispatchInvocationStdin {
+            binding: "plan-bytes",
+            bytes: Some(bytes.clone()),
+        },
+    };
+    DispatchInvocation {
+        executable: envelope.executable().as_str().to_owned(),
+        argv,
+        cwd,
+        environment,
+        stdin,
+        schema_path: envelope
+            .schema_path()
+            .map(|path| path.as_path().display().to_string()),
+        output_path: envelope
+            .output_path()
+            .map(|path| path.as_path().display().to_string()),
+    }
+}
+
+/// Read-only facts from which a dry-run projection can be computed.
+pub struct DispatchProjectionInput<'a> {
+    envelope: &'a DispatchEnvelope,
+    logging: &'a DispatchLogging,
+    log_tail: &'a EventLogTail,
+}
+
+impl<'a> DispatchProjectionInput<'a> {
+    /// Construct a projection input containing exactly three immutable domain facts.
+    ///
+    /// ```
+    /// use pce_core::{AbsoluteWorkingDirectory, DispatchEnvelope, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole, EventLogTail, Evidence, Executable, NodeId, StdinBinding};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let envelope = DispatchEnvelope::new(Executable::parse("codex")?, AbsoluteWorkingDirectory::parse("/tmp")?, StdinBinding::Null);
+    /// let logging = DispatchLogging { node: NodeId::parse("m3-s2")?, role: DispatchRole::new("step-executor"), dispatch_ref: DispatchRef::new("ref"), evidence: Evidence::parse("fixture")? };
+    /// let tail = EventLogTail::Empty;
+    /// let _input = DispatchProjectionInput::new(&envelope, &logging, &tail);
+    /// # Ok(()) }
+    /// ```
+    /// ```compile_fail
+    /// use pce_core::{AbsoluteWorkingDirectory, DispatchEnvelope, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole, EventLogTail, Evidence, Executable, NodeId, StdinBinding};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let envelope = DispatchEnvelope::new(Executable::parse("codex")?, AbsoluteWorkingDirectory::parse("/tmp")?, StdinBinding::Null);
+    /// let logging = DispatchLogging { node: NodeId::parse("m3-s2")?, role: DispatchRole::new("step-executor"), dispatch_ref: DispatchRef::new("ref"), evidence: Evidence::parse("fixture")? };
+    /// let tail = EventLogTail::Empty;
+    /// let _input = DispatchProjectionInput::new(&envelope, &logging, &tail, |_bytes: &[u8]| Ok::<(), std::io::Error>(()));
+    /// # Ok(()) }
+    /// ```
+    pub fn new(
+        envelope: &'a DispatchEnvelope,
+        logging: &'a DispatchLogging,
+        log_tail: &'a EventLogTail,
+    ) -> Self {
+        Self {
+            envelope,
+            logging,
+            log_tail,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DispatchProjection<'a> {
+    envelope: DispatchInvocation,
+    issuance: ProjectedIssuance<'a>,
+    completion: ProjectedCompletion<'a>,
+}
+
+#[derive(Serialize)]
+struct ProjectedIssuance<'a> {
+    sequence: Deferred<Sequence>,
+    timestamp: Deferred<EventTimestamp>,
+    kind: &'static str,
+    node: &'a NodeId,
+    payload: DispatchPayload,
+}
+
+#[derive(Serialize)]
+struct ProjectedCompletion<'a> {
+    sequence: Deferred<Sequence>,
+    timestamp: Deferred<EventTimestamp>,
+    kind: &'static str,
+    node: &'a NodeId,
+    payload: ProjectedCompletionPayload,
+}
+
+#[derive(Serialize)]
+struct ProjectedCompletionPayload {
+    issuance_sequence: Deferred<Sequence>,
+    duration_ms: Deferred<DispatchDuration>,
+    usage: Deferred<CodexTokenUsage>,
+    exit_status: Deferred<DispatchExitStatus>,
+    artifact_outcome: ArtifactOutcome,
+}
+
+/// A dispatch projection could not be rendered from the supplied typed facts.
+#[derive(Debug, Error)]
+pub enum DispatchProjectionError {
+    /// The immutable event-log tail is malformed or has no successor.
+    #[error("dispatch projection event-log tail is invalid: {source}")]
+    InvalidTail { source: EventLogTailError },
+    /// The typed projection unexpectedly failed JSON serialization.
+    #[error("dispatch projection could not be serialized: {source}")]
+    SerializationFailed { source: serde_json::Error },
+}
+
+/// Render one compact machine-readable dry-run projection without a terminal newline.
+///
+/// # Errors
+///
+/// Returns [`DispatchProjectionError::InvalidTail`] if the immutable log tail is invalid and
+/// [`DispatchProjectionError::SerializationFailed`] if serialization fails.
+pub fn render_dispatch_projection(
+    input: DispatchProjectionInput<'_>,
+) -> Result<String, DispatchProjectionError> {
+    successor_sequence(input.log_tail)
+        .map_err(|source| DispatchProjectionError::InvalidTail { source })?;
+    let projection = DispatchProjection {
+        envelope: dispatch_invocation(input.envelope),
+        issuance: ProjectedIssuance {
+            sequence: Deferred::default(),
+            timestamp: Deferred::default(),
+            kind: WriteKind::Dispatch.as_str(),
+            node: &input.logging.node,
+            payload: dispatch_payload(input.logging),
+        },
+        completion: ProjectedCompletion {
+            sequence: Deferred::default(),
+            timestamp: Deferred::default(),
+            kind: WriteKind::DispatchCompletion.as_str(),
+            node: &input.logging.node,
+            payload: ProjectedCompletionPayload {
+                issuance_sequence: Deferred::default(),
+                duration_ms: Deferred::default(),
+                usage: Deferred::default(),
+                exit_status: Deferred::default(),
+                artifact_outcome: ArtifactOutcome::NotValidated,
+            },
+        },
+    };
+    serde_json::to_string(&projection)
+        .map_err(|source| DispatchProjectionError::SerializationFailed { source })
+}
+
+/// One adapter-observed JSONL fact relevant to terminal classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalObservation {
+    /// The physical line did not parse as JSON.
+    MalformedLine,
+    /// A parseable JSON value other than an object, or an object with no known terminal `type`,
+    /// is non-terminal rather than malformed.
+    NonTerminal,
+    /// A completed turn with either exact counters or malformed usage.
+    TurnCompleted(Option<TerminalUsage>),
+    /// A failed turn, recording whether a forbidden usage key was present.
+    TurnFailed { usage_present: bool },
+}
+
+/// The four exact counters from a well-formed completed turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_output_tokens: u64,
+}
+
+/// Classify terminal observations after the child exit is known.
+///
+/// Invalid-data rows take precedence over well-formed outcomes, in their documented order.
+/// Signal termination counts as a nonzero exit: absent becomes `NoTerminalTurn`, completed is
+/// contradictory, and failed remains `TurnFailed`.
+pub fn classify_terminal_usage(
+    observations: &[TerminalObservation],
+    exit_status: DispatchExitStatus,
+) -> Result<CodexTokenUsage, UsageAbsenceReason> {
+    let completed = observations
+        .iter()
+        .filter(|item| matches!(item, TerminalObservation::TurnCompleted(_)))
+        .collect::<Vec<_>>();
+    let failed = observations
+        .iter()
+        .filter(|item| matches!(item, TerminalObservation::TurnFailed { .. }))
+        .collect::<Vec<_>>();
+    // Precedence is specification: malformed, duplicate, contradictory, then valid outcomes.
+    if observations
+        .iter()
+        .any(|item| matches!(item, TerminalObservation::MalformedLine))
+        || completed
+            .iter()
+            .any(|item| matches!(item, TerminalObservation::TurnCompleted(None)))
+        || failed.iter().any(|item| {
+            matches!(
+                item,
+                TerminalObservation::TurnFailed {
+                    usage_present: true
+                }
+            )
+        })
+    {
+        return Err(UsageAbsenceReason::MalformedTerminalData);
+    }
+    if completed.len() > 1 || failed.len() > 1 {
+        return Err(UsageAbsenceReason::DuplicateTerminalData);
+    }
+    if !completed.is_empty() && !failed.is_empty() {
+        return Err(UsageAbsenceReason::ContradictoryTerminalData);
+    }
+    let zero = matches!(exit_status, DispatchExitStatus::Exited { code } if code.get() == 0);
+    if (!completed.is_empty() && !zero)
+        || (!failed.is_empty() && zero)
+        || (completed.is_empty() && failed.is_empty() && zero)
+    {
+        return Err(UsageAbsenceReason::ContradictoryTerminalData);
+    }
+    if let Some(TerminalObservation::TurnCompleted(Some(usage))) = completed.first().copied() {
+        return Ok(CodexTokenUsage::Measured {
+            input_tokens: InputTokens::new(usage.input_tokens),
+            cached_input_tokens: CachedInputTokens::new(usage.cached_input_tokens),
+            output_tokens: OutputTokens::new(usage.output_tokens),
+            reasoning_output_tokens: ReasoningOutputTokens::new(usage.reasoning_output_tokens),
+        });
+    }
+    if !failed.is_empty() {
+        return Ok(CodexTokenUsage::Absent {
+            reason: UsageAbsenceReason::TurnFailed,
+        });
+    }
+    Ok(CodexTokenUsage::Absent {
+        reason: UsageAbsenceReason::NoTerminalTurn,
+    })
+}
 
 /// A program name passed directly to a process adapter, never to a shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,7 +680,129 @@ mod tests {
     use super::{
         AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
         ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, StdinBinding,
+        TerminalObservation, TerminalUsage, classify_terminal_usage,
     };
+    use crate::event_log::{
+        CodexTokenUsage, DispatchExitStatus, ExitCode, SignalNumber, UsageAbsenceReason,
+    };
+
+    fn exited(code: u64) -> DispatchExitStatus {
+        DispatchExitStatus::Exited {
+            code: ExitCode::new(code),
+        }
+    }
+
+    #[test]
+    fn terminal_partition_and_precedence_are_exhaustive() {
+        let usage = TerminalUsage {
+            input_tokens: 101,
+            cached_input_tokens: 23,
+            output_tokens: 17,
+            reasoning_output_tokens: 5,
+        };
+        let cases = [
+            (
+                vec![TerminalObservation::MalformedLine],
+                exited(5),
+                Err(UsageAbsenceReason::MalformedTerminalData),
+            ),
+            (
+                vec![TerminalObservation::TurnCompleted(None)],
+                exited(0),
+                Err(UsageAbsenceReason::MalformedTerminalData),
+            ),
+            (
+                vec![TerminalObservation::TurnFailed {
+                    usage_present: true,
+                }],
+                exited(0),
+                Err(UsageAbsenceReason::MalformedTerminalData),
+            ),
+            (
+                vec![
+                    TerminalObservation::TurnFailed {
+                        usage_present: false,
+                    },
+                    TerminalObservation::TurnFailed {
+                        usage_present: false,
+                    },
+                ],
+                exited(41),
+                Err(UsageAbsenceReason::DuplicateTerminalData),
+            ),
+            (
+                vec![
+                    TerminalObservation::TurnCompleted(Some(usage)),
+                    TerminalObservation::TurnFailed {
+                        usage_present: false,
+                    },
+                ],
+                exited(43),
+                Err(UsageAbsenceReason::ContradictoryTerminalData),
+            ),
+            (
+                vec![TerminalObservation::TurnCompleted(Some(usage))],
+                exited(5),
+                Err(UsageAbsenceReason::ContradictoryTerminalData),
+            ),
+            (
+                vec![TerminalObservation::TurnFailed {
+                    usage_present: false,
+                }],
+                exited(0),
+                Err(UsageAbsenceReason::ContradictoryTerminalData),
+            ),
+            (
+                vec![TerminalObservation::NonTerminal],
+                exited(0),
+                Err(UsageAbsenceReason::ContradictoryTerminalData),
+            ),
+            (
+                vec![TerminalObservation::TurnFailed {
+                    usage_present: false,
+                }],
+                exited(41),
+                Ok(CodexTokenUsage::Absent {
+                    reason: UsageAbsenceReason::TurnFailed,
+                }),
+            ),
+            (
+                vec![TerminalObservation::NonTerminal],
+                exited(42),
+                Ok(CodexTokenUsage::Absent {
+                    reason: UsageAbsenceReason::NoTerminalTurn,
+                }),
+            ),
+            (
+                vec![],
+                DispatchExitStatus::Signaled {
+                    signal: SignalNumber::new(15),
+                },
+                Ok(CodexTokenUsage::Absent {
+                    reason: UsageAbsenceReason::NoTerminalTurn,
+                }),
+            ),
+        ];
+        for (observations, status, expected) in cases {
+            assert_eq!(classify_terminal_usage(&observations, status), expected);
+        }
+        let measured = classify_terminal_usage(
+            &[
+                TerminalObservation::NonTerminal,
+                TerminalObservation::TurnCompleted(Some(usage)),
+            ],
+            exited(0),
+        );
+        assert_eq!(
+            measured,
+            Ok(CodexTokenUsage::Measured {
+                input_tokens: crate::event_log::InputTokens::new(101),
+                cached_input_tokens: crate::event_log::CachedInputTokens::new(23),
+                output_tokens: crate::event_log::OutputTokens::new(17),
+                reasoning_output_tokens: crate::event_log::ReasoningOutputTokens::new(5),
+            })
+        );
+    }
 
     #[test]
     fn constructs_minimal_dispatch_envelope() -> Result<(), DispatchError> {

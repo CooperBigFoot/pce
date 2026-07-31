@@ -50,6 +50,23 @@ pub enum EventLogTail {
     Present(EventLogTailLine),
 }
 
+/// Errors produced while deriving the successor of an immutable event-log tail.
+#[derive(Debug, Error)]
+pub enum EventLogTailError {
+    /// A present physical tail line is not a valid event envelope.
+    #[error("supplied event-log tail is invalid: {source}")]
+    InvalidTail {
+        /// The complete-envelope parsing or validation failure.
+        source: EventLogError,
+    },
+    /// A valid tail already has sequence `u64::MAX`.
+    #[error("supplied event-log tail sequence {tail_sequence} has no valid successor")]
+    SequenceOverflow {
+        /// The maximum sequence that cannot be incremented.
+        tail_sequence: u64,
+    },
+}
+
 /// Validated bytes for exactly one compact, newline-terminated event record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendIntent(Vec<u8>);
@@ -324,6 +341,8 @@ impl From<Sha256Digest> for String {
 pub enum WriteKind {
     /// A role dispatch at an exact repository ref.
     Dispatch,
+    /// The measured outcome of an earlier dispatch.
+    DispatchCompletion,
     /// A change in run understanding.
     Delta,
     /// A newly opened keyed escalation.
@@ -348,6 +367,7 @@ impl WriteKind {
     pub fn parse(raw: &str) -> Result<Self, EventLogError> {
         match raw {
             "dispatch" => Ok(Self::Dispatch),
+            "dispatch-completion" => Ok(Self::DispatchCompletion),
             "delta" => Ok(Self::Delta),
             "escalation-open" => Ok(Self::EscalationOpen),
             "escalation-close" => Ok(Self::EscalationClose),
@@ -364,6 +384,7 @@ impl WriteKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Dispatch => "dispatch",
+            Self::DispatchCompletion => "dispatch-completion",
             Self::Delta => "delta",
             Self::EscalationOpen => "escalation-open",
             Self::EscalationClose => "escalation-close",
@@ -380,7 +401,10 @@ impl WriteKind {
             | Self::KeyFinding
             | Self::RepositoryContract
             | Self::PlanningArtifactApproved => EvidencePolicy::Required,
-            Self::Delta | Self::EscalationOpen | Self::EscalationClose => EvidencePolicy::Absent,
+            Self::DispatchCompletion
+            | Self::Delta
+            | Self::EscalationOpen
+            | Self::EscalationClose => EvidencePolicy::Absent,
         }
     }
 }
@@ -442,6 +466,101 @@ pub struct DispatchPayload {
     pub r#ref: DispatchRef,
     /// The invocation that establishes the asserted state.
     pub evidence: Evidence,
+}
+
+macro_rules! transparent_u64 {
+    ($name:ident, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(u64);
+
+        impl $name {
+            /// Construct the typed total.
+            pub const fn new(value: u64) -> Self {
+                Self(value)
+            }
+            /// Return the numeric total.
+            pub const fn get(self) -> u64 {
+                self.0
+            }
+        }
+    };
+}
+
+transparent_u64!(
+    DispatchDuration,
+    "A checked elapsed wall-clock duration in milliseconds."
+);
+transparent_u64!(InputTokens, "A Codex input-token total.");
+transparent_u64!(CachedInputTokens, "A Codex cached-input-token total.");
+transparent_u64!(OutputTokens, "A Codex output-token total.");
+transparent_u64!(
+    ReasoningOutputTokens,
+    "A Codex reasoning-output-token total."
+);
+
+/// Why terminal observation could not provide measured usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UsageAbsenceReason {
+    /// Codex emitted `turn.failed`.
+    TurnFailed,
+    /// The process failed without a terminal turn.
+    NoTerminalTurn,
+    /// A JSONL line or terminal payload was malformed.
+    MalformedTerminalData,
+    /// A terminal event type occurred more than once.
+    DuplicateTerminalData,
+    /// Terminal facts disagreed with each other or the process exit.
+    ContradictoryTerminalData,
+}
+
+/// Codex token usage measured from, or absent from, terminal JSONL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "availability", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum CodexTokenUsage {
+    /// All four terminal counters were observed.
+    Measured {
+        input_tokens: InputTokens,
+        cached_input_tokens: CachedInputTokens,
+        output_tokens: OutputTokens,
+        reasoning_output_tokens: ReasoningOutputTokens,
+    },
+    /// No measured counters can be asserted.
+    Absent { reason: UsageAbsenceReason },
+}
+
+transparent_u64!(ExitCode, "A child process exit code.");
+transparent_u64!(SignalNumber, "A Unix child termination signal number.");
+
+/// A child process exit preserving normal exit and Unix signal termination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum DispatchExitStatus {
+    /// The child exited normally.
+    Exited { code: ExitCode },
+    /// The child was terminated by a Unix signal.
+    Signaled { signal: SignalNumber },
+}
+
+/// The artifact-validation boundary reached by a dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactOutcome {
+    /// m3 recorded execution but did not validate the artifact.
+    NotValidated,
+}
+
+/// The complete payload for `dispatch-completion`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchCompletionPayload {
+    pub issuance_sequence: Sequence,
+    pub duration_ms: DispatchDuration,
+    pub usage: CodexTokenUsage,
+    pub exit_status: DispatchExitStatus,
+    pub artifact_outcome: ArtifactOutcome,
 }
 
 /// The complete payload for `delta`.
@@ -715,6 +834,8 @@ pub struct PlanningArtifactApprovedPayload {
 pub enum KnownPayload {
     /// A `dispatch` payload.
     Dispatch(DispatchPayload),
+    /// A `dispatch-completion` payload.
+    DispatchCompletion(DispatchCompletionPayload),
     /// A `delta` payload.
     Delta(DeltaPayload),
     /// An `escalation-open` payload.
@@ -736,6 +857,7 @@ impl KnownPayload {
     pub const fn kind(&self) -> WriteKind {
         match self {
             Self::Dispatch(_) => WriteKind::Dispatch,
+            Self::DispatchCompletion(_) => WriteKind::DispatchCompletion,
             Self::Delta(_) => WriteKind::Delta,
             Self::EscalationOpen(_) => WriteKind::EscalationOpen,
             Self::EscalationClose(_) => WriteKind::EscalationClose,
@@ -755,6 +877,7 @@ impl Serialize for KnownPayload {
     {
         match self {
             Self::Dispatch(payload) => payload.serialize(serializer),
+            Self::DispatchCompletion(payload) => payload.serialize(serializer),
             Self::Delta(payload) => payload.serialize(serializer),
             Self::EscalationOpen(payload) => payload.serialize(serializer),
             Self::EscalationClose(payload) => payload.serialize(serializer),
@@ -1021,6 +1144,27 @@ pub fn serialize_event_line(record: &EventRecord) -> Result<String, EventLogErro
     serde_json::to_string(record).map_err(|source| EventLogError::MalformedEnvelope { source })
 }
 
+/// Derive the next legal sequence from an immutable physical event-log tail.
+///
+/// # Errors
+///
+/// Returns [`EventLogTailError::InvalidTail`] for a malformed present line and
+/// [`EventLogTailError::SequenceOverflow`] when the tail sequence is `u64::MAX`.
+pub fn successor_sequence(tail: &EventLogTail) -> Result<Sequence, EventLogTailError> {
+    match tail {
+        EventLogTail::Empty => Ok(Sequence::first()),
+        EventLogTail::Present(line) => {
+            let record = parse_event_line(&line.0)
+                .map_err(|source| EventLogTailError::InvalidTail { source })?;
+            let tail_sequence = record.sequence().get();
+            let successor = tail_sequence
+                .checked_add(1)
+                .ok_or(EventLogTailError::SequenceOverflow { tail_sequence })?;
+            Sequence::parse(successor).map_err(|source| EventLogTailError::InvalidTail { source })
+        }
+    }
+}
+
 /// Validate one submitted payload, derive the next sequence, and invoke an append capability once.
 ///
 /// The capability error type should represent the boundary operation directly. In the binary,
@@ -1052,18 +1196,12 @@ where
     )
     .map_err(|source| AppendError::InvalidSubmittedPayload { source })?;
 
-    let sequence = match tail {
-        EventLogTail::Empty => Sequence::first(),
-        EventLogTail::Present(line) => {
-            let tail_record =
-                parse_event_line(&line.0).map_err(|source| AppendError::InvalidTail { source })?;
-            let tail_sequence = tail_record.sequence().get();
-            let successor = tail_sequence
-                .checked_add(1)
-                .ok_or(AppendError::SequenceOverflow { tail_sequence })?;
-            Sequence::parse(successor).map_err(|source| AppendError::InvalidTail { source })?
+    let sequence = successor_sequence(&tail).map_err(|source| match source {
+        EventLogTailError::InvalidTail { source } => AppendError::InvalidTail { source },
+        EventLogTailError::SequenceOverflow { tail_sequence } => {
+            AppendError::SequenceOverflow { tail_sequence }
         }
-    };
+    })?;
 
     let timestamp = EventTimestamp::new(DateTime::<Utc>::from(timestamp));
     let record = EventRecord::known(sequence, timestamp, node, known_payload);
@@ -1136,6 +1274,9 @@ fn decode_known_payload(
 
     let decoded = match kind {
         WriteKind::Dispatch => serde_json::from_value(payload).map(KnownPayload::Dispatch),
+        WriteKind::DispatchCompletion => {
+            serde_json::from_value(payload).map(KnownPayload::DispatchCompletion)
+        }
         WriteKind::Delta => serde_json::from_value(payload).map(KnownPayload::Delta),
         WriteKind::EscalationOpen => {
             serde_json::from_value(payload).map(KnownPayload::EscalationOpen)
@@ -1158,7 +1299,7 @@ fn decode_known_payload(
 /// Errors produced by event-log domain parsing and validation.
 #[derive(Debug, Error)]
 pub enum EventLogError {
-    /// Returned when a write-kind spelling is not one of the seven registered values.
+    /// Returned when a write-kind spelling is not one of the eight registered values.
     #[error("unregistered event kind cannot be written: {kind:?}")]
     UnknownWriteKind {
         /// The rejected kind spelling.
@@ -1292,11 +1433,12 @@ mod tests {
 
     use crate::contract_measurement::{ObservedExitStatus, measure_contract_snapshot};
     use crate::event_log::{
-        AppendError, EventBodyRef, EventKindName, EventLogError, EventLogTail, EventLogTailLine,
-        EventRecord, EventRecordFilter, EventTimestamp, Evidence, EvidencePresence, KnownPayload,
-        NodeId, ReadKind, ReadPayload, RepositoryContractPayload, RepositoryName, RepositoryRoot,
-        Sequence, Sha256Digest, UnparsedPayload, WriteKind, append_event, event_record_matches,
-        parse_event_line, serialize_event_line, validate_evidence_policy,
+        AppendError, ArtifactOutcome, EventBodyRef, EventKindName, EventLogError, EventLogTail,
+        EventLogTailError, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
+        Evidence, EvidencePresence, KnownPayload, NodeId, ReadKind, ReadPayload,
+        RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence, Sha256Digest,
+        UnparsedPayload, WriteKind, append_event, event_record_matches, parse_event_line,
+        serialize_event_line, successor_sequence, validate_evidence_policy,
     };
     use crate::run_state::VersionPolicy;
     use crate::tracked_contract::{GateKind, parse_tracked_repository_contract};
@@ -1315,6 +1457,35 @@ mod tests {
 
     fn append_time() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(APPEND_TIME_SECONDS)
+    }
+
+    #[test]
+    fn successor_sequence_covers_every_physical_tail_state() {
+        assert_eq!(
+            successor_sequence(&EventLogTail::Empty)
+                .expect("empty tail successor")
+                .get(),
+            1
+        );
+        assert_eq!(
+            successor_sequence(&EventLogTail::Present(EventLogTailLine::new(
+                KNOWN_LINES[0]
+            )))
+            .expect("present tail successor")
+            .get(),
+            2
+        );
+        assert!(matches!(
+            successor_sequence(&EventLogTail::Present(EventLogTailLine::new("not-json"))),
+            Err(EventLogTailError::InvalidTail { .. })
+        ));
+        let maximum = r#"{"sequence":18446744073709551615,"timestamp":"2026-07-27T12:34:55.000Z","kind":"delta","node":"m1-s1","payload":{"message":"maximum"}}"#;
+        assert!(matches!(
+            successor_sequence(&EventLogTail::Present(EventLogTailLine::new(maximum))),
+            Err(EventLogTailError::SequenceOverflow {
+                tail_sequence: u64::MAX
+            })
+        ));
     }
 
     const KNOWN_LINES: [&str; 7] = [
@@ -1904,6 +2075,7 @@ mod tests {
             WriteKind::PlanningArtifactApproved,
         ];
         let absent = [
+            WriteKind::DispatchCompletion,
             WriteKind::Delta,
             WriteKind::EscalationOpen,
             WriteKind::EscalationClose,
@@ -2106,6 +2278,14 @@ mod tests {
 
     #[test]
     fn write_kind_parser_is_exact_and_closed() {
+        assert!(matches!(
+            WriteKind::parse("dispatch-completion"),
+            Ok(WriteKind::DispatchCompletion)
+        ));
+        assert_eq!(
+            WriteKind::DispatchCompletion.as_str(),
+            "dispatch-completion"
+        );
         for raw in ["future-kind", "dispatch-cost", "Dispatch", "DISPATCH", ""] {
             assert!(matches!(
                 WriteKind::parse(raw),
@@ -2168,5 +2348,49 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn dispatch_completion_literal_is_closed_and_byte_stable() {
+        let literal = r#"{"sequence":8,"timestamp":"2026-07-27T12:34:56.000Z","kind":"dispatch-completion","node":"m3-s1","payload":{"issuance_sequence":7,"duration_ms":200,"usage":{"availability":"measured","input_tokens":101,"cached_input_tokens":23,"output_tokens":17,"reasoning_output_tokens":5},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated"}}"#;
+        let record = parse_event_line(literal).expect("parse literal completion");
+        assert_eq!(
+            serialize_event_line(&record).expect("serialize completion"),
+            literal
+        );
+        let EventBodyRef::Known(KnownPayload::DispatchCompletion(payload)) = record.body_ref()
+        else {
+            panic!("completion decoded as another kind");
+        };
+        assert_eq!(payload.issuance_sequence.get(), 7);
+        assert_eq!(payload.duration_ms.get(), 200);
+        assert_eq!(payload.artifact_outcome, ArtifactOutcome::NotValidated);
+
+        for invalid in [
+            literal.replace(
+                "\"artifact_outcome\":\"not-validated\"",
+                "\"artifact_outcome\":\"not-validated\",\"outer\":1",
+            ),
+            literal.replace("\"input_tokens\":101", "\"input_tokens\":101,\"nested\":1"),
+            literal.replace("\"code\":0", "\"code\":0,\"nested\":1"),
+        ] {
+            assert!(matches!(
+                parse_event_line(&invalid),
+                Err(EventLogError::InvalidKnownPayload {
+                    kind: WriteKind::DispatchCompletion,
+                    ..
+                })
+            ));
+        }
+        let with_evidence = literal.replace(
+            "\"issuance_sequence\":7",
+            "\"evidence\":\"forbidden\",\"issuance_sequence\":7",
+        );
+        assert!(matches!(
+            parse_event_line(&with_evidence),
+            Err(EventLogError::ForbiddenEvidence {
+                kind: WriteKind::DispatchCompletion
+            })
+        ));
     }
 }
