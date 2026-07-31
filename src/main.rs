@@ -1,28 +1,31 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Output};
+use std::process::{ExitStatus, Output, Stdio};
 use std::time::SystemTime;
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::GateCommand;
 use pce_core::{
-    AppendError, AppendableCategory, AppendableFinding, ArtifactPath, AuthorityFailure,
-    BranchState, CanonicalNode as DispatchNode, CreationDate, CurrentArtifactObservation,
-    CurrentArtifactState, DispatchCandidate, DispatchRoleClass, DispatchabilityResult,
-    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
-    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState, FindingAdmission,
+    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
+    AppendableCategory, AppendableFinding, ArgumentVector, ArtifactPath, AuthorityFailure,
+    BranchState, CanonicalNode as DispatchNode, ChildEnvironment, CreationDate,
+    CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchEnvelope,
+    DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail,
+    EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
+    ExactPullRequestIdentity, ExactPullRequestState, Executable, FindingAdmission,
     GateObservations, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
     OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
     RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot,
-    Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState,
-    TagTarget, TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName, VisionSlug,
-    WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
+    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot, Sandbox,
+    Sha256Digest, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode, TagName,
+    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName,
+    VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
     compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
     derive_run_state, event_record_matches, measure_contract_snapshot, parse_event_line,
     parse_tracked_repository_contract, render_human_snapshot,
@@ -40,7 +43,8 @@ const USAGE: &str = concat!(
     "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>\n",
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
-    "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>"
+    "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
+    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] -- <CODEX_ARGUMENT>..."
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
@@ -70,6 +74,7 @@ const BUILD_BOOTSTRAP_CANDIDATES: &[&str] = &[
 
 #[derive(Debug)]
 enum Command {
+    Dispatch(DispatchEnvelope),
     VisionNew {
         name: VisionName,
     },
@@ -247,6 +252,7 @@ fn main() -> Result<()> {
 
 fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
     match parse_command(args)? {
+        Command::Dispatch(envelope) => spawn_dispatch(&envelope),
         Command::VisionNew { name } => run_vision_new(&name),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
@@ -307,8 +313,107 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "status" => parse_status_command(action, rest),
         [verb, rest @ ..] if verb == "ready" => parse_ready_command(rest),
         [verb, action, rest @ ..] if verb == "contract" => parse_contract_command(action, rest),
+        [verb, target, rest @ ..] if verb == "dispatch" => {
+            parse_codex_dispatch(target, rest).with_context(|| USAGE)
+        }
         _ => bail!(USAGE),
     }
+}
+
+fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
+    if target != "codex" {
+        bail!("unsupported dispatch target `{target}`");
+    }
+
+    let mut position = 0;
+    let raw_cwd = required_option(rest, &mut position, "--cwd")?;
+    let sandbox = required_option(rest, &mut position, "--sandbox")?;
+    if sandbox != "workspace-write" {
+        bail!("unsupported sandbox `{sandbox}`");
+    }
+
+    let mut environment = BTreeMap::new();
+    while rest.get(position).is_some_and(|value| value == "--env") {
+        let raw_entry = required_option(rest, &mut position, "--env")?;
+        let (name, value) = raw_entry
+            .split_once('=')
+            .ok_or_else(|| anyhow!("environment entry must contain `=`: `{raw_entry}`"))?;
+        if name.is_empty() {
+            bail!("environment name must not be empty");
+        }
+        if environment
+            .insert(name.to_owned(), value.to_owned())
+            .is_some()
+        {
+            bail!("duplicate environment name `{name}`");
+        }
+    }
+
+    let structured = if rest
+        .get(position)
+        .is_some_and(|value| value == "--output-schema")
+    {
+        let schema = required_option(rest, &mut position, "--output-schema")?;
+        let output = required_option(rest, &mut position, "-o")?;
+        Some((schema, output))
+    } else {
+        None
+    };
+
+    let plan_path = if rest
+        .get(position)
+        .is_some_and(|value| value == "--plan-file")
+    {
+        Some(required_option(rest, &mut position, "--plan-file")?)
+    } else {
+        None
+    };
+
+    if rest.get(position).is_none_or(|value| value != "--") {
+        bail!("dispatch arguments require the `--` delimiter");
+    }
+    position += 1;
+    let arguments = rest[position..].to_vec();
+
+    let executable = Executable::parse("codex").context("failed to parse Codex executable")?;
+    let working_directory = AbsoluteWorkingDirectory::parse(PathBuf::from(raw_cwd))
+        .context("failed to parse dispatch working directory")?;
+    let stdin = match plan_path {
+        Some(path) => StdinBinding::PlanBytes(
+            std::fs::read(path).with_context(|| format!("failed to read plan file `{path}`"))?,
+        ),
+        None => StdinBinding::Null,
+    };
+    let mut envelope = DispatchEnvelope::new(executable, working_directory, stdin)
+        .with_arguments(ArgumentVector::new(arguments))
+        .with_environment(ChildEnvironment::new(environment))
+        .with_sandbox(Sandbox::WorkspaceWrite);
+    if let Some((schema, output)) = structured {
+        envelope = envelope
+            .with_schema_path(
+                AbsoluteSchemaPath::parse(PathBuf::from(schema))
+                    .context("failed to parse dispatch schema path")?,
+            )
+            .with_output_path(
+                AbsoluteOutputPath::parse(PathBuf::from(output))
+                    .context("failed to parse dispatch output path")?,
+            );
+    }
+    Ok(Command::Dispatch(envelope))
+}
+
+fn required_option<'a>(rest: &'a [String], position: &mut usize, flag: &str) -> Result<&'a str> {
+    if rest.get(*position).is_none_or(|value| value != flag) {
+        bail!("expected `{flag}`");
+    }
+    let value = rest
+        .get(*position + 1)
+        .ok_or_else(|| anyhow!("missing value for `{flag}`"))?;
+    if value.is_empty() {
+        bail!("empty value for `{flag}`");
+    }
+    *position += 2;
+    Ok(value)
 }
 
 fn parse_contract_command(action: &str, rest: &[String]) -> Result<Command> {
@@ -2792,6 +2897,59 @@ fn tracked_contract_at_branch_head(
     } else {
         Ok(DefaultBranchContract::Absent)
     }
+}
+
+fn spawn_dispatch(envelope: &DispatchEnvelope) -> Result<()> {
+    let executable = envelope.executable().as_str();
+    let mut command = std::process::Command::new(executable);
+    command.arg("exec");
+    command
+        .arg("-C")
+        .arg(envelope.working_directory().as_path());
+    if let Some(sandbox) = envelope.sandbox() {
+        command.arg("--sandbox").arg(sandbox.as_str());
+    }
+    if let Some(schema_path) = envelope.schema_path() {
+        command.arg("--output-schema").arg(schema_path.as_path());
+    }
+    if let Some(output_path) = envelope.output_path() {
+        command.arg("-o").arg(output_path.as_path());
+    }
+    command.args(envelope.arguments().as_slice());
+    command.current_dir(envelope.working_directory().as_path());
+    command.env_clear();
+    command.envs(envelope.environment().iter());
+    match envelope.stdin() {
+        StdinBinding::Null => {
+            command.stdin(Stdio::null());
+        }
+        StdinBinding::PlanBytes(_) => {
+            command.stdin(Stdio::piped());
+        }
+    }
+    command.stdout(Stdio::inherit());
+    command.stderr(Stdio::inherit());
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn `{executable}`"))?;
+    if let StdinBinding::PlanBytes(bytes) = envelope.stdin() {
+        let mut child_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("`{executable}` child stdin was not piped"))?;
+        child_stdin
+            .write_all(bytes)
+            .with_context(|| format!("failed to write plan bytes to `{executable}`"))?;
+        drop(child_stdin);
+    }
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for `{executable}`"))?;
+    if !status.success() {
+        bail!("`{executable}` child exited with status {status}");
+    }
+    Ok(())
 }
 
 fn execute_process(program: &str, args: &[OsString], current_dir: Option<&Path>) -> ProcessAttempt {
