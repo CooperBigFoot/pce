@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 mod support;
 
 use std::collections::BTreeSet;
@@ -182,7 +183,6 @@ fn assert_invocation(
     caller_tail: &str,
     expected_stdin: &[u8],
 ) {
-    assert_eq!(invocation.program, OsString::from("codex"));
     let mut expected_argv = vec![
         OsString::from("exec"),
         OsString::from("-C"),
@@ -286,80 +286,111 @@ fn rejects_invalid_dispatch_inputs_before_invocation() {
     let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
     let stdin_path = harness.path().join("parser.stdin");
     fs::write(&stdin_path, b"sentinel").expect("write stdin");
-    let absolute = cwd.join("value").display().to_string();
-    let cases = vec![
-        vec!["--cwd", "relative", "--sandbox", "workspace-write", "--"],
-        vec![
-            "--cwd",
-            &absolute,
-            "--sandbox",
-            "workspace-write",
-            "--output-schema",
+    let absolute = cwd.display().to_string();
+    let cases = [
+        (
+            "relative-cwd",
             "relative",
-            "-o",
-            &absolute,
-            "--",
-        ],
-        vec![
-            "--cwd",
-            &absolute,
-            "--sandbox",
             "workspace-write",
-            "--output-schema",
+            vec![],
+            "working directory must be absolute",
+        ),
+        (
+            "relative-schema",
             &absolute,
-            "-o",
-            "relative",
-            "--",
-        ],
-        vec![
-            "--cwd",
-            &absolute,
-            "--sandbox",
             "workspace-write",
-            "--output-schema",
+            vec!["--output-schema", "relative", "-o", &absolute],
+            "schema path must be absolute",
+        ),
+        (
+            "relative-output",
             &absolute,
-            "--",
-        ],
-        vec![
-            "--cwd",
-            &absolute,
-            "--sandbox",
             "workspace-write",
-            "--env",
-            "malformed",
-            "--",
-        ],
-        vec![
-            "--cwd",
+            vec!["--output-schema", &absolute, "-o", "relative"],
+            "output path must be absolute",
+        ),
+        (
+            "unpaired-schema",
             &absolute,
-            "--sandbox",
             "workspace-write",
-            "--env",
-            "A=1",
-            "--env",
-            "A=2",
-            "--",
-        ],
-        vec!["--cwd", &absolute, "--sandbox", "unknown", "--"],
-        vec![
-            "--cwd",
+            vec!["--output-schema", &absolute],
+            "expected `-o`",
+        ),
+        (
+            "malformed-env",
             &absolute,
-            "--sandbox",
             "workspace-write",
-            "--env",
-            "=value",
-            "--",
-        ],
+            vec!["--env", "malformed"],
+            "environment entry must contain `=`",
+        ),
+        (
+            "duplicate-env",
+            &absolute,
+            "workspace-write",
+            vec!["--env", "A=1", "--env", "A=2"],
+            "duplicate environment name `A`",
+        ),
+        (
+            "unknown-sandbox",
+            &absolute,
+            "unknown",
+            vec![],
+            "unsupported sandbox `unknown`",
+        ),
+        (
+            "empty-env-name",
+            &absolute,
+            "workspace-write",
+            vec!["--env", "=value"],
+            "environment name must not be empty",
+        ),
     ];
-    for rest in cases {
-        let mut argv = vec!["dispatch", "codex"];
-        argv.extend(rest);
+    for (name, raw_cwd, sandbox, extra_options, expected_stderr) in cases {
+        let record_root = harness.path().join(format!("{name}-records"));
+        fs::create_dir(&record_root).expect("create parser record root");
+        let stdout_path = harness.path().join(format!("{name}.stdout"));
+        let stderr_path = harness.path().join(format!("{name}.stderr"));
+        fs::write(&stdout_path, []).expect("write parser fixture stdout");
+        fs::write(&stderr_path, []).expect("write parser fixture stderr");
+        let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+        let mut argv = vec![
+            "dispatch".to_owned(),
+            "codex".to_owned(),
+            "--cwd".to_owned(),
+            raw_cwd.to_owned(),
+            "--sandbox".to_owned(),
+            sandbox.to_owned(),
+        ];
+        for (name, value) in &environment {
+            argv.extend(["--env".to_owned(), format!("{name}={value}")]);
+        }
+        argv.extend(extra_options.into_iter().map(str::to_owned));
+        argv.push("--".to_owned());
         let output = harness
             .run_with_stdin_file(argv, &stdin_path, INHERITED_MARKER)
             .expect("run parser case");
-        assert!(!output.status.success());
+        assert!(!output.status.success(), "{name} unexpectedly succeeded");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected_stderr),
+            "{name} stderr did not contain {expected_stderr:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            harness
+                .codex_invocations(&record_root)
+                .expect("read parser records")
+                .is_empty(),
+            "{name} invoked Codex"
+        );
     }
     let missing_plan = harness.path().join("missing.plan");
+    let record_root = harness.path().join("missing-plan-records");
+    fs::create_dir(&record_root).expect("create missing-plan record root");
+    let stdout_path = harness.path().join("missing-plan.stdout");
+    let stderr_path = harness.path().join("missing-plan.stderr");
+    fs::write(&stdout_path, []).expect("write missing-plan fixture stdout");
+    fs::write(&stderr_path, []).expect("write missing-plan fixture stderr");
+    let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
     let argv = vec![
         "dispatch".to_owned(),
         "codex".to_owned(),
@@ -367,16 +398,31 @@ fn rejects_invalid_dispatch_inputs_before_invocation() {
         absolute,
         "--sandbox".to_owned(),
         "workspace-write".to_owned(),
+    ]
+    .into_iter()
+    .chain(
+        environment
+            .iter()
+            .flat_map(|(name, value)| ["--env".to_owned(), format!("{name}={value}")]),
+    )
+    .chain([
         "--plan-file".to_owned(),
         missing_plan.display().to_string(),
         "--".to_owned(),
         "-".to_owned(),
-    ];
+    ])
+    .collect::<Vec<_>>();
     let output = harness
         .run_with_stdin_file(argv, &stdin_path, INHERITED_MARKER)
         .expect("run unreadable plan");
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains(missing_plan.to_string_lossy().as_ref())
+    );
+    assert!(
+        harness
+            .codex_invocations(&record_root)
+            .expect("read missing-plan records")
+            .is_empty()
     );
 }

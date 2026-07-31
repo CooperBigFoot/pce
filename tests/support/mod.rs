@@ -1,5 +1,3 @@
-#![allow(dead_code, clippy::duplicated_attributes)]
-
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -69,6 +67,7 @@ printf '\n' >&2
 exit 127
 "#;
 
+#[allow(dead_code)]
 const CODEX_SHIM: &str = r#"#!/bin/sh
 program=codex
 root=${PCE_CODEX_RECORD_ROOT:?PCE_CODEX_RECORD_ROOT is required}
@@ -101,6 +100,7 @@ pub struct Invocation {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct CodexInvocation {
     pub program: OsString,
     pub argv: Vec<OsString>,
@@ -141,6 +141,7 @@ impl CliHarness {
         self.tempdir.path()
     }
 
+    #[allow(dead_code)]
     pub fn shim_path(&self) -> String {
         format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.shim_dir.display())
     }
@@ -190,6 +191,7 @@ impl CliHarness {
         child.wait_with_output()
     }
 
+    #[allow(dead_code)]
     pub fn run_with_stdin_file<I, S>(
         &self,
         argv: I,
@@ -213,6 +215,7 @@ impl CliHarness {
             .output()
     }
 
+    #[allow(dead_code)]
     pub fn codex_invocations(&self, record_root: &Path) -> io::Result<Vec<CodexInvocation>> {
         let invocation = record_root.join("invocation");
         if !invocation.exists() {
@@ -244,6 +247,7 @@ impl CliHarness {
     }
 }
 
+#[allow(dead_code)]
 fn parse_nul_set(bytes: &[u8]) -> BTreeSet<OsString> {
     bytes
         .split(|byte| *byte == 0)
