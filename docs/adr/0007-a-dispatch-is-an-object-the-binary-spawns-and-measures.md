@@ -47,7 +47,41 @@ well, but leaves half of every run with no cost channel and leaves the registrat
 existing only because the spawn happens where the binary cannot see it. It is the fallback if
 headless gates cannot draw on the subscription: the docs state credential precedence puts subscription
 OAuth ahead of everything when `ANTHROPIC_API_KEY` is unset, but they do not state that a child
-spawned from inside a running session inherits the parent's OAuth, and that is unverified.
+spawned from inside a running session inherits the parent's OAuth.
+
+This was measured on 2026-07-31 outside the executor sandbox, using Claude Code 2.1.220 on darwin
+24.6.0. It was not a bare-terminal invocation: from inside the running Claude Code orchestrator
+session on the orchestrator host, the parent session, itself authenticated by the same subscription,
+issued the `claude -p` invocation that spawned the measured child. The historical evidence command
+was:
+
+```
+claude --version; env -u ANTHROPIC_API_KEY claude -p "Reply with exactly: OK" --output-format json; echo "EXIT=$?"; grep -l apiKeyHelper $HOME/.claude/settings.json $HOME/.claude.json /Users/nicolaslazaro/Desktop/work/pce/.claude/settings*.json; grep -rn ANTHROPIC_API_KEY $HOME/.zshrc $HOME/.zprofile $HOME/.zshenv; security find-generic-password -s "Claude Code-credentials" -w | python3 -c "import sys,json;d=json.load(sys.stdin);o=d.get('claudeAiOauth',{});print(o.get('subscriptionType'),o.get('scopes'))"
+```
+
+`ANTHROPIC_API_KEY` was absent from the parent environment and additionally removed from the child
+with `env -u`. The child exited 0 with `is_error` false, `subtype` `success`, result `OK`, and
+`duration_ms` 9307. Neither `~/.zshrc`, `~/.zprofile`, nor `~/.zshenv` supplied an
+`ANTHROPIC_API_KEY`; neither `~/.claude/settings.json`, `~/.claude.json`, nor repository `.claude`
+settings supplied an `apiKeyHelper`. The macOS `Claude Code-credentials` keychain item contained a
+`claudeAiOauth` access token with `subscriptionType` `max` and scope `user:inference`.
+
+The extended controls also found `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` absent from the
+parent environment. The only settings files with `env` blocks were `~/.claude/settings.json`, whose
+sole `env` key was `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, while `~/.claude.json` had no top-level
+`env` dictionary. A recursive walk of both documents found no nested `env` entry whose name
+contained `ANTHROPIC`, `TOKEN`, or `KEY`. `/Library/Application
+Support/ClaudeCode/managed-settings.json` did not exist, excluding an enterprise managed setting as
+a credential source.
+
+The measurement therefore establishes that nested subscription OAuth is inherited. Milestone `m6`
+must implement direct headless `claude -p` children with `ANTHROPIC_API_KEY` stripped. The
+registered-subagent fallback remains documented but is not selected. The child's
+`--output-format json` result exposes per-child `usage` and per-model `modelUsage` token data usable
+by the gate meter: `usage.input_tokens` was 2, `usage.output_tokens` was 4,
+`cache_creation_input_tokens` was 9572, and `cache_read_input_tokens` was 15410. Its
+`total_cost_usd` value of 0.104116 was computed locally at list rates and is not subscription-billing
+evidence.
 
 Two records rather than one follows from the placement rule: cost and duration are unknowable when a
 dispatch is issued, and a record is never revised. It also disposes of a finding the same report
