@@ -45,12 +45,13 @@ pub use run_state::{
     derive_milestone_merge_status, derive_run_state, render_human_snapshot,
 };
 pub use tracked_contract::{
-    AppendableContract, BranchConvention, DefaultBranchName, EnvironmentHazard, GateCommand,
-    GateCommands, GateKind, GateOrdering, LocalWorkflowStandIn, LockfileRule,
-    MilestoneBranchPattern, MilestonePullRequestBase, PullRequestConvention,
-    PullRequestMergeMethod, StatedContract, StepBranchPattern, StepPullRequestBase,
-    TrackedContractError, TrackedRepositoryContract, WorkflowMapping, WorkflowMappings,
-    WorkflowName, parse_tracked_repository_contract, serialize_tracked_repository_contract,
+    AppendableCategory, AppendableContract, AppendableFinding, BranchConvention, DefaultBranchName,
+    EnvironmentHazard, FindingAdmission, GateCommand, GateCommands, GateKind, GateOrdering,
+    LocalWorkflowStandIn, LockfileRule, MilestoneBranchPattern, MilestonePullRequestBase,
+    PullRequestConvention, PullRequestMergeMethod, StatedContract, StepBranchPattern,
+    StepPullRequestBase, TrackedContractError, TrackedRepositoryContract, WorkflowMapping,
+    WorkflowMappings, WorkflowName, admit_recurrent_finding, parse_tracked_repository_contract,
+    serialize_tracked_repository_contract,
 };
 pub use vision::{
     CreationDate, NewVision, Slug, VisionDir, VisionDirOutcome, VisionError, VisionName,
