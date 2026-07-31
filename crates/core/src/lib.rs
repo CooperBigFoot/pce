@@ -1,6 +1,7 @@
 //! Core domain logic for PCE workflows.
 
 pub mod contract_measurement;
+pub mod dispatch;
 pub mod event_log;
 pub mod run_state;
 pub mod tracked_contract;
@@ -10,6 +11,10 @@ pub mod workflow_coverage;
 pub use contract_measurement::{
     ContractMeasurementError, ContractSnapshotRehydrationError, GateMeasurement, GateMeasurements,
     MeasuredContractSnapshot, ObservedExitStatus, measure_contract_snapshot,
+};
+pub use dispatch::{
+    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
+    ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, StdinBinding,
 };
 pub use event_log::{
     AppendError, AppendIntent, AppendableRepositoryContract, ArtifactPath, DeltaPayload,
