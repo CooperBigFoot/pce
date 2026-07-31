@@ -1,15 +1,19 @@
-//! dispatch = child invocation description × optional typed logging metadata; terminal_usage : JSONL observations × ExitStatus → CodexTokenUsage   (pure, deterministic)
+//! dispatch projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; terminal_usage : JSONL observations × ExitStatus → CodexTokenUsage   (pure, deterministic)
 //! This provisional module describes child invocations; the binary adapter performs all I/O and process work and will test the shape against the real tool surface in m2-s2.
 
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
 use crate::event_log::{
-    CachedInputTokens, CodexTokenUsage, DispatchExitStatus, DispatchRef, DispatchRole, Evidence,
-    InputTokens, NodeId, OutputTokens, ReasoningOutputTokens, UsageAbsenceReason,
+    ArtifactOutcome, CachedInputTokens, CodexTokenUsage, DispatchCompletionPayload,
+    DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef, DispatchRole, EventLogTail,
+    EventLogTailError, EventTimestamp, Evidence, InputTokens, NodeId, OutputTokens,
+    ReasoningOutputTokens, Sequence, UsageAbsenceReason, WriteKind, successor_sequence,
 };
 
 /// Typed log metadata carried beside, rather than inside, a child envelope.
@@ -19,6 +23,272 @@ pub struct DispatchLogging {
     pub role: DispatchRole,
     pub dispatch_ref: DispatchRef,
     pub evidence: Evidence,
+}
+
+/// Construct the shared concrete dispatch issuance payload.
+pub fn dispatch_payload(logging: &DispatchLogging) -> DispatchPayload {
+    DispatchPayload {
+        role: logging.role.clone(),
+        r#ref: logging.dispatch_ref.clone(),
+        evidence: logging.evidence.clone(),
+    }
+}
+
+/// Construct the shared concrete m3 dispatch completion payload.
+pub fn dispatch_completion_payload(
+    issuance_sequence: Sequence,
+    duration_ms: DispatchDuration,
+    usage: CodexTokenUsage,
+    exit_status: DispatchExitStatus,
+) -> DispatchCompletionPayload {
+    DispatchCompletionPayload {
+        issuance_sequence,
+        duration_ms,
+        usage,
+        exit_status,
+        artifact_outcome: ArtifactOutcome::NotValidated,
+    }
+}
+
+/// A typed prospective value that cannot carry a fabricated observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deferred<T> {
+    state: DeferredState,
+    #[serde(skip)]
+    marker: PhantomData<fn() -> T>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum DeferredState {
+    Deferred,
+}
+
+impl<T> Default for Deferred<T> {
+    fn default() -> Self {
+        Self {
+            state: DeferredState::Deferred,
+            marker: PhantomData,
+        }
+    }
+}
+
+/// The exact stdin portion of an ordered shell-free invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DispatchInvocationStdin {
+    binding: &'static str,
+    bytes: Option<Vec<u8>>,
+}
+
+/// The complete ordered shell-free child invocation shared by live and projection paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DispatchInvocation {
+    executable: String,
+    argv: Vec<String>,
+    cwd: String,
+    environment: BTreeMap<String, String>,
+    stdin: DispatchInvocationStdin,
+    schema_path: Option<String>,
+    output_path: Option<String>,
+}
+
+impl DispatchInvocation {
+    /// Return the program name passed directly to the process adapter.
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+    /// Borrow the complete ordered child argument vector.
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+    /// Return the exact working-directory spelling.
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+    /// Borrow the complete explicit child environment.
+    pub fn environment(&self) -> &BTreeMap<String, String> {
+        &self.environment
+    }
+    /// Borrow exact plan bytes, or return `None` for null stdin.
+    pub fn stdin_bytes(&self) -> Option<&[u8]> {
+        self.stdin.bytes.as_deref()
+    }
+}
+
+/// Render the complete ordered child invocation from an envelope.
+pub fn dispatch_invocation(envelope: &DispatchEnvelope) -> DispatchInvocation {
+    let cwd = envelope.working_directory().as_path().display().to_string();
+    let mut argv = vec![
+        "exec".to_owned(),
+        "--json".to_owned(),
+        "-C".to_owned(),
+        cwd.clone(),
+    ];
+    if let Some(sandbox) = envelope.sandbox() {
+        argv.extend(["--sandbox".to_owned(), sandbox.as_str().to_owned()]);
+    }
+    if let Some(path) = envelope.schema_path() {
+        argv.extend([
+            "--output-schema".to_owned(),
+            path.as_path().display().to_string(),
+        ]);
+    }
+    if let Some(path) = envelope.output_path() {
+        argv.extend(["-o".to_owned(), path.as_path().display().to_string()]);
+    }
+    argv.extend(envelope.arguments().as_slice().iter().cloned());
+    let environment = envelope
+        .environment()
+        .iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect();
+    let stdin = match envelope.stdin() {
+        StdinBinding::Null => DispatchInvocationStdin {
+            binding: "null",
+            bytes: None,
+        },
+        StdinBinding::PlanBytes(bytes) => DispatchInvocationStdin {
+            binding: "plan-bytes",
+            bytes: Some(bytes.clone()),
+        },
+    };
+    DispatchInvocation {
+        executable: envelope.executable().as_str().to_owned(),
+        argv,
+        cwd,
+        environment,
+        stdin,
+        schema_path: envelope
+            .schema_path()
+            .map(|path| path.as_path().display().to_string()),
+        output_path: envelope
+            .output_path()
+            .map(|path| path.as_path().display().to_string()),
+    }
+}
+
+/// Read-only facts from which a dry-run projection can be computed.
+pub struct DispatchProjectionInput<'a> {
+    envelope: &'a DispatchEnvelope,
+    logging: &'a DispatchLogging,
+    log_tail: &'a EventLogTail,
+}
+
+impl<'a> DispatchProjectionInput<'a> {
+    /// Construct a projection input containing exactly three immutable domain facts.
+    ///
+    /// ```
+    /// use pce_core::{AbsoluteWorkingDirectory, DispatchEnvelope, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole, EventLogTail, Evidence, Executable, NodeId, StdinBinding};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let envelope = DispatchEnvelope::new(Executable::parse("codex")?, AbsoluteWorkingDirectory::parse("/tmp")?, StdinBinding::Null);
+    /// let logging = DispatchLogging { node: NodeId::parse("m3-s2")?, role: DispatchRole::new("step-executor"), dispatch_ref: DispatchRef::new("ref"), evidence: Evidence::parse("fixture")? };
+    /// let tail = EventLogTail::Empty;
+    /// let _input = DispatchProjectionInput::new(&envelope, &logging, &tail);
+    /// # Ok(()) }
+    /// ```
+    /// ```compile_fail
+    /// use pce_core::{AbsoluteWorkingDirectory, DispatchEnvelope, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole, EventLogTail, Evidence, Executable, NodeId, StdinBinding};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let envelope = DispatchEnvelope::new(Executable::parse("codex")?, AbsoluteWorkingDirectory::parse("/tmp")?, StdinBinding::Null);
+    /// let logging = DispatchLogging { node: NodeId::parse("m3-s2")?, role: DispatchRole::new("step-executor"), dispatch_ref: DispatchRef::new("ref"), evidence: Evidence::parse("fixture")? };
+    /// let tail = EventLogTail::Empty;
+    /// let _input = DispatchProjectionInput::new(&envelope, &logging, &tail, |_bytes: &[u8]| Ok::<(), std::io::Error>(()));
+    /// # Ok(()) }
+    /// ```
+    pub fn new(
+        envelope: &'a DispatchEnvelope,
+        logging: &'a DispatchLogging,
+        log_tail: &'a EventLogTail,
+    ) -> Self {
+        Self {
+            envelope,
+            logging,
+            log_tail,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DispatchProjection<'a> {
+    envelope: DispatchInvocation,
+    issuance: ProjectedIssuance<'a>,
+    completion: ProjectedCompletion<'a>,
+}
+
+#[derive(Serialize)]
+struct ProjectedIssuance<'a> {
+    sequence: Deferred<Sequence>,
+    timestamp: Deferred<EventTimestamp>,
+    kind: &'static str,
+    node: &'a NodeId,
+    payload: DispatchPayload,
+}
+
+#[derive(Serialize)]
+struct ProjectedCompletion<'a> {
+    sequence: Deferred<Sequence>,
+    timestamp: Deferred<EventTimestamp>,
+    kind: &'static str,
+    node: &'a NodeId,
+    payload: ProjectedCompletionPayload,
+}
+
+#[derive(Serialize)]
+struct ProjectedCompletionPayload {
+    issuance_sequence: Deferred<Sequence>,
+    duration_ms: Deferred<DispatchDuration>,
+    usage: Deferred<CodexTokenUsage>,
+    exit_status: Deferred<DispatchExitStatus>,
+    artifact_outcome: ArtifactOutcome,
+}
+
+/// A dispatch projection could not be rendered from the supplied typed facts.
+#[derive(Debug, Error)]
+pub enum DispatchProjectionError {
+    /// The immutable event-log tail is malformed or has no successor.
+    #[error("dispatch projection event-log tail is invalid: {source}")]
+    InvalidTail { source: EventLogTailError },
+    /// The typed projection unexpectedly failed JSON serialization.
+    #[error("dispatch projection could not be serialized: {source}")]
+    SerializationFailed { source: serde_json::Error },
+}
+
+/// Render one compact machine-readable dry-run projection without a terminal newline.
+///
+/// # Errors
+///
+/// Returns [`DispatchProjectionError::InvalidTail`] if the immutable log tail is invalid and
+/// [`DispatchProjectionError::SerializationFailed`] if serialization fails.
+pub fn render_dispatch_projection(
+    input: DispatchProjectionInput<'_>,
+) -> Result<String, DispatchProjectionError> {
+    successor_sequence(input.log_tail)
+        .map_err(|source| DispatchProjectionError::InvalidTail { source })?;
+    let projection = DispatchProjection {
+        envelope: dispatch_invocation(input.envelope),
+        issuance: ProjectedIssuance {
+            sequence: Deferred::default(),
+            timestamp: Deferred::default(),
+            kind: WriteKind::Dispatch.as_str(),
+            node: &input.logging.node,
+            payload: dispatch_payload(input.logging),
+        },
+        completion: ProjectedCompletion {
+            sequence: Deferred::default(),
+            timestamp: Deferred::default(),
+            kind: WriteKind::DispatchCompletion.as_str(),
+            node: &input.logging.node,
+            payload: ProjectedCompletionPayload {
+                issuance_sequence: Deferred::default(),
+                duration_ms: Deferred::default(),
+                usage: Deferred::default(),
+                exit_status: Deferred::default(),
+                artifact_outcome: ArtifactOutcome::NotValidated,
+            },
+        },
+    };
+    serde_json::to_string(&projection)
+        .map_err(|source| DispatchProjectionError::SerializationFailed { source })
 }
 
 /// One adapter-observed JSONL fact relevant to terminal classification.

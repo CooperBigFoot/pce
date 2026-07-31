@@ -11,13 +11,12 @@ use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::GateCommand;
 use pce_core::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
-    AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath,
-    AuthorityFailure, BranchState, CanonicalNode as DispatchNode, ChildEnvironment,
-    CodexTokenUsage, CreationDate, CurrentArtifactObservation, CurrentArtifactState,
-    DispatchCandidate, DispatchCompletionPayload, DispatchDuration, DispatchEnvelope,
-    DispatchExitStatus, DispatchLogging, DispatchPayload, DispatchRef, DispatchRole,
-    DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail,
-    EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
+    AppendableCategory, AppendableFinding, ArgumentVector, ArtifactPath, AuthorityFailure,
+    BranchState, CanonicalNode as DispatchNode, ChildEnvironment, CodexTokenUsage, CreationDate,
+    CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchDuration,
+    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef,
+    DispatchRole, DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName,
+    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
     ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode, FindingAdmission,
     GateObservations, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
@@ -31,8 +30,9 @@ use pce_core::{
     UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
     WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_terminal_usage,
     compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
-    derive_run_state, event_record_matches, measure_contract_snapshot, parse_event_line,
-    parse_tracked_repository_contract, render_human_snapshot,
+    derive_run_state, dispatch_completion_payload, dispatch_invocation, dispatch_payload,
+    event_record_matches, measure_contract_snapshot, parse_event_line,
+    parse_tracked_repository_contract, render_dispatch_projection, render_human_snapshot,
     serialize_tracked_repository_contract, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
@@ -48,7 +48,7 @@ const USAGE: &str = concat!(
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
-    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE>] -- <CODEX_ARGUMENT>..."
+    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CODEX_ARGUMENT>..."
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
@@ -80,7 +80,7 @@ const BUILD_BOOTSTRAP_CANDIDATES: &[&str] = &[
 enum Command {
     Dispatch {
         envelope: DispatchEnvelope,
-        logging: Option<(PathBuf, DispatchLogging)>,
+        logging: Option<DispatchLoggingMode>,
     },
     VisionNew {
         name: VisionName,
@@ -128,6 +128,23 @@ enum Command {
         repository: RepositoryName,
         node: NodeId,
     },
+}
+
+#[derive(Debug)]
+enum DispatchLoggingMode {
+    Live {
+        path: PathBuf,
+        metadata: DispatchLogging,
+    },
+    DryRun {
+        path: PathBuf,
+        metadata: DispatchLogging,
+    },
+}
+
+struct LiveDispatchLog<'a> {
+    path: &'a Path,
+    metadata: &'a DispatchLogging,
 }
 
 enum DefaultBranchContract {
@@ -259,7 +276,15 @@ fn main() -> Result<()> {
 
 fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
     match parse_command(args)? {
-        Command::Dispatch { envelope, logging } => spawn_dispatch(&envelope, logging.as_ref()),
+        Command::Dispatch { envelope, logging } => match logging.as_ref() {
+            Some(DispatchLoggingMode::DryRun { path, metadata }) => {
+                run_dispatch_projection(&envelope, path, metadata)
+            }
+            Some(DispatchLoggingMode::Live { path, metadata }) => {
+                spawn_dispatch(&envelope, Some(LiveDispatchLog { path, metadata }))
+            }
+            None => spawn_dispatch(&envelope, None),
+        },
         Command::VisionNew { name } => run_vision_new(&name),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
@@ -394,15 +419,24 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
             Ok(values) => Some(values),
             Err(_) => bail!(LOGGING_DIAGNOSTIC),
         }
-    } else if rest
-        .get(position)
-        .is_some_and(|value| matches!(value.as_str(), "--node" | "--role" | "--ref" | "--evidence"))
-    {
+    } else if rest.get(position).is_some_and(|value| {
+        matches!(
+            value.as_str(),
+            "--node" | "--role" | "--ref" | "--evidence" | "--dry-run"
+        )
+    }) {
         bail!(LOGGING_DIAGNOSTIC)
     } else {
         None
     };
 
+    let dry_run =
+        if logging_raw.is_some() && rest.get(position).is_some_and(|value| value == "--dry-run") {
+            position += 1;
+            true
+        } else {
+            false
+        };
     if rest.get(position).is_none_or(|value| value != "--") {
         bail!("dispatch arguments require the `--` delimiter");
     }
@@ -435,16 +469,19 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
     }
     let logging = logging_raw
         .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
-            Ok((
-                PathBuf::from(path),
-                DispatchLogging {
-                    node: NodeId::parse(node).context("failed to parse dispatch logging node")?,
-                    role: DispatchRole::new(role),
-                    dispatch_ref: DispatchRef::new(dispatch_ref),
-                    evidence: Evidence::parse(evidence)
-                        .context("failed to parse dispatch logging evidence")?,
-                },
-            ))
+            let path = PathBuf::from(path);
+            let metadata = DispatchLogging {
+                node: NodeId::parse(node).context("failed to parse dispatch logging node")?,
+                role: DispatchRole::new(role),
+                dispatch_ref: DispatchRef::new(dispatch_ref),
+                evidence: Evidence::parse(evidence)
+                    .context("failed to parse dispatch logging evidence")?,
+            };
+            Ok(if dry_run {
+                DispatchLoggingMode::DryRun { path, metadata }
+            } else {
+                DispatchLoggingMode::Live { path, metadata }
+            })
         })
         .transpose()?;
     Ok(Command::Dispatch { envelope, logging })
@@ -2971,45 +3008,67 @@ fn tracked_contract_at_branch_head(
     }
 }
 
-fn spawn_dispatch(
+fn run_dispatch_projection(
     envelope: &DispatchEnvelope,
-    logging: Option<&(PathBuf, DispatchLogging)>,
+    log_path: &Path,
+    metadata: &DispatchLogging,
 ) -> Result<()> {
+    let content = match std::fs::read(log_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to read event-log tail from {}", log_path.display())
+            });
+        }
+    };
+    let content = String::from_utf8(content).with_context(|| {
+        format!(
+            "event-log tail in {} is not valid UTF-8",
+            log_path.display()
+        )
+    })?;
+    let tail = match content.lines().last() {
+        Some(line) => EventLogTail::Present(EventLogTailLine::new(line)),
+        None if content.is_empty() => EventLogTail::Empty,
+        None => EventLogTail::Present(EventLogTailLine::new("")),
+    };
+    let rendered =
+        render_dispatch_projection(DispatchProjectionInput::new(envelope, metadata, &tail))
+            .context("failed to render dispatch projection")?;
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    output
+        .write_all(rendered.as_bytes())
+        .context("failed to write dispatch projection to stdout")?;
+    output
+        .write_all(b"\n")
+        .context("failed to terminate dispatch projection with newline")?;
+    output
+        .flush()
+        .context("failed to flush dispatch projection")
+}
+
+fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'_>>) -> Result<()> {
     let issuance = logging
-        .map(|(path, metadata)| {
-            let payload = DispatchPayload {
-                role: metadata.role.clone(),
-                r#ref: metadata.dispatch_ref.clone(),
-                evidence: metadata.evidence.clone(),
-            };
+        .as_ref()
+        .map(|logging| {
+            let payload = dispatch_payload(logging.metadata);
             append_one(
-                path,
+                logging.path,
                 WriteKind::Dispatch,
-                metadata.node.clone(),
+                logging.metadata.node.clone(),
                 serde_json::to_string(&payload).context("failed to serialize dispatch issuance")?,
             )
         })
         .transpose()?;
-    let executable = envelope.executable().as_str();
+    let invocation = dispatch_invocation(envelope);
+    let executable = invocation.executable();
     let mut command = std::process::Command::new(executable);
-    command.arg("exec");
-    command.arg("--json");
-    command
-        .arg("-C")
-        .arg(envelope.working_directory().as_path());
-    if let Some(sandbox) = envelope.sandbox() {
-        command.arg("--sandbox").arg(sandbox.as_str());
-    }
-    if let Some(schema_path) = envelope.schema_path() {
-        command.arg("--output-schema").arg(schema_path.as_path());
-    }
-    if let Some(output_path) = envelope.output_path() {
-        command.arg("-o").arg(output_path.as_path());
-    }
-    command.args(envelope.arguments().as_slice());
-    command.current_dir(envelope.working_directory().as_path());
+    command.args(invocation.argv());
+    command.current_dir(invocation.cwd());
     command.env_clear();
-    command.envs(envelope.environment().iter());
+    command.envs(invocation.environment());
     match envelope.stdin() {
         StdinBinding::Null => {
             command.stdin(Stdio::null());
@@ -3080,21 +3139,20 @@ fn spawn_dispatch(
         .context("dispatch duration in milliseconds exceeds u64")?;
     let exit_status = dispatch_exit_status(status)?;
     let classification = classify_terminal_usage(&observations, exit_status);
-    if let (Some((path, metadata)), Some(issuance)) = (logging, issuance) {
+    if let (Some(logging), Some(issuance)) = (logging, issuance) {
         let usage = classification
             .clone()
             .unwrap_or_else(|reason| CodexTokenUsage::Absent { reason });
-        let completion = DispatchCompletionPayload {
-            issuance_sequence: issuance.sequence(),
-            duration_ms: DispatchDuration::new(duration_ms),
+        let completion = dispatch_completion_payload(
+            issuance.sequence(),
+            DispatchDuration::new(duration_ms),
             usage,
             exit_status,
-            artifact_outcome: ArtifactOutcome::NotValidated,
-        };
+        );
         append_one(
-            path,
+            logging.path,
             WriteKind::DispatchCompletion,
-            metadata.node.clone(),
+            logging.metadata.node.clone(),
             serde_json::to_string(&completion)
                 .context("failed to serialize dispatch completion")?,
         )
@@ -3348,13 +3406,14 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        BranchFetch, Command, DispatchGraphNode, DispatchNode, FORMAT_BOOTSTRAP_CANDIDATES,
-        FetchResult, RepositoryContract, RepositoryRuntime, StatusFormat, USAGE,
-        already_dispatched, github_pull_request_list_args, lexically_normalized_repository_root,
-        measure_tracked_contract_at_root, observe_git, observe_terminal_line, parse_command,
-        parse_dispatch_graph, parse_tracked_contract, read_at_default_branch_head, read_event_log,
-        readiness_version_policies, repository_contracts, run, run_log_read,
-        select_bootstrap_candidate, validated_snapshot_value,
+        BranchFetch, Command, DispatchGraphNode, DispatchLoggingMode, DispatchNode,
+        FORMAT_BOOTSTRAP_CANDIDATES, FetchResult, RepositoryContract, RepositoryRuntime,
+        StatusFormat, USAGE, already_dispatched, github_pull_request_list_args,
+        lexically_normalized_repository_root, measure_tracked_contract_at_root, observe_git,
+        observe_terminal_line, parse_command, parse_dispatch_graph, parse_tracked_contract,
+        read_at_default_branch_head, read_event_log, readiness_version_policies,
+        repository_contracts, run, run_log_read, select_bootstrap_candidate,
+        validated_snapshot_value,
     };
 
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
@@ -5684,9 +5743,46 @@ mod tests {
         let Command::Dispatch { logging, .. } = command else {
             panic!("parsed another command")
         };
-        let (path, metadata) = logging.expect("logging metadata");
+        let Some(DispatchLoggingMode::Live { path, metadata }) = logging else {
+            panic!("expected live logging metadata")
+        };
         assert_eq!(path, PathBuf::from("/tmp/events.jsonl"));
         assert_eq!(metadata.node.as_str(), "m3-s1");
+        assert_eq!(metadata.role.as_str(), "step-executor");
+
+        let dry = prefix
+            .into_iter()
+            .chain([
+                "--output-schema",
+                "/tmp/schema.json",
+                "-o",
+                "/tmp/output.json",
+                "--plan-file",
+                "/dev/null",
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--node",
+                "m3-s2",
+                "--role",
+                "step-executor",
+                "--ref",
+                "abc",
+                "--evidence",
+                "fixture",
+                "--dry-run",
+                "--",
+                "PROMPT",
+            ])
+            .map(str::to_owned);
+        let command = parse_command(dry).expect("parse complete dry-run logging group");
+        let Command::Dispatch { logging, .. } = command else {
+            panic!("parsed another command")
+        };
+        let Some(DispatchLoggingMode::DryRun { path, metadata }) = logging else {
+            panic!("expected dry-run logging metadata")
+        };
+        assert_eq!(path, PathBuf::from("/tmp/events.jsonl"));
+        assert_eq!(metadata.node.as_str(), "m3-s2");
         assert_eq!(metadata.role.as_str(), "step-executor");
 
         for suffix in [
