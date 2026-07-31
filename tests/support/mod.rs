@@ -1,4 +1,6 @@
-use std::collections::HashSet;
+#![allow(dead_code, clippy::duplicated_attributes)]
+
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
@@ -67,6 +69,22 @@ printf '\n' >&2
 exit 127
 "#;
 
+const CODEX_SHIM: &str = r#"#!/bin/sh
+program=codex
+root=${PCE_CODEX_RECORD_ROOT:?PCE_CODEX_RECORD_ROOT is required}
+mkdir "$root/invocation" || exit 126
+{
+    printf '%s\0' "$program" "$#"
+    printf '%s\0' "$@"
+} > "$root/invocation/request.bin" || exit 126
+pwd -P > "$root/invocation/cwd.bin" || exit 126
+/usr/bin/env -0 > "$root/invocation/environment.bin" || exit 126
+cat > "$root/invocation/stdin.bin" || exit 126
+cat "$PCE_CODEX_STDOUT_FILE" || exit 126
+cat "$PCE_CODEX_STDERR_FILE" >&2 || exit 126
+exit "$PCE_CODEX_EXIT_CODE"
+"#;
+
 #[derive(Debug)]
 pub struct ScriptedResponse {
     pub program: OsString,
@@ -80,6 +98,15 @@ pub struct ScriptedResponse {
 pub struct Invocation {
     pub program: OsString,
     pub argv: Vec<OsString>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CodexInvocation {
+    pub program: OsString,
+    pub argv: Vec<OsString>,
+    pub cwd: PathBuf,
+    pub environment: BTreeSet<OsString>,
+    pub stdin: Vec<u8>,
 }
 
 pub struct CliHarness {
@@ -100,6 +127,7 @@ impl CliHarness {
         fs::write(&invocation_log, [])?;
         write_shim(&shim_dir.join("git"), GIT_SHIM)?;
         write_shim(&shim_dir.join("gh"), GH_SHIM)?;
+        write_shim(&shim_dir.join("codex"), CODEX_SHIM)?;
 
         Ok(Self {
             tempdir,
@@ -111,6 +139,10 @@ impl CliHarness {
 
     pub fn path(&self) -> &Path {
         self.tempdir.path()
+    }
+
+    pub fn shim_path(&self) -> String {
+        format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.shim_dir.display())
     }
 
     pub fn materialize_responses(&self, responses: &[ScriptedResponse]) -> io::Result<()> {
@@ -158,10 +190,66 @@ impl CliHarness {
         child.wait_with_output()
     }
 
+    pub fn run_with_stdin_file<I, S>(
+        &self,
+        argv: I,
+        stdin_path: &Path,
+        inherited_marker: (&str, &str),
+    ) -> io::Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let stdin = fs::File::open(stdin_path)?;
+        Command::new(env!("CARGO_BIN_EXE_pce"))
+            .args(argv)
+            .env_clear()
+            .env("PATH", self.shim_path())
+            .env("PCE_SHIM_ROOT", self.tempdir.path())
+            .env(inherited_marker.0, inherited_marker.1)
+            .stdin(Stdio::from(stdin))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    }
+
+    pub fn codex_invocations(&self, record_root: &Path) -> io::Result<Vec<CodexInvocation>> {
+        let invocation = record_root.join("invocation");
+        if !invocation.exists() {
+            return Ok(Vec::new());
+        }
+        let request = fs::read(invocation.join("request.bin"))?;
+        let parsed = parse_invocations(&request)?;
+        let only = parsed.into_iter().next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "missing Codex invocation")
+        })?;
+        let cwd = fs::read(invocation.join("cwd.bin"))?;
+        let cwd = PathBuf::from(OsString::from_vec(
+            cwd.strip_suffix(b"\n").unwrap_or(&cwd).to_vec(),
+        ));
+        let environment = parse_nul_set(&fs::read(invocation.join("environment.bin"))?);
+        let stdin = fs::read(invocation.join("stdin.bin"))?;
+        Ok(vec![CodexInvocation {
+            program: only.program,
+            argv: only.argv,
+            cwd,
+            environment,
+            stdin,
+        }])
+    }
+
     pub fn invocations(&self) -> io::Result<Vec<Invocation>> {
         let bytes = fs::read(&self.invocation_log)?;
         parse_invocations(&bytes)
     }
+}
+
+fn parse_nul_set(bytes: &[u8]) -> BTreeSet<OsString> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .map(|field| OsString::from_vec(field.to_vec()))
+        .collect()
 }
 
 fn write_shim(path: &Path, source: &str) -> io::Result<()> {
