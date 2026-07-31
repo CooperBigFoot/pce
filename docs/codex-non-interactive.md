@@ -32,6 +32,11 @@ file channel. Supplying the complete `--log-file`, `--node`, `--role`, `--ref`, 
 group opts into two durable records: issuance before spawn and measured completion after exit.
 The completion correlates by the exact issuance sequence, records elapsed milliseconds, terminal
 usage or an explicit absence reason, normal exit or Unix signal, and `not-validated` artifact state.
+Place `--dry-run` after that complete logging group and immediately before `--` to print one compact
+JSON projection instead. The projection includes the complete shell-free child invocation and both
+prospective lifecycle records, with values that require a process or clock observation marked
+`deferred`. This mode reads an existing event-log tail only to validate that a successor is legal;
+it neither creates or appends the log nor starts Codex.
 
 ```bash
 codex exec "generate release notes for the last 10 commits" | tee release-notes.md

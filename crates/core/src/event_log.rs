@@ -50,6 +50,23 @@ pub enum EventLogTail {
     Present(EventLogTailLine),
 }
 
+/// Errors produced while deriving the successor of an immutable event-log tail.
+#[derive(Debug, Error)]
+pub enum EventLogTailError {
+    /// A present physical tail line is not a valid event envelope.
+    #[error("supplied event-log tail is invalid: {source}")]
+    InvalidTail {
+        /// The complete-envelope parsing or validation failure.
+        source: EventLogError,
+    },
+    /// A valid tail already has sequence `u64::MAX`.
+    #[error("supplied event-log tail sequence {tail_sequence} has no valid successor")]
+    SequenceOverflow {
+        /// The maximum sequence that cannot be incremented.
+        tail_sequence: u64,
+    },
+}
+
 /// Validated bytes for exactly one compact, newline-terminated event record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendIntent(Vec<u8>);
@@ -1127,6 +1144,27 @@ pub fn serialize_event_line(record: &EventRecord) -> Result<String, EventLogErro
     serde_json::to_string(record).map_err(|source| EventLogError::MalformedEnvelope { source })
 }
 
+/// Derive the next legal sequence from an immutable physical event-log tail.
+///
+/// # Errors
+///
+/// Returns [`EventLogTailError::InvalidTail`] for a malformed present line and
+/// [`EventLogTailError::SequenceOverflow`] when the tail sequence is `u64::MAX`.
+pub fn successor_sequence(tail: &EventLogTail) -> Result<Sequence, EventLogTailError> {
+    match tail {
+        EventLogTail::Empty => Ok(Sequence::first()),
+        EventLogTail::Present(line) => {
+            let record = parse_event_line(&line.0)
+                .map_err(|source| EventLogTailError::InvalidTail { source })?;
+            let tail_sequence = record.sequence().get();
+            let successor = tail_sequence
+                .checked_add(1)
+                .ok_or(EventLogTailError::SequenceOverflow { tail_sequence })?;
+            Sequence::parse(successor).map_err(|source| EventLogTailError::InvalidTail { source })
+        }
+    }
+}
+
 /// Validate one submitted payload, derive the next sequence, and invoke an append capability once.
 ///
 /// The capability error type should represent the boundary operation directly. In the binary,
@@ -1158,18 +1196,12 @@ where
     )
     .map_err(|source| AppendError::InvalidSubmittedPayload { source })?;
 
-    let sequence = match tail {
-        EventLogTail::Empty => Sequence::first(),
-        EventLogTail::Present(line) => {
-            let tail_record =
-                parse_event_line(&line.0).map_err(|source| AppendError::InvalidTail { source })?;
-            let tail_sequence = tail_record.sequence().get();
-            let successor = tail_sequence
-                .checked_add(1)
-                .ok_or(AppendError::SequenceOverflow { tail_sequence })?;
-            Sequence::parse(successor).map_err(|source| AppendError::InvalidTail { source })?
+    let sequence = successor_sequence(&tail).map_err(|source| match source {
+        EventLogTailError::InvalidTail { source } => AppendError::InvalidTail { source },
+        EventLogTailError::SequenceOverflow { tail_sequence } => {
+            AppendError::SequenceOverflow { tail_sequence }
         }
-    };
+    })?;
 
     let timestamp = EventTimestamp::new(DateTime::<Utc>::from(timestamp));
     let record = EventRecord::known(sequence, timestamp, node, known_payload);
@@ -1402,11 +1434,11 @@ mod tests {
     use crate::contract_measurement::{ObservedExitStatus, measure_contract_snapshot};
     use crate::event_log::{
         AppendError, ArtifactOutcome, EventBodyRef, EventKindName, EventLogError, EventLogTail,
-        EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
-        EvidencePresence, KnownPayload, NodeId, ReadKind, ReadPayload, RepositoryContractPayload,
-        RepositoryName, RepositoryRoot, Sequence, Sha256Digest, UnparsedPayload, WriteKind,
-        append_event, event_record_matches, parse_event_line, serialize_event_line,
-        validate_evidence_policy,
+        EventLogTailError, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
+        Evidence, EvidencePresence, KnownPayload, NodeId, ReadKind, ReadPayload,
+        RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence, Sha256Digest,
+        UnparsedPayload, WriteKind, append_event, event_record_matches, parse_event_line,
+        serialize_event_line, successor_sequence, validate_evidence_policy,
     };
     use crate::run_state::VersionPolicy;
     use crate::tracked_contract::{GateKind, parse_tracked_repository_contract};
@@ -1425,6 +1457,35 @@ mod tests {
 
     fn append_time() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(APPEND_TIME_SECONDS)
+    }
+
+    #[test]
+    fn successor_sequence_covers_every_physical_tail_state() {
+        assert_eq!(
+            successor_sequence(&EventLogTail::Empty)
+                .expect("empty tail successor")
+                .get(),
+            1
+        );
+        assert_eq!(
+            successor_sequence(&EventLogTail::Present(EventLogTailLine::new(
+                KNOWN_LINES[0]
+            )))
+            .expect("present tail successor")
+            .get(),
+            2
+        );
+        assert!(matches!(
+            successor_sequence(&EventLogTail::Present(EventLogTailLine::new("not-json"))),
+            Err(EventLogTailError::InvalidTail { .. })
+        ));
+        let maximum = r#"{"sequence":18446744073709551615,"timestamp":"2026-07-27T12:34:55.000Z","kind":"delta","node":"m1-s1","payload":{"message":"maximum"}}"#;
+        assert!(matches!(
+            successor_sequence(&EventLogTail::Present(EventLogTailLine::new(maximum))),
+            Err(EventLogTailError::SequenceOverflow {
+                tail_sequence: u64::MAX
+            })
+        ));
     }
 
     const KNOWN_LINES: [&str; 7] = [

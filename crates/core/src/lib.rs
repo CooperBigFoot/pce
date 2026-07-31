@@ -14,21 +14,24 @@ pub use contract_measurement::{
 };
 pub use dispatch::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
-    ChildEnvironment, DispatchEnvelope, DispatchError, DispatchLogging, Executable, Sandbox,
-    StdinBinding, TerminalObservation, TerminalUsage, classify_terminal_usage,
+    ChildEnvironment, Deferred, DispatchEnvelope, DispatchError, DispatchInvocation,
+    DispatchInvocationStdin, DispatchLogging, DispatchProjectionError, DispatchProjectionInput,
+    Executable, Sandbox, StdinBinding, TerminalObservation, TerminalUsage, classify_terminal_usage,
+    dispatch_completion_payload, dispatch_invocation, dispatch_payload, render_dispatch_projection,
 };
 pub use event_log::{
     AppendError, AppendIntent, AppendableRepositoryContract, ArtifactOutcome, ArtifactPath,
     CachedInputTokens, CodexTokenUsage, DeltaPayload, DispatchCompletionPayload, DispatchDuration,
     DispatchExitStatus, DispatchPayload, DispatchRef, DispatchRole, EscalationClosePayload,
     EscalationKey, EscalationOpenPayload, EventBodyRef, EventKindName, EventLogError, EventLogTail,
-    EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence, EvidencePolicy,
-    EvidencePresence, ExitCode, GateObservations, InputTokens, KeyFindingPayload, KnownPayload,
-    LegacyRepositoryContractPayload, NodeId, OutputTokens, PlanningArtifactApprovedPayload,
-    ReadKind, ReadPayload, ReasoningOutputTokens, RepositoryContractPayload, RepositoryName,
-    RepositoryRoot, Sequence, Sha256Digest, SignalNumber, StatedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, WorkflowMap, WriteKind, append_event,
-    event_record_matches, parse_event_line, serialize_event_line, validate_evidence_policy,
+    EventLogTailError, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
+    EvidencePolicy, EvidencePresence, ExitCode, GateObservations, InputTokens, KeyFindingPayload,
+    KnownPayload, LegacyRepositoryContractPayload, NodeId, OutputTokens,
+    PlanningArtifactApprovedPayload, ReadKind, ReadPayload, ReasoningOutputTokens,
+    RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence, Sha256Digest,
+    SignalNumber, StatedRepositoryContract, UnparsedPayload, UsageAbsenceReason, WorkflowMap,
+    WriteKind, append_event, event_record_matches, parse_event_line, serialize_event_line,
+    successor_sequence, validate_evidence_policy,
 };
 pub use run_state::{
     ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BranchSnapshot, BranchState,

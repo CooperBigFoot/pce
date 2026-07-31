@@ -1,7 +1,7 @@
 #[allow(dead_code)]
 mod support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -12,9 +12,14 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pce_core::{
-    ArtifactOutcome, CodexTokenUsage, DispatchExitStatus, EventBodyRef, KnownPayload,
-    UsageAbsenceReason, parse_event_line,
+    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
+    ArtifactOutcome, ChildEnvironment, CodexTokenUsage, Deferred, DispatchDuration,
+    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchRef, DispatchRole, EventBodyRef,
+    EventRecord, EventTimestamp, Evidence, Executable, KnownPayload, NodeId, Sandbox, Sequence,
+    StdinBinding, UsageAbsenceReason, WriteKind, dispatch_invocation, dispatch_payload,
+    parse_event_line, serialize_event_line,
 };
+use serde::Serialize;
 use support::{CliHarness, CodexInvocation};
 
 const INHERITED_MARKER: (&str, &str) = ("PCE_INHERITED_ONLY", "must-not-reach-codex");
@@ -25,6 +30,577 @@ fn dispatch_test_guard() -> MutexGuard<'static, ()> {
     DISPATCH_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Serialize)]
+struct FixtureProjection {
+    envelope: FixtureEnvelope,
+    issuance: FixtureIssuance,
+    completion: FixtureCompletion,
+}
+
+#[derive(Serialize)]
+struct FixtureEnvelope {
+    executable: &'static str,
+    argv: Vec<String>,
+    cwd: String,
+    environment: BTreeMap<String, String>,
+    stdin: FixtureStdin,
+    schema_path: Option<String>,
+    output_path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FixtureStdin {
+    binding: &'static str,
+    bytes: Option<Vec<u8>>,
+}
+
+#[derive(Serialize)]
+struct FixtureIssuance {
+    sequence: FixtureDeferred,
+    timestamp: FixtureDeferred,
+    kind: &'static str,
+    node: &'static str,
+    payload: FixtureIssuancePayload,
+}
+
+#[derive(Serialize)]
+struct FixtureIssuancePayload {
+    role: &'static str,
+    r#ref: &'static str,
+    evidence: &'static str,
+}
+
+#[derive(Serialize)]
+struct FixtureCompletion {
+    sequence: FixtureDeferred,
+    timestamp: FixtureDeferred,
+    kind: &'static str,
+    node: &'static str,
+    payload: FixtureCompletionPayload,
+}
+
+#[derive(Serialize)]
+struct FixtureCompletionPayload {
+    issuance_sequence: FixtureDeferred,
+    duration_ms: FixtureDeferred,
+    usage: FixtureDeferred,
+    exit_status: FixtureDeferred,
+    artifact_outcome: &'static str,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct FixtureDeferred {
+    state: &'static str,
+}
+
+#[test]
+fn dry_run_projects_all_envelope_shapes_exactly_and_matches_live_invocations() {
+    let _guard = dispatch_test_guard();
+    for (name, structured, plan) in [
+        ("dry-unstructured-null", false, None),
+        ("dry-structured-null", true, None),
+        (
+            "dry-unstructured-plan",
+            false,
+            Some(b"plan\0\xff".as_slice()),
+        ),
+        (
+            "dry-structured-plan",
+            true,
+            Some(b"struct\0\x80".as_slice()),
+        ),
+    ] {
+        assert_dry_projection_case(name, structured, plan);
+    }
+    assert_dry_parser_and_tail_failures();
+}
+
+fn assert_dry_projection_case(name: &str, structured: bool, plan: Option<&[u8]>) {
+    const SEED: &[u8] = b"{\"sequence\":1,\"timestamp\":\"2026-07-27T12:34:56.000Z\",\"kind\":\"delta\",\"node\":\"m3-s1\",\"payload\":{\"message\":\"seed\"}}\n";
+    let harness = CliHarness::new().expect("create CLI harness");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize child cwd");
+    let log_path = harness.path().join(format!("{name}.jsonl"));
+    fs::write(&log_path, SEED).expect("seed event log");
+    let seeded_bytes = fs::read(&log_path).expect("read seed");
+    let record_root = harness.path().join(format!("{name}-records"));
+    fs::create_dir(&record_root).expect("create record root");
+    let stdout_path = harness.path().join(format!("{name}.stdout"));
+    let stderr_path = harness.path().join(format!("{name}.stderr"));
+    let parent_stdin_path = harness.path().join(format!("{name}.parent-stdin"));
+    fs::write(&stdout_path, b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":2,\"output_tokens\":3,\"reasoning_output_tokens\":4,\"future_total\":5}}\n").expect("write stdout fixture");
+    fs::write(&stderr_path, []).expect("write stderr fixture");
+    fs::write(&parent_stdin_path, format!("parent-{name}")).expect("write parent stdin");
+    let mut environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+    environment.push(("ZZZ_EXPLICIT".to_owned(), "last".to_owned()));
+    environment.push(("AAA_EXPLICIT".to_owned(), "first".to_owned()));
+    let schema_path = cwd.join(format!("{name}-schema.json"));
+    let output_path = cwd.join(format!("{name}-output.json"));
+    let plan_path = plan.map(|bytes| {
+        let path = harness.path().join(format!("{name}.plan"));
+        fs::write(&path, bytes).expect("write plan");
+        path
+    });
+    let caller_arguments = vec![format!("{name}-first"), format!("{name}-second")];
+    let structured_paths = structured.then_some((&schema_path, &output_path));
+    let mut dry_argv = dispatch_argv(
+        &cwd,
+        &environment,
+        structured_paths,
+        plan_path.as_deref(),
+        caller_arguments.as_slice(),
+    );
+    let delimiter = dry_argv
+        .iter()
+        .position(|value| value == "--")
+        .expect("delimiter");
+    dry_argv.splice(delimiter..delimiter, logging_arguments(&log_path));
+    let delimiter = dry_argv
+        .iter()
+        .position(|value| value == "--")
+        .expect("delimiter");
+    dry_argv.insert(delimiter, "--dry-run".to_owned());
+
+    let dry_output = harness
+        .run_with_stdin_file(&dry_argv, &parent_stdin_path, INHERITED_MARKER)
+        .expect("run dry dispatch");
+    assert!(
+        dry_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&dry_output.stderr)
+    );
+    assert_eq!(
+        dry_output.stdout,
+        literal_projection(
+            &cwd,
+            &environment,
+            structured_paths,
+            plan,
+            &caller_arguments
+        ),
+        "literal fixture for {name}"
+    );
+    let after_dry = fs::read(&log_path).expect("reread log");
+    assert_eq!(after_dry, seeded_bytes);
+    assert_eq!(
+        seeded_bytes.iter().filter(|byte| **byte == b'\n').count(),
+        1
+    );
+    assert_eq!(after_dry.iter().filter(|byte| **byte == b'\n').count(), 1);
+    assert_eq!(
+        harness
+            .codex_invocations(&record_root)
+            .expect("dry invocations"),
+        Vec::new()
+    );
+    assert!(!record_root.join("invocation").exists());
+
+    let projection: serde_json::Value =
+        serde_json::from_slice(&dry_output.stdout).expect("parse projection");
+    assert_shared_serializer_family(
+        &projection,
+        &cwd,
+        &environment,
+        structured_paths,
+        plan,
+        &caller_arguments,
+    );
+
+    let alternate_log = harness.path().join(format!("{name}-alternate.jsonl"));
+    fs::write(&alternate_log, b"{\"sequence\":41,\"timestamp\":\"2026-07-27T12:34:56.000Z\",\"kind\":\"delta\",\"node\":\"m3-s1\",\"payload\":{\"message\":\"alternate\"}}\n").expect("write alternate tail");
+    let mut alternate_argv = dry_argv.clone();
+    let log_flag = alternate_argv
+        .iter()
+        .position(|value| value == "--log-file")
+        .expect("log flag");
+    alternate_argv[log_flag + 1] = alternate_log.display().to_string();
+    let alternate_output = harness
+        .run_with_stdin_file(&alternate_argv, &parent_stdin_path, INHERITED_MARKER)
+        .expect("run alternate-tail projection");
+    assert!(alternate_output.status.success());
+    let alternate: serde_json::Value =
+        serde_json::from_slice(&alternate_output.stdout).expect("parse alternate projection");
+    for pointer in [
+        "/issuance/sequence",
+        "/issuance/timestamp",
+        "/completion/sequence",
+        "/completion/timestamp",
+        "/completion/payload/issuance_sequence",
+        "/completion/payload/duration_ms",
+        "/completion/payload/usage",
+        "/completion/payload/exit_status",
+    ] {
+        assert_eq!(
+            projection.pointer(pointer),
+            alternate.pointer(pointer),
+            "tail-independent {pointer}"
+        );
+    }
+
+    let mut live_argv = dry_argv.clone();
+    let removed_position = live_argv
+        .iter()
+        .position(|value| value == "--dry-run")
+        .expect("dry token");
+    assert_eq!(live_argv.remove(removed_position), "--dry-run");
+    assert_eq!(
+        removed_position,
+        live_argv
+            .iter()
+            .position(|value| value == "--")
+            .expect("live delimiter")
+    );
+    let compared = dry_argv
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != removed_position)
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(live_argv, compared);
+    let live_output = harness
+        .run_with_stdin_file(&live_argv, &parent_stdin_path, INHERITED_MARKER)
+        .expect("run live dispatch");
+    assert!(
+        live_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&live_output.stderr)
+    );
+    let invocations = harness
+        .codex_invocations(&record_root)
+        .expect("live invocation");
+    assert_eq!(invocations.len(), 1);
+    assert_invocation(
+        &invocations[0],
+        &cwd,
+        &environment,
+        structured_paths,
+        caller_arguments.as_slice(),
+        plan.unwrap_or_default(),
+    );
+    assert_eq!(projection["envelope"]["executable"], "codex");
+    let captured_argv = invocations[0]
+        .argv
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        projection["envelope"]["argv"],
+        serde_json::to_value(captured_argv).expect("serialize captured argv")
+    );
+    assert_eq!(projection["envelope"]["cwd"], cwd.display().to_string());
+    assert_eq!(
+        projection["envelope"]["stdin"]["bytes"],
+        plan.map_or(serde_json::Value::Null, |bytes| serde_json::to_value(bytes)
+            .expect("serialize bytes"))
+    );
+    let mut projected_environment = projection["envelope"]["environment"]
+        .as_object()
+        .expect("projected environment")
+        .iter()
+        .map(|(name, value)| {
+            OsString::from(format!(
+                "{name}={}",
+                value.as_str().expect("environment value")
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    projected_environment.insert(OsString::from(format!("PWD={}", cwd.display())));
+    projected_environment.insert(OsString::from("SHLVL=1"));
+    projected_environment.insert(OsString::from("_=/usr/bin/env"));
+    assert_eq!(invocations[0].environment, projected_environment);
+    assert!(
+        !invocations[0].environment.contains(&OsString::from(format!(
+            "{}={}",
+            INHERITED_MARKER.0, INHERITED_MARKER.1
+        )))
+    );
+}
+
+fn assert_dry_parser_and_tail_failures() {
+    const DIAGNOSTIC: &str = "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence";
+    let harness = CliHarness::new().expect("create parser harness");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize parser cwd");
+    let prefix = vec![
+        "dispatch".to_owned(),
+        "codex".to_owned(),
+        "--cwd".to_owned(),
+        cwd.display().to_string(),
+        "--sandbox".to_owned(),
+        "workspace-write".to_owned(),
+    ];
+    let failures = [
+        vec!["--dry-run", "--", "PROMPT"],
+        vec![
+            "--dry-run",
+            "--log-file",
+            "/tmp/events",
+            "--node",
+            "n",
+            "--role",
+            "r",
+            "--ref",
+            "x",
+            "--evidence",
+            "e",
+            "--",
+            "PROMPT",
+        ],
+        vec![
+            "--log-file",
+            "/tmp/events",
+            "--node",
+            "n",
+            "--dry-run",
+            "--role",
+            "r",
+            "--ref",
+            "x",
+            "--evidence",
+            "e",
+            "--",
+            "PROMPT",
+        ],
+        vec![
+            "--log-file",
+            "/tmp/events",
+            "--node",
+            "n",
+            "--dry-run",
+            "--",
+            "PROMPT",
+        ],
+    ];
+    for suffix in failures {
+        let argv = prefix
+            .iter()
+            .cloned()
+            .chain(suffix.into_iter().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let output = harness.run(&argv, b"").expect("run parser failure");
+        assert!(!output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .last()
+                .map(str::trim_start),
+            Some(DIAGNOSTIC)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(harness.invocations().expect("shim invocations").is_empty());
+    }
+
+    let unreadable_plan = harness.path().join("absent.plan");
+    let unreadable_log = harness.path().join("unreadable-plan-log.jsonl");
+    fs::write(&unreadable_log, b"not-json\n").expect("write malformed unread log");
+    let mut argv = prefix.clone();
+    argv.extend([
+        "--plan-file".to_owned(),
+        unreadable_plan.display().to_string(),
+    ]);
+    argv.extend(logging_arguments(&unreadable_log));
+    argv.extend(["--dry-run".to_owned(), "--".to_owned(), "PROMPT".to_owned()]);
+    let output = harness
+        .run(&argv, b"")
+        .expect("run unreadable-plan projection");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("failed to read plan file"));
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("supplied event-log tail is invalid")
+    );
+    assert!(output.stdout.is_empty());
+
+    for (name, tail, expected) in [
+        ("malformed", b"not-json\n".as_slice(), "supplied event-log tail is invalid"),
+        ("overflow", b"{\"sequence\":18446744073709551615,\"timestamp\":\"2026-07-27T12:34:56.000Z\",\"kind\":\"delta\",\"node\":\"m3-s1\",\"payload\":{\"message\":\"max\"}}\n".as_slice(), "supplied event-log tail sequence 18446744073709551615 has no valid successor"),
+    ] {
+        let log_path = harness.path().join(format!("{name}.jsonl"));
+        fs::write(&log_path, tail).expect("write invalid tail");
+        let record_root = harness.path().join(format!("{name}-records"));
+        let mut argv = prefix.clone();
+        argv.extend(logging_arguments(&log_path));
+        argv.extend(["--dry-run".to_owned(), "--".to_owned(), "PROMPT".to_owned()]);
+        let output = harness.run(&argv, b"").expect("run invalid-tail projection");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+        assert!(output.stdout.is_empty());
+        assert_eq!(harness.codex_invocations(&record_root).expect("tail invocations"), Vec::new());
+    }
+
+    let missing_log = harness.path().join("missing.jsonl");
+    let mut argv = prefix;
+    argv.extend(logging_arguments(&missing_log));
+    argv.extend(["--dry-run".to_owned(), "--".to_owned(), "PROMPT".to_owned()]);
+    let output = harness.run(&argv, b"").expect("run missing-log projection");
+    assert!(output.status.success());
+    assert!(!missing_log.exists());
+    assert_eq!(
+        output.stdout.iter().filter(|byte| **byte == b'\n').count(),
+        1
+    );
+}
+
+fn logging_arguments(log_path: &Path) -> Vec<String> {
+    vec![
+        "--log-file".to_owned(),
+        log_path.display().to_string(),
+        "--node".to_owned(),
+        "m3-s2".to_owned(),
+        "--role".to_owned(),
+        "step-executor".to_owned(),
+        "--ref".to_owned(),
+        "fixture-ref".to_owned(),
+        "--evidence".to_owned(),
+        "fixture-evidence".to_owned(),
+    ]
+}
+
+fn literal_projection(
+    cwd: &Path,
+    environment: &[(String, String)],
+    structured: Option<(&PathBuf, &PathBuf)>,
+    plan: Option<&[u8]>,
+    caller_arguments: &[String],
+) -> Vec<u8> {
+    let mut argv = vec![
+        "exec".to_owned(),
+        "--json".to_owned(),
+        "-C".to_owned(),
+        cwd.display().to_string(),
+        "--sandbox".to_owned(),
+        "workspace-write".to_owned(),
+    ];
+    if let Some((schema, output)) = structured {
+        argv.extend([
+            "--output-schema".to_owned(),
+            schema.display().to_string(),
+            "-o".to_owned(),
+            output.display().to_string(),
+        ]);
+    }
+    argv.extend(caller_arguments.iter().cloned());
+    let deferred = FixtureDeferred { state: "deferred" };
+    let fixture = FixtureProjection {
+        envelope: FixtureEnvelope {
+            executable: "codex",
+            argv,
+            cwd: cwd.display().to_string(),
+            environment: environment.iter().cloned().collect(),
+            stdin: FixtureStdin {
+                binding: if plan.is_some() { "plan-bytes" } else { "null" },
+                bytes: plan.map(<[u8]>::to_vec),
+            },
+            schema_path: structured.map(|(schema, _)| schema.display().to_string()),
+            output_path: structured.map(|(_, output)| output.display().to_string()),
+        },
+        issuance: FixtureIssuance {
+            sequence: deferred,
+            timestamp: deferred,
+            kind: "dispatch",
+            node: "m3-s2",
+            payload: FixtureIssuancePayload {
+                role: "step-executor",
+                r#ref: "fixture-ref",
+                evidence: "fixture-evidence",
+            },
+        },
+        completion: FixtureCompletion {
+            sequence: deferred,
+            timestamp: deferred,
+            kind: "dispatch-completion",
+            node: "m3-s2",
+            payload: FixtureCompletionPayload {
+                issuance_sequence: deferred,
+                duration_ms: deferred,
+                usage: deferred,
+                exit_status: deferred,
+                artifact_outcome: "not-validated",
+            },
+        },
+    };
+    let mut bytes = serde_json::to_vec(&fixture).expect("serialize independent fixture");
+    bytes.push(b'\n');
+    bytes
+}
+
+fn assert_shared_serializer_family(
+    actual: &serde_json::Value,
+    cwd: &Path,
+    environment: &[(String, String)],
+    structured: Option<(&PathBuf, &PathBuf)>,
+    plan: Option<&[u8]>,
+    caller_arguments: &[String],
+) {
+    let stdin = plan.map_or(StdinBinding::Null, |bytes| {
+        StdinBinding::PlanBytes(bytes.to_vec())
+    });
+    let mut envelope = DispatchEnvelope::new(
+        Executable::parse("codex").expect("executable"),
+        AbsoluteWorkingDirectory::parse(cwd).expect("working directory"),
+        stdin,
+    )
+    .with_arguments(ArgumentVector::new(caller_arguments.to_vec()))
+    .with_environment(ChildEnvironment::new(environment.iter().cloned().collect()))
+    .with_sandbox(Sandbox::WorkspaceWrite);
+    if let Some((schema, output)) = structured {
+        envelope = envelope
+            .with_schema_path(AbsoluteSchemaPath::parse(schema).expect("schema path"))
+            .with_output_path(AbsoluteOutputPath::parse(output).expect("output path"));
+    }
+    assert_eq!(
+        actual["envelope"],
+        serde_json::to_value(dispatch_invocation(&envelope)).expect("serialize shared invocation")
+    );
+    let logging = DispatchLogging {
+        node: NodeId::parse("m3-s2").expect("node"),
+        role: DispatchRole::new("step-executor"),
+        dispatch_ref: DispatchRef::new("fixture-ref"),
+        evidence: Evidence::parse("fixture-evidence").expect("evidence"),
+    };
+    let payload = dispatch_payload(&logging);
+    assert_eq!(
+        actual["issuance"]["payload"],
+        serde_json::to_value(&payload).expect("serialize shared payload")
+    );
+    assert_eq!(actual["issuance"]["kind"], WriteKind::Dispatch.as_str());
+    assert_eq!(actual["issuance"]["node"], logging.node.as_str());
+    let record = EventRecord::known(
+        Sequence::parse(71).expect("sequence"),
+        EventTimestamp::parse("2026-08-01T12:34:56.789Z").expect("timestamp"),
+        logging.node,
+        KnownPayload::Dispatch(payload),
+    );
+    let real: serde_json::Value =
+        serde_json::from_str(&serialize_event_line(&record).expect("serialize real event"))
+            .expect("parse real event");
+    let actual_keys = actual["issuance"]
+        .as_object()
+        .expect("issuance object")
+        .keys()
+        .collect::<BTreeSet<_>>();
+    let real_keys = real
+        .as_object()
+        .expect("real event object")
+        .keys()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_keys, real_keys);
+    let _: Deferred<Sequence> = serde_json::from_value(actual["issuance"]["sequence"].clone())
+        .expect("typed deferred sequence");
+    let _: Deferred<EventTimestamp> =
+        serde_json::from_value(actual["issuance"]["timestamp"].clone())
+            .expect("typed deferred timestamp");
+    let _: Deferred<Sequence> =
+        serde_json::from_value(actual["completion"]["payload"]["issuance_sequence"].clone())
+            .expect("typed deferred issuance correlation");
+    let _: Deferred<DispatchDuration> =
+        serde_json::from_value(actual["completion"]["payload"]["duration_ms"].clone())
+            .expect("typed deferred duration");
+    let _: Deferred<CodexTokenUsage> =
+        serde_json::from_value(actual["completion"]["payload"]["usage"].clone())
+            .expect("typed deferred usage");
+    let _: Deferred<DispatchExitStatus> =
+        serde_json::from_value(actual["completion"]["payload"]["exit_status"].clone())
+            .expect("typed deferred exit status");
 }
 
 struct DispatchCase<'a> {
@@ -180,12 +756,37 @@ fn child_environment(
     ]
 }
 
-fn dispatch_argv(
+trait CallerArguments {
+    fn append_strings(&self, target: &mut Vec<String>);
+    fn append_os_strings(&self, target: &mut Vec<OsString>);
+}
+
+impl CallerArguments for str {
+    fn append_strings(&self, target: &mut Vec<String>) {
+        target.push(self.to_owned());
+    }
+
+    fn append_os_strings(&self, target: &mut Vec<OsString>) {
+        target.push(OsString::from(self));
+    }
+}
+
+impl CallerArguments for [String] {
+    fn append_strings(&self, target: &mut Vec<String>) {
+        target.extend(self.iter().cloned());
+    }
+
+    fn append_os_strings(&self, target: &mut Vec<OsString>) {
+        target.extend(self.iter().map(OsString::from));
+    }
+}
+
+fn dispatch_argv<A: CallerArguments + ?Sized>(
     cwd: &Path,
     environment: &[(String, String)],
     structured: Option<(&PathBuf, &PathBuf)>,
     plan_path: Option<&Path>,
-    caller_tail: &str,
+    caller_arguments: &A,
 ) -> Vec<String> {
     let mut argv = vec![
         "dispatch".to_owned(),
@@ -209,16 +810,17 @@ fn dispatch_argv(
     if let Some(path) = plan_path {
         argv.extend(["--plan-file".to_owned(), path.display().to_string()]);
     }
-    argv.extend(["--".to_owned(), caller_tail.to_owned()]);
+    argv.push("--".to_owned());
+    caller_arguments.append_strings(&mut argv);
     argv
 }
 
-fn assert_invocation(
+fn assert_invocation<A: CallerArguments + ?Sized>(
     invocation: &CodexInvocation,
     cwd: &Path,
     environment: &[(String, String)],
     structured: Option<(&PathBuf, &PathBuf)>,
-    caller_tail: &str,
+    caller_arguments: &A,
     expected_stdin: &[u8],
 ) {
     let mut expected_argv = vec![
@@ -237,7 +839,7 @@ fn assert_invocation(
             output.as_os_str().to_owned(),
         ]);
     }
-    expected_argv.push(OsString::from(caller_tail));
+    caller_arguments.append_os_strings(&mut expected_argv);
     assert_eq!(invocation.argv, expected_argv);
     assert_eq!(invocation.cwd, cwd);
     let mut expected_environment: BTreeSet<OsString> = environment
