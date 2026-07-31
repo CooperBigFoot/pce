@@ -100,36 +100,36 @@ impl ReadyFixture {
         }
     }
 
-    fn run(&self, policies: &[(&str, &str)]) -> std::process::Output {
-        let mut args = vec![
-            OsString::from("ready"),
-            OsString::from("--file"),
-            self.log.as_os_str().to_owned(),
-            OsString::from("--vision-dir"),
-            self.vision.as_os_str().to_owned(),
-        ];
-        for (repository, policy) in policies {
-            args.push(OsString::from("--policy"));
-            args.push(OsString::from(format!("{repository}={policy}")));
-        }
-        self.harness.run(args, b"").expect("run ready")
+    fn run(&self) -> std::process::Output {
+        self.harness
+            .run(
+                [
+                    OsString::from("ready"),
+                    OsString::from("--file"),
+                    self.log.as_os_str().to_owned(),
+                    OsString::from("--vision-dir"),
+                    self.vision.as_os_str().to_owned(),
+                ],
+                b"",
+            )
+            .expect("run ready")
     }
 
-    fn run_with_graph(&self, graph_path: &str, policies: &[(&str, &str)]) -> std::process::Output {
-        let mut args = vec![
-            OsString::from("ready"),
-            OsString::from("--file"),
-            self.log.as_os_str().to_owned(),
-            OsString::from("--vision-dir"),
-            self.vision.as_os_str().to_owned(),
-            OsString::from("--graph"),
-            OsString::from(graph_path),
-        ];
-        for (repository, policy) in policies {
-            args.push(OsString::from("--policy"));
-            args.push(OsString::from(format!("{repository}={policy}")));
-        }
-        self.harness.run(args, b"").expect("run ready")
+    fn run_with_graph(&self, graph_path: &str) -> std::process::Output {
+        self.harness
+            .run(
+                [
+                    OsString::from("ready"),
+                    OsString::from("--file"),
+                    self.log.as_os_str().to_owned(),
+                    OsString::from("--vision-dir"),
+                    self.vision.as_os_str().to_owned(),
+                    OsString::from("--graph"),
+                    OsString::from(graph_path),
+                ],
+                b"",
+            )
+            .expect("run ready")
     }
 
     fn run_status(&self) -> std::process::Output {
@@ -178,7 +178,7 @@ fn routes_both_altitudes_through_exact_repository_local_selectors() {
         ))
         .expect("responses");
 
-    let output = fixture.run(&[("pce", "NONE"), ("docs", "NONE")]);
+    let output = fixture.run();
     assert_success(&output);
     assert_eq!(
         stdout_json(&output),
@@ -235,7 +235,7 @@ fn reason_edge_changes_waiting_to_ready_when_dependency_merges() {
                 ],
             ))
             .expect("responses");
-        let output = fixture.run(&[("pce", "NONE")]);
+        let output = fixture.run();
         assert_success(&output);
         let value = stdout_json(&output);
         assert_eq!(value["results"][1]["classification"], expected);
@@ -250,17 +250,15 @@ fn contract_policies_narrow_only_the_selected_repository() {
         node("m1-s3", "docs", vec![]),
         node("m1-s4", "docs", vec![]),
     ]);
-    for (pce_policy, docs_policy, compatibility_policies, expected) in [
+    for (pce_policy, docs_policy, expected) in [
         (
             "SERIALIZE_DISPATCHES",
             "NONE",
-            vec![("pce", "NONE"), ("docs", "SERIALIZE_DISPATCHES")],
             vec!["ready", "waiting", "ready", "ready"],
         ),
         (
             "NONE",
             "SERIALIZE_DISPATCHES",
-            vec![("pce", "SERIALIZE_DISPATCHES"), ("docs", "NONE")],
             vec!["ready", "ready", "ready", "waiting"],
         ),
     ] {
@@ -274,7 +272,7 @@ fn contract_policies_narrow_only_the_selected_repository() {
             .harness
             .materialize_responses(&all_not_merged(&fixture, &graph))
             .expect("responses");
-        let output = fixture.run(&compatibility_policies);
+        let output = fixture.run();
         assert_success(&output);
         let value = stdout_json(&output);
         let actual = value["results"]
@@ -291,7 +289,7 @@ fn contract_policies_narrow_only_the_selected_repository() {
         .harness
         .materialize_responses(&all_not_merged(&fixture, &graph))
         .expect("responses");
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert_success(&output);
     assert_eq!(
         stdout_json(&output)["results"]
@@ -303,7 +301,7 @@ fn contract_policies_narrow_only_the_selected_repository() {
 }
 
 #[test]
-fn latest_current_contract_policy_supersedes_compatibility_policy() {
+fn latest_current_contract_policy_controls_readiness() {
     let graph = two_pce_node_graph();
     let fixture = ReadyFixture::new_with_contracts(&graph, &[], |primary, _| {
         vec![
@@ -316,7 +314,7 @@ fn latest_current_contract_policy_supersedes_compatibility_policy() {
         .materialize_responses(&all_not_merged(&fixture, &graph))
         .expect("responses");
 
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert_success(&output);
     assert_eq!(
         stdout_json(&output),
@@ -340,7 +338,7 @@ fn legacy_only_history_reads_none_policy_at_default_branch_head() {
         .materialize_responses(&scripted)
         .expect("responses");
 
-    let output = fixture.run(&[("pce", "SERIALIZE_DISPATCHES")]);
+    let output = fixture.run();
     assert_success(&output);
     let invocations = fixture.harness.invocations().expect("invocations");
     assert_eq!(
@@ -372,7 +370,7 @@ fn legacy_only_history_reads_none_policy_at_default_branch_head() {
 }
 
 #[test]
-fn legacy_only_history_defaults_to_none_when_tracked_contract_is_unreachable() {
+fn legacy_only_history_fails_when_tracked_contract_is_unreachable() {
     let graph = two_pce_node_graph();
     let fixture = ReadyFixture::new_with_contracts(&graph, &[], |primary, _| {
         vec![legacy_repository_contract("pce", primary)]
@@ -388,12 +386,16 @@ fn legacy_only_history_defaults_to_none_when_tracked_contract_is_unreachable() {
         .materialize_responses(&scripted)
         .expect("responses");
 
-    let output = fixture.run(&[("pce", "SERIALIZE_DISPATCHES")]);
-    assert_success(&output);
-    let invocations = fixture.harness.invocations().expect("invocations");
+    let output = fixture.run();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
     assert_eq!(
-        &invocations[..2],
-        &[
+        stderr(&output),
+        "Error: repository pce has neither a current repository-contract record nor .pce/repository-contract.json at default-branch HEAD\n"
+    );
+    assert_eq!(
+        fixture.harness.invocations().expect("invocations"),
+        vec![
             invocation(
                 "git",
                 git_args(
@@ -409,18 +411,6 @@ fn legacy_only_history_defaults_to_none_when_tracked_contract_is_unreachable() {
                 )
             )
         ]
-    );
-    assert!(
-        invocations[2..]
-            .iter()
-            .any(|invocation| invocation.program == OsStr::new("gh"))
-    );
-    assert_eq!(
-        stdout_json(&output),
-        json!({"results":[
-            {"classification":"ready","node":"m1-s1","repository":"pce"},
-            {"classification":"ready","node":"m1-s2","repository":"pce"}
-        ]})
     );
 }
 
@@ -450,7 +440,7 @@ fn legacy_then_current_history_keeps_status_and_ready_operational() {
         Some(&json!("pce"))
     );
 
-    let ready = fixture.run_with_graph("graph.json", &[("pce", "NONE")]);
+    let ready = fixture.run_with_graph("graph.json");
     assert_success(&ready);
     assert_eq!(
         stdout_json(&ready),
@@ -486,7 +476,7 @@ fn digest_mismatch_fails_before_any_adapter_invocation() {
         .materialize_responses(&[])
         .expect("empty responses");
 
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let error = stderr(&output);
@@ -544,7 +534,7 @@ fn default_selector_walk_skips_newer_non_graph() {
         .materialize_responses(&all_not_merged(&fixture, &older_graph))
         .expect("responses");
 
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert_success(&output);
     assert_eq!(
         stdout_json(&output),
@@ -601,7 +591,7 @@ fn selector_targets_an_older_approved_graph() {
         .materialize_responses(&all_not_merged(&fixture, &older_graph))
         .expect("responses");
 
-    let output = fixture.run_with_graph("older.json", &[("pce", "NONE")]);
+    let output = fixture.run_with_graph("older.json");
     assert_success(&output);
     assert_eq!(
         stdout_json(&output),
@@ -659,7 +649,7 @@ fn selector_digest_is_bound_to_the_named_record() {
         .materialize_responses(&[])
         .expect("empty responses");
 
-    let output = fixture.run_with_graph("named.json", &[("pce", "NONE")]);
+    let output = fixture.run_with_graph("named.json");
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let error = stderr(&output);
@@ -678,7 +668,7 @@ fn unknown_graph_selector_fails_without_fallback() {
         .materialize_responses(&all_not_merged(&fixture, &graph))
         .expect("responses");
 
-    let output = fixture.run_with_graph("unknown.json", &[("pce", "NONE")]);
+    let output = fixture.run_with_graph("unknown.json");
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(
@@ -738,7 +728,7 @@ fn named_non_graph_fails_without_fallback() {
         .materialize_responses(&[])
         .expect("empty responses");
 
-    let output = fixture.run_with_graph("plan.md", &[("pce", "NONE")]);
+    let output = fixture.run_with_graph("plan.md");
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let error = stderr(&output);
@@ -765,7 +755,7 @@ fn graph_selector_digest_mismatch_precedes_all_adapters() {
         .materialize_responses(&[])
         .expect("empty responses");
 
-    let output = fixture.run_with_graph("graph.json", &[("pce", "NONE")]);
+    let output = fixture.run_with_graph("graph.json");
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let error = stderr(&output);
@@ -830,7 +820,7 @@ fn older_graph_survives_newer_missing_and_non_graph_approvals() {
         .materialize_responses(&all_not_merged(&fixture, &older_graph))
         .expect("responses");
 
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert_success(&output);
     assert_eq!(
         stdout_json(&output),
@@ -890,7 +880,7 @@ fn digest_verdict_belongs_to_selected_older_graph() {
         .materialize_responses(&[])
         .expect("empty responses");
 
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let error = stderr(&output);
@@ -950,7 +940,7 @@ fn newest_conforming_graph_wins() {
         .materialize_responses(&all_not_merged(&fixture, &newer_graph))
         .expect("responses");
 
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert_success(&output);
     assert_eq!(
         stdout_json(&output),
@@ -973,7 +963,7 @@ fn emits_every_ready_node_in_graph_order() {
         .harness
         .materialize_responses(&all_not_merged(&fixture, &graph))
         .expect("responses");
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert_success(&output);
     assert_eq!(
         stdout_json(&output),
@@ -1018,7 +1008,7 @@ fn dependency_inconclusive_is_not_collapsed() {
             ],
         ))
         .expect("responses");
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert_success(&output);
     let classification = stdout_json(&output)["results"][1]["classification"]
         .as_str()
@@ -1075,7 +1065,7 @@ fn malformed_matching_graph_fails_before_adapters() {
             .harness
             .materialize_responses(&[])
             .expect("empty responses");
-        let output = fixture.run(&[("pce", "NONE")]);
+        let output = fixture.run();
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         assert!(stderr(&output).contains("conforming graph"));
@@ -1109,7 +1099,7 @@ fn in_flight_execution_is_filtered_but_still_observed() {
         .harness
         .materialize_responses(&all_not_merged(&fixture, &graph))
         .expect("responses");
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert_success(&output);
     assert_eq!(
         stdout_json(&output),
@@ -1165,7 +1155,7 @@ fn every_approved_artifact_path_is_observed() {
         .harness
         .materialize_responses(&all_not_merged(&fixture, &graph))
         .expect("responses");
-    let output = fixture.run(&[("pce", "NONE")]);
+    let output = fixture.run();
     assert_success(&output);
     assert_eq!(stdout_json(&output)["results"][0]["node"], "m1-s1");
 }
