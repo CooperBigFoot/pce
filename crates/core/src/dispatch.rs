@@ -1,4 +1,4 @@
-//! DispatchEnvelope = Executable × ArgumentVector × AbsoluteWorkingDirectory × ChildEnvironment × StdinBinding × Option<Sandbox> × Option<AbsoluteSchemaPath> × Option<AbsoluteOutputPath>   (pure, deterministic)
+//! dispatch = child invocation description × optional typed logging metadata; terminal_usage : JSONL observations × ExitStatus → CodexTokenUsage   (pure, deterministic)
 //! This provisional module describes child invocations; the binary adapter performs all I/O and process work and will test the shape against the real tool surface in m2-s2.
 
 use std::collections::BTreeMap;
@@ -6,6 +6,108 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use tracing::instrument;
+
+use crate::event_log::{
+    CachedInputTokens, CodexTokenUsage, DispatchExitStatus, DispatchRef, DispatchRole, Evidence,
+    InputTokens, NodeId, OutputTokens, ReasoningOutputTokens, UsageAbsenceReason,
+};
+
+/// Typed log metadata carried beside, rather than inside, a child envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchLogging {
+    pub node: NodeId,
+    pub role: DispatchRole,
+    pub dispatch_ref: DispatchRef,
+    pub evidence: Evidence,
+}
+
+/// One adapter-observed JSONL fact relevant to terminal classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalObservation {
+    /// The physical line did not parse as JSON.
+    MalformedLine,
+    /// A parseable object has no known terminal `type`; absence of `type` is non-terminal.
+    NonTerminal,
+    /// A completed turn with either exact counters or malformed usage.
+    TurnCompleted(Option<TerminalUsage>),
+    /// A failed turn, recording whether a forbidden usage key was present.
+    TurnFailed { usage_present: bool },
+}
+
+/// The four exact counters from a well-formed completed turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_output_tokens: u64,
+}
+
+/// Classify terminal observations after the child exit is known.
+///
+/// Invalid-data rows take precedence over well-formed outcomes, in their documented order.
+/// Signal termination counts as a nonzero exit: absent becomes `NoTerminalTurn`, completed is
+/// contradictory, and failed remains `TurnFailed`.
+pub fn classify_terminal_usage(
+    observations: &[TerminalObservation],
+    exit_status: DispatchExitStatus,
+) -> Result<CodexTokenUsage, UsageAbsenceReason> {
+    let completed = observations
+        .iter()
+        .filter(|item| matches!(item, TerminalObservation::TurnCompleted(_)))
+        .collect::<Vec<_>>();
+    let failed = observations
+        .iter()
+        .filter(|item| matches!(item, TerminalObservation::TurnFailed { .. }))
+        .collect::<Vec<_>>();
+    // Precedence is specification: malformed, duplicate, contradictory, then valid outcomes.
+    if observations
+        .iter()
+        .any(|item| matches!(item, TerminalObservation::MalformedLine))
+        || completed
+            .iter()
+            .any(|item| matches!(item, TerminalObservation::TurnCompleted(None)))
+        || failed.iter().any(|item| {
+            matches!(
+                item,
+                TerminalObservation::TurnFailed {
+                    usage_present: true
+                }
+            )
+        })
+    {
+        return Err(UsageAbsenceReason::MalformedTerminalData);
+    }
+    if completed.len() > 1 || failed.len() > 1 {
+        return Err(UsageAbsenceReason::DuplicateTerminalData);
+    }
+    if !completed.is_empty() && !failed.is_empty() {
+        return Err(UsageAbsenceReason::ContradictoryTerminalData);
+    }
+    let zero = matches!(exit_status, DispatchExitStatus::Exited { code } if code.get() == 0);
+    if (!completed.is_empty() && !zero)
+        || (!failed.is_empty() && zero)
+        || (completed.is_empty() && failed.is_empty() && zero)
+    {
+        return Err(UsageAbsenceReason::ContradictoryTerminalData);
+    }
+    if let Some(TerminalObservation::TurnCompleted(Some(usage))) = completed.first().copied() {
+        return Ok(CodexTokenUsage::Measured {
+            input_tokens: InputTokens::new(usage.input_tokens),
+            cached_input_tokens: CachedInputTokens::new(usage.cached_input_tokens),
+            output_tokens: OutputTokens::new(usage.output_tokens),
+            reasoning_output_tokens: ReasoningOutputTokens::new(usage.reasoning_output_tokens),
+        });
+    }
+    if !failed.is_empty() {
+        return Ok(CodexTokenUsage::Absent {
+            reason: UsageAbsenceReason::TurnFailed,
+        });
+    }
+    Ok(CodexTokenUsage::Absent {
+        reason: UsageAbsenceReason::NoTerminalTurn,
+    })
+}
 
 /// A program name passed directly to a process adapter, never to a shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,7 +409,129 @@ mod tests {
     use super::{
         AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
         ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, StdinBinding,
+        TerminalObservation, TerminalUsage, classify_terminal_usage,
     };
+    use crate::event_log::{
+        CodexTokenUsage, DispatchExitStatus, ExitCode, SignalNumber, UsageAbsenceReason,
+    };
+
+    fn exited(code: u64) -> DispatchExitStatus {
+        DispatchExitStatus::Exited {
+            code: ExitCode::new(code),
+        }
+    }
+
+    #[test]
+    fn terminal_partition_and_precedence_are_exhaustive() {
+        let usage = TerminalUsage {
+            input_tokens: 101,
+            cached_input_tokens: 23,
+            output_tokens: 17,
+            reasoning_output_tokens: 5,
+        };
+        let cases = [
+            (
+                vec![TerminalObservation::MalformedLine],
+                exited(5),
+                Err(UsageAbsenceReason::MalformedTerminalData),
+            ),
+            (
+                vec![TerminalObservation::TurnCompleted(None)],
+                exited(0),
+                Err(UsageAbsenceReason::MalformedTerminalData),
+            ),
+            (
+                vec![TerminalObservation::TurnFailed {
+                    usage_present: true,
+                }],
+                exited(0),
+                Err(UsageAbsenceReason::MalformedTerminalData),
+            ),
+            (
+                vec![
+                    TerminalObservation::TurnFailed {
+                        usage_present: false,
+                    },
+                    TerminalObservation::TurnFailed {
+                        usage_present: false,
+                    },
+                ],
+                exited(41),
+                Err(UsageAbsenceReason::DuplicateTerminalData),
+            ),
+            (
+                vec![
+                    TerminalObservation::TurnCompleted(Some(usage)),
+                    TerminalObservation::TurnFailed {
+                        usage_present: false,
+                    },
+                ],
+                exited(43),
+                Err(UsageAbsenceReason::ContradictoryTerminalData),
+            ),
+            (
+                vec![TerminalObservation::TurnCompleted(Some(usage))],
+                exited(5),
+                Err(UsageAbsenceReason::ContradictoryTerminalData),
+            ),
+            (
+                vec![TerminalObservation::TurnFailed {
+                    usage_present: false,
+                }],
+                exited(0),
+                Err(UsageAbsenceReason::ContradictoryTerminalData),
+            ),
+            (
+                vec![TerminalObservation::NonTerminal],
+                exited(0),
+                Err(UsageAbsenceReason::ContradictoryTerminalData),
+            ),
+            (
+                vec![TerminalObservation::TurnFailed {
+                    usage_present: false,
+                }],
+                exited(41),
+                Ok(CodexTokenUsage::Absent {
+                    reason: UsageAbsenceReason::TurnFailed,
+                }),
+            ),
+            (
+                vec![TerminalObservation::NonTerminal],
+                exited(42),
+                Ok(CodexTokenUsage::Absent {
+                    reason: UsageAbsenceReason::NoTerminalTurn,
+                }),
+            ),
+            (
+                vec![],
+                DispatchExitStatus::Signaled {
+                    signal: SignalNumber::new(15),
+                },
+                Ok(CodexTokenUsage::Absent {
+                    reason: UsageAbsenceReason::NoTerminalTurn,
+                }),
+            ),
+        ];
+        for (observations, status, expected) in cases {
+            assert_eq!(classify_terminal_usage(&observations, status), expected);
+        }
+        let measured = classify_terminal_usage(
+            &[
+                TerminalObservation::NonTerminal,
+                TerminalObservation::TurnCompleted(Some(usage)),
+            ],
+            exited(0),
+        );
+        assert_eq!(
+            measured,
+            Ok(CodexTokenUsage::Measured {
+                input_tokens: crate::event_log::InputTokens::new(101),
+                cached_input_tokens: crate::event_log::CachedInputTokens::new(23),
+                output_tokens: crate::event_log::OutputTokens::new(17),
+                reasoning_output_tokens: crate::event_log::ReasoningOutputTokens::new(5),
+            })
+        );
+    }
 
     #[test]
     fn constructs_minimal_dispatch_envelope() -> Result<(), DispatchError> {
