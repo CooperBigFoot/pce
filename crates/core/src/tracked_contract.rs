@@ -1,4 +1,4 @@
-//! parse_tracked_repository_contract : TrackedContractBytes → TrackedRepositoryContract ∪ TrackedContractError; serialize_tracked_repository_contract : TrackedRepositoryContract → CanonicalTrackedContractBytes ∪ serde_json::Error; admit_recurrent_finding : TrackedRepositoryContract × AppendableFinding × CurrentRunFindingTexts × PriorRunFindingTexts → TrackedRepositoryContract × FindingAdmission   (pure, deterministic)
+//! parse_gate_command : GateCommandText → Executable × ArgumentVector ∪ GateCommandParseError; parse_tracked_repository_contract : TrackedContractBytes → TrackedRepositoryContract ∪ TrackedContractError; serialize_tracked_repository_contract : TrackedRepositoryContract → CanonicalTrackedContractBytes ∪ serde_json::Error; admit_recurrent_finding : TrackedRepositoryContract × AppendableFinding × CurrentRunFindingTexts × PriorRunFindingTexts → TrackedRepositoryContract × FindingAdmission   (pure, deterministic)
 //! This module performs no I/O.
 
 use std::collections::HashSet;
@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
+use crate::dispatch::{ArgumentVector, DispatchError, Executable};
 use crate::run_state::VersionPolicy;
 
 /// The typed stated and appendable halves of a tracked repository contract.
@@ -86,6 +87,237 @@ impl GateCommand {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// A shell-free executable and its complete parsed argument vector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedGateCommand {
+    executable: Executable,
+    arguments: ArgumentVector,
+}
+
+impl ParsedGateCommand {
+    /// Borrow the parsed executable.
+    pub const fn executable(&self) -> &Executable {
+        &self.executable
+    }
+
+    /// Borrow the parsed argument vector.
+    pub const fn arguments(&self) -> &ArgumentVector {
+        &self.arguments
+    }
+}
+
+/// A gate command uses syntax that cannot be represented by direct process execution.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum GateCommandParseError {
+    /// Fires when the command contains no word.
+    #[error("gate command cannot be empty")]
+    EmptyCommand,
+    /// Fires when quoting constructs a zero-byte word.
+    #[error("gate command contains an empty word at byte {position}")]
+    EmptyWord {
+        /// Byte offset where the empty word ended.
+        position: usize,
+    },
+    /// Fires when a single or double quote has no closing delimiter.
+    #[error("gate command has an unterminated {quote} quote starting at byte {position}")]
+    UnterminatedQuote {
+        /// The human-readable quote kind.
+        quote: &'static str,
+        /// Byte offset of the opening quote.
+        position: usize,
+    },
+    /// Fires when a trailing backslash has no byte to quote.
+    #[error("gate command has a dangling escape at byte {position}")]
+    DanglingEscape {
+        /// Byte offset of the trailing backslash.
+        position: usize,
+    },
+    /// Fires when unquoted control or operator syntax is present.
+    #[error("gate command contains shell operator {syntax:?} at byte {position}")]
+    ShellOperator {
+        /// The rejected syntax.
+        syntax: String,
+        /// Byte offset of the syntax.
+        position: usize,
+    },
+    /// Fires when unquoted input or output redirection syntax is present.
+    #[error("gate command contains redirection {syntax:?} at byte {position}")]
+    Redirection {
+        /// The rejected syntax.
+        syntax: String,
+        /// Byte offset of the syntax.
+        position: usize,
+    },
+    /// Fires when command-substitution syntax is present.
+    #[error("gate command contains command substitution {syntax:?} at byte {position}")]
+    CommandSubstitution {
+        /// The rejected syntax.
+        syntax: String,
+        /// Byte offset of the syntax.
+        position: usize,
+    },
+    /// Fires when variable or parameter expansion syntax is present.
+    #[error("gate command contains variable expansion at byte {position}")]
+    VariableExpansion {
+        /// Byte offset of the dollar sign.
+        position: usize,
+    },
+    /// Fires when globbing syntax is present.
+    #[error("gate command contains globbing syntax {syntax:?} at byte {position}")]
+    Globbing {
+        /// The rejected syntax.
+        syntax: char,
+        /// Byte offset of the syntax.
+        position: usize,
+    },
+    /// Fires when the parsed executable violates its domain invariant.
+    #[error("gate command executable is invalid: {source}")]
+    InvalidExecutable {
+        /// The executable parsing failure.
+        source: DispatchError,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quote {
+    Single,
+    Double,
+}
+
+/// Parse lexical shell-style words without invoking or emulating a shell.
+///
+/// Quotes and backslashes only preserve literal word bytes. Shell operators,
+/// redirections, expansions, substitutions, and globbing are rejected.
+///
+/// # Errors
+///
+/// Returns [`GateCommandParseError`] when the command is empty, creates an
+/// empty word, has incomplete quoting, or contains shell execution semantics.
+pub fn parse_gate_command(raw: &str) -> Result<ParsedGateCommand, GateCommandParseError> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut word_started = false;
+    let mut quote = None;
+    let mut quote_start = 0;
+    let mut chars = raw.char_indices().peekable();
+
+    while let Some((position, character)) = chars.next() {
+        if character == '\n' {
+            return Err(GateCommandParseError::ShellOperator {
+                syntax: "newline".to_owned(),
+                position,
+            });
+        }
+        if character == '\\' {
+            let Some((_, literal)) = chars.next() else {
+                return Err(GateCommandParseError::DanglingEscape { position });
+            };
+            word_started = true;
+            word.push(literal);
+            continue;
+        }
+        match quote {
+            Some(Quote::Single) if character == '\'' => {
+                quote = None;
+                continue;
+            }
+            Some(Quote::Double) if character == '"' => {
+                quote = None;
+                continue;
+            }
+            Some(_) => {}
+            None if character == '\'' => {
+                quote = Some(Quote::Single);
+                quote_start = position;
+                word_started = true;
+                continue;
+            }
+            None if character == '"' => {
+                quote = Some(Quote::Double);
+                quote_start = position;
+                word_started = true;
+                continue;
+            }
+            None if character.is_whitespace() => {
+                if word_started {
+                    if word.is_empty() {
+                        return Err(GateCommandParseError::EmptyWord { position });
+                    }
+                    words.push(std::mem::take(&mut word));
+                    word_started = false;
+                }
+                continue;
+            }
+            None => {}
+        }
+
+        if character == '`' {
+            return Err(GateCommandParseError::CommandSubstitution {
+                syntax: "`".to_owned(),
+                position,
+            });
+        }
+        if character == '$' {
+            if chars.peek().is_some_and(|(_, next)| *next == '(') {
+                return Err(GateCommandParseError::CommandSubstitution {
+                    syntax: "$(".to_owned(),
+                    position,
+                });
+            }
+            return Err(GateCommandParseError::VariableExpansion { position });
+        }
+        if quote.is_none() {
+            if matches!(character, '<' | '>') {
+                return Err(GateCommandParseError::Redirection {
+                    syntax: character.to_string(),
+                    position,
+                });
+            }
+            if matches!(character, ';' | '&' | '|' | '(' | ')') {
+                return Err(GateCommandParseError::ShellOperator {
+                    syntax: character.to_string(),
+                    position,
+                });
+            }
+            if matches!(character, '*' | '?' | '[' | ']') {
+                return Err(GateCommandParseError::Globbing {
+                    syntax: character,
+                    position,
+                });
+            }
+        }
+        word_started = true;
+        word.push(character);
+    }
+
+    if let Some(open_quote) = quote {
+        return Err(GateCommandParseError::UnterminatedQuote {
+            quote: match open_quote {
+                Quote::Single => "single",
+                Quote::Double => "double",
+            },
+            position: quote_start,
+        });
+    }
+    if word_started {
+        if word.is_empty() {
+            return Err(GateCommandParseError::EmptyWord {
+                position: raw.len(),
+            });
+        }
+        words.push(word);
+    }
+    if words.is_empty() {
+        return Err(GateCommandParseError::EmptyCommand);
+    }
+    let executable = Executable::parse(&words.remove(0))
+        .map_err(|source| GateCommandParseError::InvalidExecutable { source })?;
+    Ok(ParsedGateCommand {
+        executable,
+        arguments: ArgumentVector::new(words),
+    })
 }
 
 /// The role of one acceptance gate.
@@ -932,13 +1164,108 @@ mod tests {
 
     use super::{
         AppendableCategory, AppendableContract, AppendableFinding, DefaultBranchName,
-        EnvironmentHazard, FindingAdmission, GateKind, GateOrdering, LocalWorkflowStandIn,
-        LockfileRule, MilestoneBranchPattern, MilestonePullRequestBase, PullRequestMergeMethod,
-        StatedContract, StepBranchPattern, StepPullRequestBase, TrackedContractError,
-        admit_recurrent_finding, parse_tracked_repository_contract,
-        serialize_tracked_repository_contract,
+        EnvironmentHazard, FindingAdmission, GateCommandParseError, GateKind, GateOrdering,
+        LocalWorkflowStandIn, LockfileRule, MilestoneBranchPattern, MilestonePullRequestBase,
+        PullRequestMergeMethod, StatedContract, StepBranchPattern, StepPullRequestBase,
+        TrackedContractError, admit_recurrent_finding, parse_gate_command,
+        parse_tracked_repository_contract, serialize_tracked_repository_contract,
     };
     use crate::run_state::VersionPolicy;
+
+    #[test]
+    fn gate_command_parser_preserves_word_boundaries() {
+        for (raw, executable, arguments) in [
+            ("uv build --wheel", "uv", vec!["build", "--wheel"]),
+            ("uv 'quoted whitespace'", "uv", vec!["quoted whitespace"]),
+            ("uv \"double whitespace\"", "uv", vec!["double whitespace"]),
+            ("uv escaped\\ whitespace", "uv", vec!["escaped whitespace"]),
+            ("u'v' bu\"il\"d", "uv", vec!["build"]),
+        ] {
+            let parsed = parse_gate_command(raw).expect("lexical command should parse");
+            assert_eq!(parsed.executable().as_str(), executable);
+            assert_eq!(parsed.arguments().as_slice(), arguments);
+        }
+    }
+
+    #[test]
+    fn gate_command_parser_rejects_empty_commands_and_words() {
+        assert_eq!(
+            parse_gate_command("  \t"),
+            Err(GateCommandParseError::EmptyCommand)
+        );
+        assert!(matches!(
+            parse_gate_command("uv ''"),
+            Err(GateCommandParseError::EmptyWord { .. })
+        ));
+    }
+
+    #[test]
+    fn gate_command_parser_rejects_shell_operators_and_pipelines() {
+        assert!(matches!(
+            parse_gate_command("uv && build"),
+            Err(GateCommandParseError::ShellOperator { syntax, .. }) if syntax == "&"
+        ));
+        assert!(matches!(
+            parse_gate_command("uv | build"),
+            Err(GateCommandParseError::ShellOperator { syntax, .. }) if syntax == "|"
+        ));
+        assert!(matches!(
+            parse_gate_command("uv\nbuild"),
+            Err(GateCommandParseError::ShellOperator { syntax, .. }) if syntax == "newline"
+        ));
+    }
+
+    #[test]
+    fn gate_command_parser_rejects_redirection() {
+        assert!(matches!(
+            parse_gate_command("uv build > artifact"),
+            Err(GateCommandParseError::Redirection { syntax, .. }) if syntax == ">"
+        ));
+        assert!(matches!(
+            parse_gate_command("uv build 2<artifact"),
+            Err(GateCommandParseError::Redirection { syntax, .. }) if syntax == "<"
+        ));
+    }
+
+    #[test]
+    fn gate_command_parser_rejects_substitution_and_expansion() {
+        assert!(matches!(
+            parse_gate_command("uv `pwd`"),
+            Err(GateCommandParseError::CommandSubstitution { .. })
+        ));
+        assert!(matches!(
+            parse_gate_command("uv $(pwd)"),
+            Err(GateCommandParseError::CommandSubstitution { .. })
+        ));
+        assert!(matches!(
+            parse_gate_command("uv $HOME"),
+            Err(GateCommandParseError::VariableExpansion { .. })
+        ));
+        assert!(matches!(
+            parse_gate_command("uv ${HOME}"),
+            Err(GateCommandParseError::VariableExpansion { .. })
+        ));
+    }
+
+    #[test]
+    fn gate_command_parser_rejects_globbing() {
+        assert!(matches!(
+            parse_gate_command("uv *.rs"),
+            Err(GateCommandParseError::Globbing { syntax: '*', .. })
+        ));
+    }
+
+    #[test]
+    fn gate_command_parser_rejects_incomplete_lexical_syntax() {
+        assert!(matches!(
+            parse_gate_command("uv 'build"),
+            Err(GateCommandParseError::UnterminatedQuote { .. })
+        ));
+        assert!(matches!(
+            parse_gate_command("uv build\\"),
+            Err(GateCommandParseError::DanglingEscape { .. })
+        ));
+    }
 
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
   "stated": {

@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -15,48 +16,80 @@ const CURRENT_FINDING: &str = r#"{"sequence":2,"timestamp":"2026-07-29T12:00:01.
 const PRIOR_FINDING: &str = r#"{"sequence":2,"timestamp":"2026-07-28T12:00:01.000Z","kind":"key-finding","node":"m2-s2","payload":{"finding":"Cargo.lock must be regenerated before cargo test","evidence":"cargo test --workspace"}}"#;
 const DIVERGENT_PRIOR_FINDING: &str = r#"{"sequence":2,"timestamp":"2026-07-28T12:00:01.000Z","kind":"key-finding","node":"m2-s2","payload":{"finding":"Cargo.lock can be regenerated after cargo test","evidence":"cargo test --workspace"}}"#;
 const NON_SELECTED_CURRENT_FINDING: &str = r#"{"sequence":2,"timestamp":"2026-07-29T12:00:01.000Z","kind":"key-finding","node":"m3-s5","payload":{"finding":"Cargo.lock can be regenerated after cargo test","evidence":"cargo test --workspace"}}"#;
-const TRACKED_CONTRACT: &[u8] = br#"{
-  "stated": {
-    "gates": {
-      "format": ": format-preservation",
-      "lint": ": lint-preservation",
-      "typecheck": ": typecheck-preservation",
-      "test": ": test-preservation",
-      "build": ": build-preservation"
-    },
+#[derive(Debug)]
+struct GateFixtureCommands {
+    format: String,
+    lint: String,
+    typecheck: String,
+    test: String,
+    build: String,
+}
+
+impl GateFixtureCommands {
+    fn values(&self) -> [&str; 5] {
+        [
+            &self.format,
+            &self.lint,
+            &self.typecheck,
+            &self.test,
+            &self.build,
+        ]
+    }
+
+    fn evidence(&self) -> String {
+        self.values().join("\n")
+    }
+}
+
+fn tracked_contract(commands: &GateFixtureCommands) -> Vec<u8> {
+    format!(
+        r#"{{
+  "stated": {{
+    "gates": {{
+      "format": "{}",
+      "lint": "{}",
+      "typecheck": "{}",
+      "test": "{}",
+      "build": "{}"
+    }},
     "version_policy": "SERIALIZE_DISPATCHES",
-    "branches": {
+    "branches": {{
       "default": "contract-default-not-git-main",
-      "milestone": "integration/{vision}/{milestone}",
-      "step": "work/{vision}/{milestone}/{step}"
-    },
-    "pull_requests": {
+      "milestone": "integration/{{vision}}/{{milestone}}",
+      "step": "work/{{vision}}/{{milestone}}/{{step}}"
+    }},
+    "pull_requests": {{
       "step_base": "MILESTONE",
       "milestone_base": "DEFAULT",
       "merge_method": "SQUASH"
-    },
+    }},
     "workflows": [
-      {
+      {{
         "workflow": "ci.yml",
-        "stand_in": {
+        "stand_in": {{
           "kind": "NONE"
-        }
-      }
+        }}
+      }}
     ]
-  },
-  "appendable": {
+  }},
+  "appendable": {{
     "environment_hazards": [],
     "gate_orderings": [],
     "lockfile_rules": []
-  }
+  }}
+}}
+"#,
+        commands.format, commands.lint, commands.typecheck, commands.test, commands.build
+    )
+    .into_bytes()
 }
-"#;
 
 struct Fixture {
     _directory: tempfile::TempDir,
     root: PathBuf,
     current_log: PathBuf,
     prior_log: PathBuf,
+    commands: GateFixtureCommands,
 }
 
 fn git(root: &Path, args: &[&str]) -> Output {
@@ -74,7 +107,11 @@ fn git(root: &Path, args: &[&str]) -> Output {
     output
 }
 
-fn repository_contract_line(root: &Path, repository: &str) -> String {
+fn repository_contract_line(
+    root: &Path,
+    repository: &str,
+    commands: &GateFixtureCommands,
+) -> String {
     json!({
         "sequence": 1,
         "timestamp": "2026-07-29T12:00:00.000Z",
@@ -84,11 +121,11 @@ fn repository_contract_line(root: &Path, repository: &str) -> String {
             "repository": repository,
             "repo_root": root.to_str().expect("fixture root should be UTF-8"),
             "stated": {
-                "format": ": format-preservation",
-                "lint": ": lint-preservation",
-                "typecheck": ": typecheck-preservation",
-                "test": ": test-preservation",
-                "build": ": build-preservation",
+                "format": commands.format,
+                "lint": commands.lint,
+                "typecheck": commands.typecheck,
+                "test": commands.test,
+                "build": commands.build,
                 "version_policy": "SERIALIZE_DISPATCHES",
                 "branch_convention": "default=contract-default-not-git-main; milestone=integration/{vision}/{milestone}; step=work/{vision}/{milestone}/{step}",
                 "pull_request_convention": "step_base=MILESTONE; milestone_base=DEFAULT; merge_method=SQUASH"
@@ -108,20 +145,53 @@ fn repository_contract_line(root: &Path, repository: &str) -> String {
                 "gate_orderings": [],
                 "lockfile_rules": []
             },
-            "evidence": ": format-preservation\n: lint-preservation\n: typecheck-preservation\n: test-preservation\n: build-preservation"
+            "evidence": commands.evidence()
         }
     })
     .to_string()
 }
 
-fn log_body(root: &Path, repository: &str, finding_line: Option<&str>) -> String {
-    let mut body = repository_contract_line(root, repository);
+fn log_body(
+    root: &Path,
+    repository: &str,
+    commands: &GateFixtureCommands,
+    finding_line: Option<&str>,
+) -> String {
+    let mut body = repository_contract_line(root, repository, commands);
     body.push('\n');
     if let Some(line) = finding_line {
         body.push_str(line);
         body.push('\n');
     }
     body
+}
+
+fn gate_fixture_commands(root: &Path) -> GateFixtureCommands {
+    let command = |role: &str| {
+        let shim = root.join(format!("gate-{role}"));
+        let log = root.join(format!("gate-{role}-invocations.bin"));
+        fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n{{ printf '{role}\\0%s\\0' \"$#\"; printf '%s\\0' \"$@\"; }} >> '{}' || exit 74\n",
+                log.display()
+            ),
+        )
+        .expect("gate shim should write");
+        let mut permissions = fs::metadata(&shim)
+            .expect("gate shim metadata should read")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&shim, permissions).expect("gate shim should be executable");
+        shim.display().to_string()
+    };
+    GateFixtureCommands {
+        format: command("format"),
+        lint: command("lint"),
+        typecheck: command("typecheck"),
+        test: command("test"),
+        build: command("build"),
+    }
 }
 
 fn fixture(prior_finding: &str) -> Fixture {
@@ -139,6 +209,7 @@ fn fixture(prior_finding: &str) -> Fixture {
     );
     git(&root, &["config", "user.name", "PCE Test"]);
     git(&root, &["config", "user.email", "pce-test@example.invalid"]);
+    let commands = gate_fixture_commands(&root);
     let workflow = root.join(".github/workflows/ci.yml");
     fs::create_dir_all(workflow.parent().expect("workflow should have parent"))
         .expect("workflow directory should create");
@@ -146,7 +217,7 @@ fn fixture(prior_finding: &str) -> Fixture {
     let tracked = root.join(".pce/repository-contract.json");
     fs::create_dir_all(tracked.parent().expect("contract should have parent"))
         .expect("contract directory should create");
-    fs::write(&tracked, TRACKED_CONTRACT).expect("contract should write");
+    fs::write(&tracked, tracked_contract(&commands)).expect("contract should write");
     git(&root, &["add", ".github/workflows/ci.yml"]);
     git(&root, &["add", ".pce/repository-contract.json"]);
     git(&root, &["commit", "-m", "initial authority"]);
@@ -164,12 +235,17 @@ fn fixture(prior_finding: &str) -> Fixture {
     let prior_log = directory.path().join("prior.jsonl");
     fs::write(
         &current_log,
-        log_body(&root, "fixture-repository", Some(CURRENT_FINDING)),
+        log_body(
+            &root,
+            "fixture-repository",
+            &commands,
+            Some(CURRENT_FINDING),
+        ),
     )
     .expect("current log should write");
     fs::write(
         &prior_log,
-        log_body(&root, "fixture-repository", Some(prior_finding)),
+        log_body(&root, "fixture-repository", &commands, Some(prior_finding)),
     )
     .expect("prior log should write");
     Fixture {
@@ -177,6 +253,7 @@ fn fixture(prior_finding: &str) -> Fixture {
         root,
         current_log,
         prior_log,
+        commands,
     }
 }
 
@@ -315,14 +392,26 @@ fn recurrence_appends_once_and_preserves_stated_half_byte_for_byte() {
     let tracked =
         parse_tracked_repository_contract(&tracked_bytes).expect("learned contract should parse");
     let stated = tracked.stated();
-    assert_eq!(stated.gates().format().as_str(), ": format-preservation");
-    assert_eq!(stated.gates().lint().as_str(), ": lint-preservation");
+    assert_eq!(
+        stated.gates().format().as_str(),
+        fixture.commands.format.as_str()
+    );
+    assert_eq!(
+        stated.gates().lint().as_str(),
+        fixture.commands.lint.as_str()
+    );
     assert_eq!(
         stated.gates().typecheck().as_str(),
-        ": typecheck-preservation"
+        fixture.commands.typecheck.as_str()
     );
-    assert_eq!(stated.gates().test().as_str(), ": test-preservation");
-    assert_eq!(stated.gates().build().as_str(), ": build-preservation");
+    assert_eq!(
+        stated.gates().test().as_str(),
+        fixture.commands.test.as_str()
+    );
+    assert_eq!(
+        stated.gates().build().as_str(),
+        fixture.commands.build.as_str()
+    );
     assert_eq!(stated.version_policy(), &VersionPolicy::SerializeDispatches);
     assert_eq!(
         stated.branches().default().as_str(),
@@ -449,7 +538,12 @@ fn prior_repository_identity_mismatch_is_rejected() {
     let fixture = fixture(PRIOR_FINDING);
     fs::write(
         &fixture.prior_log,
-        log_body(&fixture.root, "other-repository", Some(PRIOR_FINDING)),
+        log_body(
+            &fixture.root,
+            "other-repository",
+            &fixture.commands,
+            Some(PRIOR_FINDING),
+        ),
     )
     .expect("prior log should write");
     let tracked_path = fixture.root.join(".pce/repository-contract.json");
@@ -480,6 +574,7 @@ fn missing_current_key_finding_is_rejected() {
         log_body(
             &fixture.root,
             "fixture-repository",
+            &fixture.commands,
             Some(NON_SELECTED_CURRENT_FINDING),
         ),
     )
@@ -517,7 +612,7 @@ fn later_lifecycle_invocation_recovers_exact_entry_without_key_finding() {
     let later_log = fixture._directory.path().join("later.jsonl");
     fs::write(
         &later_log,
-        log_body(&fixture.root, "fixture-repository", None),
+        log_body(&fixture.root, "fixture-repository", &fixture.commands, None),
     )
     .expect("later log should write");
     let refresh_args = vec![
