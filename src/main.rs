@@ -8,22 +8,22 @@ use std::time::SystemTime;
 use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::GateCommand;
 use pce_core::{
-    AppendError, ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode,
-    CreationDate, CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate,
-    DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail,
-    EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
-    ExactPullRequestIdentity, ExactPullRequestState, GitAuthorityObservation,
-    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
-    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
-    MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
-    OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
-    RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot,
-    Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState,
-    TagTarget, TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName, VisionSlug,
-    WorktreeIdentity, WorktreeState, WriteKind, append_event, compute_dispatchability,
-    create_vision, derive_merge_status, derive_milestone_merge_status, derive_run_state,
-    event_record_matches, measure_contract_snapshot, parse_event_line,
+    AppendError, AppendableCategory, AppendableFinding, ArtifactPath, AuthorityFailure,
+    BranchState, CanonicalNode as DispatchNode, CreationDate, CurrentArtifactObservation,
+    CurrentArtifactState, DispatchCandidate, DispatchRoleClass, DispatchabilityResult,
+    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
+    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState, FindingAdmission,
+    GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
+    GitMergeObservation, KnownPayload, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
+    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus,
+    ObservedWorkflowName, OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
+    RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation, RepositoryName,
+    RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot,
+    RunSnapshot, Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode, TagName,
+    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName,
+    VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
+    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
+    derive_run_state, event_record_matches, measure_contract_snapshot, parse_event_line,
     parse_tracked_repository_contract, render_human_snapshot,
     serialize_tracked_repository_contract, validate_workflow_coverage,
 };
@@ -37,7 +37,8 @@ const USAGE: &str = concat!(
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] --policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> [--policy <REPOSITORY>=<NONE|SERIALIZE_DISPATCHES> ...]\n",
     "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>\n",
-    "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>"
+    "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
+    "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>"
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
@@ -79,6 +80,13 @@ enum Command {
         log_path: PathBuf,
         repository_root: PathBuf,
         node: NodeId,
+    },
+    ContractLearn {
+        log_path: PathBuf,
+        prior_log_path: PathBuf,
+        repository_root: PathBuf,
+        node: NodeId,
+        finding: AppendableFinding,
     },
 }
 
@@ -212,6 +220,13 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             repository_root,
             node,
         } => run_contract_refresh(&log_path, &repository_root, node),
+        Command::ContractLearn {
+            log_path,
+            prior_log_path,
+            repository_root,
+            node,
+            finding,
+        } => run_contract_learn(&log_path, &prior_log_path, &repository_root, node, finding),
     }
 }
 
@@ -265,6 +280,48 @@ fn parse_contract_command(action: &str, rest: &[String]) -> Result<Command> {
                 log_path: PathBuf::from(raw_log_path),
                 repository_root: PathBuf::from(raw_repository_root),
                 node,
+            })
+        }
+        (
+            "learn",
+            [
+                file_flag,
+                raw_log_path,
+                prior_file_flag,
+                raw_prior_log_path,
+                root_flag,
+                raw_repository_root,
+                node_flag,
+                raw_node,
+                category_flag,
+                raw_category,
+                finding_flag,
+                raw_finding,
+            ],
+        ) if file_flag == "--file"
+            && prior_file_flag == "--prior-file"
+            && root_flag == "--repo-root"
+            && node_flag == "--node"
+            && category_flag == "--category"
+            && finding_flag == "--finding"
+            && is_value(raw_log_path)
+            && is_value(raw_prior_log_path)
+            && is_value(raw_repository_root)
+            && is_value(raw_node)
+            && is_value(raw_category)
+            && is_value(raw_finding) =>
+        {
+            let node = NodeId::parse(raw_node).context("failed to parse contract-learn node")?;
+            let category = AppendableCategory::parse(raw_category)
+                .context("failed to parse contract-learn category")?;
+            let finding = AppendableFinding::parse(category, raw_finding.clone())
+                .context("failed to parse contract-learn finding")?;
+            Ok(Command::ContractLearn {
+                log_path: PathBuf::from(raw_log_path),
+                prior_log_path: PathBuf::from(raw_prior_log_path),
+                repository_root: PathBuf::from(raw_repository_root),
+                node,
+                finding,
             })
         }
         _ => bail!(USAGE),
@@ -870,22 +927,54 @@ fn run_contract_refresh(log_path: &Path, repository_root: &Path, node: NodeId) -
     }
 }
 
+fn run_contract_learn(
+    log_path: &Path,
+    prior_log_path: &Path,
+    repository_root: &Path,
+    node: NodeId,
+    finding: AppendableFinding,
+) -> Result<()> {
+    if log_path == prior_log_path {
+        bail!("current and prior run logs must be distinct paths");
+    }
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(log_path)
+        .with_context(|| format!("failed to open event log {}", log_path.display()))?;
+    file.lock()
+        .with_context(|| format!("failed to lock event log {}", log_path.display()))?;
+
+    let operation = learn_locked(
+        &mut file,
+        log_path,
+        prior_log_path,
+        repository_root,
+        node,
+        finding,
+    );
+    let unlock = file
+        .unlock()
+        .with_context(|| format!("failed to unlock event log {}", log_path.display()));
+
+    match (operation, unlock) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(()), Err(unlock_error)) => Err(unlock_error),
+        (Err(primary), Err(unlock_error)) => Err(primary.context(format!(
+            "additionally, explicit event-log unlock failed: {unlock_error:#}"
+        ))),
+    }
+}
+
 fn refresh_locked(
     file: &mut File,
     log_path: &Path,
     repository_root: &Path,
     node: NodeId,
 ) -> Result<()> {
-    let repository_root_argument = repository_root.to_str().with_context(|| {
-        format!(
-            "raw --repo-root argument is not valid UTF-8: {}",
-            repository_root.display()
-        )
-    })?;
-    let requested_repository_root = RepositoryRoot::new(repository_root_argument.to_owned());
-    let normalized_repository_root =
-        lexically_normalized_repository_root(requested_repository_root.as_str());
-
     file.seek(SeekFrom::Start(0))
         .with_context(|| format!("failed to seek event log {} for read", log_path.display()))?;
     let parsed_lines = {
@@ -896,23 +985,9 @@ fn refresh_locked(
         .iter()
         .map(|line| line.record.clone())
         .collect::<Vec<_>>();
-    let contracts = repository_contracts(&records)?;
-    let mut matching = contracts.iter().filter(|contract| {
-        lexically_normalized_repository_root(contract.root()) == normalized_repository_root
-    });
-    let previous = matching.next().with_context(|| {
-        format!(
-            "event log contains no repository contract for lexically normalized --repo-root {}",
-            normalized_repository_root.display()
-        )
-    })?;
-    if matching.next().is_some() {
-        bail!(
-            "event log contains multiple repository contracts for lexically normalized --repo-root {}",
-            normalized_repository_root.display()
-        );
-    }
-    let RepositoryContract::Current(previous) = previous else {
+    let (selected_projection, normalized_repository_root) =
+        contract_for_repository_root(&records, repository_root)?;
+    let RepositoryContract::Current(previous) = selected_projection else {
         bail!(
             "event log repository contract for lexically normalized --repo-root {} is legacy and cannot be refreshed",
             normalized_repository_root.display()
@@ -922,10 +997,104 @@ fn refresh_locked(
     let tracked_bytes =
         read_at_default_branch_head(repository_root, TRACKED_REPOSITORY_CONTRACT_PATH)?;
     let tracked = parse_tracked_contract(&tracked_bytes)?;
+    persist_refreshed_contract_locked(file, log_path, repository_root, node, &previous, &tracked)
+}
+
+fn learn_locked(
+    file: &mut File,
+    log_path: &Path,
+    prior_log_path: &Path,
+    repository_root: &Path,
+    node: NodeId,
+    finding: AppendableFinding,
+) -> Result<()> {
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek event log {} for read", log_path.display()))?;
+    let current_lines = {
+        let mut reader = BufReader::new(&mut *file);
+        read_event_log_lines(&mut reader, log_path)?
+    };
+    let current_records = current_lines
+        .iter()
+        .map(|line| line.record.clone())
+        .collect::<Vec<_>>();
+    let (current_contract, current_normalized_root) =
+        contract_for_repository_root(&current_records, repository_root)?;
+    let RepositoryContract::Current(current_contract) = current_contract else {
+        bail!(
+            "event log repository contract for lexically normalized --repo-root {} is legacy and cannot be refreshed",
+            current_normalized_root.display()
+        );
+    };
+
+    let prior_lines = read_event_log(prior_log_path)?;
+    let prior_records = prior_lines
+        .iter()
+        .map(|line| line.record.clone())
+        .collect::<Vec<_>>();
+    let (prior_contract, prior_normalized_root) =
+        contract_for_repository_root(&prior_records, repository_root)?;
+    if prior_contract.name() != &current_contract.repository
+        || prior_normalized_root != current_normalized_root
+    {
+        bail!(
+            "prior run log repository identity does not match current run repository {}",
+            current_contract.repository.as_str()
+        );
+    }
+
+    let tracked_bytes =
+        read_at_default_branch_head(repository_root, TRACKED_REPOSITORY_CONTRACT_PATH)?;
+    let mut tracked = parse_tracked_contract(&tracked_bytes)?;
+    let current_findings = current_records
+        .iter()
+        .filter_map(|record| match record.body_ref() {
+            EventBodyRef::Known(KnownPayload::KeyFinding(payload)) => {
+                Some(payload.finding.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let prior_findings = prior_records
+        .iter()
+        .filter_map(|record| match record.body_ref() {
+            EventBodyRef::Known(KnownPayload::KeyFinding(payload)) => {
+                Some(payload.finding.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let finding_text = finding.as_str().to_owned();
+    match admit_recurrent_finding(&mut tracked, finding, &current_findings, &prior_findings) {
+        FindingAdmission::CurrentOccurrenceMissing => {
+            bail!("current run log contains no byte-exact key-finding {finding_text:?}")
+        }
+        FindingAdmission::FirstOccurrence => Ok(()),
+        FindingAdmission::Appended | FindingAdmission::AlreadyPresent => {
+            persist_refreshed_contract_locked(
+                file,
+                log_path,
+                repository_root,
+                node,
+                &current_contract,
+                &tracked,
+            )
+        }
+    }
+}
+
+fn persist_refreshed_contract_locked(
+    file: &mut File,
+    log_path: &Path,
+    repository_root: &Path,
+    node: NodeId,
+    previous: &RepositoryContractPayload,
+    tracked: &TrackedRepositoryContract,
+) -> Result<()> {
     let observed = observed_workflows(repository_root)?;
     validate_workflow_coverage(tracked.stated().workflows(), &observed)
         .context("failed to validate tracked workflow coverage")?;
-    let previous_snapshot = previous_measured_snapshot(&tracked, previous)?;
+    let previous_snapshot = previous_measured_snapshot(tracked, previous)?;
     let measured =
         measure_contract_snapshot(tracked.stated(), Some(&previous_snapshot), |command| {
             execute_gate_command(repository_root, command)
@@ -941,13 +1110,13 @@ fn refresh_locked(
     let payload = RepositoryContractPayload::from_tracked_measurement(
         previous.repository.clone(),
         previous.repo_root.clone(),
-        &tracked,
+        tracked,
         measured.gates(),
         evidence,
     );
     let payload_json = serde_json::to_string(&payload)
         .context("failed to serialize repository contract payload")?;
-    let canonical_bytes = serialize_tracked_repository_contract(&tracked)
+    let canonical_bytes = serialize_tracked_repository_contract(tracked)
         .context("failed to serialize tracked repository contract")?;
     let tracked_path = repository_root.join(TRACKED_REPOSITORY_CONTRACT_PATH);
     std::fs::write(&tracked_path, canonical_bytes).with_context(|| {
@@ -1360,6 +1529,38 @@ fn repository_contracts(records: &[EventRecord]) -> Result<Vec<RepositoryContrac
         bail!("event log contains no repository-contract record");
     }
     Ok(contracts)
+}
+
+fn contract_for_repository_root(
+    records: &[EventRecord],
+    repository_root: &Path,
+) -> Result<(RepositoryContract, PathBuf)> {
+    let repository_root_argument = repository_root.to_str().with_context(|| {
+        format!(
+            "raw --repo-root argument is not valid UTF-8: {}",
+            repository_root.display()
+        )
+    })?;
+    let requested_repository_root = RepositoryRoot::new(repository_root_argument.to_owned());
+    let normalized_repository_root =
+        lexically_normalized_repository_root(requested_repository_root.as_str());
+    let contracts = repository_contracts(records)?;
+    let mut matching = contracts.into_iter().filter(|contract| {
+        lexically_normalized_repository_root(contract.root()) == normalized_repository_root
+    });
+    let selected = matching.next().with_context(|| {
+        format!(
+            "event log contains no repository contract for lexically normalized --repo-root {}",
+            normalized_repository_root.display()
+        )
+    })?;
+    if matching.next().is_some() {
+        bail!(
+            "event log contains multiple repository contracts for lexically normalized --repo-root {}",
+            normalized_repository_root.display()
+        );
+    }
+    Ok((selected, normalized_repository_root))
 }
 
 fn resolve_primary_repository(
@@ -2185,14 +2386,15 @@ mod tests {
     use std::time::SystemTime;
 
     use pce_core::{
-        ArtifactPath, BranchState, CurrentArtifactObservation, CurrentArtifactState, EventKindName,
-        EventRecord, EventRecordFilter, GitAuthorityObservation, GitHubAuthorityObservation,
-        GitHubPullRequestObservation, GitMergeObservation, KnownPayload, MilestoneMergeSubject,
-        MilestoneNode, NodeId, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
-        RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-        RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation, TagName,
-        TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
-        derive_run_state, parse_event_line, render_human_snapshot,
+        AppendableFinding, ArtifactPath, BranchState, CurrentArtifactObservation,
+        CurrentArtifactState, EventKindName, EventRecord, EventRecordFilter,
+        GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
+        GitMergeObservation, KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId, ReadKind,
+        ReadPayload, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
+        RepositoryName, RepositoryObservation, RepositoryObservationFailure, RunSnapshot,
+        Sha256Digest, StepAuthorityObservation, TagName, TagState, VersionPolicy, VisionSlug,
+        WorktreeIdentity, WorktreeState, WriteKind, derive_run_state, parse_event_line,
+        render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -2425,6 +2627,154 @@ mod tests {
             refresh_args(log_path, root).into_iter(),
             &mut Cursor::new([]),
         )
+    }
+
+    #[test]
+    fn contract_learn_parser_accepts_only_the_exact_ordered_shape() {
+        let exact = [
+            "contract",
+            "learn",
+            "--file",
+            "current.jsonl",
+            "--prior-file",
+            "prior.jsonl",
+            "--repo-root",
+            "repository",
+            "--node",
+            "m3-s5",
+            "--category",
+            "lockfile-rule",
+            "--finding",
+            "Cargo.lock must be regenerated before cargo test",
+        ];
+        let command = parse_command(exact.into_iter().map(str::to_owned))
+            .expect("exact learn command should parse");
+        let Command::ContractLearn {
+            log_path,
+            prior_log_path,
+            repository_root,
+            node,
+            finding,
+        } = command
+        else {
+            panic!("expected contract learn command");
+        };
+        assert_eq!(log_path, PathBuf::from("current.jsonl"));
+        assert_eq!(prior_log_path, PathBuf::from("prior.jsonl"));
+        assert_eq!(repository_root, PathBuf::from("repository"));
+        assert_eq!(node, NodeId::parse("m3-s5").expect("node should parse"));
+        assert!(matches!(
+            finding,
+            AppendableFinding::LockfileRule(rule)
+                if rule.as_str() == "Cargo.lock must be regenerated before cargo test"
+        ));
+
+        for rejected in [
+            vec![
+                "contract",
+                "learn",
+                "--prior-file",
+                "prior.jsonl",
+                "--file",
+                "current.jsonl",
+                "--repo-root",
+                "repository",
+                "--node",
+                "m3-s5",
+                "--category",
+                "lockfile-rule",
+                "--finding",
+                "finding",
+            ],
+            vec![
+                "contract",
+                "learn",
+                "--file",
+                "current.jsonl",
+                "--repo-root",
+                "repository",
+                "--node",
+                "m3-s5",
+                "--category",
+                "lockfile-rule",
+                "--finding",
+                "finding",
+            ],
+            vec![
+                "contract",
+                "learn",
+                "--file",
+                "current.jsonl",
+                "--file",
+                "prior.jsonl",
+                "--repo-root",
+                "repository",
+                "--node",
+                "m3-s5",
+                "--category",
+                "lockfile-rule",
+                "--finding",
+                "finding",
+            ],
+            vec![
+                "contract",
+                "learn",
+                "--file",
+                "current.jsonl",
+                "--prior-file",
+                "prior.jsonl",
+                "--repo-root",
+                "repository",
+                "--node",
+                "m3-s5",
+                "--category",
+                "lockfile-rule",
+                "--finding",
+                "finding",
+                "extra",
+            ],
+            vec![
+                "contract",
+                "learn",
+                "--file",
+                "--prior-file",
+                "prior.jsonl",
+                "--repo-root",
+                "repository",
+                "--node",
+                "m3-s5",
+                "--category",
+                "lockfile-rule",
+                "--finding",
+                "finding",
+            ],
+        ] {
+            let err = parse_command(rejected.into_iter().map(str::to_owned))
+                .expect_err("non-exact learn command should fail");
+            assert_eq!(err.to_string(), USAGE);
+        }
+
+        let unknown = exact.into_iter().map(str::to_owned).map(|value| {
+            if value == "lockfile-rule" {
+                "lockfile_rules".to_owned()
+            } else {
+                value
+            }
+        });
+        let err = parse_command(unknown).expect_err("unknown category should fail");
+        assert_eq!(err.to_string(), "failed to parse contract-learn category");
+        assert!(format!("{err:#}").contains(
+            "unknown appendable category \"lockfile_rules\"; expected environment-hazard, \
+             gate-ordering, or lockfile-rule"
+        ));
+
+        let mut empty = exact.map(str::to_owned);
+        empty[13] = String::new();
+        let err = parse_command(empty.into_iter()).expect_err("empty finding should fail");
+        assert_eq!(err.to_string(), "failed to parse contract-learn finding");
+        assert!(format!("{err:#}").contains(
+            "tracked repository contract field appendable.lockfile_rules[] cannot be empty"
+        ));
     }
 
     #[test]
