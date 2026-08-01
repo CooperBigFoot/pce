@@ -7,8 +7,9 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::event_log::{
-    ArtifactPath, DispatchRef, DispatchRole, EscalationKey, EventBodyRef, EventRecord,
-    EventTimestamp, KnownPayload, NodeId, RepositoryName, Sequence, Sha256Digest,
+    ArtifactOutcome, ArtifactPath, DispatchDuration, DispatchExitStatus, DispatchRef, DispatchRole,
+    DispatchTokenUsage, EscalationKey, EventBodyRef, EventRecord, EventTimestamp, KnownPayload,
+    NodeId, RepositoryName, Sequence, Sha256Digest,
 };
 
 /// A vision-directory basename suffix with its leading date prefix removed.
@@ -1100,6 +1101,42 @@ pub struct DispatchObservation {
     dispatch_ref: DispatchRef,
 }
 
+/// One completion correlated to its exact earlier issuance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchLifecycleObservation {
+    completion_sequence: Sequence,
+    completion_timestamp: EventTimestamp,
+    issuance: DispatchObservation,
+    duration: DispatchDuration,
+    usage: DispatchTokenUsage,
+    exit_status: DispatchExitStatus,
+    artifact_outcome: ArtifactOutcome,
+}
+
+impl DispatchLifecycleObservation {
+    pub const fn completion_sequence(&self) -> Sequence {
+        self.completion_sequence
+    }
+    pub const fn completion_timestamp(&self) -> EventTimestamp {
+        self.completion_timestamp
+    }
+    pub const fn issuance(&self) -> &DispatchObservation {
+        &self.issuance
+    }
+    pub const fn duration(&self) -> DispatchDuration {
+        self.duration
+    }
+    pub const fn usage(&self) -> &DispatchTokenUsage {
+        &self.usage
+    }
+    pub const fn exit_status(&self) -> DispatchExitStatus {
+        self.exit_status
+    }
+    pub const fn artifact_outcome(&self) -> ArtifactOutcome {
+        self.artifact_outcome
+    }
+}
+
 impl DispatchObservation {
     /// Return the dispatch sequence.
     pub const fn sequence(&self) -> Sequence {
@@ -1491,6 +1528,7 @@ pub struct DerivedRunState {
     repositories: Vec<RepositoryObservation>,
     steps: Vec<StepMergeResult>,
     dispatches: Vec<DispatchObservation>,
+    dispatch_lifecycles: Vec<DispatchLifecycleObservation>,
     rounds: Vec<RoundSeries>,
     holds: Vec<HoldObservation>,
     provenance: Vec<ArtifactProvenance>,
@@ -1512,6 +1550,11 @@ impl DerivedRunState {
     /// Return every exact dispatch in record order.
     pub fn dispatches(&self) -> &[DispatchObservation] {
         &self.dispatches
+    }
+
+    /// Return measured dispatch lifecycles in completion-record order.
+    pub fn dispatch_lifecycles(&self) -> &[DispatchLifecycleObservation] {
+        &self.dispatch_lifecycles
     }
 
     /// Return first-seen-ordered exact `(node, role)` round series.
@@ -2667,6 +2710,7 @@ pub fn derive_run_state(
 
     let mut visible_nodes = Vec::<VisibleNode>::new();
     let mut dispatches = Vec::<DispatchObservation>::new();
+    let mut dispatch_lifecycles = Vec::<DispatchLifecycleObservation>::new();
     let mut rounds = Vec::<RoundSeries>::new();
     let mut holds = Vec::<HoldObservation>::new();
     let mut approvals = Vec::<LatestApproval>::new();
@@ -2722,6 +2766,59 @@ pub fn derive_run_state(
                     );
                 }
                 recovery_facts.push(recovery_fact(record, "dispatch", payload.evidence.as_str()));
+            }
+            EventBodyRef::Known(KnownPayload::DispatchCompletion(payload)) => {
+                if payload.issuance_sequence.get() >= record.sequence().get() {
+                    return Err(RunStateError::CompletionPointsForward {
+                        completion_sequence: record.sequence(),
+                        issuance_sequence: payload.issuance_sequence,
+                    });
+                }
+                let Some(issuance) = dispatches
+                    .iter()
+                    .find(|item| item.sequence == payload.issuance_sequence)
+                    .cloned()
+                else {
+                    if records
+                        .iter()
+                        .any(|candidate| candidate.sequence() == payload.issuance_sequence)
+                    {
+                        return Err(RunStateError::CompletionPointsToNonDispatch {
+                            completion_sequence: record.sequence(),
+                            issuance_sequence: payload.issuance_sequence,
+                        });
+                    }
+                    return Err(RunStateError::CompletionIssuanceMissing {
+                        completion_sequence: record.sequence(),
+                        issuance_sequence: payload.issuance_sequence,
+                    });
+                };
+                if dispatch_lifecycles
+                    .iter()
+                    .any(|item| item.issuance.sequence == payload.issuance_sequence)
+                {
+                    return Err(RunStateError::DispatchAlreadyCompleted {
+                        completion_sequence: record.sequence(),
+                        issuance_sequence: payload.issuance_sequence,
+                    });
+                }
+                if issuance.node != *record.node() {
+                    return Err(RunStateError::CompletionNodeMismatch {
+                        completion_sequence: record.sequence(),
+                        issuance_sequence: payload.issuance_sequence,
+                        issuance_node: issuance.node,
+                        completion_node: record.node().clone(),
+                    });
+                }
+                dispatch_lifecycles.push(DispatchLifecycleObservation {
+                    completion_sequence: record.sequence(),
+                    completion_timestamp: *record.timestamp(),
+                    issuance,
+                    duration: payload.duration_ms,
+                    usage: payload.usage.clone(),
+                    exit_status: payload.exit_status,
+                    artifact_outcome: payload.artifact_outcome,
+                });
             }
             EventBodyRef::Known(KnownPayload::EscalationOpen(payload)) => {
                 let status = HoldStatus::Open {
@@ -2843,6 +2940,7 @@ pub fn derive_run_state(
         repositories: repositories.to_vec(),
         steps,
         dispatches,
+        dispatch_lifecycles,
         rounds,
         holds,
         provenance,
@@ -3189,6 +3287,40 @@ pub enum RunStateError {
         previous: Sequence,
         current: Sequence,
     },
+    /// A completion names an issuance identity absent from the record set.
+    #[error("completion {completion_sequence:?} names missing issuance {issuance_sequence:?}")]
+    CompletionIssuanceMissing {
+        completion_sequence: Sequence,
+        issuance_sequence: Sequence,
+    },
+    /// A completion identity resolves to a record that is not a dispatch.
+    #[error("completion {completion_sequence:?} points to non-dispatch {issuance_sequence:?}")]
+    CompletionPointsToNonDispatch {
+        completion_sequence: Sequence,
+        issuance_sequence: Sequence,
+    },
+    /// A completion points to itself or a later record.
+    #[error("completion {completion_sequence:?} points forward to {issuance_sequence:?}")]
+    CompletionPointsForward {
+        completion_sequence: Sequence,
+        issuance_sequence: Sequence,
+    },
+    /// More than one completion names the same issuance.
+    #[error("completion {completion_sequence:?} repeats completed issuance {issuance_sequence:?}")]
+    DispatchAlreadyCompleted {
+        completion_sequence: Sequence,
+        issuance_sequence: Sequence,
+    },
+    /// Completion and issuance nodes differ.
+    #[error(
+        "completion {completion_sequence:?} node {completion_node:?} differs from issuance {issuance_sequence:?} node {issuance_node:?}"
+    )]
+    CompletionNodeMismatch {
+        completion_sequence: Sequence,
+        issuance_sequence: Sequence,
+        issuance_node: NodeId,
+        completion_node: NodeId,
+    },
     /// Returned when an exact `(node, role)` dispatch count cannot be incremented.
     #[error("round count overflow for node {node:?} and role {role:?}")]
     RoundCountOverflow { node: NodeId, role: DispatchRole },
@@ -3253,10 +3385,12 @@ mod tests {
     use std::error::Error;
 
     use crate::event_log::{
-        ArtifactPath, DeltaPayload, DispatchPayload, DispatchRef, DispatchRole,
-        EscalationClosePayload, EscalationKey, EscalationOpenPayload, EventRecord, EventTimestamp,
-        Evidence, KnownPayload, NodeId, PlanningArtifactApprovedPayload, RepositoryName, Sequence,
-        Sha256Digest,
+        ArtifactOutcome, ArtifactPath, CachedInputTokens, DeltaPayload, DispatchCompletionPayload,
+        DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef, DispatchRole,
+        DispatchTokenUsage, EscalationClosePayload, EscalationKey, EscalationOpenPayload,
+        EventRecord, EventTimestamp, Evidence, ExitCode, InputTokens, KnownPayload, NodeId,
+        OutputTokens, PlanningArtifactApprovedPayload, ReasoningOutputTokens, RepositoryName,
+        Sequence, Sha256Digest,
     };
     use crate::run_state::{
         ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BranchState,
@@ -3330,6 +3464,119 @@ mod tests {
                 message: "changed".to_owned(),
             }),
         )
+    }
+
+    #[test]
+    fn completion_correlates_exact_identity_without_incrementing_rounds()
+    -> Result<(), Box<dyn Error>> {
+        let records = vec![
+            dispatch(1, "m3-s1", "step-executor", "abc")?,
+            delta(2, "m3-s1")?,
+            event(
+                3,
+                "m3-s1",
+                KnownPayload::DispatchCompletion(DispatchCompletionPayload {
+                    issuance_sequence: Sequence::parse(1)?,
+                    duration_ms: DispatchDuration::new(200),
+                    usage: DispatchTokenUsage::Measured {
+                        input_tokens: InputTokens::new(101),
+                        cached_input_tokens: CachedInputTokens::new(23),
+                        output_tokens: OutputTokens::new(17),
+                        reasoning_output_tokens: ReasoningOutputTokens::new(5),
+                    },
+                    exit_status: DispatchExitStatus::Exited {
+                        code: ExitCode::new(0),
+                    },
+                    artifact_outcome: ArtifactOutcome::NotValidated,
+                }),
+            )?,
+        ];
+        let state = derive(&records, &[], &[], &[])?;
+        assert_eq!(state.dispatch_lifecycles().len(), 1);
+        assert_eq!(
+            state.dispatch_lifecycles()[0].issuance().sequence().get(),
+            1
+        );
+        assert_eq!(
+            state.dispatch_lifecycles()[0].completion_sequence().get(),
+            3
+        );
+        assert_eq!(state.rounds().len(), 1);
+        assert_eq!(state.rounds()[0].count().get(), 1);
+        Ok(())
+    }
+
+    fn completion(sequence: u64, node: &str, issuance: u64) -> Result<EventRecord, Box<dyn Error>> {
+        event(
+            sequence,
+            node,
+            KnownPayload::DispatchCompletion(DispatchCompletionPayload {
+                issuance_sequence: Sequence::parse(issuance)?,
+                duration_ms: DispatchDuration::new(1),
+                usage: DispatchTokenUsage::Absent {
+                    reason: crate::event_log::UsageAbsenceReason::NoTerminalTurn,
+                },
+                exit_status: DispatchExitStatus::Exited {
+                    code: ExitCode::new(42),
+                },
+                artifact_outcome: ArtifactOutcome::NotValidated,
+            }),
+        )
+    }
+
+    #[test]
+    fn completion_rejects_every_invalid_correlation() -> Result<(), Box<dyn Error>> {
+        assert!(matches!(
+            derive(&[completion(2, "m3-s1", 1)?], &[], &[], &[]),
+            Err(RunStateError::CompletionIssuanceMissing { .. })
+        ));
+        assert!(matches!(
+            derive(
+                &[delta(1, "m3-s1")?, completion(2, "m3-s1", 1)?],
+                &[],
+                &[],
+                &[]
+            ),
+            Err(RunStateError::CompletionPointsToNonDispatch { .. })
+        ));
+        assert!(matches!(
+            derive(
+                &[
+                    completion(1, "m3-s1", 2)?,
+                    dispatch(2, "m3-s1", "step-executor", "abc")?
+                ],
+                &[],
+                &[],
+                &[]
+            ),
+            Err(RunStateError::CompletionPointsForward { .. })
+        ));
+        assert!(matches!(
+            derive(
+                &[
+                    dispatch(1, "m3-s1", "step-executor", "abc")?,
+                    completion(2, "m3-s1", 1)?,
+                    completion(3, "m3-s1", 1)?
+                ],
+                &[],
+                &[],
+                &[]
+            ),
+            Err(RunStateError::DispatchAlreadyCompleted { .. })
+        ));
+        assert!(matches!(
+            derive(
+                &[
+                    dispatch(1, "m3-s1", "step-executor", "abc")?,
+                    completion(2, "m3-s2", 1)?
+                ],
+                &[],
+                &[],
+                &[]
+            ),
+            Err(RunStateError::CompletionNodeMismatch { .. })
+        ));
+        Ok(())
     }
 
     fn digest(byte: char) -> Result<Sha256Digest, Box<dyn Error>> {

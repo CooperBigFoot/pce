@@ -3,6 +3,11 @@ mod support;
 use std::ffi::OsString;
 use std::fs;
 
+use pce_core::{
+    ArtifactOutcome, CachedInputTokens, DispatchExitStatus, DispatchTokenUsage, ExitCode,
+    InputTokens, OutputTokens, ReasoningOutputTokens, RecoveryLogPath, RunSnapshot, VisionSlug,
+    derive_run_state, parse_event_line,
+};
 use serde_json::{Value, json};
 use support::{CliHarness, Invocation, ScriptedResponse};
 
@@ -35,6 +40,123 @@ fn current_repository_contract(root: &std::path::Path, evidence: &str) -> Value 
         },
         "evidence": evidence
     })
+}
+
+#[test]
+fn binary_log_read_folds_the_complete_measured_lifecycle() {
+    let harness = CliHarness::new().expect("create lifecycle recovery harness");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
+    let record_root = harness.path().join("lifecycle-records");
+    fs::create_dir(&record_root).expect("create invocation record root");
+    let stdout_path = harness.path().join("codex.stdout");
+    let stderr_path = harness.path().join("codex.stderr");
+    let log_path = harness.path().join("events.jsonl");
+    fs::write(
+        &stdout_path,
+        b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":101,\"cached_input_tokens\":23,\"output_tokens\":17,\"reasoning_output_tokens\":5}}\n",
+    )
+    .expect("write Codex stdout fixture");
+    fs::write(&stderr_path, []).expect("write Codex stderr fixture");
+    let child_path = harness.shim_path();
+    let args = vec![
+        "dispatch".to_owned(),
+        "codex".to_owned(),
+        "--cwd".to_owned(),
+        cwd.display().to_string(),
+        "--sandbox".to_owned(),
+        "workspace-write".to_owned(),
+        "--env".to_owned(),
+        format!("PATH={child_path}"),
+        "--env".to_owned(),
+        format!("PCE_CODEX_RECORD_ROOT={}", record_root.display()),
+        "--env".to_owned(),
+        format!("PCE_CODEX_STDOUT_FILE={}", stdout_path.display()),
+        "--env".to_owned(),
+        format!("PCE_CODEX_STDERR_FILE={}", stderr_path.display()),
+        "--env".to_owned(),
+        "PCE_CODEX_EXIT_CODE=0".to_owned(),
+        "--env".to_owned(),
+        "PCE_CODEX_SLEEP_SECONDS=0.2".to_owned(),
+        "--log-file".to_owned(),
+        log_path.display().to_string(),
+        "--node".to_owned(),
+        "m3-s1".to_owned(),
+        "--role".to_owned(),
+        "step-executor".to_owned(),
+        "--ref".to_owned(),
+        "abc123".to_owned(),
+        "--evidence".to_owned(),
+        "binary lifecycle fixture".to_owned(),
+        "--".to_owned(),
+        "PROMPT".to_owned(),
+    ];
+    let dispatched = harness.run(&args, b"").expect("run logged dispatch");
+    assert!(
+        dispatched.status.success(),
+        "dispatch stderr: {}",
+        stderr(&dispatched)
+    );
+
+    let read = harness
+        .run(
+            [
+                "log",
+                "read",
+                "--file",
+                log_path.to_str().expect("UTF-8 log path"),
+            ],
+            b"",
+        )
+        .expect("read complete lifecycle log");
+    assert!(read.status.success(), "log read stderr: {}", stderr(&read));
+    let records = String::from_utf8(read.stdout)
+        .expect("log read emits UTF-8")
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse binary-written record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    let vision =
+        VisionSlug::parse("2026-07-31-the-binary-owns-every-dispatch").expect("parse vision");
+    let state = derive_run_state(
+        &records,
+        &vision,
+        &RecoveryLogPath::new(log_path.display().to_string()),
+        &[],
+        &[],
+        &[],
+    )
+    .expect("fold binary-written lifecycle");
+    assert_eq!(state.dispatch_lifecycles().len(), 1);
+    let lifecycle = &state.dispatch_lifecycles()[0];
+    assert_eq!(lifecycle.issuance().sequence().get(), 1);
+    assert_eq!(lifecycle.issuance().node().as_str(), "m3-s1");
+    assert_eq!(lifecycle.issuance().role().as_str(), "step-executor");
+    assert_eq!(lifecycle.issuance().dispatch_ref().as_str(), "abc123");
+    assert_eq!(lifecycle.completion_sequence().get(), 2);
+    assert_eq!(lifecycle.completion_timestamp(), *records[1].timestamp());
+    assert!(lifecycle.duration().get() >= 100);
+    assert_eq!(
+        lifecycle.usage(),
+        &DispatchTokenUsage::Measured {
+            input_tokens: InputTokens::new(101),
+            cached_input_tokens: CachedInputTokens::new(23),
+            output_tokens: OutputTokens::new(17),
+            reasoning_output_tokens: ReasoningOutputTokens::new(5),
+        }
+    );
+    assert_eq!(
+        lifecycle.exit_status(),
+        DispatchExitStatus::Exited {
+            code: ExitCode::new(0)
+        }
+    );
+    assert_eq!(lifecycle.artifact_outcome(), ArtifactOutcome::NotValidated);
+    assert_eq!(state.rounds().len(), 1);
+    assert_eq!(state.rounds()[0].count().get(), 1);
+    let snapshot = serde_json::to_value(RunSnapshot::from(&state)).expect("serialize snapshot");
+    assert_eq!(snapshot["schema_id"], "pce.run-snapshot");
+    assert_eq!(snapshot["schema_version"], 1);
+    assert!(snapshot.get("dispatch_lifecycles").is_none());
 }
 
 #[test]

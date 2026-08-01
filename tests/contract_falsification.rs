@@ -282,7 +282,7 @@ exit 73
 fn run_seatbelt_fixture(fixture: &SeatbeltFixture) -> std::process::Output {
     fixture
         .harness
-        .run_with_parent_environment(
+        .run_with_parent_environment_and_stdin(
             contract_check_args(&fixture.contract_path, &fixture.repository_root),
             b"",
             "ANTHROPIC_API_KEY",

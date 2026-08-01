@@ -166,6 +166,10 @@ exit 127
 const CODEX_SHIM: &str = r#"#!/bin/sh
 program=codex
 root=${PCE_CODEX_RECORD_ROOT:?PCE_CODEX_RECORD_ROOT is required}
+if [ "${PCE_CODEX_SKIP_RECORDING:-}" = 1 ]; then
+    while IFS= read -r line; do printf '%s\n' "$line"; done < "$PCE_CODEX_STDOUT_FILE"
+    exit "$PCE_CODEX_EXIT_CODE"
+fi
 mkdir "$root/invocation" || exit 126
 {
     printf '%s\0' "$program" "$#"
@@ -174,9 +178,51 @@ mkdir "$root/invocation" || exit 126
 pwd -P > "$root/invocation/cwd.bin" || exit 126
 /usr/bin/env -0 > "$root/invocation/environment.bin" || exit 126
 cat > "$root/invocation/stdin.bin" || exit 126
+printf '%s\n' "$$" > "$root/invocation/pid" || exit 126
+if [ -n "${PCE_CODEX_BLOCK_FILE:-}" ]; then
+    while [ ! -e "$PCE_CODEX_BLOCK_FILE" ]; do sleep 0.01; done
+fi
+if [ -n "${PCE_CODEX_SLEEP_SECONDS:-}" ]; then sleep "$PCE_CODEX_SLEEP_SECONDS"; fi
+if [ -n "${PCE_CODEX_OUTPUT_BYTES_FILE:-}" ]; then
+    output_path=
+    previous=
+    for argument in "$@"; do
+        if [ "$previous" = -o ]; then output_path=$argument; break; fi
+        previous=$argument
+    done
+    [ -n "$output_path" ] || exit 126
+    cat "$PCE_CODEX_OUTPUT_BYTES_FILE" > "$output_path" || exit 126
+fi
 cat "$PCE_CODEX_STDOUT_FILE" || exit 126
 cat "$PCE_CODEX_STDERR_FILE" >&2 || exit 126
+if [ -n "${PCE_CODEX_SIGNAL:-}" ]; then kill -"$PCE_CODEX_SIGNAL" "$$"; fi
 exit "$PCE_CODEX_EXIT_CODE"
+"#;
+
+#[allow(dead_code)]
+const CLAUDE_SHIM: &str = r#"#!/bin/sh
+program=claude
+root=${PCE_CLAUDE_RECORD_ROOT:?PCE_CLAUDE_RECORD_ROOT is required}
+mkdir "$root/invocation" || exit 126
+{
+    printf '%s\0' "$program" "$#"
+    printf '%s\0' "$@"
+} > "$root/invocation/request.bin" || exit 126
+pwd -P > "$root/invocation/cwd.bin" || exit 126
+/usr/bin/env -0 > "$root/invocation/environment.bin" || exit 126
+cat > "$root/invocation/stdin.bin" || exit 126
+printf '%s\n' "$$" > "$root/invocation/pid" || exit 126
+if [ -n "${PCE_CLAUDE_BLOCK_FILE:-}" ]; then
+    while [ ! -e "$PCE_CLAUDE_BLOCK_FILE" ]; do sleep 0.01; done
+fi
+if [ -n "${PCE_CLAUDE_SLEEP_SECONDS:-}" ]; then sleep "$PCE_CLAUDE_SLEEP_SECONDS"; fi
+if [ -n "${PCE_CLAUDE_OUTPUT_BYTES_FILE:-}" ]; then
+    cat "$PCE_CLAUDE_OUTPUT_BYTES_FILE" > "$PCE_CLAUDE_OUTPUT_PATH" || exit 126
+fi
+cat "$PCE_CLAUDE_STDOUT_FILE" || exit 126
+cat "$PCE_CLAUDE_STDERR_FILE" >&2 || exit 126
+if [ -n "${PCE_CLAUDE_SIGNAL:-}" ]; then kill -"$PCE_CLAUDE_SIGNAL" "$$"; fi
+exit "$PCE_CLAUDE_EXIT_CODE"
 "#;
 
 #[derive(Debug)]
@@ -204,6 +250,16 @@ pub struct CodexInvocation {
     pub stdin: Vec<u8>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct ClaudeInvocation {
+    pub program: OsString,
+    pub argv: Vec<OsString>,
+    pub cwd: PathBuf,
+    pub environment: BTreeSet<OsString>,
+    pub stdin: Vec<u8>,
+}
+
 pub struct CliHarness {
     tempdir: TempDir,
     shim_dir: PathBuf,
@@ -223,6 +279,7 @@ impl CliHarness {
         write_shim(&shim_dir.join("git"), GIT_SHIM)?;
         write_shim(&shim_dir.join("gh"), GH_SHIM)?;
         write_shim(&shim_dir.join("codex"), CODEX_SHIM)?;
+        write_shim(&shim_dir.join("claude"), CLAUDE_SHIM)?;
 
         Ok(Self {
             tempdir,
@@ -294,7 +351,7 @@ impl CliHarness {
     }
 
     #[allow(dead_code)]
-    pub fn run_with_parent_environment<I, S>(
+    pub fn run_with_parent_environment_and_stdin<I, S>(
         &self,
         argv: I,
         stdin: &[u8],
@@ -350,6 +407,28 @@ impl CliHarness {
     }
 
     #[allow(dead_code)]
+    pub fn run_with_parent_environment<I, S>(
+        &self,
+        argv: I,
+        parent_environment: &[(&str, &str)],
+    ) -> io::Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pce"));
+        command.args(argv).env_clear();
+        for (name, value) in parent_environment {
+            command.env(name, value);
+        }
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    }
+
+    #[allow(dead_code)]
     pub fn codex_invocations(&self, record_root: &Path) -> io::Result<Vec<CodexInvocation>> {
         let invocation = record_root.join("invocation");
         if !invocation.exists() {
@@ -372,6 +451,32 @@ impl CliHarness {
             cwd,
             environment,
             stdin,
+        }])
+    }
+
+    #[allow(dead_code)]
+    pub fn claude_invocations(&self, record_root: &Path) -> io::Result<Vec<ClaudeInvocation>> {
+        let invocation = record_root.join("invocation");
+        if !invocation.exists() {
+            return Ok(Vec::new());
+        }
+        let request = fs::read(invocation.join("request.bin"))?;
+        let only = parse_invocations(&request)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "missing Claude invocation")
+            })?;
+        let cwd = fs::read(invocation.join("cwd.bin"))?;
+        let cwd = PathBuf::from(OsString::from_vec(
+            cwd.strip_suffix(b"\n").unwrap_or(&cwd).to_vec(),
+        ));
+        Ok(vec![ClaudeInvocation {
+            program: only.program,
+            argv: only.argv,
+            cwd,
+            environment: parse_nul_set(&fs::read(invocation.join("environment.bin"))?),
+            stdin: fs::read(invocation.join("stdin.bin"))?,
         }])
     }
 
