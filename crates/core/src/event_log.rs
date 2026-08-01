@@ -1579,7 +1579,7 @@ mod tests {
     #[test]
     fn tracked_measurement_round_trips_every_current_payload_field() -> Result<(), Box<dyn Error>> {
         let tracked = parse_tracked_repository_contract(TRACKED_CONTRACT)?;
-        let snapshot = measure_contract_snapshot(tracked.stated(), None, |_command| {
+        let snapshot = measure_contract_snapshot(tracked.stated(), |_command| {
             Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
         })?;
         let evidence = "cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release";

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
@@ -9,6 +10,7 @@ use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::GateCommand;
+use pce_core::tracked_contract::parse_gate_command;
 use pce_core::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
     AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath,
@@ -18,24 +20,25 @@ use pce_core::{
     DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole,
     DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef,
     EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
-    Evidence, ExactPullRequestIdentity, ExactPullRequestState, ExitCode, FileObservation,
-    FindingAdmission, GateObservations, GitAuthorityObservation, GitHubAuthorityObservation,
+    Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode,
+    FileObservation, FindingAdmission, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
     OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
     RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot, Sandbox,
-    Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
-    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
-    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
-    classify_codex_terminal_usage, compute_dispatchability, create_vision, derive_merge_status,
+    SeatbeltCapability, Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding,
+    StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName, TagState,
+    TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy,
+    VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
+    append_event, classify_claude_result, classify_codex_terminal_usage,
+    classify_seatbelt_capability, compute_dispatchability, create_vision, derive_merge_status,
     derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
     dispatch_invocation, dispatch_payload, event_record_matches, measure_contract_snapshot,
     parse_claude_result, parse_event_line, parse_tracked_repository_contract,
-    render_dispatch_projection, render_human_snapshot, serialize_tracked_repository_contract,
-    validate_artifact, validate_workflow_coverage,
+    render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
+    serialize_tracked_repository_contract, validate_artifact, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -467,7 +470,7 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         bail!("dispatch arguments require the `--` delimiter");
     }
     position += 1;
-    let arguments = rest[position..].to_vec();
+    let caller_arguments = rest[position..].to_vec();
 
     let working_directory = AbsoluteWorkingDirectory::parse(PathBuf::from(raw_cwd))
         .context("failed to parse dispatch working directory")?;
@@ -478,7 +481,7 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         None => StdinBinding::Null,
     };
     let mut envelope = DispatchEnvelope::new(DispatchTarget::Codex, working_directory, stdin)
-        .with_arguments(ArgumentVector::new(arguments))
+        .with_arguments(ArgumentVector::new(caller_arguments))
         .with_environment(ChildEnvironment::new(environment))
         .with_sandbox(Sandbox::WorkspaceWrite);
     if let Some((schema, output)) = structured {
@@ -1315,7 +1318,7 @@ pub fn parse_tracked_contract(bytes: &[u8]) -> Result<TrackedRepositoryContract>
 }
 
 fn run_contract_check(contract_path: &Path, repository_root: &Path) -> Result<()> {
-    measure_tracked_contract_at_root(contract_path, repository_root, None)?;
+    measure_tracked_contract_at_root(contract_path, repository_root)?;
     Ok(())
 }
 
@@ -1439,7 +1442,7 @@ fn bootstrap_locked(
         let mut reader = BufReader::new(&mut *file);
         read_event_log_lines(&mut reader, log_path)?
     };
-    let previous =
+    let _previous =
         matching_bootstrap_contract(&parsed_lines, &repository, &normalized_repository_root)?;
 
     let branch = resolve_default_branch(repository_root)?;
@@ -1479,15 +1482,7 @@ fn bootstrap_locked(
         let tracked = parse_tracked_contract(&bytes)?;
         validate_workflow_coverage(tracked.stated().workflows(), &workflow_identities)
             .context("failed to validate tracked workflow coverage")?;
-        let previous_snapshot = previous
-            .as_ref()
-            .map(|prior| previous_measured_snapshot(&tracked, prior))
-            .transpose()?;
-        let measured =
-            measure_contract_snapshot(tracked.stated(), previous_snapshot.as_ref(), |command| {
-                execute_gate_command(repository_root, command)
-            })
-            .context("failed to measure tracked repository contract")?;
+        let measured = measure_stated_contract_at_root(tracked.stated(), repository_root)?;
         (tracked, measured)
     } else {
         derive_bootstrap_contract(
@@ -1587,28 +1582,29 @@ fn derive_bootstrap_contract(
         if !path_exists_at_default_branch_head(repository_root, branch, "Cargo.toml")? {
             bail!("cannot bootstrap CI-less repository without Cargo.toml at default-branch HEAD");
         }
+        verify_seatbelt_execution_capability(repository_root)?;
         BootstrapDerivation::CargoFallback {
             gates: BootstrapGateCommands {
                 format: select_bootstrap_candidate(
                     "format",
                     FORMAT_BOOTSTRAP_CANDIDATES,
-                    |command| execute_shell_gate_command(repository_root, command),
+                    |command| execute_sandboxed_gate_text(repository_root, command),
                 )?,
                 lint: select_bootstrap_candidate("lint", LINT_BOOTSTRAP_CANDIDATES, |command| {
-                    execute_shell_gate_command(repository_root, command)
+                    execute_sandboxed_gate_text(repository_root, command)
                 })?,
                 typecheck: select_bootstrap_candidate(
                     "typecheck",
                     TYPECHECK_BOOTSTRAP_CANDIDATES,
-                    |command| execute_shell_gate_command(repository_root, command),
+                    |command| execute_sandboxed_gate_text(repository_root, command),
                 )?,
                 test: select_bootstrap_candidate("test", TEST_BOOTSTRAP_CANDIDATES, |command| {
-                    execute_shell_gate_command(repository_root, command)
+                    execute_sandboxed_gate_text(repository_root, command)
                 })?,
                 build: select_bootstrap_candidate(
                     "build",
                     BUILD_BOOTSTRAP_CANDIDATES,
-                    |command| execute_shell_gate_command(repository_root, command),
+                    |command| execute_sandboxed_gate_text(repository_root, command),
                 )?,
             },
         }
@@ -1701,25 +1697,7 @@ fn derive_bootstrap_contract(
     let tracked = parse_tracked_contract(&bytes)?;
     validate_workflow_coverage(tracked.stated().workflows(), workflow_identities)
         .context("failed to validate tracked workflow coverage")?;
-    let measured = match derivation {
-        BootstrapDerivation::Ci { .. } => {
-            measure_contract_snapshot(tracked.stated(), None, |command| {
-                execute_gate_command(repository_root, command)
-            })
-            .context("failed to measure tracked repository contract")?
-        }
-        BootstrapDerivation::CargoFallback { .. } => {
-            let observations = GateObservations {
-                format: ObservedExitStatus::from_code(0),
-                lint: ObservedExitStatus::from_code(0),
-                typecheck: ObservedExitStatus::from_code(0),
-                test: ObservedExitStatus::from_code(0),
-                build: ObservedExitStatus::from_code(0),
-            };
-            MeasuredContractSnapshot::from_observations(tracked.stated(), &observations)
-                .context("failed to construct bootstrap observations")?
-        }
-    };
+    let measured = measure_stated_contract_at_root(tracked.stated(), repository_root)?;
     Ok((tracked, measured))
 }
 
@@ -1938,12 +1916,7 @@ fn persist_refreshed_contract_locked(
     let observed = observed_workflows(repository_root)?;
     validate_workflow_coverage(tracked.stated().workflows(), &observed)
         .context("failed to validate tracked workflow coverage")?;
-    let previous_snapshot = previous_measured_snapshot(tracked, previous)?;
-    let measured =
-        measure_contract_snapshot(tracked.stated(), Some(&previous_snapshot), |command| {
-            execute_gate_command(repository_root, command)
-        })
-        .context("failed to measure tracked repository contract")?;
+    let measured = measure_stated_contract_at_root(tracked.stated(), repository_root)?;
     let evidence_text = measured
         .gates()
         .iter()
@@ -1978,40 +1951,9 @@ fn persist_refreshed_contract_locked(
     )
 }
 
-fn previous_measured_snapshot(
-    tracked: &TrackedRepositoryContract,
-    previous: &RepositoryContractPayload,
-) -> Result<MeasuredContractSnapshot> {
-    (|| {
-        let bytes = serialize_tracked_repository_contract(tracked)?;
-        let mut value: Value = serde_json::from_slice(&bytes)?;
-        for (pointer, command) in [
-            ("/stated/gates/format", previous.stated.format.as_str()),
-            ("/stated/gates/lint", previous.stated.lint.as_str()),
-            (
-                "/stated/gates/typecheck",
-                previous.stated.typecheck.as_str(),
-            ),
-            ("/stated/gates/test", previous.stated.test.as_str()),
-            ("/stated/gates/build", previous.stated.build.as_str()),
-        ] {
-            let slot = value
-                .pointer_mut(pointer)
-                .with_context(|| format!("canonical tracked contract lacks {pointer}"))?;
-            *slot = Value::String(command.to_owned());
-        }
-        let prior_bytes = serde_json::to_vec(&value)?;
-        let prior_tracked = parse_tracked_contract(&prior_bytes)?;
-        MeasuredContractSnapshot::from_observations(prior_tracked.stated(), &previous.observations)
-            .map_err(Error::from)
-    })()
-    .context("failed to reconstruct previous measured contract snapshot")
-}
-
 fn measure_tracked_contract_at_root(
     contract_path: &Path,
     repository_root: &Path,
-    previous: Option<&MeasuredContractSnapshot>,
 ) -> Result<MeasuredContractSnapshot> {
     let bytes = std::fs::read(contract_path).with_context(|| {
         format!(
@@ -2023,8 +1965,16 @@ fn measure_tracked_contract_at_root(
     let observed = observed_workflows(repository_root)?;
     validate_workflow_coverage(contract.stated().workflows(), &observed)
         .context("failed to validate tracked workflow coverage")?;
-    measure_contract_snapshot(contract.stated(), previous, |command| {
-        execute_gate_command(repository_root, command)
+    measure_stated_contract_at_root(contract.stated(), repository_root)
+}
+
+fn measure_stated_contract_at_root(
+    stated: &pce_core::StatedContract,
+    repository_root: &Path,
+) -> Result<MeasuredContractSnapshot> {
+    verify_seatbelt_execution_capability(repository_root)?;
+    measure_contract_snapshot(stated, |command| {
+        execute_sandboxed_gate_command(repository_root, command)
     })
     .context("failed to measure tracked repository contract")
 }
@@ -2078,31 +2028,194 @@ fn observed_workflows(repository_root: &Path) -> Result<Vec<ObservedWorkflowName
     Ok(observed)
 }
 
-fn execute_gate_command(
+fn execute_sandboxed_gate_command(
     repository_root: &Path,
     command: &GateCommand,
 ) -> std::io::Result<ObservedExitStatus> {
-    execute_shell_gate_command(repository_root, command.as_str())
+    execute_sandboxed_gate_text(repository_root, command.as_str())
 }
 
-fn execute_shell_gate_command(
+fn verify_seatbelt_execution_capability(repository_root: &Path) -> std::io::Result<()> {
+    if let SeatbeltCapability::Unavailable { status } =
+        seatbelt_execution_capability(repository_root)?
+    {
+        return Err(std::io::Error::other(format!(
+            "failed to verify Seatbelt execution capability: permissive profile probe exited with status {status}"
+        )));
+    }
+    Ok(())
+}
+
+fn seatbelt_execution_capability(repository_root: &Path) -> std::io::Result<SeatbeltCapability> {
+    let canonical_root = std::fs::canonicalize(repository_root).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to canonicalize Seatbelt probe working directory {}: {error}",
+            repository_root.display()
+        ))
+    })?;
+    let working_directory = AbsoluteWorkingDirectory::parse(canonical_root)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let envelope = seatbelt_capability_probe(working_directory)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let status = spawn_envelope(&envelope).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to verify Seatbelt execution capability: {error:#}"
+        ))
+    })?;
+    Ok(classify_seatbelt_capability(status))
+}
+
+fn execute_sandboxed_gate_text(
     repository_root: &Path,
     command: &str,
 ) -> std::io::Result<ObservedExitStatus> {
-    let args = [OsString::from("-c"), OsString::from(command)];
-    match execute_process("/bin/sh", &args, Some(repository_root)) {
-        ProcessAttempt::SpawnFailed { detail } => Err(std::io::Error::other(detail)),
-        ProcessAttempt::Completed(result) => result
-            .status
-            .code()
-            .map(ObservedExitStatus::from_code)
-            .ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "stated gate command `{}` terminated without an exit-status code",
-                    command
-                ))
-            }),
+    let parsed = parse_gate_command(command).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to parse stated gate command `{command}`: {error}"
+        ))
+    })?;
+    let canonical_root = std::fs::canonicalize(repository_root).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to canonicalize gate repository root {}: {error}",
+            repository_root.display()
+        ))
+    })?;
+    let canonical_temp = std::fs::canonicalize(std::env::temp_dir()).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to canonicalize platform temporary directory {}: {error}",
+            std::env::temp_dir().display()
+        ))
+    })?;
+    let mut temporary_directories = std::collections::BTreeSet::new();
+    temporary_directories.insert(canonical_temp);
+    let profile = render_seatbelt_profile(&canonical_root, &temporary_directories)?;
+
+    let environment = gate_child_environment();
+    let resolved_executable = resolve_gate_executable(parsed.executable(), &environment)?;
+    let mut arguments = vec![
+        "-p".to_owned(),
+        profile,
+        "--".to_owned(),
+        resolved_executable.as_str().to_owned(),
+    ];
+    arguments.extend(parsed.arguments().as_slice().iter().cloned());
+    let envelope = DispatchEnvelope::new(
+        DispatchTarget::Seatbelt,
+        AbsoluteWorkingDirectory::parse(canonical_root)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        StdinBinding::Null,
+    )
+    .with_arguments(ArgumentVector::new(arguments))
+    .with_environment(environment);
+    spawn_envelope(&envelope).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to execute stated gate command `{command}` in Seatbelt: {error:#}"
+        ))
+    })
+}
+
+fn gate_child_environment() -> ChildEnvironment {
+    let mut environment = BTreeMap::new();
+    for name in ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME"] {
+        if let Ok(value) = std::env::var(name) {
+            environment.insert(name.to_owned(), value);
+        }
     }
+    ChildEnvironment::new(environment)
+}
+
+fn resolve_gate_executable(
+    executable: &Executable,
+    environment: &ChildEnvironment,
+) -> std::io::Result<Executable> {
+    let raw = Path::new(executable.as_str());
+    if raw.is_absolute() {
+        return executable_path(raw);
+    }
+    let path = environment
+        .iter()
+        .find_map(|(name, value)| (name == "PATH").then_some(value))
+        .ok_or_else(|| {
+            std::io::Error::other(format!(
+                "cannot resolve gate executable `{}` without forwarded PATH",
+                executable.as_str()
+            ))
+        })?;
+    for directory in std::env::split_paths(path) {
+        let candidate = directory.join(raw);
+        if let Ok(resolved) = executable_path(&candidate) {
+            return Ok(resolved);
+        }
+    }
+    Err(std::io::Error::other(format!(
+        "gate executable `{}` was not found as an executable file on forwarded PATH",
+        executable.as_str()
+    )))
+}
+
+fn executable_path(path: &Path) -> std::io::Result<Executable> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to inspect gate executable {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(std::io::Error::other(format!(
+            "gate executable {} is not an executable file",
+            path.display()
+        )));
+    }
+    let raw = path.to_str().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "gate executable path {} is not valid UTF-8",
+            path.display()
+        ))
+    })?;
+    Executable::parse(raw).map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+fn render_seatbelt_profile(
+    repository_root: &Path,
+    temporary_directories: &std::collections::BTreeSet<PathBuf>,
+) -> std::io::Result<String> {
+    let repository_root = seatbelt_path(repository_root)?;
+    let temporary_directories = temporary_directories
+        .iter()
+        .map(|directory| seatbelt_path(directory))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut profile = concat!(
+        "(version 1)\n",
+        "(deny default)\n",
+        "(import \"system.sb\")\n",
+        "(allow process*)\n",
+        "(allow file-read*)\n"
+    )
+    .to_owned();
+    profile.push_str("(deny file-write*\n  (require-all\n");
+    profile.push_str(&format!(
+        "    (require-not (subpath \"{repository_root}\"))\n"
+    ));
+    for directory in &temporary_directories {
+        profile.push_str(&format!("    (require-not (subpath \"{directory}\"))\n"));
+    }
+    profile.push_str("  ))\n(allow file-write*\n");
+    profile.push_str(&format!("  (subpath \"{repository_root}\")\n"));
+    for directory in temporary_directories {
+        profile.push_str(&format!("  (subpath \"{directory}\")\n"));
+    }
+    profile.push_str(")\n(deny network*)");
+    Ok(profile)
+}
+
+fn seatbelt_path(path: &Path) -> std::io::Result<String> {
+    let raw = path.to_str().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "Seatbelt path {} is not valid UTF-8",
+            path.display()
+        ))
+    })?;
+    Ok(raw.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn parse_dispatch_graph(bytes: &[u8]) -> Result<DispatchGraph> {
@@ -3291,6 +3404,9 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
                 claude_stdout.extend_from_slice(bytes);
             }
         }
+        DispatchTarget::Seatbelt => {
+            bail!("Seatbelt envelopes must use the contract-measurement process adapter")
+        }
     }
     if let Some(writer) = stdin_writer {
         writer
@@ -3307,6 +3423,9 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
         DispatchTarget::Codex => classify_codex_terminal_usage(&observations, exit_status),
         DispatchTarget::Gate => {
             classify_claude_result(&parse_claude_result(&claude_stdout), exit_status)
+        }
+        DispatchTarget::Seatbelt => {
+            bail!("Seatbelt envelopes must use the contract-measurement process adapter")
         }
     };
     let artifact_validation: Result<ArtifactOutcome, pce_core::ArtifactValidationError> =
@@ -3358,6 +3477,9 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
             DispatchTarget::Gate => {
                 bail!("invalid Claude result data: {}", usage_absence_name(reason));
             }
+            DispatchTarget::Seatbelt => {
+                bail!("Seatbelt envelopes must use the contract-measurement process adapter");
+            }
         }
     }
     if !status.success() {
@@ -3365,6 +3487,49 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
     }
     artifact_validation.map_err(Error::new)?;
     Ok(())
+}
+
+fn spawn_envelope(envelope: &DispatchEnvelope) -> Result<ObservedExitStatus> {
+    let invocation = dispatch_invocation(envelope);
+    let executable = invocation.executable();
+    let mut command = std::process::Command::new(executable);
+    command.args(invocation.argv());
+    command.current_dir(invocation.cwd());
+    command.env_clear();
+    command.envs(invocation.environment());
+    match invocation.stdin_bytes() {
+        None => {
+            command.stdin(Stdio::null());
+        }
+        Some(_) => {
+            command.stdin(Stdio::piped());
+        }
+    }
+    command.stdout(Stdio::inherit());
+    command.stderr(Stdio::inherit());
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn `{executable}`"))?;
+    if let Some(bytes) = invocation.stdin_bytes() {
+        let mut child_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("`{executable}` child stdin was not piped"))?;
+        child_stdin
+            .write_all(bytes)
+            .with_context(|| format!("failed to write plan bytes to `{executable}`"))?;
+        drop(child_stdin);
+    }
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for `{executable}`"))?;
+    status
+        .code()
+        .map(ObservedExitStatus::from_code)
+        .ok_or_else(|| {
+            anyhow!("`{executable}` child terminated without an exit-status code: {status}")
+        })
 }
 
 fn read_file_observation(path: &Path) -> OwnedFileObservation {
@@ -3594,6 +3759,7 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::io::{Cursor, Read};
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command as ProcessCommand;
     use std::time::SystemTime;
@@ -3603,13 +3769,13 @@ mod tests {
         CurrentArtifactObservation, CurrentArtifactState, DispatchExitStatus, DispatchTokenUsage,
         EventKindName, EventRecord, EventRecordFilter, ExitCode, GitAuthorityObservation,
         GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, InputTokens,
-        KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus,
-        OutputTokens, ReadKind, ReadPayload, ReasoningOutputTokens, RecoveryLogPath,
-        RepositoryBranchName, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-        RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation,
-        StepNode, TagName, TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
-        WriteKind, classify_codex_terminal_usage, derive_run_state, parse_event_line,
-        render_human_snapshot,
+        KnownPayload, MilestoneMergeSubject, MilestoneNode, NESTED_SEATBELT_SKIP_MARKER, NodeId,
+        ObservedExitStatus, OutputTokens, ReadKind, ReadPayload, ReasoningOutputTokens,
+        RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation, RepositoryName,
+        RepositoryObservation, RepositoryObservationFailure, RunSnapshot, SeatbeltCapability,
+        Sha256Digest, StepAuthorityObservation, StepNode, TagName, TagState, VersionPolicy,
+        VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, classify_codex_terminal_usage,
+        derive_run_state, parse_event_line, render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -3621,9 +3787,25 @@ mod tests {
         lexically_normalized_repository_root, measure_tracked_contract_at_root, observe_git,
         observe_terminal_line, parse_command, parse_dispatch_graph, parse_tracked_contract,
         read_at_default_branch_head, read_event_log, readiness_version_policies,
-        repository_contracts, run, run_log_read, select_bootstrap_candidate,
-        validated_snapshot_value,
+        repository_contracts, run, run_log_read, seatbelt_execution_capability,
+        select_bootstrap_candidate, validated_snapshot_value,
     };
+
+    fn record_nested_seatbelt_skip() {
+        let status = ProcessCommand::new("/bin/sh")
+            .args([
+                "-c",
+                "printf '%s\\n' \"$1\" >&2",
+                "pce-test-skip",
+                NESTED_SEATBELT_SKIP_MARKER,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .expect("skip marker process should spawn");
+        assert!(status.success(), "skip marker process should succeed");
+    }
 
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
   "stated": {
@@ -4136,12 +4318,26 @@ mod tests {
 
     #[test]
     fn contract_refresh_reads_default_branch_head_not_feature_worktree() {
+        if let SeatbeltCapability::Unavailable { .. } =
+            seatbelt_execution_capability(Path::new(".")).expect("Seatbelt probe should execute")
+        {
+            record_nested_seatbelt_skip();
+            return;
+        }
         let directory = tempdir().expect("temporary directory should create");
         let root = directory.path().join("repository");
         let log_path = directory.path().join("events.jsonl");
-        let strict = ["true", "true", "true", "exit 23", "true"];
-        let relaxed = ["true", "true", "true", "true", "true"];
         initialize_git_repository(&root);
+        let strict_test = root.join("strict-test");
+        fs::write(&strict_test, "#!/bin/sh\nexit 23\n").expect("strict shim should write");
+        let mut permissions = fs::metadata(&strict_test)
+            .expect("strict shim metadata should read")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&strict_test, permissions).expect("strict shim should be executable");
+        let strict_command = strict_test.display().to_string();
+        let strict = ["true", "true", "true", strict_command.as_str(), "true"];
+        let relaxed = ["true", "true", "true", "true", "true"];
         commit_contract(&root, &tracked_contract_bytes(strict), "initial contract");
         establish_remote_head(&root);
         fs::write(&log_path, current_contract_line(&root, relaxed)).expect("event log should seed");
@@ -4164,14 +4360,16 @@ mod tests {
             output.stdout
         };
         let main = parse_tracked_contract(&main_bytes).expect("main contract should parse");
-        assert_eq!(main.stated().gates().test().as_str(), "exit 23");
+        assert_eq!(main.stated().gates().test().as_str(), strict_command);
         let before = fs::read(&log_path).expect("event log should read");
 
         let err = invoke_refresh(&log_path, &root).expect_err("strict test gate should fail");
 
         let rendered = format!("{err:#}");
         assert!(rendered.contains("failed to measure tracked repository contract"));
-        assert!(rendered.contains("stated gate command `exit 23` exited with status 23"));
+        assert!(rendered.contains(&format!(
+            "stated gate command `{strict_command}` exited with status 23"
+        )));
         assert_eq!(fs::read(&log_path).expect("event log should read"), before);
         assert_eq!(
             read_event_log(&log_path)
@@ -4182,45 +4380,78 @@ mod tests {
     }
 
     #[test]
-    fn contract_refresh_rereads_post_merge_command_and_reuses_unchanged_observations() {
+    fn contract_refresh_rereads_post_merge_command_and_reexecutes_all_gates() {
+        if let SeatbeltCapability::Unavailable { .. } =
+            seatbelt_execution_capability(Path::new(".")).expect("Seatbelt probe should execute")
+        {
+            record_nested_seatbelt_skip();
+            return;
+        }
         let directory = tempdir().expect("temporary directory should create");
         let root = directory.path().join("repository");
         let log_path = directory.path().join("events.jsonl");
-        let initial = [
-            "touch format-ran",
-            "touch lint-ran",
-            "touch typecheck-ran",
-            "touch old-test-ran",
-            "touch build-ran",
-        ];
         initialize_git_repository(&root);
+        let invocation_log = root.join("gate-invocations");
+        let make_shim = |name: &str| {
+            let path = root.join(name);
+            fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' '{}' >> '{}' || exit 74\n",
+                    path.display(),
+                    invocation_log.display()
+                ),
+            )
+            .expect("recording shim should write");
+            let mut permissions = fs::metadata(&path)
+                .expect("recording shim metadata should read")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("recording shim should be executable");
+            path.display().to_string()
+        };
+        let format = make_shim("format-gate");
+        let lint = make_shim("lint-gate");
+        let typecheck = make_shim("typecheck-gate");
+        let old_test = make_shim("old-test-gate");
+        let new_test = make_shim("new-test-gate");
+        let build = make_shim("build-gate");
+        let initial = [
+            format.as_str(),
+            lint.as_str(),
+            typecheck.as_str(),
+            old_test.as_str(),
+            build.as_str(),
+        ];
         commit_contract(&root, &tracked_contract_bytes(initial), "initial contract");
         establish_remote_head(&root);
         fs::write(&log_path, current_contract_line(&root, initial)).expect("event log should seed");
 
         invoke_refresh(&log_path, &root).expect("unchanged refresh should succeed");
+        let first_invocations =
+            fs::read_to_string(&invocation_log).expect("first invocation log should read");
+        let expected_first = [
+            format.as_str(),
+            lint.as_str(),
+            typecheck.as_str(),
+            old_test.as_str(),
+            build.as_str(),
+        ]
+        .join("\n")
+            + "\n";
+        assert_eq!(first_invocations, expected_first);
         assert_eq!(
             read_event_log(&log_path)
                 .expect("event log should parse")
                 .len(),
             2
         );
-        for marker in [
-            "format-ran",
-            "lint-ran",
-            "typecheck-ran",
-            "old-test-ran",
-            "build-ran",
-        ] {
-            assert!(!root.join(marker).exists(), "{marker} must not exist");
-        }
-
         let changed = [
-            "touch format-ran",
-            "touch lint-ran",
-            "touch typecheck-ran",
-            "touch new-test-ran",
-            "touch build-ran",
+            format.as_str(),
+            lint.as_str(),
+            typecheck.as_str(),
+            new_test.as_str(),
+            build.as_str(),
         ];
         commit_contract(
             &root,
@@ -4231,16 +4462,21 @@ mod tests {
 
         let lines = read_event_log(&log_path).expect("event log should parse");
         assert_eq!(lines.len(), 3);
-        assert!(root.join("new-test-ran").exists());
-        for marker in [
-            "format-ran",
-            "lint-ran",
-            "typecheck-ran",
-            "old-test-ran",
-            "build-ran",
-        ] {
-            assert!(!root.join(marker).exists(), "{marker} must not exist");
-        }
+        let all_invocations =
+            fs::read_to_string(&invocation_log).expect("second invocation log should read");
+        let expected_second = [
+            format.as_str(),
+            lint.as_str(),
+            typecheck.as_str(),
+            new_test.as_str(),
+            build.as_str(),
+        ]
+        .join("\n")
+            + "\n";
+        assert_eq!(
+            all_invocations,
+            format!("{first_invocations}{expected_second}")
+        );
         let records = lines
             .iter()
             .map(|line| line.record.clone())
@@ -4249,7 +4485,7 @@ mod tests {
         let [RepositoryContract::Current(latest)] = contracts.as_slice() else {
             panic!("one latest current contract expected");
         };
-        assert_eq!(latest.stated.test, "touch new-test-ran");
+        assert_eq!(latest.stated.test, new_test);
         assert_eq!(latest.observations.format.get(), 0);
         assert_eq!(latest.observations.lint.get(), 0);
         assert_eq!(latest.observations.typecheck.get(), 0);
@@ -5263,57 +5499,82 @@ mod tests {
     }
 
     #[test]
-    fn successive_contract_measurements_do_not_reexecute_unchanged_gate_commands() {
+    fn successive_contract_measurements_reexecute_every_gate() {
+        if let SeatbeltCapability::Unavailable { .. } =
+            seatbelt_execution_capability(Path::new(".")).expect("Seatbelt probe should execute")
+        {
+            record_nested_seatbelt_skip();
+            return;
+        }
         let directory = tempdir().expect("temporary directory should create");
         let repository_root = directory.path().join("repo");
         fs::create_dir(&repository_root).expect("repository fixture should create");
         let contract_path = directory.path().join("contract.json");
+        let marker_path = repository_root.join("gate-runs");
+        let shim_path = repository_root.join("record-gate");
+        fs::write(
+            &shim_path,
+            format!(
+                "#!/bin/sh\nprintf x >> '{}' || exit 74\n",
+                marker_path.display()
+            ),
+        )
+        .expect("gate shim should write");
+        let mut permissions = fs::metadata(&shim_path)
+            .expect("gate shim metadata should read")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&shim_path, permissions).expect("gate shim should be executable");
+        let command = shim_path.display().to_string();
         fs::write(
             &contract_path,
-            br#"{
-  "stated": {
-    "gates": {
-      "format": "printf x >> gate-runs",
-      "lint": "printf x >> gate-runs",
-      "typecheck": "printf x >> gate-runs",
-      "test": "printf x >> gate-runs",
-      "build": "printf x >> gate-runs"
-    },
+            format!(
+                r#"{{
+  "stated": {{
+    "gates": {{
+      "format": "{command}",
+      "lint": "{command}",
+      "typecheck": "{command}",
+      "test": "{command}",
+      "build": "{command}"
+    }},
     "version_policy": "NONE",
-    "branches": {
+    "branches": {{
       "default": "main",
-      "milestone": "pce/{vision}/milestone-{milestone}",
-      "step": "pce/{vision}/m{milestone}-s{step}"
-    },
-    "pull_requests": {
+      "milestone": "pce/{{vision}}/milestone-{{milestone}}",
+      "step": "pce/{{vision}}/m{{milestone}}-s{{step}}"
+    }},
+    "pull_requests": {{
       "step_base": "MILESTONE",
       "milestone_base": "DEFAULT",
       "merge_method": "SQUASH"
-    },
+    }},
     "workflows": []
-  },
-  "appendable": {
+  }},
+  "appendable": {{
     "environment_hazards": [],
     "gate_orderings": [],
     "lockfile_rules": []
-  }
-}"#,
+  }}
+}}"#
+            ),
         )
         .expect("contract fixture should write");
 
-        let first = measure_tracked_contract_at_root(&contract_path, &repository_root, None)
+        let _first = measure_tracked_contract_at_root(&contract_path, &repository_root)
             .expect("first measurement should succeed");
-        let marker_path = repository_root.join("gate-runs");
         assert_eq!(
             fs::read_to_string(&marker_path).expect("marker should read"),
             "xxxxx"
         );
 
-        measure_tracked_contract_at_root(&contract_path, &repository_root, Some(&first))
-            .expect("second measurement should reuse prior observations");
+        let first_invocations =
+            fs::read_to_string(&marker_path).expect("first invocation log should read");
+        measure_tracked_contract_at_root(&contract_path, &repository_root)
+            .expect("second measurement should freshly execute every gate");
         assert_eq!(
             fs::read_to_string(marker_path).expect("marker should read"),
-            "xxxxx"
+            format!("{first_invocations}{first_invocations}")
         );
     }
 

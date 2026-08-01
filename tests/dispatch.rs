@@ -21,7 +21,7 @@ use pce_core::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
-use support::{ClaudeInvocation, CliHarness, CodexInvocation};
+use support::{ClaudeInvocation, CliHarness, CodexInvocation, skip_without_nested_seatbelt};
 
 const INHERITED_MARKER: (&str, &str) = ("PCE_INHERITED_ONLY", "must-not-reach-codex");
 const CHILD_MARKER: (&str, &str) = ("PCE_CHILD_MARKER", "explicit-child-value");
@@ -1714,6 +1714,9 @@ fn wait_for_path(path: &Path) {
 
 #[test]
 fn interruption_leaves_only_durable_issuance() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let _guard = dispatch_test_guard();
     let harness = CliHarness::new().expect("create interruption harness");
     let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
