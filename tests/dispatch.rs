@@ -14,13 +14,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use pce_core::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
     ArtifactOutcome, ChildEnvironment, Deferred, DispatchDuration, DispatchEnvelope,
-    DispatchExitStatus, DispatchLogging, DispatchRef, DispatchRole, DispatchTokenUsage,
-    EventBodyRef, EventRecord, EventTimestamp, Evidence, Executable, KnownPayload, NodeId, Sandbox,
-    Sequence, StdinBinding, UsageAbsenceReason, WriteKind, dispatch_invocation, dispatch_payload,
-    parse_event_line, serialize_event_line,
+    DispatchExitStatus, DispatchLogging, DispatchRef, DispatchRole, DispatchTarget,
+    DispatchTokenUsage, EventBodyRef, EventRecord, EventTimestamp, Evidence, KnownPayload, NodeId,
+    Sandbox, Sequence, StdinBinding, UsageAbsenceReason, WriteKind, dispatch_invocation,
+    dispatch_payload, parse_event_line, serialize_event_line,
 };
 use serde::Serialize;
-use support::{CliHarness, CodexInvocation};
+use serde_json::{Value, json};
+use support::{ClaudeInvocation, CliHarness, CodexInvocation};
 
 const INHERITED_MARKER: (&str, &str) = ("PCE_INHERITED_ONLY", "must-not-reach-codex");
 const CHILD_MARKER: (&str, &str) = ("PCE_CHILD_MARKER", "explicit-child-value");
@@ -55,6 +56,7 @@ struct FixtureProjection {
 
 #[derive(Serialize)]
 struct FixtureEnvelope {
+    target: &'static str,
     executable: &'static str,
     argv: Vec<String>,
     cwd: String,
@@ -507,6 +509,7 @@ fn literal_projection(
     let deferred = FixtureDeferred { state: "deferred" };
     let fixture = FixtureProjection {
         envelope: FixtureEnvelope {
+            target: "codex",
             executable: "codex",
             argv,
             cwd: cwd.display().to_string(),
@@ -563,7 +566,7 @@ fn assert_shared_serializer_family(
         StdinBinding::PlanBytes(bytes.to_vec())
     });
     let mut envelope = DispatchEnvelope::new(
-        Executable::parse("codex").expect("executable"),
+        DispatchTarget::Codex,
         AbsoluteWorkingDirectory::parse(cwd).expect("working directory"),
         stdin,
     )
@@ -1987,5 +1990,1171 @@ fn rejects_invalid_dispatch_inputs_before_invocation() {
             .codex_invocations(&record_root)
             .expect("read missing-plan records")
             .is_empty()
+    );
+}
+
+const CLAUDE_SUCCESS: &[u8] = br#"{"is_error":false,"duration_ms":7,"result":"ok","usage":{"input_tokens":11,"output_tokens":13,"cache_creation_input_tokens":17,"cache_read_input_tokens":19}}"#;
+
+struct GateFixture {
+    harness: CliHarness,
+    cwd: PathBuf,
+    record_root: PathBuf,
+    schema_path: PathBuf,
+    output_path: PathBuf,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+}
+
+impl GateFixture {
+    fn new(name: &str, stdout: &[u8]) -> Self {
+        let harness = CliHarness::new().expect("create gate harness");
+        let cwd = fs::canonicalize(harness.path()).expect("canonicalize gate cwd");
+        let record_root = harness.path().join(format!("{name}-records"));
+        fs::create_dir(&record_root).expect("create gate record root");
+        let schema_path = harness.path().join(format!("{name}-schema.json"));
+        let output_path = harness.path().join(format!("{name}-output.json"));
+        let stdout_path = harness.path().join(format!("{name}-stdout.bin"));
+        let stderr_path = harness.path().join(format!("{name}-stderr.bin"));
+        fs::write(&schema_path, VALID_ARTIFACT_SCHEMA).expect("write gate schema");
+        fs::write(&output_path, CONFORMING_ARTIFACT).expect("write gate output");
+        fs::write(&stdout_path, stdout).expect("write gate stdout");
+        fs::write(&stderr_path, []).expect("write gate stderr");
+        Self {
+            harness,
+            cwd,
+            record_root,
+            schema_path,
+            output_path,
+            stdout_path,
+            stderr_path,
+        }
+    }
+
+    fn environment(&self, exit_code: i32) -> Vec<(String, String)> {
+        vec![
+            ("PATH".to_owned(), self.harness.shim_path()),
+            (
+                "PCE_CLAUDE_RECORD_ROOT".to_owned(),
+                self.record_root.display().to_string(),
+            ),
+            (
+                "PCE_CLAUDE_STDOUT_FILE".to_owned(),
+                self.stdout_path.display().to_string(),
+            ),
+            (
+                "PCE_CLAUDE_STDERR_FILE".to_owned(),
+                self.stderr_path.display().to_string(),
+            ),
+            ("PCE_CLAUDE_EXIT_CODE".to_owned(), exit_code.to_string()),
+        ]
+    }
+
+    fn argv(&self, environment: &[(String, String)], tail: &[&str]) -> Vec<String> {
+        let mut argv = vec![
+            "dispatch".to_owned(),
+            "gate".to_owned(),
+            "--cwd".to_owned(),
+            self.cwd.display().to_string(),
+        ];
+        for (name, value) in environment {
+            argv.extend(["--env".to_owned(), format!("{name}={value}")]);
+        }
+        argv.extend([
+            "--output-schema".to_owned(),
+            self.schema_path.display().to_string(),
+            "-o".to_owned(),
+            self.output_path.display().to_string(),
+            "--".to_owned(),
+        ]);
+        argv.extend(tail.iter().map(|value| (*value).to_owned()));
+        argv
+    }
+
+    fn invocation(&self) -> ClaudeInvocation {
+        let mut invocations = self
+            .harness
+            .claude_invocations(&self.record_root)
+            .expect("read Claude invocation");
+        assert_eq!(invocations.len(), 1);
+        invocations.remove(0)
+    }
+}
+
+fn insert_gate_logging(argv: &mut Vec<String>, log_path: &Path, dry_run: bool) {
+    let delimiter = argv
+        .iter()
+        .position(|value| value == "--")
+        .expect("delimiter");
+    let mut logging = vec![
+        "--log-file".to_owned(),
+        log_path.display().to_string(),
+        "--node".to_owned(),
+        "m6-s2".to_owned(),
+        "--role".to_owned(),
+        "critic".to_owned(),
+        "--ref".to_owned(),
+        "gate-ref".to_owned(),
+        "--evidence".to_owned(),
+        "gate-evidence".to_owned(),
+    ];
+    if dry_run {
+        logging.push("--dry-run".to_owned());
+    }
+    argv.splice(delimiter..delimiter, logging);
+}
+
+fn gate_completion(log_path: &Path) -> pce_core::DispatchCompletionPayload {
+    let records = fs::read_to_string(log_path)
+        .expect("read gate log")
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse gate event"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref()
+    else {
+        panic!("second gate record is not a completion")
+    };
+    completion.clone()
+}
+
+#[test]
+fn gate_dry_run_projects_null_and_plan_routes() {
+    let _guard = dispatch_test_guard();
+    for (name, plan) in [("null", None), ("plan", Some(b"plan\0\xff".as_slice()))] {
+        let fixture = GateFixture::new(name, CLAUDE_SUCCESS);
+        let environment = fixture.environment(0);
+        let mut argv = fixture.argv(&environment, &["alpha", "beta"]);
+        if let Some(bytes) = plan {
+            let path = fixture.harness.path().join(format!("{name}.plan"));
+            fs::write(&path, bytes).expect("write gate plan");
+            let delimiter = argv
+                .iter()
+                .position(|value| value == "--")
+                .expect("delimiter");
+            argv.splice(
+                delimiter..delimiter,
+                ["--plan-file".to_owned(), path.display().to_string()],
+            );
+        }
+        let log = fixture.harness.path().join(format!("{name}.jsonl"));
+        insert_gate_logging(&mut argv, &log, true);
+        let output = fixture.harness.run(&argv, b"").expect("run gate dry-run");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("projection");
+        assert_eq!(value["envelope"]["target"], "gate");
+        assert_eq!(value["envelope"]["executable"], "claude");
+        assert_eq!(
+            value["envelope"]["argv"],
+            json!(["-p", "--output-format", "json", "alpha", "beta"])
+        );
+        assert_eq!(
+            value["envelope"]["schema_path"],
+            fixture.schema_path.display().to_string()
+        );
+        assert_eq!(
+            value["envelope"]["output_path"],
+            fixture.output_path.display().to_string()
+        );
+        assert_eq!(
+            value["envelope"]["stdin"]["bytes"],
+            plan.map_or(Value::Null, |bytes| json!(bytes))
+        );
+        assert!(
+            fixture
+                .harness
+                .claude_invocations(&fixture.record_root)
+                .expect("dry records")
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn gate_invocation_is_pinned_and_environment_is_exact() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("pinned", CLAUDE_SUCCESS);
+    let mut environment = fixture.environment(0);
+    environment.push(("EXPLICIT".to_owned(), "value".to_owned()));
+    let argv = fixture.argv(&environment, &["one", "two words", "three"]);
+    let output = fixture
+        .harness
+        .run_with_parent_environment(&argv, &[("PARENT_ONLY", "secret")])
+        .expect("run pinned gate");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let invocation = fixture.invocation();
+    assert_eq!(invocation.program, "claude");
+    assert_eq!(
+        invocation.argv,
+        ["-p", "--output-format", "json", "one", "two words", "three"].map(OsString::from)
+    );
+    assert_eq!(invocation.cwd, fixture.cwd);
+    assert_eq!(invocation.stdin, b"");
+    let mut expected = environment
+        .iter()
+        .map(|(name, value)| OsString::from(format!("{name}={value}")))
+        .collect::<BTreeSet<_>>();
+    expected.extend([
+        OsString::from(format!("PWD={}", fixture.cwd.display())),
+        OsString::from("SHLVL=1"),
+        OsString::from("_=/usr/bin/env"),
+    ]);
+    assert_eq!(invocation.environment, expected);
+    assert!(
+        !invocation
+            .environment
+            .contains(&OsString::from("PARENT_ONLY=secret"))
+    );
+}
+
+#[test]
+fn gate_null_and_plan_stdin_are_distinct() {
+    let _guard = dispatch_test_guard();
+    let null = GateFixture::new("stdin-null", CLAUDE_SUCCESS);
+    let output = null
+        .harness
+        .run(null.argv(&null.environment(0), &[]), b"parent stdin")
+        .expect("run null gate");
+    assert!(output.status.success());
+    assert_eq!(null.invocation().stdin, b"");
+    let plan = GateFixture::new("stdin-plan", CLAUDE_SUCCESS);
+    let bytes = b"\0plan\xff\n";
+    let plan_path = plan.harness.path().join("exact.plan");
+    fs::write(&plan_path, bytes).expect("write exact plan");
+    let environment = plan.environment(0);
+    let mut argv = plan.argv(&environment, &[]);
+    let delimiter = argv
+        .iter()
+        .position(|value| value == "--")
+        .expect("delimiter");
+    argv.splice(
+        delimiter..delimiter,
+        ["--plan-file".to_owned(), plan_path.display().to_string()],
+    );
+    let output = plan.harness.run(&argv, b"ignored").expect("run plan gate");
+    assert!(output.status.success());
+    let invocation = plan.invocation();
+    assert_eq!(invocation.stdin, bytes);
+    assert_eq!(
+        invocation.argv,
+        ["-p", "--output-format", "json"].map(OsString::from)
+    );
+}
+
+#[test]
+fn gate_stdout_is_teed_byte_for_byte() {
+    let _guard = dispatch_test_guard();
+    let bytes = b" \n{\"is_error\":false,\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":4}} \t";
+    let fixture = GateFixture::new("tee", bytes);
+    let log = fixture.harness.path().join("tee.jsonl");
+    let mut argv = fixture.argv(&fixture.environment(0), &[]);
+    insert_gate_logging(&mut argv, &log, false);
+    let output = fixture.harness.run(&argv, b"").expect("run tee gate");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, bytes);
+    assert!(matches!(
+        gate_completion(&log).usage,
+        DispatchTokenUsage::ClaudeMeasured { .. }
+    ));
+}
+
+#[test]
+fn gate_rejects_explicit_anthropic_api_key() {
+    let _guard = dispatch_test_guard();
+    for value in ["", "secret"] {
+        let fixture = GateFixture::new(&format!("key-{value}"), CLAUDE_SUCCESS);
+        let mut environment = fixture.environment(0);
+        environment.push(("ANTHROPIC_API_KEY".to_owned(), value.to_owned()));
+        let output = fixture
+            .harness
+            .run(fixture.argv(&environment, &[]), b"")
+            .expect("reject key");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("gate dispatch environment must not contain `ANTHROPIC_API_KEY`")
+        );
+        assert!(
+            fixture
+                .harness
+                .claude_invocations(&fixture.record_root)
+                .expect("key records")
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn gate_rejects_caller_output_format_spellings() {
+    let _guard = dispatch_test_guard();
+    for token in ["--output-format", "--output-format=stream-json"] {
+        let fixture = GateFixture::new(token, CLAUDE_SUCCESS);
+        let output = fixture
+            .harness
+            .run(fixture.argv(&fixture.environment(0), &[token]), b"")
+            .expect("reject format");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("gate caller arguments must not contain `--output-format`")
+        );
+        assert!(
+            fixture
+                .harness
+                .claude_invocations(&fixture.record_root)
+                .expect("format records")
+                .is_empty()
+        );
+    }
+    let fixture = GateFixture::new("near-miss", CLAUDE_SUCCESS);
+    let mut argv = fixture.argv(
+        &fixture.environment(0),
+        &[
+            "--output-formatting",
+            "--no-output-format",
+            "prompt mentions --output-format in prose",
+        ],
+    );
+    let log = fixture.harness.path().join("near-miss.jsonl");
+    insert_gate_logging(&mut argv, &log, false);
+    let evidence = argv
+        .iter()
+        .position(|value| value == "--evidence")
+        .expect("evidence");
+    argv[evidence + 1] = "--output-format".to_owned();
+    let output = fixture.harness.run(&argv, b"").expect("accept near misses");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fixture.invocation().argv,
+        [
+            "-p",
+            "--output-format",
+            "json",
+            "--output-formatting",
+            "--no-output-format",
+            "prompt mentions --output-format in prose"
+        ]
+        .map(OsString::from)
+    );
+}
+
+#[test]
+fn gate_parent_anthropic_key_is_absent_from_exact_child_environment() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("parent-key", CLAUDE_SUCCESS);
+    let environment = fixture.environment(0);
+    let argv = fixture.argv(&environment, &[]);
+    let output = fixture
+        .harness
+        .run_with_parent_environment(&argv, &[("ANTHROPIC_API_KEY", "parent-secret")])
+        .expect("run parent-key gate");
+    assert!(output.status.success());
+    let invocation = fixture.invocation();
+    let mut expected = environment
+        .iter()
+        .map(|(name, value)| OsString::from(format!("{name}={value}")))
+        .collect::<BTreeSet<_>>();
+    expected.extend([
+        OsString::from(format!("PWD={}", fixture.cwd.display())),
+        OsString::from("SHLVL=1"),
+        OsString::from("_=/usr/bin/env"),
+    ]);
+    assert_eq!(invocation.environment, expected);
+    assert!(
+        !invocation
+            .environment
+            .contains(&OsString::from("ANTHROPIC_API_KEY=parent-secret"))
+    );
+}
+
+#[test]
+fn gate_parser_rejections_precede_invocation() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("parser", CLAUDE_SUCCESS);
+    let cwd = fixture.cwd.display().to_string();
+    let schema = fixture.schema_path.display().to_string();
+    let output = fixture.output_path.display().to_string();
+    let base = || {
+        vec![
+            "dispatch".to_owned(),
+            "gate".to_owned(),
+            "--cwd".to_owned(),
+            cwd.clone(),
+        ]
+    };
+    let cases: Vec<(&str, Vec<String>, &str)> = vec![
+        (
+            "relative-cwd",
+            vec![
+                "dispatch",
+                "gate",
+                "--cwd",
+                "relative",
+                "--output-schema",
+                &schema,
+                "-o",
+                &output,
+                "--",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            "working directory must be absolute",
+        ),
+        (
+            "malformed-env",
+            [
+                base(),
+                vec![
+                    "--env".to_owned(),
+                    "broken".to_owned(),
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "-o".to_owned(),
+                    output.clone(),
+                    "--".to_owned(),
+                ],
+            ]
+            .concat(),
+            "environment entry must contain `=`",
+        ),
+        (
+            "empty-env",
+            [
+                base(),
+                vec![
+                    "--env".to_owned(),
+                    "=x".to_owned(),
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "-o".to_owned(),
+                    output.clone(),
+                    "--".to_owned(),
+                ],
+            ]
+            .concat(),
+            "environment name must not be empty",
+        ),
+        (
+            "duplicate-env",
+            [
+                base(),
+                vec![
+                    "--env".to_owned(),
+                    "A=1".to_owned(),
+                    "--env".to_owned(),
+                    "A=2".to_owned(),
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "-o".to_owned(),
+                    output.clone(),
+                    "--".to_owned(),
+                ],
+            ]
+            .concat(),
+            "duplicate environment name `A`",
+        ),
+        (
+            "key",
+            [
+                base(),
+                vec![
+                    "--env".to_owned(),
+                    "ANTHROPIC_API_KEY=".to_owned(),
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "-o".to_owned(),
+                    output.clone(),
+                    "--".to_owned(),
+                ],
+            ]
+            .concat(),
+            "gate dispatch environment must not contain `ANTHROPIC_API_KEY`",
+        ),
+        (
+            "absent-schema",
+            [base(), vec!["--".to_owned()]].concat(),
+            "expected `--output-schema`",
+        ),
+        (
+            "schema-order",
+            [
+                base(),
+                vec![
+                    "-o".to_owned(),
+                    output.clone(),
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "--".to_owned(),
+                ],
+            ]
+            .concat(),
+            "expected `--output-schema`",
+        ),
+        (
+            "relative-schema",
+            [
+                base(),
+                vec![
+                    "--output-schema".to_owned(),
+                    "relative".to_owned(),
+                    "-o".to_owned(),
+                    output.clone(),
+                    "--".to_owned(),
+                ],
+            ]
+            .concat(),
+            "schema path must be absolute",
+        ),
+        (
+            "unpaired-output",
+            [
+                base(),
+                vec![
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "--".to_owned(),
+                ],
+            ]
+            .concat(),
+            "expected `-o`",
+        ),
+        (
+            "relative-output",
+            [
+                base(),
+                vec![
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "-o".to_owned(),
+                    "relative".to_owned(),
+                    "--".to_owned(),
+                ],
+            ]
+            .concat(),
+            "output path must be absolute",
+        ),
+        (
+            "sandbox",
+            [
+                base(),
+                vec![
+                    "--sandbox".to_owned(),
+                    "workspace-write".to_owned(),
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "-o".to_owned(),
+                    output.clone(),
+                    "--".to_owned(),
+                ],
+            ]
+            .concat(),
+            "expected `--output-schema`",
+        ),
+        (
+            "stray-dry",
+            [
+                base(),
+                vec![
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "-o".to_owned(),
+                    output.clone(),
+                    "--dry-run".to_owned(),
+                    "--".to_owned(),
+                ],
+            ]
+            .concat(),
+            "dispatch logging options must be supplied together",
+        ),
+        (
+            "missing-delimiter",
+            [
+                base(),
+                vec![
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "-o".to_owned(),
+                    output.clone(),
+                ],
+            ]
+            .concat(),
+            "dispatch arguments require the `--` delimiter",
+        ),
+        (
+            "displaced-delimiter",
+            [
+                base(),
+                vec![
+                    "--".to_owned(),
+                    "--output-schema".to_owned(),
+                    schema.clone(),
+                    "-o".to_owned(),
+                    output.clone(),
+                ],
+            ]
+            .concat(),
+            "expected `--output-schema`",
+        ),
+    ];
+    for (name, argv, diagnostic) in cases {
+        let result = fixture
+            .harness
+            .run(&argv, b"")
+            .expect("run gate parser rejection");
+        assert!(!result.status.success(), "{name} unexpectedly succeeded");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(diagnostic),
+            "{name}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            fixture
+                .harness
+                .claude_invocations(&fixture.record_root)
+                .expect("parser records")
+                .is_empty(),
+            "{name} invoked Claude"
+        );
+    }
+    for target in ["claude", "Gate"] {
+        let result = fixture
+            .harness
+            .run(["dispatch", target], b"")
+            .expect("unsupported target");
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains(&format!("unsupported dispatch target `{target}`"))
+        );
+        assert!(
+            fixture
+                .harness
+                .claude_invocations(&fixture.record_root)
+                .expect("Claude records")
+                .is_empty()
+        );
+        assert!(
+            fixture
+                .harness
+                .invocations()
+                .expect("generic records")
+                .is_empty()
+        );
+    }
+    let missing_plan = fixture.harness.path().join("missing-plan");
+    let mut argv = fixture.argv(&fixture.environment(0), &[]);
+    let delimiter = argv
+        .iter()
+        .position(|value| value == "--")
+        .expect("delimiter");
+    argv.splice(
+        delimiter..delimiter,
+        ["--plan-file".to_owned(), missing_plan.display().to_string()],
+    );
+    let result = fixture.harness.run(&argv, b"").expect("missing gate plan");
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains(&format!(
+        "failed to read plan file `{}`",
+        missing_plan.display()
+    )));
+
+    let swaps = [(0, 2), (2, 4), (4, 6), (6, 8)];
+    for (case, (left, right)) in swaps.into_iter().enumerate() {
+        let log = fixture.harness.path().join(format!("swap-{case}.jsonl"));
+        let mut logging = vec![
+            "--log-file".to_owned(),
+            log.display().to_string(),
+            "--node".to_owned(),
+            "m6-s2".to_owned(),
+            "--role".to_owned(),
+            "critic".to_owned(),
+            "--ref".to_owned(),
+            "ref".to_owned(),
+            "--evidence".to_owned(),
+            "evidence".to_owned(),
+        ];
+        logging.swap(left, right);
+        logging.swap(left + 1, right + 1);
+        let mut argv = fixture.argv(&fixture.environment(0), &[]);
+        let delimiter = argv
+            .iter()
+            .position(|value| value == "--")
+            .expect("delimiter");
+        argv.splice(delimiter..delimiter, logging);
+        let result = fixture.harness.run(&argv, b"").expect("logging swap");
+        assert!(
+            !result.status.success(),
+            "adjacent logging swap {case} succeeded"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("dispatch logging options must be supplied together"),
+            "swap {case}"
+        );
+    }
+}
+
+#[test]
+fn codex_accepts_explicit_anthropic_api_key_and_reaches_shim() {
+    let _guard = dispatch_test_guard();
+    let harness = CliHarness::new().expect("create Codex key harness");
+    let cwd = fs::canonicalize(harness.path()).expect("cwd");
+    let record_root = harness.path().join("codex-key-records");
+    fs::create_dir(&record_root).expect("records");
+    let stdout = harness.path().join("codex-key.stdout");
+    let stderr = harness.path().join("codex-key.stderr");
+    fs::write(&stdout, b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":2,\"output_tokens\":3,\"reasoning_output_tokens\":4}}\n").expect("stdout");
+    fs::write(&stderr, []).expect("stderr");
+    let mut environment = child_environment(&harness, &record_root, &stdout, &stderr, 0);
+    environment.push((
+        "ANTHROPIC_API_KEY".to_owned(),
+        "allowed-for-codex".to_owned(),
+    ));
+    let result = harness
+        .run(dispatch_argv(&cwd, &environment, None, None, "prompt"), b"")
+        .expect("run Codex with key");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        harness
+            .codex_invocations(&record_root)
+            .expect("Codex key record")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn gate_logging_group_is_optional_exact_and_ordered() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("logging", CLAUDE_SUCCESS);
+    let result = fixture
+        .harness
+        .run(fixture.argv(&fixture.environment(0), &[]), b"")
+        .expect("no logging");
+    assert!(result.status.success());
+    for dry_run in [false, true] {
+        let fixture = GateFixture::new(
+            if dry_run {
+                "logging-dry"
+            } else {
+                "logging-live"
+            },
+            CLAUDE_SUCCESS,
+        );
+        let log = fixture.harness.path().join("events.jsonl");
+        let mut argv = fixture.argv(&fixture.environment(0), &[]);
+        insert_gate_logging(&mut argv, &log, dry_run);
+        let result = fixture.harness.run(&argv, b"").expect("complete logging");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            fixture
+                .harness
+                .claude_invocations(&fixture.record_root)
+                .expect("logging records")
+                .len(),
+            usize::from(!dry_run)
+        );
+    }
+}
+
+fn assert_gate_classification(
+    name: &str,
+    stdout: &[u8],
+    exit_code: i32,
+    reason: UsageAbsenceReason,
+) {
+    let fixture = GateFixture::new(name, stdout);
+    let log = fixture.harness.path().join("events.jsonl");
+    let mut argv = fixture.argv(&fixture.environment(exit_code), &[]);
+    insert_gate_logging(&mut argv, &log, false);
+    let result = fixture
+        .harness
+        .run(&argv, b"")
+        .expect("run classified gate");
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains(&format!(
+        "invalid Claude result data: {}",
+        usage_reason_name(reason)
+    )));
+    let completion = gate_completion(&log);
+    assert_eq!(completion.usage, DispatchTokenUsage::Absent { reason });
+    assert_eq!(
+        completion.exit_status,
+        DispatchExitStatus::Exited {
+            code: pce_core::ExitCode::new(
+                u64::try_from(exit_code).expect("nonnegative fixture exit")
+            )
+        }
+    );
+    if name == "malformed" {
+        assert_eq!(result.stdout, stdout);
+    }
+}
+
+#[test]
+fn gate_success_records_claude_usage() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("usage-success", CLAUDE_SUCCESS);
+    let log = fixture.harness.path().join("events.jsonl");
+    let mut argv = fixture.argv(&fixture.environment(0), &[]);
+    insert_gate_logging(&mut argv, &log, false);
+    let result = fixture.harness.run(&argv, b"").expect("run usage gate");
+    assert!(result.status.success());
+    assert_eq!(
+        gate_completion(&log).usage,
+        DispatchTokenUsage::ClaudeMeasured {
+            input_tokens: pce_core::InputTokens::new(11),
+            output_tokens: pce_core::OutputTokens::new(13),
+            cache_creation_input_tokens: pce_core::CacheCreationInputTokens::new(17),
+            cache_read_input_tokens: pce_core::CacheReadInputTokens::new(19)
+        }
+    );
+}
+
+#[test]
+fn gate_missing_usage_reports_route_specific_reason() {
+    let _guard = dispatch_test_guard();
+    assert_gate_classification(
+        "missing-usage",
+        br#"{"is_error":false}"#,
+        0,
+        UsageAbsenceReason::ClaudeMissingUsage,
+    );
+}
+
+#[test]
+fn gate_malformed_result_reports_route_specific_reason() {
+    let _guard = dispatch_test_guard();
+    assert_gate_classification(
+        "malformed",
+        b"not json",
+        0,
+        UsageAbsenceReason::ClaudeMalformedResult,
+    );
+}
+
+#[test]
+fn gate_error_result_records_error_envelope() {
+    let _guard = dispatch_test_guard();
+    assert_gate_classification(
+        "error",
+        br#"{"is_error":true}"#,
+        7,
+        UsageAbsenceReason::ClaudeErrorEnvelope,
+    );
+}
+
+#[test]
+fn gate_error_result_with_zero_exit_is_contradiction() {
+    let _guard = dispatch_test_guard();
+    assert_gate_classification(
+        "error-zero",
+        br#"{"is_error":true}"#,
+        0,
+        UsageAbsenceReason::ClaudeExitEnvelopeContradiction,
+    );
+}
+
+#[test]
+fn gate_success_result_with_nonzero_exit_is_contradiction() {
+    let _guard = dispatch_test_guard();
+    assert_gate_classification(
+        "success-nonzero",
+        CLAUDE_SUCCESS,
+        9,
+        UsageAbsenceReason::ClaudeExitEnvelopeContradiction,
+    );
+}
+
+#[test]
+fn gate_signal_exit_is_preserved() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("signal", br#"{"is_error":true}"#);
+    let log = fixture.harness.path().join("events.jsonl");
+    let mut environment = fixture.environment(0);
+    environment.push(("PCE_CLAUDE_SIGNAL".to_owned(), "15".to_owned()));
+    let mut argv = fixture.argv(&environment, &[]);
+    insert_gate_logging(&mut argv, &log, false);
+    let result = fixture.harness.run(&argv, b"").expect("run signaled gate");
+    assert!(!result.status.success());
+    assert_eq!(
+        gate_completion(&log).exit_status,
+        DispatchExitStatus::Signaled {
+            signal: pce_core::SignalNumber::new(15)
+        }
+    );
+    assert_eq!(
+        gate_completion(&log).usage,
+        DispatchTokenUsage::Absent {
+            reason: UsageAbsenceReason::ClaudeErrorEnvelope
+        }
+    );
+}
+
+#[test]
+fn gate_artifact_outcomes_cover_all_categories() {
+    let _guard = dispatch_test_guard();
+    for (name, schema, artifact, expected) in [
+        (
+            "validated",
+            VALID_ARTIFACT_SCHEMA as &[u8],
+            Some(CONFORMING_ARTIFACT as &[u8]),
+            ArtifactOutcome::Validated,
+        ),
+        (
+            "missing",
+            VALID_ARTIFACT_SCHEMA,
+            None,
+            ArtifactOutcome::Missing,
+        ),
+        (
+            "truncated",
+            VALID_ARTIFACT_SCHEMA,
+            Some(b"{".as_slice()),
+            ArtifactOutcome::Truncated,
+        ),
+        (
+            "schema-invalid",
+            b"{".as_slice(),
+            Some(CONFORMING_ARTIFACT),
+            ArtifactOutcome::SchemaInvalid,
+        ),
+        (
+            "schema-violating",
+            VALID_ARTIFACT_SCHEMA,
+            Some(b"{}".as_slice()),
+            ArtifactOutcome::SchemaViolating,
+        ),
+    ] {
+        let stdout = if name == "missing" {
+            br#"{"is_error":false,"result":"{\"verdict\":\"pass\",\"summary\":\"looks valid\"}","usage":{"input_tokens":11,"output_tokens":13,"cache_creation_input_tokens":17,"cache_read_input_tokens":19}}"#
+        } else {
+            CLAUDE_SUCCESS
+        };
+        let fixture = GateFixture::new(name, stdout);
+        fs::write(&fixture.schema_path, schema).expect("replace schema fixture");
+        let mut environment = fixture.environment(0);
+        match (name, artifact) {
+            ("validated" | "truncated" | "schema-violating", Some(bytes)) => {
+                let bytes_path = fixture.harness.path().join(format!("{name}-artifact.bin"));
+                fs::write(&bytes_path, bytes).expect("write child artifact bytes");
+                fs::remove_file(&fixture.output_path).expect("remove pre-created artifact fixture");
+                environment.extend([
+                    (
+                        "PCE_CLAUDE_OUTPUT_BYTES_FILE".to_owned(),
+                        bytes_path.display().to_string(),
+                    ),
+                    (
+                        "PCE_CLAUDE_OUTPUT_PATH".to_owned(),
+                        fixture.output_path.display().to_string(),
+                    ),
+                ]);
+            }
+            (_, Some(bytes)) => {
+                fs::write(&fixture.output_path, bytes).expect("replace artifact fixture")
+            }
+            (_, None) => fs::remove_file(&fixture.output_path).expect("remove artifact fixture"),
+        }
+        let log = fixture.harness.path().join("events.jsonl");
+        let mut argv = fixture.argv(&environment, &[]);
+        insert_gate_logging(&mut argv, &log, false);
+        let result = fixture.harness.run(&argv, b"").expect("run artifact gate");
+        assert_eq!(
+            result.status.success(),
+            expected == ArtifactOutcome::Validated,
+            "{name}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(gate_completion(&log).artifact_outcome, expected, "{name}");
+    }
+}
+
+fn run_measured_gate(
+    name: &str,
+    stdout: &[u8],
+    sleep: Option<&str>,
+) -> pce_core::DispatchCompletionPayload {
+    let fixture = GateFixture::new(name, stdout);
+    let log = fixture.harness.path().join("events.jsonl");
+    let mut environment = fixture.environment(0);
+    if let Some(seconds) = sleep {
+        environment.push(("PCE_CLAUDE_SLEEP_SECONDS".to_owned(), seconds.to_owned()));
+    }
+    let mut argv = fixture.argv(&environment, &[]);
+    insert_gate_logging(&mut argv, &log, false);
+    let result = fixture.harness.run(&argv, b"").expect("run measured gate");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    gate_completion(&log)
+}
+
+#[test]
+fn gate_duration_compares_binary_measurements() {
+    let _guard = dispatch_test_guard();
+    let fast = run_measured_gate("duration-fast", CLAUDE_SUCCESS, None);
+    let slow = run_measured_gate("duration-slow", CLAUDE_SUCCESS, Some("0.2"));
+    assert!(
+        slow.duration_ms
+            .get()
+            .checked_sub(fast.duration_ms.get())
+            .is_some_and(|difference| difference >= 150),
+        "fast={} slow={}",
+        fast.duration_ms.get(),
+        slow.duration_ms.get()
+    );
+}
+
+#[test]
+fn gate_usage_compares_two_measurements() {
+    let _guard = dispatch_test_guard();
+    let first = run_measured_gate("usage-first", CLAUDE_SUCCESS, None);
+    let second_bytes = br#"{"is_error":false,"duration_ms":7,"usage":{"input_tokens":22,"output_tokens":30,"cache_creation_input_tokens":51,"cache_read_input_tokens":74}}"#;
+    let second = run_measured_gate("usage-second", second_bytes, None);
+    let (
+        DispatchTokenUsage::ClaudeMeasured {
+            input_tokens: first_input,
+            output_tokens: first_output,
+            cache_creation_input_tokens: first_creation,
+            cache_read_input_tokens: first_read,
+        },
+        DispatchTokenUsage::ClaudeMeasured {
+            input_tokens: second_input,
+            output_tokens: second_output,
+            cache_creation_input_tokens: second_creation,
+            cache_read_input_tokens: second_read,
+        },
+    ) = (first.usage, second.usage)
+    else {
+        panic!("both gate usages must be measured")
+    };
+    assert_eq!(second_input.get() - first_input.get(), 11);
+    assert_eq!(second_output.get() - first_output.get(), 17);
+    assert_eq!(second_creation.get() - first_creation.get(), 34);
+    assert_eq!(second_read.get() - first_read.get(), 55);
+}
+
+#[test]
+fn gate_valid_artifact_succeeds_without_logging() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("no-log", CLAUDE_SUCCESS);
+    let log = fixture.harness.path().join("must-not-exist.jsonl");
+    let result = fixture
+        .harness
+        .run(fixture.argv(&fixture.environment(0), &["prompt"]), b"")
+        .expect("run unlogged gate");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, CLAUDE_SUCCESS);
+    assert!(!log.exists());
+}
+
+#[test]
+fn gate_rejects_missing_structured_artifact_without_logging() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("no-log-missing", CLAUDE_SUCCESS);
+    fs::remove_file(&fixture.output_path).expect("remove no-log gate artifact");
+    let result = fixture
+        .harness
+        .run(fixture.argv(&fixture.environment(0), &["prompt"]), b"")
+        .expect("run unlogged gate with missing artifact");
+    assert!(!result.status.success());
+    assert_eq!(
+        result.stderr,
+        format!(
+            "Error: artifact output `{}` is missing\n",
+            fixture.output_path.display()
+        )
+        .as_bytes()
+    );
+    assert_no_jsonl_files(fixture.harness.path());
+}
+
+#[test]
+fn gate_records_exact_issuance_correlation() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("correlation", CLAUDE_SUCCESS);
+    let log = fixture.harness.path().join("events.jsonl");
+    let block = fixture.harness.path().join("release");
+    let mut environment = fixture.environment(0);
+    environment.push((
+        "PCE_CLAUDE_BLOCK_FILE".to_owned(),
+        block.display().to_string(),
+    ));
+    let mut argv = fixture.argv(&environment, &[]);
+    insert_gate_logging(&mut argv, &log, false);
+    let binary = env!("CARGO_BIN_EXE_pce");
+    let mut child = Command::new(binary)
+        .args(&argv)
+        .env_clear()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn blocked gate");
+    wait_for_path(&fixture.record_root.join("invocation/pid"));
+    let interleaved = fixture
+        .harness
+        .run(
+            [
+                "log",
+                "--file",
+                log.to_str().expect("log"),
+                "--kind",
+                "delta",
+                "--node",
+                "m6-s2",
+            ],
+            br#"{"message":"interleaved"}"#,
+        )
+        .expect("append interleaved record");
+    assert!(interleaved.status.success(), "lock was held while gate ran");
+    fs::write(&block, []).expect("release gate");
+    let status = child.wait().expect("wait blocked gate");
+    assert!(status.success());
+    let records = fs::read_to_string(&log)
+        .expect("read correlation log")
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse correlation record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 3);
+    let EventBodyRef::Known(KnownPayload::Dispatch(issuance)) = records[0].body_ref() else {
+        panic!("issuance")
+    };
+    assert_eq!(issuance.role.as_str(), "critic");
+    assert_eq!(issuance.r#ref.as_str(), "gate-ref");
+    assert_eq!(issuance.evidence.as_str(), "gate-evidence");
+    let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[2].body_ref()
+    else {
+        panic!("completion")
+    };
+    assert_eq!(completion.issuance_sequence, records[0].sequence());
+    assert_ne!(
+        completion.issuance_sequence.get(),
+        records[2].sequence().get() - 1
     );
 }

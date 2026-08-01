@@ -1,4 +1,4 @@
-//! dispatch_projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; codex_terminal_usage : CodexTerminalObservation* × DispatchExitStatus → DispatchTokenUsage; claude_result_usage : ClaudeResultEnvelope × DispatchExitStatus → DispatchTokenUsage   (pure, deterministic)
+//! dispatch_invocation : DispatchTarget × DispatchEnvelope → Executable × Argv; dispatch_projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; codex_terminal_usage : CodexTerminalObservation* × DispatchExitStatus → DispatchTokenUsage; claude_result_usage : ClaudeResultEnvelope × DispatchExitStatus → DispatchTokenUsage   (pure, deterministic)
 //! This provisional module describes child invocations; the binary adapter performs all I/O and process work and will test the shape against the real tool surface in m2-s2.
 
 use std::collections::BTreeMap;
@@ -85,6 +85,7 @@ pub struct DispatchInvocationStdin {
 /// The complete ordered shell-free child invocation shared by live and projection paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DispatchInvocation {
+    target: DispatchTarget,
     executable: String,
     argv: Vec<String>,
     cwd: String,
@@ -95,6 +96,10 @@ pub struct DispatchInvocation {
 }
 
 impl DispatchInvocation {
+    /// Return the closed dispatch route.
+    pub const fn target(&self) -> DispatchTarget {
+        self.target
+    }
     /// Return the program name passed directly to the process adapter.
     pub fn executable(&self) -> &str {
         &self.executable
@@ -120,23 +125,20 @@ impl DispatchInvocation {
 /// Render the complete ordered child invocation from an envelope.
 pub fn dispatch_invocation(envelope: &DispatchEnvelope) -> DispatchInvocation {
     let cwd = envelope.working_directory().as_path().display().to_string();
-    let mut argv = vec![
-        "exec".to_owned(),
-        "--json".to_owned(),
-        "-C".to_owned(),
-        cwd.clone(),
-    ];
-    if let Some(sandbox) = envelope.sandbox() {
-        argv.extend(["--sandbox".to_owned(), sandbox.as_str().to_owned()]);
-    }
-    if let Some(path) = envelope.schema_path() {
-        argv.extend([
-            "--output-schema".to_owned(),
-            path.as_path().display().to_string(),
-        ]);
-    }
-    if let Some(path) = envelope.output_path() {
-        argv.extend(["-o".to_owned(), path.as_path().display().to_string()]);
+    let mut argv = envelope.target().argv_prefix(&cwd);
+    if envelope.target() == DispatchTarget::Codex {
+        if let Some(sandbox) = envelope.sandbox() {
+            argv.extend(["--sandbox".to_owned(), sandbox.as_str().to_owned()]);
+        }
+        if let Some(path) = envelope.schema_path() {
+            argv.extend([
+                "--output-schema".to_owned(),
+                path.as_path().display().to_string(),
+            ]);
+        }
+        if let Some(path) = envelope.output_path() {
+            argv.extend(["-o".to_owned(), path.as_path().display().to_string()]);
+        }
     }
     argv.extend(envelope.arguments().as_slice().iter().cloned());
     let environment = envelope
@@ -155,6 +157,7 @@ pub fn dispatch_invocation(envelope: &DispatchEnvelope) -> DispatchInvocation {
         },
     };
     DispatchInvocation {
+        target: envelope.target(),
         executable: envelope.executable().as_str().to_owned(),
         argv,
         cwd,
@@ -180,18 +183,18 @@ impl<'a> DispatchProjectionInput<'a> {
     /// Construct a projection input containing exactly three immutable domain facts.
     ///
     /// ```
-    /// use pce_core::{AbsoluteWorkingDirectory, DispatchEnvelope, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole, EventLogTail, Evidence, Executable, NodeId, StdinBinding};
+    /// use pce_core::{AbsoluteWorkingDirectory, DispatchEnvelope, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole, DispatchTarget, EventLogTail, Evidence, NodeId, StdinBinding};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let envelope = DispatchEnvelope::new(Executable::parse("codex")?, AbsoluteWorkingDirectory::parse("/tmp")?, StdinBinding::Null);
+    /// let envelope = DispatchEnvelope::new(DispatchTarget::Codex, AbsoluteWorkingDirectory::parse("/tmp")?, StdinBinding::Null);
     /// let logging = DispatchLogging { node: NodeId::parse("m3-s2")?, role: DispatchRole::new("step-executor"), dispatch_ref: DispatchRef::new("ref"), evidence: Evidence::parse("fixture")? };
     /// let tail = EventLogTail::Empty;
     /// let _input = DispatchProjectionInput::new(&envelope, &logging, &tail);
     /// # Ok(()) }
     /// ```
     /// ```compile_fail
-    /// use pce_core::{AbsoluteWorkingDirectory, DispatchEnvelope, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole, EventLogTail, Evidence, Executable, NodeId, StdinBinding};
+    /// use pce_core::{AbsoluteWorkingDirectory, DispatchEnvelope, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole, DispatchTarget, EventLogTail, Evidence, NodeId, StdinBinding};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let envelope = DispatchEnvelope::new(Executable::parse("codex")?, AbsoluteWorkingDirectory::parse("/tmp")?, StdinBinding::Null);
+    /// let envelope = DispatchEnvelope::new(DispatchTarget::Codex, AbsoluteWorkingDirectory::parse("/tmp")?, StdinBinding::Null);
     /// let logging = DispatchLogging { node: NodeId::parse("m3-s2")?, role: DispatchRole::new("step-executor"), dispatch_ref: DispatchRef::new("ref"), evidence: Evidence::parse("fixture")? };
     /// let tail = EventLogTail::Empty;
     /// let _input = DispatchProjectionInput::new(&envelope, &logging, &tail, |_bytes: &[u8]| Ok::<(), std::io::Error>(()));
@@ -545,6 +548,42 @@ impl Executable {
     }
 }
 
+/// The closed set of dispatch routes and their fixed executables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DispatchTarget {
+    /// A Codex headless execution.
+    Codex,
+    /// A direct Claude headless gate execution.
+    Gate,
+}
+
+impl DispatchTarget {
+    /// Return the route's fixed executable.
+    pub fn executable(self) -> Executable {
+        Executable(match self {
+            Self::Codex => "codex".to_owned(),
+            Self::Gate => "claude".to_owned(),
+        })
+    }
+
+    fn argv_prefix(self, cwd: &str) -> Vec<String> {
+        match self {
+            Self::Codex => vec![
+                "exec".to_owned(),
+                "--json".to_owned(),
+                "-C".to_owned(),
+                cwd.to_owned(),
+            ],
+            Self::Gate => vec![
+                "-p".to_owned(),
+                "--output-format".to_owned(),
+                "json".to_owned(),
+            ],
+        }
+    }
+}
+
 /// The caller-supplied argument tail in caller order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ArgumentVector(Vec<String>);
@@ -694,6 +733,7 @@ impl AbsoluteOutputPath {
 /// A pure description of one shell-free child invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchEnvelope {
+    target: DispatchTarget,
     executable: Executable,
     arguments: ArgumentVector,
     working_directory: AbsoluteWorkingDirectory,
@@ -707,12 +747,13 @@ pub struct DispatchEnvelope {
 impl DispatchEnvelope {
     /// Construct a minimal dispatch with empty arguments and explicit environment.
     pub fn new(
-        executable: Executable,
+        target: DispatchTarget,
         working_directory: AbsoluteWorkingDirectory,
         stdin: StdinBinding,
     ) -> Self {
         Self {
-            executable,
+            target,
+            executable: target.executable(),
             arguments: ArgumentVector::default(),
             working_directory,
             environment: ChildEnvironment::default(),
@@ -721,6 +762,11 @@ impl DispatchEnvelope {
             schema_path: None,
             output_path: None,
         }
+    }
+
+    /// Return the closed dispatch route.
+    pub const fn target(&self) -> DispatchTarget {
+        self.target
     }
 
     /// Set the caller-supplied argument tail.
@@ -819,8 +865,9 @@ mod tests {
     use super::{
         AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
         ChildEnvironment, ClaudeResultEnvelope, CodexTerminalObservation, CodexTerminalUsage,
-        DispatchEnvelope, DispatchError, Executable, Sandbox, StdinBinding, classify_claude_result,
-        classify_codex_terminal_usage, dispatch_completion_payload, parse_claude_result,
+        DispatchEnvelope, DispatchError, DispatchTarget, Executable, Sandbox, StdinBinding,
+        classify_claude_result, classify_codex_terminal_usage, dispatch_completion_payload,
+        parse_claude_result,
     };
     use crate::event_log::{
         ArtifactOutcome, DispatchDuration, DispatchExitStatus, DispatchTokenUsage, ExitCode,
@@ -1156,12 +1203,13 @@ mod tests {
     #[test]
     fn constructs_minimal_dispatch_envelope() -> Result<(), DispatchError> {
         let envelope = DispatchEnvelope::new(
-            Executable::parse("codex")?,
+            DispatchTarget::Codex,
             AbsoluteWorkingDirectory::parse("/workspace/project")?,
             StdinBinding::Null,
         );
 
         assert_eq!(envelope.executable().as_str(), "codex");
+        assert_eq!(envelope.target(), DispatchTarget::Codex);
         assert_eq!(
             envelope.working_directory().as_path(),
             Path::new("/workspace/project")
@@ -1237,7 +1285,7 @@ mod tests {
         let plan_bytes = vec![0, 1, 2, 255];
 
         let envelope = DispatchEnvelope::new(
-            Executable::parse("codex")?,
+            DispatchTarget::Codex,
             AbsoluteWorkingDirectory::parse("/workspace/project")?,
             StdinBinding::PlanBytes(plan_bytes.clone()),
         )
@@ -1248,6 +1296,7 @@ mod tests {
         .with_output_path(AbsoluteOutputPath::parse("/workspace/output.json")?);
 
         assert_eq!(envelope.executable().as_str(), "codex");
+        assert_eq!(envelope.target(), DispatchTarget::Codex);
         assert_eq!(envelope.arguments().as_slice(), arguments.as_slice());
         assert_eq!(
             envelope.environment().iter().collect::<Vec<_>>(),
@@ -1277,11 +1326,14 @@ mod tests {
     fn constructs_unstructured_reusable_dispatch_value() -> Result<(), DispatchError> {
         let arguments = ArgumentVector::new(vec!["positional prompt".to_owned()]);
         let envelope = DispatchEnvelope::new(
-            Executable::parse("claude")?,
+            DispatchTarget::Gate,
             AbsoluteWorkingDirectory::parse("/workspace/project")?,
             StdinBinding::Null,
         )
         .with_arguments(arguments);
+
+        assert_eq!(envelope.target(), DispatchTarget::Gate);
+        assert_eq!(envelope.executable().as_str(), "claude");
 
         assert_eq!(
             envelope.arguments().as_slice(),
