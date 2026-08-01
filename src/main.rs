@@ -3336,6 +3336,25 @@ mod tests {
         seatbelt_execution_capability, select_bootstrap_candidate, validated_snapshot_value,
     };
 
+    const NESTED_SEATBELT_SKIP_MARKER: &str =
+        "PCE_TEST_SKIP: nested Seatbelt unavailable; permissive capability probe was denied";
+
+    fn record_nested_seatbelt_skip() {
+        let status = ProcessCommand::new("/bin/sh")
+            .args([
+                "-c",
+                "printf '%s\\n' \"$1\" >&2",
+                "pce-test-skip",
+                NESTED_SEATBELT_SKIP_MARKER,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .expect("skip marker process should spawn");
+        assert!(status.success(), "skip marker process should succeed");
+    }
+
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
   "stated": {
     "gates": {
@@ -4973,9 +4992,7 @@ mod tests {
         if let SeatbeltCapability::Unavailable { .. } =
             seatbelt_execution_capability(Path::new(".")).expect("Seatbelt probe should execute")
         {
-            eprintln!(
-                "PCE_TEST_SKIP: nested Seatbelt unavailable; permissive capability probe was denied"
-            );
+            record_nested_seatbelt_skip();
             return;
         }
         let directory = tempdir().expect("temporary directory should create");

@@ -21,6 +21,22 @@ static SEATBELT_CAPABILITY: OnceLock<SeatbeltProbeObservation> = OnceLock::new()
 const NESTED_SEATBELT_SKIP_MARKER: &str =
     "PCE_TEST_SKIP: nested Seatbelt unavailable; permissive capability probe was denied";
 
+fn record_nested_seatbelt_skip() {
+    let status = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf '%s\\n' \"$1\" >&2",
+            "pce-test-skip",
+            NESTED_SEATBELT_SKIP_MARKER,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .expect("skip marker process should spawn");
+    assert!(status.success(), "skip marker process should succeed");
+}
+
 #[derive(Clone, Copy)]
 struct SeatbeltProbeObservation {
     status: ObservedExitStatus,
@@ -59,7 +75,7 @@ fn observe_seatbelt_capability() -> SeatbeltProbeObservation {
 
 fn skip_without_nested_seatbelt() -> bool {
     if let SeatbeltCapability::Unavailable { .. } = observe_seatbelt_capability().capability {
-        eprintln!("{NESTED_SEATBELT_SKIP_MARKER}");
+        record_nested_seatbelt_skip();
         true
     } else {
         false
@@ -533,7 +549,7 @@ fn host_permissive_probe_reports_nested_seatbelt_available() {
         .status()
         .expect("direct permissive Seatbelt probe should spawn");
     if !direct_status.success() {
-        eprintln!("{NESTED_SEATBELT_SKIP_MARKER}");
+        record_nested_seatbelt_skip();
         return;
     }
 
@@ -547,5 +563,36 @@ fn host_permissive_probe_reports_nested_seatbelt_available() {
     assert!(
         !skip_without_nested_seatbelt(),
         "the shared skip decision must remain false when the independent direct probe succeeds"
+    );
+}
+
+#[test]
+fn nested_seatbelt_skip_marker_survives_libtest_capture() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+
+    let test_executable = std::env::current_exe().expect("test executable path should read");
+    let output = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "--"])
+        .arg(test_executable)
+        .args([
+            "--exact",
+            "contract_check_executes_gate_inside_seatbelt_boundary",
+        ])
+        .env_clear()
+        .stdin(Stdio::null())
+        .output()
+        .expect("captured nested-Seatbelt test should spawn");
+
+    assert!(
+        output.status.success(),
+        "captured nested-Seatbelt test failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("test stderr should be UTF-8");
+    assert!(
+        stderr.contains(NESTED_SEATBELT_SKIP_MARKER),
+        "uncaptured test stderr omitted the skip marker: {stderr}"
     );
 }
