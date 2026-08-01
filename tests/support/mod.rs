@@ -6,8 +6,103 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use pce_core::{
+    AbsoluteWorkingDirectory, NESTED_SEATBELT_SKIP_MARKER, ObservedExitStatus, SeatbeltCapability,
+    StdinBinding, classify_seatbelt_capability, seatbelt_capability_probe,
+};
 use tempfile::TempDir;
+
+static SEATBELT_CAPABILITY: OnceLock<SeatbeltCapability> = OnceLock::new();
+static WORKSPACE_FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[allow(dead_code)]
+pub struct WorkspaceFixtureDirectory(PathBuf);
+
+#[allow(dead_code)]
+impl WorkspaceFixtureDirectory {
+    pub fn create(label: &str) -> io::Result<Self> {
+        let sequence = WORKSPACE_FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/pce-seatbelt-fixtures")
+            .join(format!("{label}-{}-{sequence}", std::process::id()));
+        fs::create_dir_all(&path)?;
+        Ok(Self(path))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn assert_outside_temporary_roots(&self, repository: &Path) {
+        let repository = fs::canonicalize(repository).expect("repository should canonicalize");
+        let canonical_tmp = fs::canonicalize("/tmp").expect("/tmp should canonicalize");
+        let canonical_platform_temp =
+            fs::canonicalize(std::env::temp_dir()).expect("platform temp should canonicalize");
+        assert!(!repository.starts_with(canonical_tmp));
+        assert!(!repository.starts_with(canonical_platform_temp));
+    }
+}
+
+impl Drop for WorkspaceFixtureDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Probe whether this process may apply nested Seatbelt and record the exact skip marker on fd 2.
+#[allow(dead_code)]
+pub fn skip_without_nested_seatbelt() -> bool {
+    let capability = *SEATBELT_CAPABILITY.get_or_init(|| {
+        let current_directory =
+            fs::canonicalize(std::env::current_dir().expect("test current directory should read"))
+                .expect("test current directory should canonicalize");
+        let working_directory = AbsoluteWorkingDirectory::parse(current_directory)
+            .expect("canonical test directory should be absolute");
+        let envelope = seatbelt_capability_probe(working_directory)
+            .expect("fixed Seatbelt capability probe should construct");
+        assert_eq!(envelope.stdin(), &StdinBinding::Null);
+        let output = Command::new(envelope.executable().as_str())
+            .args(envelope.arguments().as_slice())
+            .current_dir(envelope.working_directory().as_path())
+            .env_clear()
+            .stdin(Stdio::null())
+            .output()
+            .expect("Seatbelt capability probe should spawn");
+        let status = ObservedExitStatus::from_code(
+            output
+                .status
+                .code()
+                .expect("Seatbelt capability probe should return an exit-status code"),
+        );
+        classify_seatbelt_capability(status)
+    });
+    if let SeatbeltCapability::Unavailable { .. } = capability {
+        record_nested_seatbelt_skip();
+        true
+    } else {
+        false
+    }
+}
+
+#[allow(dead_code)]
+pub fn record_nested_seatbelt_skip() {
+    let status = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf '%s\\n' \"$1\" >&2",
+            "pce-test-skip",
+            NESTED_SEATBELT_SKIP_MARKER,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .expect("skip marker process should spawn");
+    assert!(status.success(), "skip marker process should succeed");
+}
 
 const GIT_SHIM: &str = r#"#!/bin/sh
 program=git

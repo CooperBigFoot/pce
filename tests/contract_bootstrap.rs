@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+mod support;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -9,6 +12,8 @@ use pce_core::{
 };
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
+
+use support::{WorkspaceFixtureDirectory, skip_without_nested_seatbelt};
 
 const DEFAULT_BRANCH_CONTRACT: &[u8] = br#"{
   "stated": {
@@ -70,8 +75,8 @@ jobs:
 "#;
 
 struct Fixture {
-    _temporary: TempDir,
-    root: PathBuf,
+    _temporary: Option<TempDir>,
+    _workspace: Option<WorkspaceFixtureDirectory>,
     repository: PathBuf,
     events: PathBuf,
 }
@@ -80,6 +85,28 @@ impl Fixture {
     fn new(files: &[(&str, &[u8])]) -> Self {
         let temporary = tempdir().expect("create fixture directory");
         let root = temporary.path().to_path_buf();
+        Self::at_root(root, Some(temporary), None, files)
+    }
+
+    fn workspace(files: &[(&str, &[u8])]) -> Self {
+        let workspace = WorkspaceFixtureDirectory::create("bootstrap")
+            .expect("create workspace fixture directory");
+        let root = workspace.path().to_path_buf();
+        let fixture = Self::at_root(root, None, Some(workspace), files);
+        fixture
+            ._workspace
+            .as_ref()
+            .expect("workspace guard should exist")
+            .assert_outside_temporary_roots(&fixture.repository);
+        fixture
+    }
+
+    fn at_root(
+        root: PathBuf,
+        temporary: Option<TempDir>,
+        workspace: Option<WorkspaceFixtureDirectory>,
+        files: &[(&str, &[u8])],
+    ) -> Self {
         let repository = root.join("repository");
         git(None, ["init", "-b", "main", path_text(&repository)]);
         git(Some(&repository), ["config", "user.name", "PCE Test"]);
@@ -107,13 +134,17 @@ impl Fixture {
         fs::write(&events, b"").expect("create empty event log");
         Self {
             _temporary: temporary,
-            root,
+            _workspace: workspace,
             repository,
             events,
         }
     }
 
-    fn invoke(&self, shim: Option<&Path>, cargo_log: Option<&Path>) -> Output {
+    fn invoke(&self, shim: Option<&Path>) -> Output {
+        self.invoke_as(shim, "fixture")
+    }
+
+    fn invoke_as(&self, shim: Option<&Path>, repository_name: &str) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pce"));
         command.args([
             "contract",
@@ -123,7 +154,7 @@ impl Fixture {
             "--repo-root",
             path_text(&self.repository),
             "--repository",
-            "fixture",
+            repository_name,
             "--node",
             "m3-s3",
         ]);
@@ -137,9 +168,6 @@ impl Fixture {
                 .expect("join shim PATH"),
             );
         }
-        if let Some(cargo_log) = cargo_log {
-            command.env("PCE_CARGO_LOG", cargo_log);
-        }
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -148,9 +176,47 @@ impl Fixture {
             .expect("run pce contract bootstrap")
     }
 
+    fn invoke_with_exact_path(&self, path: &Path) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_pce"))
+            .args(["contract", "bootstrap", "--file"])
+            .arg(&self.events)
+            .arg("--repo-root")
+            .arg(&self.repository)
+            .args(["--repository", "fixture", "--node", "m3-s3"])
+            .env_clear()
+            .env("PATH", path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run pce contract bootstrap with exact PATH")
+    }
+
     fn contract_path(&self) -> PathBuf {
         self.repository.join(".pce/repository-contract.json")
     }
+}
+
+fn probing_cargo_shim(fixture: &Fixture, exit_on_probe_denial: i32) -> (PathBuf, PathBuf, PathBuf) {
+    let log = fixture.repository.join("probe-cargo.log");
+    let probe = fixture
+        ._workspace
+        .as_ref()
+        .expect("probing fixtures are workspace-backed")
+        .path()
+        .join("external-probe");
+    assert!(!probe.starts_with(&fixture.repository));
+    fs::write(&probe, b"host writable").expect("probe host write should work");
+    fs::remove_file(&probe).expect("probe reset should work");
+    let shim = create_shim(
+        &fixture.repository,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}' || exit 74\nif printf probe > '{}'; then exit 0; fi\nexit {exit_on_probe_denial}\n",
+            log.display(),
+            probe.display()
+        ),
+    );
+    (shim, log, probe)
 }
 
 #[test]
@@ -165,7 +231,7 @@ fn bootstrap_rejects_contract_present_at_default_branch_head_without_writing() {
     assert!(shown.status.success());
     assert_eq!(shown.stdout, DEFAULT_BRANCH_CONTRACT);
 
-    let output = fixture.invoke(None, None);
+    let output = fixture.invoke(None);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "stderr: {stderr}");
     assert!(
@@ -180,15 +246,21 @@ fn bootstrap_rejects_contract_present_at_default_branch_head_without_writing() {
 
 #[test]
 fn ci_derived_bootstrap_creates_contract_and_persists_every_workflow_unattended() {
-    let fixture = Fixture::new(&[
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[
         ("Cargo.toml", MANIFEST.as_bytes()),
         (".github/workflows/ci.yml", CI_WORKFLOW.as_bytes()),
         (".github/workflows/release.yml", RELEASE_WORKFLOW.as_bytes()),
     ]);
     assert_default_contract_absent(&fixture);
+    let invocation_log = fixture.repository.join("ci-cargo.log");
     let shim = create_shim(
-        &fixture.root,
-        r#"#!/bin/sh
+        &fixture.repository,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}' || exit 74
 case "$*" in
   "fmt --check" | \
   "clippy --all-targets" | \
@@ -203,9 +275,15 @@ case "$*" in
     ;;
 esac
 "#,
+            invocation_log.display()
+        ),
     );
-    let output = fixture.invoke(Some(&shim), None);
+    let output = fixture.invoke(Some(&shim));
     assert_success(&output);
+    assert_eq!(
+        fs::read_to_string(invocation_log).expect("CI invocation log should read"),
+        "fmt --check\nclippy --all-targets\ncheck --all-targets\ntest --all-targets\nbuild --all-targets\n"
+    );
 
     let expected = ci_contract_value();
     let bytes = fs::read(fixture.contract_path()).expect("read persisted contract");
@@ -238,13 +316,18 @@ esac
 
 #[test]
 fn ci_less_bootstrap_uses_declared_precedence_stops_early_and_preserves_stated_half() {
-    let fixture = Fixture::new(&[("Cargo.toml", MANIFEST.as_bytes())]);
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[("Cargo.toml", MANIFEST.as_bytes())]);
     assert_default_contract_absent(&fixture);
-    let cargo_log = fixture.root.join("cargo.log");
+    let cargo_log = fixture.repository.join("cargo.log");
+    let cargo_log_text = path_text(&cargo_log);
     let shim = create_shim(
-        &fixture.root,
-        r#"#!/bin/sh
-printf '%s\n' "$*" >> "${PCE_CARGO_LOG:?PCE_CARGO_LOG is required}"
+        &fixture.repository,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{cargo_log_text}"
 case "$*" in
   "fmt --all --check")
     exit 31
@@ -261,9 +344,10 @@ case "$*" in
     exit 97
     ;;
 esac
-"#,
+"#
+        ),
     );
-    let first = fixture.invoke(Some(&shim), Some(&cargo_log));
+    let first = fixture.invoke(Some(&shim));
     assert_success(&first);
     let first_json: Value =
         serde_json::from_slice(&fs::read(fixture.contract_path()).expect("read first contract"))
@@ -280,20 +364,25 @@ esac
     );
     assert_eq!(
         fs::read(&cargo_log).expect("read cargo invocation log"),
-        b"fmt --all --check\nfmt --check\nclippy --workspace --all-targets\ncheck --workspace --all-targets\ntest --workspace\nbuild --workspace\n"
+        b"fmt --all --check\nfmt --check\nclippy --workspace --all-targets\ncheck --workspace --all-targets\ntest --workspace\nbuild --workspace\nfmt --check\nclippy --workspace --all-targets\ncheck --workspace --all-targets\ntest --workspace\nbuild --workspace\n"
     );
     let stated = first_json["stated"].clone();
     let cargo_log_bytes = fs::read(&cargo_log).expect("save cargo log");
 
-    let second = fixture.invoke(Some(&shim), Some(&cargo_log));
+    let second = fixture.invoke(Some(&shim));
     assert_success(&second);
     let second_json: Value =
         serde_json::from_slice(&fs::read(fixture.contract_path()).expect("read second contract"))
             .expect("parse second contract JSON");
     assert_eq!(second_json["stated"], stated);
+    let second_log = fs::read(&cargo_log).expect("reread cargo log");
     assert_eq!(
-        fs::read(&cargo_log).expect("reread cargo log"),
-        cargo_log_bytes
+        &second_log[..cargo_log_bytes.len()],
+        cargo_log_bytes.as_slice()
+    );
+    assert_eq!(
+        &second_log[cargo_log_bytes.len()..],
+        b"fmt --check\nclippy --workspace --all-targets\ncheck --workspace --all-targets\ntest --workspace\nbuild --workspace\n"
     );
     let payloads = current_payloads(&fixture.events);
     assert_eq!(payloads.len(), 2);
@@ -304,6 +393,245 @@ esac
         assert_zero_observations(&payload);
     }
     assert_no_escalations(&fixture.events);
+}
+
+#[test]
+fn ci_less_bootstrap_rejects_host_green_sandbox_red_candidates_without_persistence() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[("Cargo.toml", MANIFEST.as_bytes())]);
+    let (shim, log, probe) = probing_cargo_shim(&fixture, 73);
+    let output = fixture.invoke(Some(&shim));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains("no passing bootstrap candidate for format"));
+    assert_eq!(
+        fs::read_to_string(log).expect("candidate log should read"),
+        "fmt --all --check\nfmt --check\n"
+    );
+    assert!(!probe.exists());
+    assert!(!fixture.contract_path().exists());
+    assert_eq!(
+        fs::read(&fixture.events).expect("event log should read"),
+        b""
+    );
+}
+
+#[test]
+fn ci_less_bootstrap_profile_denies_external_probe_and_allows_repository_log() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[("Cargo.toml", MANIFEST.as_bytes())]);
+    let (shim, log, probe) = probing_cargo_shim(&fixture, 73);
+    let output = fixture.invoke(Some(&shim));
+    assert!(!output.status.success());
+    assert!(
+        log.exists(),
+        "repository-local invocation log must be writable"
+    );
+    assert!(!probe.exists(), "external probe must remain denied");
+}
+
+#[test]
+fn ci_less_bootstrap_distinguishes_unavailable_seatbelt_from_all_candidates_red() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[("Cargo.toml", MANIFEST.as_bytes())]);
+    let (shim, log, _probe) = probing_cargo_shim(&fixture, 73);
+    let ordinary = std::env::var_os("PATH").expect("test PATH should exist");
+    let composed_path =
+        std::env::join_paths(std::iter::once(shim.clone()).chain(std::env::split_paths(&ordinary)))
+            .expect("outer PATH should compose");
+    let unavailable = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "--"])
+        .arg(env!("CARGO_BIN_EXE_pce"))
+        .args(["contract", "bootstrap", "--file"])
+        .arg(&fixture.events)
+        .arg("--repo-root")
+        .arg(&fixture.repository)
+        .args(["--repository", "fixture", "--node", "m3-s3"])
+        .env_clear()
+        .env("PATH", composed_path)
+        .output()
+        .expect("outer Seatbelt bootstrap should run");
+    let unavailable_stderr = String::from_utf8_lossy(&unavailable.stderr);
+    assert!(!unavailable.status.success());
+    assert!(
+        unavailable_stderr.contains("failed to verify Seatbelt execution capability"),
+        "stderr: {unavailable_stderr}"
+    );
+    assert!(!unavailable_stderr.contains("no passing bootstrap candidate"));
+    assert!(!log.exists(), "capability failure must precede candidates");
+
+    let all_red = fixture.invoke(Some(&shim));
+    let all_red_stderr = String::from_utf8_lossy(&all_red.stderr);
+    assert!(all_red_stderr.contains("no passing bootstrap candidate for format"));
+    assert!(
+        log.exists(),
+        "repository-owned exhaustion must invoke candidates"
+    );
+}
+
+#[test]
+fn bootstrap_named_gate_distinguishes_path_resolution_from_gate_status() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[("Cargo.toml", MANIFEST.as_bytes())]);
+    let (shim, log, probe) = probing_cargo_shim(&fixture, 73);
+    let output = fixture.invoke(Some(&shim));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no passing bootstrap candidate for format"));
+    assert!(!stderr.contains("failed to resolve executable"));
+    assert!(
+        fs::read_to_string(log)
+            .expect("PATH-resolved invocation should record")
+            .starts_with("fmt --all --check\n")
+    );
+    assert!(!probe.exists());
+}
+
+#[test]
+fn bootstrap_missing_gate_executable_is_execution_failure_without_invocation() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[
+        ("Cargo.toml", MANIFEST.as_bytes()),
+        (".github/workflows/ci.yml", CI_WORKFLOW.as_bytes()),
+    ]);
+    let path = fixture.repository.join("missing-cargo-path");
+    fs::create_dir(&path).expect("exact PATH directory should create");
+    std::os::unix::fs::symlink("/usr/bin/git", path.join("git"))
+        .expect("git symlink should create");
+    let output = fixture.invoke_with_exact_path(&path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains(
+            "gate executable `cargo` was not found as an executable file on forwarded PATH"
+        ),
+        "stderr: {stderr}"
+    );
+    assert!(!fixture.repository.join("missing-invocation.log").exists());
+    assert!(!fixture.contract_path().exists());
+}
+
+#[test]
+fn bootstrap_measurement_failure_leaves_contract_unchanged() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[
+        ("Cargo.toml", MANIFEST.as_bytes()),
+        (".github/workflows/ci.yml", CI_WORKFLOW.as_bytes()),
+    ]);
+    let shim = create_shim(&fixture.repository, "#!/bin/sh\nexit 29\n");
+    let output = fixture.invoke(Some(&shim));
+    assert!(!output.status.success());
+    assert!(!fixture.contract_path().exists());
+}
+
+#[test]
+fn bootstrap_measurement_failure_leaves_event_unchanged() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[
+        ("Cargo.toml", MANIFEST.as_bytes()),
+        (".github/workflows/ci.yml", CI_WORKFLOW.as_bytes()),
+    ]);
+    let before = fs::read(&fixture.events).expect("event baseline should read");
+    let shim = create_shim(&fixture.repository, "#!/bin/sh\nexit 29\n");
+    let output = fixture.invoke(Some(&shim));
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read(&fixture.events).expect("event log should read"),
+        before
+    );
+}
+
+#[test]
+fn successful_sandboxed_bootstrap_preserves_stated_and_appends_event() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[
+        ("Cargo.toml", MANIFEST.as_bytes()),
+        (".github/workflows/ci.yml", CI_WORKFLOW.as_bytes()),
+        (".github/workflows/release.yml", RELEASE_WORKFLOW.as_bytes()),
+    ]);
+    let log = fixture.repository.join("successful-bootstrap.log");
+    let shim = create_shim(
+        &fixture.repository,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}' || exit 74\nexit 0\n",
+            log.display()
+        ),
+    );
+    let output = fixture.invoke(Some(&shim));
+    assert_success(&output);
+    let tracked: Value = serde_json::from_slice(
+        &fs::read(fixture.contract_path()).expect("tracked contract should read"),
+    )
+    .expect("tracked contract should parse");
+    assert_eq!(tracked["stated"], ci_contract_value()["stated"]);
+    assert_eq!(current_payloads(&fixture.events).len(), 1);
+    assert_eq!(
+        current_payloads(&fixture.events)[0].stated.test,
+        "cargo test --all-targets"
+    );
+}
+
+#[test]
+fn bootstrap_rejects_ambiguous_duplicate_contract_identity() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = Fixture::workspace(&[
+        ("Cargo.toml", MANIFEST.as_bytes()),
+        (".github/workflows/ci.yml", CI_WORKFLOW.as_bytes()),
+    ]);
+    let log = fixture.repository.join("identity.log");
+    let shim = create_shim(
+        &fixture.repository,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            log.display()
+        ),
+    );
+    assert_success(&fixture.invoke(Some(&shim)));
+    let accepted_baseline = fs::read(&log).expect("first measurement should read");
+    assert_success(&fixture.invoke(Some(&shim)));
+    let accepted = fs::read(&log).expect("second measurement should read");
+    assert!(
+        accepted.len() > accepted_baseline.len(),
+        "exact identity must remeasure"
+    );
+
+    let event_before = fs::read(&fixture.events).expect("events should read");
+    let log_before = fs::read(&log).expect("log should read");
+    let different_name = fixture.invoke_as(Some(&shim), "other");
+    assert!(!different_name.status.success());
+    assert!(String::from_utf8_lossy(&different_name.stderr).contains("ambiguous duplicate"));
+    assert_eq!(
+        fs::read(&fixture.events).expect("events should read"),
+        event_before
+    );
+    assert_eq!(fs::read(&log).expect("log should read"), log_before);
+
+    let other = Fixture::workspace(&[
+        ("Cargo.toml", MANIFEST.as_bytes()),
+        (".github/workflows/ci.yml", CI_WORKFLOW.as_bytes()),
+    ]);
+    fs::write(&other.events, &event_before).expect("shared event history should write");
+    let other_output = other.invoke(Some(&shim));
+    assert!(!other_output.status.success());
+    assert!(String::from_utf8_lossy(&other_output.stderr).contains("ambiguous duplicate"));
+    assert!(!other.contract_path().exists());
 }
 
 fn assert_default_contract_absent(fixture: &Fixture) {

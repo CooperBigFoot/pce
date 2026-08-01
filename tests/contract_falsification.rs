@@ -10,32 +10,17 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pce_core::{
-    AbsoluteWorkingDirectory, ObservedExitStatus, SeatbeltCapability, StdinBinding,
-    classify_seatbelt_capability, seatbelt_capability_probe,
+    AbsoluteWorkingDirectory, EventBodyRef, KnownPayload, NESTED_SEATBELT_SKIP_MARKER,
+    ObservedExitStatus, SeatbeltCapability, StdinBinding, classify_seatbelt_capability,
+    parse_event_line, seatbelt_capability_probe,
 };
-use support::CliHarness;
+use support::{
+    CliHarness, WorkspaceFixtureDirectory, record_nested_seatbelt_skip,
+    skip_without_nested_seatbelt as shared_seatbelt_skip,
+};
 
 static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static SEATBELT_CAPABILITY: OnceLock<SeatbeltProbeObservation> = OnceLock::new();
-
-const NESTED_SEATBELT_SKIP_MARKER: &str =
-    "PCE_TEST_SKIP: nested Seatbelt unavailable; permissive capability probe was denied";
-
-fn record_nested_seatbelt_skip() {
-    let status = Command::new("/bin/sh")
-        .args([
-            "-c",
-            "printf '%s\\n' \"$1\" >&2",
-            "pce-test-skip",
-            NESTED_SEATBELT_SKIP_MARKER,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .status()
-        .expect("skip marker process should spawn");
-    assert!(status.success(), "skip marker process should succeed");
-}
 
 #[derive(Clone, Copy)]
 struct SeatbeltProbeObservation {
@@ -74,12 +59,7 @@ fn observe_seatbelt_capability() -> SeatbeltProbeObservation {
 }
 
 fn skip_without_nested_seatbelt() -> bool {
-    if let SeatbeltCapability::Unavailable { .. } = observe_seatbelt_capability().capability {
-        record_nested_seatbelt_skip();
-        true
-    } else {
-        false
-    }
+    shared_seatbelt_skip()
 }
 
 struct ProbeGuard(PathBuf);
@@ -338,6 +318,118 @@ fn assert_uv_status_and_invocation(fixture: &SeatbeltFixture, output: std::proce
     );
 }
 
+struct LifecycleFixture {
+    _workspace: WorkspaceFixtureDirectory,
+    repository: PathBuf,
+    events: PathBuf,
+    invocation_log: PathBuf,
+    probe_path: PathBuf,
+    shim_directory: PathBuf,
+}
+
+fn lifecycle_fixture() -> LifecycleFixture {
+    let workspace = WorkspaceFixtureDirectory::create("lifecycle")
+        .expect("workspace lifecycle fixture should create");
+    let repository = workspace.path().join("repository");
+    let probe_path = workspace.path().join("external-probe");
+    let shim_directory = repository.join("shims");
+    fs::create_dir_all(&shim_directory).expect("shim directory should create");
+    let output = Command::new("git")
+        .args(["init", "-b", "main"])
+        .arg(&repository)
+        .output()
+        .expect("git init should run");
+    assert!(output.status.success());
+    git_success(&repository, &["config", "user.name", "PCE Test"]);
+    git_success(
+        &repository,
+        &["config", "user.email", "pce-test@example.invalid"],
+    );
+    fs::write(
+        repository.join("Cargo.toml"),
+        b"[workspace]\nmembers = []\n",
+    )
+    .expect("manifest should write");
+    git_success(&repository, &["add", "."]);
+    git_success(&repository, &["commit", "-m", "fixture"]);
+    git_success(
+        &repository,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    workspace.assert_outside_temporary_roots(&repository);
+    let canonical_temp = fs::canonicalize(std::env::temp_dir()).expect("temp should canonicalize");
+    let canonical_tmp = fs::canonicalize("/tmp").expect("/tmp should canonicalize");
+    assert!(!probe_path.starts_with(&repository));
+    assert!(!probe_path.starts_with(canonical_temp));
+    assert!(!probe_path.starts_with(canonical_tmp));
+    fs::write(&probe_path, b"host-writable").expect("probe should be host writable");
+    fs::remove_file(&probe_path).expect("probe should reset");
+    let invocation_log = repository.join("uv-invocations.bin");
+    let uv = shim_directory.join("uv");
+    fs::write(
+        &uv,
+        format!(
+            "#!/bin/sh\n{{ printf 'uv\\0%s\\0' \"$#\"; printf '%s\\0' \"$@\"; }} >> '{}' || exit 74\nif printf probe > '{}'; then exit 0; fi\nexit 73\n",
+            invocation_log.display(),
+            probe_path.display()
+        ),
+    )
+    .expect("uv shim should write");
+    let mut permissions = fs::metadata(&uv)
+        .expect("uv metadata should read")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(uv, permissions).expect("uv shim should be executable");
+    let events = workspace.path().join("events.jsonl");
+    fs::write(&events, []).expect("event log should create");
+    LifecycleFixture {
+        _workspace: workspace,
+        repository,
+        events,
+        invocation_log,
+        probe_path,
+        shim_directory,
+    }
+}
+
+fn git_success(repository: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(args)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn lifecycle_path(fixture: &LifecycleFixture) -> std::ffi::OsString {
+    let parent = std::env::var_os("PATH").expect("test PATH should exist");
+    std::env::join_paths(
+        std::iter::once(fixture.shim_directory.clone()).chain(std::env::split_paths(&parent)),
+    )
+    .expect("lifecycle PATH should join")
+}
+
+fn invoke_bootstrap(fixture: &LifecycleFixture) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["contract", "bootstrap", "--file"])
+        .arg(&fixture.events)
+        .arg("--repo-root")
+        .arg(&fixture.repository)
+        .args(["--repository", "fixture", "--node", "m5-s2"])
+        .env("PATH", lifecycle_path(fixture))
+        .output()
+        .expect("bootstrap should run")
+}
+
 #[test]
 fn contract_check_executes_gate_inside_seatbelt_boundary() {
     if skip_without_nested_seatbelt() {
@@ -350,6 +442,220 @@ fn contract_check_executes_gate_inside_seatbelt_boundary() {
         "out-of-boundary probe must be absent immediately after contract check"
     );
     assert_uv_status_and_invocation(&fixture, output);
+}
+
+#[test]
+fn bootstrap_executes_uv_build_inside_seatbelt_boundary() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let fixture = lifecycle_fixture();
+    fs::create_dir_all(fixture.repository.join(".pce")).expect("contract directory should create");
+    fs::write(
+        fixture.repository.join(".pce/repository-contract.json"),
+        gate_contract("uv build"),
+    )
+    .expect("tracked contract should write");
+
+    let output = invoke_bootstrap(&fixture);
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("stated gate command `uv build` exited with status 73"),
+        "stderr was: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&fixture.invocation_log).expect("invocation log should read"),
+        b"uv\0\x31\0build\0"
+    );
+    assert!(!fixture.probe_path.exists());
+}
+
+fn prepare_refresh_fixture(absolute: bool) -> (LifecycleFixture, String) {
+    let fixture = lifecycle_fixture();
+    fs::create_dir_all(fixture.repository.join(".pce")).expect("contract directory should create");
+    fs::write(
+        fixture.repository.join(".pce/repository-contract.json"),
+        gate_contract("true"),
+    )
+    .expect("initial tracked contract should write");
+    let bootstrap = invoke_bootstrap(&fixture);
+    assert!(
+        bootstrap.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bootstrap.stderr)
+    );
+    let command = if absolute {
+        fixture.shim_directory.join("uv").display().to_string() + " build"
+    } else {
+        "uv build".to_owned()
+    };
+    fs::write(
+        fixture.repository.join(".pce/repository-contract.json"),
+        gate_contract(&command),
+    )
+    .expect("refreshed tracked contract should write");
+    git_success(
+        &fixture.repository,
+        &["add", ".pce/repository-contract.json"],
+    );
+    git_success(&fixture.repository, &["commit", "-m", "tracked contract"]);
+    fs::write(&fixture.invocation_log, []).expect("invocation log should reset");
+    (fixture, command)
+}
+
+fn invoke_refresh_fixture(fixture: &LifecycleFixture) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["contract", "refresh", "--file"])
+        .arg(&fixture.events)
+        .arg("--repo-root")
+        .arg(&fixture.repository)
+        .args(["--node", "m5-s2"])
+        .env("PATH", lifecycle_path(fixture))
+        .output()
+        .expect("refresh should run")
+}
+
+#[test]
+fn refresh_executes_uv_build_inside_seatbelt_boundary() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let (fixture, command) = prepare_refresh_fixture(false);
+    let output = invoke_refresh_fixture(&fixture);
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains(&format!(
+            "stated gate command `{command}` exited with status 73"
+        )),
+        "stderr was: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&fixture.invocation_log).expect("invocation log should read"),
+        b"uv\0\x31\0build\0"
+    );
+    assert!(!fixture.probe_path.exists());
+}
+
+#[test]
+fn refresh_absolute_gate_stays_inside_seatbelt_boundary() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let (fixture, command) = prepare_refresh_fixture(true);
+    let output = invoke_refresh_fixture(&fixture);
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains(&format!(
+            "stated gate command `{command}` exited with status 73"
+        )),
+        "stderr was: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&fixture.invocation_log).expect("invocation log should read"),
+        b"uv\0\x31\0build\0"
+    );
+    assert!(!fixture.probe_path.exists());
+}
+
+#[test]
+fn refresh_measurement_failure_leaves_contract_unchanged() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let (fixture, _command) = prepare_refresh_fixture(false);
+    let contract_path = fixture.repository.join(".pce/repository-contract.json");
+    let before = fs::read(&contract_path).expect("tracked baseline should read");
+    let output = invoke_refresh_fixture(&fixture);
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read(contract_path).expect("tracked contract should read"),
+        before
+    );
+}
+
+#[test]
+fn refresh_measurement_failure_leaves_event_unchanged() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let (fixture, _command) = prepare_refresh_fixture(false);
+    let before = fs::read(&fixture.events).expect("event baseline should read");
+    let output = invoke_refresh_fixture(&fixture);
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read(&fixture.events).expect("event log should read"),
+        before
+    );
+}
+
+#[test]
+fn successful_sandboxed_refresh_preserves_stated_and_appends_event() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let (fixture, _old_command) = prepare_refresh_fixture(false);
+    let success_log = fixture.repository.join("successful-refresh.log");
+    let success_gate = fixture.repository.join("shims/success-gate");
+    fs::write(
+        &success_gate,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}' || exit 74\nexit 0\n",
+            success_log.display()
+        ),
+    )
+    .expect("success gate should write");
+    let mut permissions = fs::metadata(&success_gate)
+        .expect("success gate metadata should read")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&success_gate, permissions).expect("success gate should be executable");
+    let command = format!("{} test-argument", success_gate.display());
+    let stated = gate_contract(&command);
+    fs::write(
+        fixture.repository.join(".pce/repository-contract.json"),
+        &stated,
+    )
+    .expect("successful refreshed contract should write");
+    git_success(
+        &fixture.repository,
+        &["add", ".pce/repository-contract.json", "shims/success-gate"],
+    );
+    git_success(&fixture.repository, &["commit", "-m", "successful refresh"]);
+    let events_before = fs::read_to_string(&fixture.events)
+        .expect("event baseline should read")
+        .lines()
+        .count();
+
+    let output = invoke_refresh_fixture(&fixture);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(success_log).expect("success invocation should read"),
+        "test-argument\n"
+    );
+    let event_text = fs::read_to_string(&fixture.events).expect("event log should read");
+    assert_eq!(event_text.lines().count(), events_before + 1);
+    let last = parse_event_line(
+        event_text
+            .lines()
+            .last()
+            .expect("latest event should exist"),
+    )
+    .expect("latest event should parse");
+    let EventBodyRef::Known(KnownPayload::RepositoryContract(payload)) = last.body_ref() else {
+        panic!("latest event should be a repository contract");
+    };
+    assert_eq!(payload.stated.format, command);
+    assert_eq!(payload.stated.lint, "true");
+    assert_eq!(payload.stated.typecheck, "true");
+    assert_eq!(payload.stated.test, "true");
+    assert_eq!(payload.stated.build, "true");
 }
 
 #[test]
@@ -499,6 +805,51 @@ fn contract_check_rejects_non_zero_base_gate_with_command_and_status() {
 }
 
 #[test]
+fn contract_check_gate_child_environment_forwards_only_runtime_allowlist() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let harness = CliHarness::new().expect("CLI harness should create");
+    let repository_root = harness.path().join("repo");
+    fs::create_dir(&repository_root).expect("repository fixture should create");
+    let observed = repository_root.join("child-environment");
+    let shim = repository_root.join("environment-gate");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nenv | sed 's/=.*//' | sort -u | grep -v -E '^(PWD|SHLVL|_)$' > '{}' || exit 74\nwhile IFS= read -r name; do\n  case \"$name\" in PATH|HOME|CARGO_HOME|RUSTUP_HOME) ;; *) exit 75 ;; esac\ndone < '{}'\n",
+            observed.display(),
+            observed.display()
+        ),
+    )
+    .expect("environment shim should write");
+    let mut permissions = fs::metadata(&shim)
+        .expect("environment shim metadata should read")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shim, permissions).expect("environment shim should be executable");
+    let contract_path = harness.path().join("contract.json");
+    fs::write(&contract_path, gate_contract(&shim.display().to_string()))
+        .expect("contract fixture should write");
+
+    let output = harness
+        .run(contract_check_args(&contract_path, &repository_root), b"")
+        .expect("CLI should run");
+    assert!(
+        output.status.success(),
+        "stderr was: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let names = fs::read_to_string(observed).expect("observed environment should read");
+    assert!(
+        names
+            .lines()
+            .all(|name| matches!(name, "PATH" | "HOME" | "CARGO_HOME" | "RUSTUP_HOME")),
+        "unexpected child environment: {names:?}"
+    );
+}
+
+#[test]
 fn contract_check_rejects_omitted_workflow_and_accepts_explicit_none() {
     if skip_without_nested_seatbelt() {
         return;
@@ -548,10 +899,15 @@ fn host_permissive_probe_reports_nested_seatbelt_available() {
         .stdin(Stdio::null())
         .status()
         .expect("direct permissive Seatbelt probe should spawn");
-    if !direct_status.success() {
+    if direct_status.code() == Some(71) {
         record_nested_seatbelt_skip();
         return;
     }
+    assert!(
+        direct_status.success(),
+        "direct permissive probe failed with unexpected status {:?}",
+        direct_status.code()
+    );
 
     let observation = observe_seatbelt_capability();
     assert_eq!(
