@@ -87,12 +87,19 @@ struct FixtureCompletionPayload {
     duration_ms: FixtureDeferred,
     usage: FixtureDeferred,
     exit_status: FixtureDeferred,
-    artifact_outcome: &'static str,
+    artifact_outcome: FixtureArtifactOutcome,
 }
 
 #[derive(Clone, Copy, Serialize)]
 struct FixtureDeferred {
     state: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum FixtureArtifactOutcome {
+    Observed(&'static str),
+    Deferred(FixtureDeferred),
 }
 
 #[test]
@@ -514,7 +521,10 @@ fn literal_projection(
                 duration_ms: deferred,
                 usage: deferred,
                 exit_status: deferred,
-                artifact_outcome: "not-validated",
+                artifact_outcome: structured
+                    .map_or(FixtureArtifactOutcome::Observed("not-validated"), |_| {
+                        FixtureArtifactOutcome::Deferred(deferred)
+                    }),
             },
         },
     };

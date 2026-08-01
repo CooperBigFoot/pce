@@ -40,13 +40,14 @@ pub fn dispatch_completion_payload(
     duration_ms: DispatchDuration,
     usage: CodexTokenUsage,
     exit_status: DispatchExitStatus,
+    artifact_outcome: ArtifactOutcome,
 ) -> DispatchCompletionPayload {
     DispatchCompletionPayload {
         issuance_sequence,
         duration_ms,
         usage,
         exit_status,
-        artifact_outcome: ArtifactOutcome::NotValidated,
+        artifact_outcome,
     }
 }
 
@@ -239,7 +240,14 @@ struct ProjectedCompletionPayload {
     duration_ms: Deferred<DispatchDuration>,
     usage: Deferred<CodexTokenUsage>,
     exit_status: Deferred<DispatchExitStatus>,
-    artifact_outcome: ArtifactOutcome,
+    artifact_outcome: ProjectedArtifactOutcome,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ProjectedArtifactOutcome {
+    Observed(ArtifactOutcome),
+    Deferred(Deferred<ArtifactOutcome>),
 }
 
 /// A dispatch projection could not be rendered from the supplied typed facts.
@@ -264,6 +272,12 @@ pub fn render_dispatch_projection(
 ) -> Result<String, DispatchProjectionError> {
     successor_sequence(input.log_tail)
         .map_err(|source| DispatchProjectionError::InvalidTail { source })?;
+    let artifact_outcome =
+        if input.envelope.schema_path().is_some() && input.envelope.output_path().is_some() {
+            ProjectedArtifactOutcome::Deferred(Deferred::default())
+        } else {
+            ProjectedArtifactOutcome::Observed(ArtifactOutcome::NotValidated)
+        };
     let projection = DispatchProjection {
         envelope: dispatch_invocation(input.envelope),
         issuance: ProjectedIssuance {
@@ -283,7 +297,7 @@ pub fn render_dispatch_projection(
                 duration_ms: Deferred::default(),
                 usage: Deferred::default(),
                 exit_status: Deferred::default(),
-                artifact_outcome: ArtifactOutcome::NotValidated,
+                artifact_outcome,
             },
         },
     };
@@ -680,16 +694,31 @@ mod tests {
     use super::{
         AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
         ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, StdinBinding,
-        TerminalObservation, TerminalUsage, classify_terminal_usage,
+        TerminalObservation, TerminalUsage, classify_terminal_usage, dispatch_completion_payload,
     };
     use crate::event_log::{
-        CodexTokenUsage, DispatchExitStatus, ExitCode, SignalNumber, UsageAbsenceReason,
+        ArtifactOutcome, CodexTokenUsage, DispatchDuration, DispatchExitStatus, ExitCode, Sequence,
+        SignalNumber, UsageAbsenceReason,
     };
 
     fn exited(code: u64) -> DispatchExitStatus {
         DispatchExitStatus::Exited {
             code: ExitCode::new(code),
         }
+    }
+
+    #[test]
+    fn dispatch_completion_payload_preserves_artifact_outcome() {
+        let payload = dispatch_completion_payload(
+            Sequence::parse(7).expect("positive sequence"),
+            DispatchDuration::new(12),
+            CodexTokenUsage::Absent {
+                reason: UsageAbsenceReason::NoTerminalTurn,
+            },
+            exited(0),
+            ArtifactOutcome::SchemaViolating,
+        );
+        assert_eq!(payload.artifact_outcome, ArtifactOutcome::SchemaViolating);
     }
 
     #[test]

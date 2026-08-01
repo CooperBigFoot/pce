@@ -1,5 +1,6 @@
 //! Core domain logic for PCE workflows.
 
+pub mod artifact_validation;
 pub mod contract_measurement;
 pub mod dispatch;
 pub mod event_log;
@@ -8,6 +9,9 @@ pub mod tracked_contract;
 pub mod vision;
 pub mod workflow_coverage;
 
+pub use artifact_validation::{
+    ArtifactValidationError, FileObservation, StructuredArtifactObservation, validate_artifact,
+};
 pub use contract_measurement::{
     ContractMeasurementError, ContractSnapshotRehydrationError, GateMeasurement, GateMeasurements,
     MeasuredContractSnapshot, ObservedExitStatus, measure_contract_snapshot,

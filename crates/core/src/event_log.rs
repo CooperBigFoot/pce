@@ -548,8 +548,18 @@ pub enum DispatchExitStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ArtifactOutcome {
-    /// m3 recorded execution but did not validate the artifact.
+    /// No artifact validation occurred.
     NotValidated,
+    /// Readable artifact JSON conforms to a valid schema.
+    Validated,
+    /// The artifact is absent or unreadable.
+    Missing,
+    /// The readable artifact bytes are not complete valid JSON.
+    Truncated,
+    /// The schema is absent, unreadable, unparsable, or cannot be compiled.
+    SchemaInvalid,
+    /// Parsed artifact JSON is rejected by a valid compiled schema.
+    SchemaViolating,
 }
 
 /// The complete payload for `dispatch-completion`.
@@ -2392,5 +2402,33 @@ mod tests {
                 kind: WriteKind::DispatchCompletion
             })
         ));
+    }
+
+    #[test]
+    fn artifact_outcome_has_exact_closed_serialization() {
+        for outcome in [
+            ArtifactOutcome::NotValidated,
+            ArtifactOutcome::Validated,
+            ArtifactOutcome::Missing,
+            ArtifactOutcome::Truncated,
+            ArtifactOutcome::SchemaInvalid,
+            ArtifactOutcome::SchemaViolating,
+        ] {
+            let spelling = match outcome {
+                ArtifactOutcome::NotValidated => "not-validated",
+                ArtifactOutcome::Validated => "validated",
+                ArtifactOutcome::Missing => "missing",
+                ArtifactOutcome::Truncated => "truncated",
+                ArtifactOutcome::SchemaInvalid => "schema-invalid",
+                ArtifactOutcome::SchemaViolating => "schema-violating",
+            };
+            let encoded = serde_json::to_string(&outcome).expect("serialize artifact outcome");
+            assert_eq!(encoded, format!("\"{spelling}\""));
+            assert_eq!(
+                serde_json::from_str::<ArtifactOutcome>(&encoded)
+                    .expect("deserialize artifact outcome"),
+                outcome
+            );
+        }
     }
 }
