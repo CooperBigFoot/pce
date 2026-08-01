@@ -7,9 +7,9 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::event_log::{
-    ArtifactOutcome, ArtifactPath, CodexTokenUsage, DispatchDuration, DispatchExitStatus,
-    DispatchRef, DispatchRole, EscalationKey, EventBodyRef, EventRecord, EventTimestamp,
-    KnownPayload, NodeId, RepositoryName, Sequence, Sha256Digest,
+    ArtifactOutcome, ArtifactPath, DispatchDuration, DispatchExitStatus, DispatchRef, DispatchRole,
+    DispatchTokenUsage, EscalationKey, EventBodyRef, EventRecord, EventTimestamp, KnownPayload,
+    NodeId, RepositoryName, Sequence, Sha256Digest,
 };
 
 /// A vision-directory basename suffix with its leading date prefix removed.
@@ -1108,7 +1108,7 @@ pub struct DispatchLifecycleObservation {
     completion_timestamp: EventTimestamp,
     issuance: DispatchObservation,
     duration: DispatchDuration,
-    usage: CodexTokenUsage,
+    usage: DispatchTokenUsage,
     exit_status: DispatchExitStatus,
     artifact_outcome: ArtifactOutcome,
 }
@@ -1126,7 +1126,7 @@ impl DispatchLifecycleObservation {
     pub const fn duration(&self) -> DispatchDuration {
         self.duration
     }
-    pub const fn usage(&self) -> &CodexTokenUsage {
+    pub const fn usage(&self) -> &DispatchTokenUsage {
         &self.usage
     }
     pub const fn exit_status(&self) -> DispatchExitStatus {
@@ -3385,9 +3385,9 @@ mod tests {
     use std::error::Error;
 
     use crate::event_log::{
-        ArtifactOutcome, ArtifactPath, CachedInputTokens, CodexTokenUsage, DeltaPayload,
-        DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload,
-        DispatchRef, DispatchRole, EscalationClosePayload, EscalationKey, EscalationOpenPayload,
+        ArtifactOutcome, ArtifactPath, CachedInputTokens, DeltaPayload, DispatchCompletionPayload,
+        DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef, DispatchRole,
+        DispatchTokenUsage, EscalationClosePayload, EscalationKey, EscalationOpenPayload,
         EventRecord, EventTimestamp, Evidence, ExitCode, InputTokens, KnownPayload, NodeId,
         OutputTokens, PlanningArtifactApprovedPayload, ReasoningOutputTokens, RepositoryName,
         Sequence, Sha256Digest,
@@ -3478,7 +3478,7 @@ mod tests {
                 KnownPayload::DispatchCompletion(DispatchCompletionPayload {
                     issuance_sequence: Sequence::parse(1)?,
                     duration_ms: DispatchDuration::new(200),
-                    usage: CodexTokenUsage::Measured {
+                    usage: DispatchTokenUsage::Measured {
                         input_tokens: InputTokens::new(101),
                         cached_input_tokens: CachedInputTokens::new(23),
                         output_tokens: OutputTokens::new(17),
@@ -3513,7 +3513,7 @@ mod tests {
             KnownPayload::DispatchCompletion(DispatchCompletionPayload {
                 issuance_sequence: Sequence::parse(issuance)?,
                 duration_ms: DispatchDuration::new(1),
-                usage: CodexTokenUsage::Absent {
+                usage: DispatchTokenUsage::Absent {
                     reason: crate::event_log::UsageAbsenceReason::NoTerminalTurn,
                 },
                 exit_status: DispatchExitStatus::Exited {
