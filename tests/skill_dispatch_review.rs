@@ -1,6 +1,7 @@
 //! review : SkillMarkdown × ReviewBindings → ReviewOutcome
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
@@ -10,8 +11,20 @@ use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 
-const EXPECTED_ANCHORED_ROUTE_COUNT: usize = 0;
+const EXPECTED_ANCHORED_ROUTE_COUNT: usize = 9;
 const MARKER_START: &str = "<!-- pce-dispatch-route";
+const CONSOLIDATION_MARKER: &str = "<!-- pce-dispatch-issuance-consolidated -->";
+const ROLE_REGISTRY: [&str; 9] = [
+    "milestone-planner",
+    "step-planner",
+    "step-plan-writer",
+    "milestone-critic",
+    "step-critic",
+    "step-plan-critic",
+    "pr-reviewer",
+    "step-executor",
+    "repository-analyst",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RouteKind {
@@ -47,6 +60,8 @@ enum Placeholder {
     LogFile,
     Env,
     Node,
+    MilestoneNode,
+    StepNode,
     Role,
     Ref,
     Evidence,
@@ -64,6 +79,8 @@ impl Placeholder {
             "{{LOG_FILE}}" => Ok(Self::LogFile),
             "{{ENV}}" => Ok(Self::Env),
             "{{NODE}}" => Ok(Self::Node),
+            "{{MILESTONE_NODE}}" => Ok(Self::MilestoneNode),
+            "{{STEP_NODE}}" => Ok(Self::StepNode),
             "{{ROLE}}" => Ok(Self::Role),
             "{{REF}}" => Ok(Self::Ref),
             "{{EVIDENCE}}" => Ok(Self::Evidence),
@@ -89,11 +106,24 @@ struct ReviewBindings {
     plan_file: PathBuf,
     log_file: PathBuf,
     shim_dir: PathBuf,
+    graph_schema: PathBuf,
+    verdict_schema: PathBuf,
+    graph_outputs: BTreeMap<String, PathBuf>,
+    verdict_root: PathBuf,
+    complete_git_dir: PathBuf,
+    context: ReviewContext,
     role: OsString,
     dispatch_ref: OsString,
     evidence: OsString,
+    evidence_by_role: BTreeMap<String, OsString>,
     caller_arg: OsString,
     pce_invocations: Cell<usize>,
+}
+
+#[derive(Debug)]
+struct ReviewContext {
+    accepted_events: Vec<serde_json::Value>,
+    review_directories: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Debug)]
@@ -112,6 +142,13 @@ struct RouteObservation {
 #[derive(Debug)]
 struct ReviewReport {
     routes: Vec<(usize, RouteKind)>,
+    observations: Vec<RouteObservation>,
+}
+
+#[derive(Debug)]
+struct AttributedReviewError {
+    source_line: usize,
+    error: ReviewError,
     observations: Vec<RouteObservation>,
 }
 
@@ -144,7 +181,69 @@ enum ReviewError {
     ParentGrammar,
     MultipleDelimiters,
     CallerTailResuppliesBinaryArgument,
+    IndentedMarker,
+    IndentedOpeningFence,
+    IndentedCommand,
+    IndentedClosingFence,
+    GateOutputPathMismatch,
+    GateTailDesignator,
+    GateTailValue,
+    GateTailAbsolute,
+    GateTailPrompt,
+    GateTailCardinality,
+    WrongVerdictIndex,
+    WrongVerdictDirectory,
+    RoleSemantics,
+    OutsideAnchorDispatchFragment,
+    CoLocatedStandaloneDispatchAppend,
+    VerdictMissing,
+    VerdictUnreadable,
+    VerdictMalformed,
+    VerdictSchemaInvalid,
+    VerdictUnknown,
     Spawn(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VerdictRoute {
+    Forward,
+    Revise,
+    Escalate,
+}
+
+fn route_verdict(path: &Path, schema_path: &Path) -> Result<VerdictRoute, ReviewError> {
+    let bytes = fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ReviewError::VerdictMissing
+        } else {
+            ReviewError::VerdictUnreadable
+        }
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| ReviewError::VerdictMalformed)?;
+    let schema: serde_json::Value =
+        serde_json::from_slice(&fs::read(schema_path).map_err(|_| ReviewError::VerdictUnreadable)?)
+            .map_err(|_| ReviewError::VerdictSchemaInvalid)?;
+    let validator =
+        jsonschema::validator_for(&schema).map_err(|_| ReviewError::VerdictSchemaInvalid)?;
+    if !validator.is_valid(&value) {
+        return Err(ReviewError::VerdictSchemaInvalid);
+    }
+    match value["verdict"].as_str() {
+        Some("APPROVE") => Ok(VerdictRoute::Forward),
+        Some("REVISE") => Ok(VerdictRoute::Revise),
+        Some("BLOCK") => Ok(VerdictRoute::Escalate),
+        _ => Err(ReviewError::VerdictUnknown),
+    }
+}
+
+fn prior_dispatch_count(events: &[serde_json::Value], node: &str, role: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            event["kind"] == "dispatch" && event["node"] == node && event["role"] == role
+        })
+        .count()
 }
 
 fn fixture() -> Fixture {
@@ -157,6 +256,78 @@ fn fixture() -> Fixture {
     let plan_file = root.path().join("plan.bin");
     fs::write(&schema, br#"{"type":"object"}"#).expect("schema");
     fs::write(&plan_file, b"plan\0bytes").expect("plan");
+    let graph_schema = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("skills/pce/schemas/graph.schema.json")
+        .canonicalize()
+        .expect("graph schema");
+    let verdict_schema = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("skills/pce/schemas/verdict.schema.json")
+        .canonicalize()
+        .expect("verdict schema");
+    let graph_outputs = ["milestone-planner", "step-planner"]
+        .into_iter()
+        .map(|role| (role.to_owned(), root.path().join(format!("{role}.json"))))
+        .collect();
+    let verdict_root = root.path().join("reviews");
+    fs::create_dir_all(&verdict_root).expect("review root");
+    let mut review_directories = BTreeMap::new();
+    for role in ROLE_REGISTRY {
+        let directory = verdict_root.join(role);
+        fs::create_dir_all(&directory).expect("role review directory");
+        review_directories.insert(role.to_owned(), directory);
+    }
+    let mut accepted_events = Vec::new();
+    let mut evidence_by_role = BTreeMap::new();
+    for role in ROLE_REGISTRY {
+        evidence_by_role.insert(
+            role.to_owned(),
+            OsString::from("measured evidence with spaces"),
+        );
+    }
+    for role in [
+        "repository-analyst",
+        "milestone-critic",
+        "step-critic",
+        "step-plan-critic",
+        "pr-reviewer",
+    ] {
+        let node = match role {
+            "repository-analyst" | "milestone-critic" => "m1-s1",
+            "step-critic" => "m7-s1",
+            _ => "m7-s2",
+        };
+        for _ in 0..2 {
+            accepted_events.push(serde_json::json!({"kind":"dispatch","node":node,"role":role}));
+        }
+    }
+    accepted_events.push(
+        serde_json::json!({"kind":"dispatch-completion","node":"m7-s2","role":"pr-reviewer"}),
+    );
+    accepted_events.push(serde_json::json!({"kind":"dispatch","node":"m7-s1","role":"other-role"}));
+    let dot_git = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".git");
+    let complete_git_dir = if dot_git.is_dir() {
+        dot_git.canonicalize().expect("common git directory")
+    } else {
+        let metadata = fs::read_to_string(&dot_git).expect("gitdir file");
+        let worktree_git = dot_git
+            .parent()
+            .expect("worktree root")
+            .join(
+                metadata
+                    .trim()
+                    .strip_prefix("gitdir: ")
+                    .expect("gitdir prefix"),
+            )
+            .canonicalize()
+            .expect("worktree git metadata");
+        let worktrees = worktree_git.parent().expect("worktrees directory");
+        assert_eq!(worktrees.file_name(), Some(OsStr::new("worktrees")));
+        worktrees
+            .parent()
+            .expect("common git parent")
+            .canonicalize()
+            .expect("common git directory")
+    };
     for executable in ["codex", "claude"] {
         let shim = shim_dir.join(executable);
         let result = if executable == "codex" {
@@ -164,10 +335,48 @@ fn fixture() -> Fixture {
         } else {
             r#"{"type":"result","subtype":"success","is_error":false,"result":"OK","usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}"#
         };
+        let conformance = if executable == "codex" {
+            format!(
+                r#"structured=0
+schema=
+out_count=0
+out=
+previous=
+for arg in "$@"; do
+  if [ "$previous" = schema ]; then schema=$arg; previous=; continue; fi
+  if [ "$previous" = out ]; then out=$arg; previous=; continue; fi
+  if [ "$arg" = --output-schema ]; then structured=1; previous=schema; continue; fi
+  if [ "$arg" = -o ]; then out_count=$((out_count + 1)); previous=out; continue; fi
+done
+if [ "$structured" = 1 ]; then
+  if [ "$out_count" != 1 ] || [ -z "$out" ] || [ "${{out#/}}" = "$out" ]; then exit 73; fi
+  printf '%s' "$out" > "$PWD/.review/recovered-path"
+  if [ "$schema" = '{}' ]; then printf '{{"nodes":[]}}' > "$out"
+  elif [ "$schema" = '{}' ]; then printf '{{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"fixture"}}' > "$out"
+  else printf 'unrecognised schema: %s\n' "$schema" >&2; exit 74; fi
+fi
+"#,
+                graph_schema.display(),
+                verdict_schema.display()
+            )
+        } else {
+            r#"count=0
+out=
+previous=
+for arg in "$@"; do
+  if [ "$previous" = out ]; then out=$arg; previous=; continue; fi
+  if [ "$arg" = --append-system-prompt ]; then count=$((count + 1)); previous=out; fi
+done
+if [ "$count" != 1 ] || [ -z "$out" ] || [ "${out#/}" = "$out" ]; then exit 75; fi
+printf '%s' "$out" > "$PWD/.review/recovered-path"
+printf '{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"fixture"}' > "$out"
+"#
+            .to_owned()
+        };
         fs::write(
             &shim,
             format!(
-                "#!/bin/sh\n: > \"$PWD/.review/argv\"\nfor arg in \"$@\"; do printf '%s\\0' \"$arg\" >> \"$PWD/.review/argv\"; done\n/bin/cat > \"$PWD/.review/stdin\"\n/usr/bin/env > \"$PWD/.review/env\"\nif [ \"${{ARTIFACT_MODE:-}}\" = valid ]; then printf '{{}}' > \"$ARTIFACT\"; fi\nif [ \"${{ARTIFACT_MODE:-}}\" = malformed ]; then printf '{{' > \"$ARTIFACT\"; fi\nif [ \"${{SILENT_STDOUT:-}}\" != yes ]; then printf '%s\\n' '{result}'; fi\nprintf '%s' \"${{EXIT_CODE:-0}}\" > \"$PWD/.review/completion\"\nexit \"${{EXIT_CODE:-0}}\"\n"
+                "#!/bin/sh\n: > \"$PWD/.review/argv\"\nfor arg in \"$@\"; do printf '%s\\0' \"$arg\" >> \"$PWD/.review/argv\"; done\n/bin/cat > \"$PWD/.review/stdin\"\n/usr/bin/env > \"$PWD/.review/env\"\nif [ \"${{ARTIFACT_MODE+x}}\" = x ]; then\nif [ \"$ARTIFACT_MODE\" = valid ]; then printf '{{}}' > \"$ARTIFACT\"; fi\nif [ \"$ARTIFACT_MODE\" = malformed ]; then printf '{{' > \"$ARTIFACT\"; fi\nelse\n{conformance}fi\nif [ \"${{SILENT_STDOUT:-}}\" != yes ]; then printf '%s\\n' '{result}'; fi\nprintf '%s' \"${{EXIT_CODE:-0}}\" > \"$PWD/.review/completion\"\nexit \"${{EXIT_CODE:-0}}\"\n"
             ),
         )
         .expect("shim");
@@ -183,9 +392,19 @@ fn fixture() -> Fixture {
             plan_file,
             log_file: root.path().join("events.jsonl"),
             shim_dir,
+            graph_schema,
+            verdict_schema,
+            graph_outputs,
+            verdict_root,
+            complete_git_dir,
+            context: ReviewContext {
+                accepted_events,
+                review_directories,
+            },
             role: OsString::from("step-plan-writer"),
             dispatch_ref: OsString::from("07b85ccd"),
             evidence: OsString::from("measured evidence with spaces"),
+            evidence_by_role,
             caller_arg: OsString::from("opaque value with spaces"),
             pce_invocations: Cell::new(0),
         },
@@ -294,6 +513,11 @@ fn extract_anchored_routes(markdown: &str) -> Result<Vec<AnchoredRoute>, ReviewE
     let mut routes = Vec::new();
     let mut index = 0;
     while index < lines.len() {
+        if lines[index].trim_start().starts_with(MARKER_START)
+            && !lines[index].starts_with(MARKER_START)
+        {
+            return Err(ReviewError::IndentedMarker);
+        }
         if !lines[index].starts_with(MARKER_START) {
             index += 1;
             continue;
@@ -307,6 +531,9 @@ fn extract_anchored_routes(markdown: &str) -> Result<Vec<AnchoredRoute>, ReviewE
         if index == lines.len() {
             return Err(ReviewError::MissingFence);
         }
+        if lines[index].trim_start() == "```sh" && lines[index] != "```sh" {
+            return Err(ReviewError::IndentedOpeningFence);
+        }
         if !lines[index].starts_with("```") {
             return Err(ReviewError::InterveningContent);
         }
@@ -316,6 +543,12 @@ fn extract_anchored_routes(markdown: &str) -> Result<Vec<AnchoredRoute>, ReviewE
         index += 1;
         let start = index;
         while index < lines.len() && lines[index] != "```" {
+            if lines[index].trim_start() == "```" {
+                return Err(ReviewError::IndentedClosingFence);
+            }
+            if lines[index].starts_with([' ', '\t']) {
+                return Err(ReviewError::IndentedCommand);
+            }
             index += 1;
         }
         if index == lines.len() {
@@ -332,7 +565,16 @@ fn extract_anchored_routes(markdown: &str) -> Result<Vec<AnchoredRoute>, ReviewE
     Ok(routes)
 }
 
-fn placeholder_value<'a>(placeholder: Placeholder, bindings: &'a ReviewBindings) -> &'a OsStr {
+fn route_role(route: &AnchoredRoute) -> Option<&str> {
+    route
+        .tokens
+        .windows(2)
+        .find(|pair| pair[0] == "--role")
+        .map(|pair| pair[1].as_str())
+        .filter(|role| ROLE_REGISTRY.contains(role))
+}
+
+fn placeholder_value(placeholder: Placeholder, bindings: &ReviewBindings) -> &OsStr {
     match placeholder {
         Placeholder::Cwd => bindings.cwd.as_os_str(),
         Placeholder::Schema => bindings.schema.as_os_str(),
@@ -341,6 +583,8 @@ fn placeholder_value<'a>(placeholder: Placeholder, bindings: &'a ReviewBindings)
         Placeholder::LogFile => bindings.log_file.as_os_str(),
         Placeholder::Env => bindings.shim_dir.as_os_str(),
         Placeholder::Node => OsStr::new("m7-s1"),
+        Placeholder::MilestoneNode => OsStr::new("m7-s1"),
+        Placeholder::StepNode => OsStr::new("m7-s2"),
         Placeholder::Role => bindings.role.as_os_str(),
         Placeholder::Ref => bindings.dispatch_ref.as_os_str(),
         Placeholder::Evidence => bindings.evidence.as_os_str(),
@@ -369,7 +613,65 @@ fn substitute_route(
                 return Err(ReviewError::EmbeddedPlaceholder);
             }
             let placeholder = Placeholder::parse(token)?;
-            let value = placeholder_value(placeholder, bindings);
+            let role = route_role(route);
+            let contextual;
+            let value = match placeholder {
+                Placeholder::Schema
+                    if role.is_some_and(|role| {
+                        matches!(role, "milestone-planner" | "step-planner")
+                    }) =>
+                {
+                    bindings.graph_schema.as_os_str()
+                }
+                Placeholder::Schema if role.is_some() => bindings.verdict_schema.as_os_str(),
+                Placeholder::Output
+                    if role.is_some_and(|role| {
+                        matches!(role, "milestone-planner" | "step-planner")
+                    }) =>
+                {
+                    bindings
+                        .graph_outputs
+                        .get(role.expect("planner role"))
+                        .expect("planner output")
+                        .as_os_str()
+                }
+                Placeholder::Output if role.is_some_and(|role| role == "step-executor") => {
+                    contextual = bindings.verdict_root.join("executor-result.json");
+                    contextual.as_os_str()
+                }
+                Placeholder::Output if role.is_some() => {
+                    let role = role.expect("canonical role");
+                    let node = match role {
+                        "repository-analyst" | "milestone-critic" => "m1-s1",
+                        "step-critic" => "m7-s1",
+                        _ => "m7-s2",
+                    };
+                    let prior = bindings
+                        .context
+                        .accepted_events
+                        .iter()
+                        .filter(|event| {
+                            event["kind"] == "dispatch"
+                                && event["node"] == node
+                                && event["role"] == role
+                        })
+                        .count();
+                    contextual = bindings.context.review_directories[role].join(format!(
+                        "review-{}.json",
+                        prior.checked_add(1).expect("review index")
+                    ));
+                    contextual.as_os_str()
+                }
+                Placeholder::AbsPath if role.is_some_and(|role| role == "step-executor") => {
+                    bindings.complete_git_dir.as_os_str()
+                }
+                Placeholder::Evidence if role.is_some() => bindings
+                    .evidence_by_role
+                    .get(role.expect("canonical role"))
+                    .expect("role evidence")
+                    .as_os_str(),
+                _ => placeholder_value(placeholder, bindings),
+            };
             if value.is_empty() {
                 return Err(match placeholder {
                     Placeholder::Role => ReviewError::EmptyRole,
@@ -428,10 +730,10 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
     if !Path::new(cwd).is_absolute() {
         return Err(ReviewError::ParentGrammar);
     }
-    if route.kind != RouteKind::GateStructured {
-        if value(argv, &mut position, "--sandbox")? != "workspace-write" {
-            return Err(ReviewError::ParentGrammar);
-        }
+    if route.kind != RouteKind::GateStructured
+        && value(argv, &mut position, "--sandbox")? != "workspace-write"
+    {
+        return Err(ReviewError::ParentGrammar);
     }
     let mut env_count = 0;
     while argv.get(position).is_some_and(|token| token == "--env") {
@@ -451,12 +753,14 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
     let has_structured = argv
         .get(position)
         .is_some_and(|token| token == "--output-schema");
+    let mut parent_output = None;
     if has_structured {
-        if !Path::new(value(argv, &mut position, "--output-schema")?).is_absolute()
-            || !Path::new(value(argv, &mut position, "-o")?).is_absolute()
-        {
+        let schema = value(argv, &mut position, "--output-schema")?;
+        let output = value(argv, &mut position, "-o")?;
+        if !Path::new(schema).is_absolute() || !Path::new(output).is_absolute() {
             return Err(ReviewError::ParentGrammar);
         }
+        parent_output = Some(output.to_owned());
     }
     if (route.kind == RouteKind::CodexUnstructured) == has_structured {
         return Err(ReviewError::ParentGrammar);
@@ -509,6 +813,25 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
         matches!(token.as_ref(), "-p" | "--output-format") || token.starts_with("--output-format=")
     }) {
         return Err(ReviewError::CallerTailResuppliesBinaryArgument);
+    } else if route_role(route).is_some() {
+        if tail.len() != 3 {
+            return Err(ReviewError::GateTailCardinality);
+        }
+        if tail[0] != "--append-system-prompt" {
+            return Err(ReviewError::GateTailDesignator);
+        }
+        if tail[1].is_empty() {
+            return Err(ReviewError::GateTailValue);
+        }
+        if !Path::new(&tail[1]).is_absolute() {
+            return Err(ReviewError::GateTailAbsolute);
+        }
+        if tail[2].is_empty() {
+            return Err(ReviewError::GateTailPrompt);
+        }
+        if parent_output.as_deref() != Some(tail[1].as_os_str()) {
+            return Err(ReviewError::GateOutputPathMismatch);
+        }
     }
     Ok(())
 }
@@ -547,16 +870,336 @@ fn execute_route(
     })
 }
 
-fn review_document(markdown: &str, bindings: &ReviewBindings) -> Result<ReviewReport, ReviewError> {
-    if markdown.contains("codex exec") {
-        return Err(ReviewError::RawCodexExec);
+fn expected_kind(role: &str) -> RouteKind {
+    if matches!(
+        role,
+        "repository-analyst"
+            | "milestone-critic"
+            | "step-critic"
+            | "step-plan-critic"
+            | "pr-reviewer"
+    ) {
+        RouteKind::GateStructured
+    } else if role == "step-plan-writer" {
+        RouteKind::CodexUnstructured
+    } else {
+        RouteKind::CodexStructured
     }
-    let routes = extract_anchored_routes(markdown)?;
+}
+
+fn expected_node(role: &str) -> &str {
+    match role {
+        "repository-analyst" | "milestone-planner" | "milestone-critic" => "m1-s1",
+        "step-planner" | "step-critic" => "{{MILESTONE_NODE}}",
+        _ => "{{STEP_NODE}}",
+    }
+}
+
+fn canonical_semantics(route: &AnchoredRoute) -> Result<(), ReviewError> {
+    let Some(role) = route_role(route) else {
+        return Ok(());
+    };
+    if route.kind != expected_kind(role) {
+        return Err(ReviewError::RoleSemantics);
+    }
+    let tokens = &route.tokens;
+    let count = |needle: &str| {
+        tokens
+            .iter()
+            .filter(|token| token.as_str() == needle)
+            .count()
+    };
+    if count("--env") != 1 || count("{{ENV}}") != 1 {
+        return Err(ReviewError::RoleSemantics);
+    }
+    let logging = [
+        "--log-file",
+        "{{LOG_FILE}}",
+        "--node",
+        expected_node(role),
+        "--role",
+        role,
+        "--ref",
+        "{{REF}}",
+        "--evidence",
+        "{{EVIDENCE}}",
+    ];
+    if !tokens
+        .windows(logging.len())
+        .any(|window| window.iter().map(String::as_str).eq(logging))
+    {
+        return Err(ReviewError::RoleSemantics);
+    }
+    if count("--ref") != 1
+        || count("{{REF}}") != 1
+        || count("--evidence") != 1
+        || count("{{EVIDENCE}}") != 1
+    {
+        return Err(ReviewError::RoleSemantics);
+    }
+    let structured = count("--output-schema") == 1
+        && count("{{SCHEMA}}") == 1
+        && count("-o") == 1
+        && count("{{OUTPUT}}") >= 1;
+    if (role == "step-plan-writer") == structured {
+        return Err(ReviewError::RoleSemantics);
+    }
+    if (role == "step-executor") != (count("--plan-file") == 1) {
+        return Err(ReviewError::RoleSemantics);
+    }
+    if role == "step-executor" {
+        let delimiter = tokens
+            .iter()
+            .position(|token| token == "--")
+            .ok_or(ReviewError::RoleSemantics)?;
+        if tokens.get(delimiter + 1..)
+            != Some(
+                &[
+                    "--add-dir".to_owned(),
+                    "{{ABS_PATH}}".to_owned(),
+                    "{{CALLER_ARG}}".to_owned(),
+                ][..],
+            )
+        {
+            return Err(ReviewError::RoleSemantics);
+        }
+    }
+    Ok(())
+}
+
+fn semantic_output_path(
+    route: &AnchoredRoute,
+    argv: &[OsString],
+    bindings: &ReviewBindings,
+) -> Result<(), ReviewError> {
+    let Some(role) = route_role(route) else {
+        return Ok(());
+    };
+    if route.kind != RouteKind::GateStructured {
+        return Ok(());
+    }
+    let field = |flag: &str| {
+        argv.windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].as_os_str())
+    };
+    let node = field("--node").ok_or(ReviewError::RoleSemantics)?;
+    let output = Path::new(field("-o").ok_or(ReviewError::RoleSemantics)?);
+    let directory = bindings
+        .context
+        .review_directories
+        .get(role)
+        .ok_or(ReviewError::WrongVerdictDirectory)?;
+    if output.parent() != Some(directory.as_path()) {
+        return Err(ReviewError::WrongVerdictDirectory);
+    }
+    let prior = bindings
+        .context
+        .accepted_events
+        .iter()
+        .filter(|event| {
+            event["kind"] == "dispatch"
+                && event["node"]
+                    .as_str()
+                    .is_some_and(|value| OsStr::new(value) == node)
+                && event["role"] == role
+        })
+        .count();
+    let expected = format!(
+        "review-{}.json",
+        prior.checked_add(1).ok_or(ReviewError::WrongVerdictIndex)?
+    );
+    if output.file_name() != Some(OsStr::new(&expected)) {
+        return Err(ReviewError::WrongVerdictIndex);
+    }
+    Ok(())
+}
+
+const DISPATCH_OPTIONS: [&str; 12] = [
+    "--cwd",
+    "--sandbox",
+    "--env",
+    "--output-schema",
+    "-o",
+    "--plan-file",
+    "--log-file",
+    "--node",
+    "--role",
+    "--ref",
+    "--evidence",
+    "--dry-run",
+];
+
+fn unit_has_prohibited_fragment(unit: &str) -> bool {
+    let target = unit.contains("pce dispatch codex") || unit.contains("pce dispatch gate");
+    let tokens: Vec<&str> = unit.split_ascii_whitespace().collect();
+    let second = tokens.iter().enumerate().any(|(index, token)| {
+        *token == "--"
+            || DISPATCH_OPTIONS.iter().any(|option| {
+                *token == *option
+                    || token
+                        .strip_prefix(option)
+                        .is_some_and(|rest| rest.starts_with('='))
+            })
+            || tokens[..index].contains(&"--")
+    });
+    target && second
+}
+
+fn shell_like(line: &str) -> bool {
+    let mut text = line.trim_start_matches([' ', '\t']);
+    for prefix in ["> ", "- ", "* ", "+ "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest;
+            break;
+        }
+    }
+    if let Some((marker, rest)) = text.split_once(' ')
+        && marker.ends_with('.')
+        && marker[..marker.len() - 1]
+            .chars()
+            .all(|c| c.is_ascii_digit())
+    {
+        text = rest;
+    }
+    let mut tokens = text.split_ascii_whitespace();
+    let first = tokens.next().unwrap_or("");
+    let first = if first == "$" {
+        tokens.next().unwrap_or("")
+    } else {
+        first
+    };
+    first == "pce"
+        || first == "--"
+        || DISPATCH_OPTIONS.iter().any(|option| {
+            first == *option
+                || first
+                    .strip_prefix(option)
+                    .is_some_and(|rest| rest.starts_with('='))
+        })
+}
+
+fn reject_outside_fragments(markdown: &str) -> Result<(), ReviewError> {
+    let lines: Vec<&str> = markdown.lines().collect();
+    let mut in_anchor = false;
+    let mut in_fence = false;
+    let mut fence = String::new();
+    for line in lines {
+        if line.starts_with(MARKER_START) {
+            in_anchor = true;
+            continue;
+        }
+        if in_anchor {
+            if line == "```" {
+                in_anchor = false;
+            }
+            continue;
+        }
+        if line.starts_with("```") {
+            if in_fence {
+                if unit_has_prohibited_fragment(&fence) {
+                    return Err(ReviewError::OutsideAnchorDispatchFragment);
+                }
+                fence.clear();
+                in_fence = false;
+            } else {
+                in_fence = true;
+            }
+            continue;
+        }
+        if in_fence {
+            fence.push_str(line);
+            fence.push('\n');
+            continue;
+        }
+        let mut rest = line;
+        while let Some(start) = rest.find('`') {
+            rest = &rest[start + 1..];
+            let Some(end) = rest.find('`') else { break };
+            if unit_has_prohibited_fragment(&rest[..end]) {
+                return Err(ReviewError::OutsideAnchorDispatchFragment);
+            }
+            rest = &rest[end + 1..];
+        }
+        if shell_like(line) && unit_has_prohibited_fragment(line) {
+            return Err(ReviewError::OutsideAnchorDispatchFragment);
+        }
+    }
+    Ok(())
+}
+
+fn reject_colocated_standalone_append(markdown: &str) -> Result<(), ReviewError> {
+    if !markdown.contains(CONSOLIDATION_MARKER) {
+        return Ok(());
+    }
+    let mut section = String::new();
+    let inspect = |section: &str| {
+        let anchor = section.contains(MARKER_START);
+        let append = section.lines().any(|line| {
+            shell_like(line)
+                && line
+                    .split_ascii_whitespace()
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .any(|pair| pair == ["pce", "log"])
+                && line.contains("--kind dispatch")
+        });
+        anchor && append
+    };
+    for line in markdown.lines() {
+        let heading = line.split_once(' ').is_some_and(|(hashes, _)| {
+            (1..=6).contains(&hashes.len()) && hashes.chars().all(|c| c == '#')
+        });
+        if heading && inspect(&section) {
+            return Err(ReviewError::CoLocatedStandaloneDispatchAppend);
+        }
+        if heading {
+            section.clear();
+        }
+        section.push_str(line);
+        section.push('\n');
+    }
+    if inspect(&section) {
+        return Err(ReviewError::CoLocatedStandaloneDispatchAppend);
+    }
+    Ok(())
+}
+
+fn review_document(markdown: &str, bindings: &ReviewBindings) -> Result<ReviewReport, ReviewError> {
+    review_document_attributed(markdown, bindings).map_err(|failure| failure.error)
+}
+
+fn review_document_attributed(
+    markdown: &str,
+    bindings: &ReviewBindings,
+) -> Result<ReviewReport, AttributedReviewError> {
+    if markdown.contains("codex exec") {
+        return Err(AttributedReviewError {
+            source_line: 0,
+            error: ReviewError::RawCodexExec,
+            observations: Vec::new(),
+        });
+    }
+    let global = |error| AttributedReviewError {
+        source_line: 0,
+        error,
+        observations: Vec::new(),
+    };
+    let routes = extract_anchored_routes(markdown).map_err(global)?;
+    reject_outside_fragments(markdown).map_err(global)?;
+    reject_colocated_standalone_append(markdown).map_err(global)?;
     let mut observations = Vec::new();
     for route in &routes {
-        let argv = substitute_route(route, bindings)?;
-        validate_route(route, &argv)?;
-        let mut observation = execute_route(&argv, bindings)?;
+        let failure = |error| AttributedReviewError {
+            source_line: route.source_line,
+            error,
+            observations: observations.clone(),
+        };
+        canonical_semantics(route).map_err(failure)?;
+        let argv = substitute_route(route, bindings).map_err(failure)?;
+        validate_route(route, &argv).map_err(failure)?;
+        semantic_output_path(route, &argv, bindings).map_err(failure)?;
+        let mut observation = execute_route(&argv, bindings).map_err(failure)?;
         observation.source_line = route.source_line;
         observations.push(observation);
     }
@@ -573,8 +1216,7 @@ fn error_for(markdown: &str) -> ReviewError {
     let fixture = fixture();
     match review_document(markdown, &fixture.bindings) {
         Ok(report) => {
-            let name = std::env::var("PCE_REVIEW_CASE").unwrap_or_else(|_| "fixture".to_owned());
-            panic!("{name}: fixture must red, got {report:?}")
+            panic!("fixture must red, got {report:?}")
         }
         Err(error) => {
             assert_eq!(
@@ -588,9 +1230,6 @@ fn error_for(markdown: &str) -> ReviewError {
 }
 
 fn assert_document_error_before_pce(name: &str, markdown: &str, expected: ReviewError) {
-    if !case_enabled(name) {
-        return;
-    }
     let fixture = fixture();
     let before = fixture.bindings.pce_invocations.get();
     let error = match review_document(markdown, &fixture.bindings) {
@@ -603,22 +1242,6 @@ fn assert_document_error_before_pce(name: &str, markdown: &str, expected: Review
         fixture.bindings.pce_invocations.get(),
         "{name}: pce invocation changed"
     );
-}
-
-fn case_enabled(name: &str) -> bool {
-    std::env::var("PCE_REVIEW_CASE").map_or(true, |selected| selected == name)
-}
-
-fn target_enabled(target: &str) -> bool {
-    std::env::var("PCE_REVIEW_CASE").map_or(true, |selected| {
-        let targeted = selected.starts_with("codex_")
-            || selected.starts_with("gate_")
-            || selected.ends_with("/codex")
-            || selected.ends_with("/gate");
-        !targeted
-            || selected.starts_with(&format!("{target}_"))
-            || selected.ends_with(&format!("/{target}"))
-    })
 }
 
 fn run_pce(args: &[OsString], stdin: Option<&[u8]>) -> Output {
@@ -645,15 +1268,37 @@ fn run_pce(args: &[OsString], stdin: Option<&[u8]>) -> Output {
     child.wait_with_output().expect("pce output")
 }
 
+fn run_direct_shim(fixture: &Fixture, executable: &str, args: &[OsString]) -> Output {
+    Command::new(fixture.bindings.shim_dir.join(executable))
+        .args(args)
+        .current_dir(&fixture.bindings.cwd)
+        .env_clear()
+        .env("PATH", &fixture.bindings.shim_dir)
+        .stdin(Stdio::null())
+        .output()
+        .expect("direct conformance shim")
+}
+
+fn repository_route(role: &str) -> AnchoredRoute {
+    repository_routes()
+        .into_iter()
+        .find(|route| route_role(route) == Some(role))
+        .unwrap_or_else(|| panic!("missing repository route {role}"))
+}
+
+fn route_document(route: &AnchoredRoute) -> String {
+    format!(
+        "{}\n```sh\n{}\n```\n",
+        marker(match route.kind {
+            RouteKind::CodexUnstructured => "codex-unstructured",
+            RouteKind::CodexStructured => "codex-structured",
+            RouteKind::GateStructured => "gate-structured",
+        }),
+        route.tokens.join(" ")
+    )
+}
+
 fn assert_parser_red(name: &str, args: Vec<OsString>, diagnostic: &str) {
-    if !case_enabled(name) {
-        return;
-    }
-    let record = args
-        .windows(2)
-        .find(|pair| pair[0] == "--cwd")
-        .map(|pair| PathBuf::from(&pair[1]).join(".review/argv"));
-    let before = record.as_deref().map(read_nul).unwrap_or_default().len();
     let output = run_pce(&args, None);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{name}: unexpectedly accepted");
@@ -661,27 +1306,15 @@ fn assert_parser_red(name: &str, args: Vec<OsString>, diagnostic: &str) {
         stderr.contains(diagnostic),
         "{name}: expected {diagnostic:?}, got {stderr:?}"
     );
-    let after = record.as_deref().map(read_nul).unwrap_or_default().len();
-    assert_eq!(before, after, "{name}: child invocation changed");
 }
 
 fn assert_parser_green(name: &str, args: Vec<OsString>) {
-    if !case_enabled(name) {
-        return;
-    }
-    let record = args
-        .windows(2)
-        .find(|pair| pair[0] == "--cwd")
-        .map(|pair| PathBuf::from(&pair[1]).join(".review/argv"));
-    let before = record.as_deref().map(read_nul).unwrap_or_default().len();
     let output = run_pce(&args, None);
     assert!(
         output.status.success(),
         "{name}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let after = record.as_deref().map(read_nul).unwrap_or_default().len();
-    assert_eq!(before, after, "{name}: child invocation changed");
 }
 
 fn complete_args(f: &Fixture, target: &str) -> Vec<OsString> {
@@ -721,13 +1354,1641 @@ fn complete_args(f: &Fixture, target: &str) -> Vec<OsString> {
 }
 
 #[test]
-fn real_skill_has_exact_pinned_anchor_count_zero() {
+fn real_skill_has_exact_pinned_anchor_count_nine() {
     let fixture = fixture();
     let markdown = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
         .expect("repository skill");
     let report = review_document(&markdown, &fixture.bindings).expect("real skill review");
     assert_eq!(report.routes.len(), EXPECTED_ANCHORED_ROUTE_COUNT);
-    assert!(report.observations.is_empty());
+    assert_eq!(report.observations.len(), EXPECTED_ANCHORED_ROUTE_COUNT);
+    let routes = extract_anchored_routes(&markdown).expect("route extraction");
+    let roles: std::collections::BTreeSet<_> = routes.iter().filter_map(route_role).collect();
+    let expected: std::collections::BTreeSet<_> = ROLE_REGISTRY.into_iter().collect();
+    assert_eq!(roles, expected);
+}
+
+#[test]
+fn column_zero_and_environment_protocol() {
+    let good = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured),
+    );
+    review_document(&good, &fixture().bindings).expect("column_zero_anchor_accepts");
+    for (name, mutated, expected) in [
+        (
+            "indented_anchor_marker_reds",
+            good.replacen(MARKER_START, &format!(" {MARKER_START}"), 1),
+            ReviewError::IndentedMarker,
+        ),
+        (
+            "indented_anchor_opening_fence_reds",
+            good.replacen("```sh", " ```sh", 1),
+            ReviewError::IndentedOpeningFence,
+        ),
+        (
+            "indented_anchor_command_reds",
+            good.replacen("pce dispatch", " pce dispatch", 1),
+            ReviewError::IndentedCommand,
+        ),
+        (
+            "indented_anchor_closing_fence_reds",
+            good.replacen("\n```\n", "\n ```\n", 1),
+            ReviewError::IndentedClosingFence,
+        ),
+    ] {
+        assert_document_error_before_pce(name, &mutated, expected);
+    }
+    let zero = good.replace("--env {{ENV}} ", "");
+    assert_document_error_before_pce("route_zero_env_reds", &zero, ReviewError::ParentGrammar);
+    let two = good.replace("--env {{ENV}}", "--env {{ENV}} --env {{ENV}}");
+    assert_document_error_before_pce("route_two_env_reds", &two, ReviewError::ParentGrammar);
+    review_document(&good, &fixture().bindings).expect("route_exactly_one_env_accepts");
+}
+
+fn assert_indentation_fixture(name: &str, mutation: fn(String) -> String, expected: ReviewError) {
+    let document = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured),
+    );
+    assert_document_error_before_pce(name, &mutation(document), expected);
+}
+
+#[test]
+fn column_zero_anchor_accepts() {
+    review_document(
+        &document(
+            "codex-unstructured",
+            &base_command(RouteKind::CodexUnstructured),
+        ),
+        &fixture().bindings,
+    )
+    .expect("column_zero_anchor_accepts");
+}
+
+#[test]
+fn indented_anchor_marker_reds() {
+    assert_indentation_fixture(
+        "indented_anchor_marker_reds",
+        |text| text.replacen(MARKER_START, &format!(" {MARKER_START}"), 1),
+        ReviewError::IndentedMarker,
+    );
+}
+
+#[test]
+fn indented_anchor_opening_fence_reds() {
+    assert_indentation_fixture(
+        "indented_anchor_opening_fence_reds",
+        |text| text.replacen("```sh", " ```sh", 1),
+        ReviewError::IndentedOpeningFence,
+    );
+}
+
+#[test]
+fn indented_anchor_command_reds() {
+    assert_indentation_fixture(
+        "indented_anchor_command_reds",
+        |text| text.replacen("pce dispatch", " pce dispatch", 1),
+        ReviewError::IndentedCommand,
+    );
+}
+
+#[test]
+fn indented_anchor_closing_fence_reds() {
+    assert_indentation_fixture(
+        "indented_anchor_closing_fence_reds",
+        |text| text.replacen("\n```\n", "\n ```\n", 1),
+        ReviewError::IndentedClosingFence,
+    );
+}
+
+#[test]
+fn route_zero_env_reds() {
+    let markdown = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured).replace("--env {{ENV}} ", ""),
+    );
+    assert_document_error_before_pce("route_zero_env_reds", &markdown, ReviewError::ParentGrammar);
+}
+
+#[test]
+fn route_exactly_one_env_accepts() {
+    let markdown = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured),
+    );
+    review_document(&markdown, &fixture().bindings).expect("route_exactly_one_env_accepts");
+}
+
+#[test]
+fn route_two_env_reds() {
+    let markdown = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured)
+            .replace("--env {{ENV}}", "--env {{ENV}} --env {{ENV}}"),
+    );
+    assert_document_error_before_pce("route_two_env_reds", &markdown, ReviewError::ParentGrammar);
+}
+
+#[test]
+fn two_anchor_error_attribution() {
+    let first = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured),
+    );
+    let second = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured).replace("{{CALLER_ARG}}", "{{UNKNOWN}}"),
+    );
+    let markdown = format!("{first}{second}");
+    let routes = extract_anchored_routes(&markdown).expect("two routes");
+    let f = fixture();
+    let failure = review_document_attributed(&markdown, &f.bindings).expect_err("second reds");
+    assert_eq!(failure.error, ReviewError::UnknownPlaceholder);
+    assert_eq!(
+        failure.source_line, routes[1].source_line,
+        "second source identity"
+    );
+    assert_eq!(failure.observations.len(), 1, "first observation only");
+    assert_eq!(
+        failure.observations[0].source_line, routes[0].source_line,
+        "first attribution"
+    );
+}
+
+#[test]
+fn two_anchor_first_error_stops_before_second() {
+    let first = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured).replace("{{CALLER_ARG}}", "{{UNKNOWN}}"),
+    );
+    let second = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured),
+    );
+    let markdown = format!("{first}{second}");
+    let routes = extract_anchored_routes(&markdown).expect("two routes");
+    let f = fixture();
+    let failure = review_document_attributed(&markdown, &f.bindings).expect_err("first reds");
+    assert_eq!(failure.error, ReviewError::UnknownPlaceholder);
+    assert_eq!(
+        failure.source_line, routes[0].source_line,
+        "first source identity"
+    );
+    assert!(failure.observations.is_empty(), "second was not invoked");
+    assert_eq!(
+        f.bindings.pce_invocations.get(),
+        0,
+        "no invocation after first error"
+    );
+}
+
+#[test]
+fn canonical_role_semantics_by_role() {
+    let markdown = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("repository skill");
+    let routes = extract_anchored_routes(&markdown).expect("routes");
+    let mut counts = std::collections::BTreeMap::new();
+    for route in &routes {
+        let role = route_role(route).expect("one_anchor_per_role");
+        *counts.entry(role).or_insert(0usize) += 1;
+        assert_eq!(route.kind, expected_kind(role), "route_kind_by_role/{role}");
+        assert_eq!(
+            route
+                .tokens
+                .windows(2)
+                .find(|pair| pair[0] == "--node")
+                .map(|pair| pair[1].as_str()),
+            Some(expected_node(role)),
+            "node_class_by_role/{role}"
+        );
+        assert_eq!(
+            route
+                .tokens
+                .iter()
+                .filter(|token| *token == "--env")
+                .count(),
+            1,
+            "environment_cardinality_by_role/{role}"
+        );
+        assert!(
+            canonical_semantics(route).is_ok(),
+            "logging_group_by_role/{role}"
+        );
+        assert_eq!(
+            route
+                .tokens
+                .iter()
+                .filter(|token| *token == "{{REF}}")
+                .count(),
+            1,
+            "ref_source_by_role/{role}"
+        );
+        assert_eq!(
+            route
+                .tokens
+                .iter()
+                .filter(|token| *token == "{{EVIDENCE}}")
+                .count(),
+            1,
+            "evidence_source_by_role/{role}"
+        );
+        let structured = route.tokens.iter().any(|token| token == "--output-schema");
+        assert_eq!(
+            structured,
+            role != "step-plan-writer",
+            "schema_and_output_class_by_role/{role}"
+        );
+        assert_eq!(
+            route.tokens.iter().any(|token| token == "--plan-file"),
+            role == "step-executor",
+            "stdin_class_by_role/{role}"
+        );
+    }
+    let measured: std::collections::BTreeSet<_> = counts.keys().copied().collect();
+    let expected: std::collections::BTreeSet<_> = ROLE_REGISTRY.into_iter().collect();
+    assert_eq!(measured, expected, "role_registry_exact_set");
+    assert!(
+        counts.values().all(|count| *count == 1),
+        "one_anchor_per_role: {counts:?}"
+    );
+    let executor = routes
+        .iter()
+        .find(|route| route_role(route) == Some("step-executor"))
+        .expect("executor");
+    assert!(
+        canonical_semantics(executor).is_ok(),
+        "executor_complete_git_parent_required"
+    );
+}
+
+fn repository_routes() -> Vec<AnchoredRoute> {
+    let markdown = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("repository skill");
+    extract_anchored_routes(&markdown).expect("repository routes")
+}
+
+#[test]
+fn role_registry_exact_set() {
+    let measured: std::collections::BTreeSet<_> = repository_routes()
+        .iter()
+        .filter_map(route_role)
+        .map(ToOwned::to_owned)
+        .collect();
+    let expected: std::collections::BTreeSet<_> =
+        ROLE_REGISTRY.into_iter().map(ToOwned::to_owned).collect();
+    assert_eq!(measured, expected, "role_registry_exact_set");
+}
+
+#[test]
+fn one_anchor_per_role() {
+    let mut counts = BTreeMap::new();
+    for role in repository_routes().iter().filter_map(route_role) {
+        *counts.entry(role.to_owned()).or_insert(0usize) += 1;
+    }
+    let missing: Vec<_> = ROLE_REGISTRY
+        .iter()
+        .filter(|role| !counts.contains_key(**role))
+        .copied()
+        .collect();
+    let duplicated: Vec<_> = counts
+        .iter()
+        .filter(|(_, count)| **count != 1)
+        .map(|(role, count)| (role.as_str(), *count))
+        .collect();
+    assert!(
+        missing.is_empty() && duplicated.is_empty() && counts.len() == ROLE_REGISTRY.len(),
+        "one_anchor_per_role: missing={missing:?}, duplicated={duplicated:?}, measured={counts:?}"
+    );
+}
+
+#[test]
+fn environment_cardinality_by_role() {
+    for route in repository_routes() {
+        let role = route_role(&route).expect("canonical role");
+        assert_eq!(
+            route
+                .tokens
+                .iter()
+                .filter(|token| *token == "--env")
+                .count(),
+            1,
+            "environment_cardinality_by_role/{role}"
+        );
+        assert_eq!(
+            route
+                .tokens
+                .iter()
+                .filter(|token| *token == "{{ENV}}")
+                .count(),
+            1,
+            "environment_cardinality_by_role/{role}"
+        );
+    }
+}
+
+#[test]
+fn logging_group_by_role() {
+    for route in repository_routes() {
+        let role = route_role(&route).expect("canonical role");
+        assert!(
+            canonical_semantics(&route).is_ok(),
+            "logging_group_by_role/{role}"
+        );
+    }
+}
+
+#[test]
+fn route_kind_by_role() {
+    for route in repository_routes() {
+        let role = route_role(&route).expect("canonical role");
+        assert_eq!(route.kind, expected_kind(role), "route_kind_by_role/{role}");
+    }
+}
+
+#[test]
+fn node_class_by_role() {
+    for route in repository_routes() {
+        let role = route_role(&route).expect("canonical role");
+        let node = route
+            .tokens
+            .windows(2)
+            .find(|pair| pair[0] == "--node")
+            .map(|pair| pair[1].as_str());
+        assert_eq!(node, Some(expected_node(role)), "node_class_by_role/{role}");
+    }
+}
+
+#[test]
+fn ref_source_by_role() {
+    for route in repository_routes() {
+        let role = route_role(&route).expect("canonical role");
+        let source = route
+            .tokens
+            .windows(2)
+            .filter(|pair| pair[0] == "--ref")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(source, ["{{REF}}"], "ref_source_by_role/{role}");
+    }
+}
+
+#[test]
+fn evidence_source_by_role() {
+    let fixture = fixture();
+    for route in repository_routes() {
+        let role = route_role(&route).expect("canonical role");
+        let source = route
+            .tokens
+            .windows(2)
+            .filter(|pair| pair[0] == "--evidence")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(source, ["{{EVIDENCE}}"], "evidence_source_by_role/{role}");
+        let argv = substitute_route(&route, &fixture.bindings)
+            .unwrap_or_else(|error| panic!("evidence_source_by_role/{role}: {error:?}"));
+        let value = argv
+            .windows(2)
+            .find(|pair| pair[0] == "--evidence")
+            .map(|pair| pair[1].as_os_str())
+            .expect("evidence argv");
+        assert!(
+            !value.is_empty(),
+            "evidence_source_by_role/{role}: empty binding"
+        );
+    }
+}
+
+#[test]
+fn remaining_role_metadata_classes() {
+    for route in repository_routes() {
+        let role = route_role(&route).expect("canonical role");
+        let structured = route.tokens.iter().any(|token| token == "--output-schema");
+        assert_eq!(
+            structured,
+            role != "step-plan-writer",
+            "schema_and_output_class_by_role/{role}"
+        );
+        assert_eq!(
+            route.tokens.iter().any(|token| token == "--plan-file"),
+            role == "step-executor",
+            "stdin_class_by_role/{role}"
+        );
+        assert!(
+            route
+                .tokens
+                .windows(2)
+                .any(|pair| pair == ["--ref", "{{REF}}"]),
+            "ref_source_by_role/{role}"
+        );
+        assert!(
+            route
+                .tokens
+                .windows(2)
+                .any(|pair| pair == ["--evidence", "{{EVIDENCE}}"]),
+            "evidence_source_by_role/{role}"
+        );
+        if role == "step-executor" {
+            assert!(
+                canonical_semantics(&route).is_ok(),
+                "executor_complete_git_parent_required"
+            );
+        }
+        if route.kind == RouteKind::GateStructured {
+            let delimiter = route
+                .tokens
+                .iter()
+                .position(|token| token == "--")
+                .expect("delimiter");
+            assert_eq!(
+                &route.tokens[delimiter + 1..],
+                ["--append-system-prompt", "{{OUTPUT}}", "{{CALLER_ARG}}"],
+                "caller_tail_class_by_role/{role}"
+            );
+        }
+    }
+}
+
+#[test]
+fn schema_and_output_class_by_role() {
+    for route in repository_routes() {
+        let role = route_role(&route).expect("canonical role");
+        let pair = route
+            .tokens
+            .iter()
+            .filter(|token| *token == "--output-schema")
+            .count()
+            == 1
+            && route
+                .tokens
+                .iter()
+                .filter(|token| *token == "{{SCHEMA}}")
+                .count()
+                == 1
+            && route.tokens.iter().filter(|token| *token == "-o").count() == 1
+            && route
+                .tokens
+                .iter()
+                .filter(|token| *token == "{{OUTPUT}}")
+                .count()
+                >= 1;
+        assert_eq!(
+            pair,
+            role != "step-plan-writer",
+            "schema_and_output_class_by_role/{role}"
+        );
+    }
+}
+
+#[test]
+fn stdin_class_by_role() {
+    for route in repository_routes() {
+        let role = route_role(&route).expect("canonical role");
+        assert_eq!(
+            route
+                .tokens
+                .iter()
+                .filter(|token| *token == "--plan-file")
+                .count(),
+            usize::from(role == "step-executor"),
+            "stdin_class_by_role/{role}"
+        );
+    }
+}
+
+#[test]
+fn caller_tail_class_by_role() {
+    for route in repository_routes() {
+        let role = route_role(&route).expect("canonical role");
+        let delimiter = route
+            .tokens
+            .iter()
+            .position(|token| token == "--")
+            .expect("delimiter");
+        let expected: &[&str] = match route.kind {
+            RouteKind::GateStructured => {
+                &["--append-system-prompt", "{{OUTPUT}}", "{{CALLER_ARG}}"]
+            }
+            RouteKind::CodexStructured | RouteKind::CodexUnstructured
+                if role == "step-executor" =>
+            {
+                &["--add-dir", "{{ABS_PATH}}", "{{CALLER_ARG}}"]
+            }
+            RouteKind::CodexStructured | RouteKind::CodexUnstructured => &["{{CALLER_ARG}}"],
+        };
+        assert!(
+            route.tokens[delimiter + 1..]
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied()),
+            "caller_tail_class_by_role/{role}"
+        );
+    }
+}
+
+#[test]
+fn executor_complete_git_parent_required() {
+    let route = repository_route("step-executor");
+    let delimiter = route
+        .tokens
+        .iter()
+        .position(|token| token == "--")
+        .expect("delimiter");
+    assert_eq!(
+        &route.tokens[delimiter + 1..],
+        ["--add-dir", "{{ABS_PATH}}", "{{CALLER_ARG}}"],
+        "executor_complete_git_parent_required"
+    );
+    let f = fixture();
+    let argv = substitute_route(&route, &f.bindings).expect("executor binding");
+    let add_dir = argv
+        .windows(2)
+        .find(|pair| pair[0] == "--add-dir")
+        .expect("add-dir");
+    assert_eq!(
+        add_dir[1], f.bindings.complete_git_dir,
+        "executor complete parent git binding"
+    );
+}
+
+#[test]
+fn outside_fragment_controls() {
+    let f = fixture();
+    for (name, unit) in [
+        (
+            "outside_fragment_code_span_target_then_option_reds",
+            "`pce dispatch codex --cwd`",
+        ),
+        (
+            "outside_fragment_code_span_option_then_target_reds",
+            "`--cwd pce dispatch codex`",
+        ),
+        (
+            "outside_fragment_fence_target_then_delimiter_reds",
+            "```text\npce dispatch gate --\n```",
+        ),
+        (
+            "outside_fragment_fence_delimiter_then_target_reds",
+            "```text\n-- pce dispatch gate\n```",
+        ),
+        (
+            "outside_fragment_shell_line_target_then_caller_reds",
+            "pce dispatch codex -- caller",
+        ),
+        (
+            "outside_fragment_shell_line_caller_then_target_reds",
+            "-- caller pce dispatch codex",
+        ),
+    ] {
+        assert!(
+            (unit.contains("pce dispatch codex") || unit.contains("pce dispatch gate"))
+                && unit.contains("--"),
+            "{name}: conjunct precondition"
+        );
+        assert_eq!(
+            review_document(unit, &f.bindings).expect_err(name),
+            ReviewError::OutsideAnchorDispatchFragment,
+            "{name}"
+        );
+    }
+    for (name, unit) in [
+        (
+            "outside_fragment_bare_route_accepts",
+            "`pce dispatch codex`",
+        ),
+        ("outside_fragment_option_only_accepts", "`--cwd`"),
+        (
+            "outside_fragment_split_units_accepts",
+            "`pce dispatch codex` and `--cwd`",
+        ),
+    ] {
+        review_document(unit, &f.bindings).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+    }
+    let protocol = "Outside a valid anchored fence, a prohibited dispatch fragment is one inline code span, one complete fenced code block, or one shell-like physical line that contains both (a) the contiguous route name `pce dispatch codex` or `pce dispatch gate` and (b) at least one whitespace-delimited token that is a dispatch-only parent option, the standalone `--` delimiter, or any caller argument represented by a whitespace-delimited token after that delimiter.";
+    review_document(protocol, &f.bindings).expect("outside_fragment_protocol_definition_accepts");
+    let control =
+        "> Prose control: pce dispatch codex --cwd names tokens without presenting a command.";
+    assert!(unit_has_prohibited_fragment(control));
+    assert!(!shell_like(control));
+    review_document(control, &f.bindings)
+        .expect("outside_fragment_non_shell_line_with_both_conjuncts_accepts");
+    review_document(
+        &document(
+            "codex-unstructured",
+            &base_command(RouteKind::CodexUnstructured),
+        ),
+        &f.bindings,
+    )
+    .expect("outside_fragment_valid_anchor_accepts");
+}
+
+fn assert_outside_red(name: &str, unit: &str) {
+    let measured = unit
+        .strip_prefix('`')
+        .and_then(|text| text.strip_suffix('`'))
+        .unwrap_or(unit);
+    assert!(
+        unit_has_prohibited_fragment(measured),
+        "{name}: both conjuncts"
+    );
+    assert_eq!(
+        review_document(unit, &fixture().bindings).expect_err(name),
+        ReviewError::OutsideAnchorDispatchFragment,
+        "{name}"
+    );
+}
+
+#[test]
+fn outside_fragment_code_span_target_then_option_reds() {
+    assert_outside_red(
+        "outside_fragment_code_span_target_then_option_reds",
+        "`pce dispatch codex --cwd`",
+    );
+}
+
+#[test]
+fn outside_fragment_code_span_option_then_target_reds() {
+    assert_outside_red(
+        "outside_fragment_code_span_option_then_target_reds",
+        "`--cwd pce dispatch codex`",
+    );
+}
+
+#[test]
+fn outside_fragment_fence_target_then_delimiter_reds() {
+    assert_outside_red(
+        "outside_fragment_fence_target_then_delimiter_reds",
+        "```text\npce dispatch gate --\n```",
+    );
+}
+
+#[test]
+fn outside_fragment_fence_delimiter_then_target_reds() {
+    assert_outside_red(
+        "outside_fragment_fence_delimiter_then_target_reds",
+        "```text\n-- pce dispatch gate\n```",
+    );
+}
+
+#[test]
+fn outside_fragment_shell_line_target_then_caller_reds() {
+    assert_outside_red(
+        "outside_fragment_shell_line_target_then_caller_reds",
+        "pce dispatch codex -- caller",
+    );
+}
+
+#[test]
+fn outside_fragment_shell_line_caller_then_target_reds() {
+    assert_outside_red(
+        "outside_fragment_shell_line_caller_then_target_reds",
+        "-- caller pce dispatch codex",
+    );
+}
+
+#[test]
+fn outside_fragment_bare_route_accepts() {
+    review_document("`pce dispatch codex`", &fixture().bindings).expect("bare route");
+}
+
+#[test]
+fn outside_fragment_option_only_accepts() {
+    review_document("`--cwd`", &fixture().bindings).expect("option only");
+}
+
+#[test]
+fn outside_fragment_split_units_accepts() {
+    review_document("`pce dispatch codex` and `--cwd`", &fixture().bindings).expect("split units");
+}
+
+#[test]
+fn outside_fragment_valid_anchor_accepts() {
+    review_document(
+        &document(
+            "codex-unstructured",
+            &base_command(RouteKind::CodexUnstructured),
+        ),
+        &fixture().bindings,
+    )
+    .expect("valid anchor exemption");
+}
+
+#[test]
+fn outside_fragment_protocol_definition_accepts() {
+    let protocol = "Outside a valid anchored fence, a prohibited dispatch fragment is one inline code span, one complete fenced code block, or one shell-like physical line that contains both (a) the contiguous route name `pce dispatch codex` or `pce dispatch gate` and (b) at least one whitespace-delimited token that is a dispatch-only parent option, the standalone `--` delimiter, or any caller argument represented by a whitespace-delimited token after that delimiter.";
+    review_document(protocol, &fixture().bindings).expect("protocol definition");
+}
+
+#[test]
+fn outside_fragment_non_shell_line_with_both_conjuncts_accepts() {
+    let control =
+        "> Prose control: pce dispatch codex --cwd names tokens without presenting a command.";
+    assert!(unit_has_prohibited_fragment(control));
+    assert!(!shell_like(control));
+    review_document(control, &fixture().bindings).expect("first-token boundary");
+}
+
+#[test]
+fn standalone_append_marker_controls() {
+    let anchor = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured),
+    );
+    let append = "pce log --file /tmp/events --kind dispatch --node m1-s1\n";
+    let absent = format!("## One\n{anchor}{append}");
+    review_document(&absent, &fixture().bindings)
+        .expect("standalone_append_marker_absent_allows_legacy");
+    let separate = format!("{CONSOLIDATION_MARKER}\n## One\n{anchor}## Two\n{append}");
+    review_document(&separate, &fixture().bindings)
+        .expect("standalone_append_marker_present_non_colocated_accepts");
+    for (name, body) in [
+        (
+            "standalone_append_after_anchor_reds",
+            format!("{CONSOLIDATION_MARKER}\n## One\n{anchor}{append}"),
+        ),
+        (
+            "standalone_append_before_anchor_reds",
+            format!("{CONSOLIDATION_MARKER}\n## One\n{append}{anchor}"),
+        ),
+    ] {
+        assert_eq!(
+            review_document(&body, &fixture().bindings).expect_err(name),
+            ReviewError::CoLocatedStandaloneDispatchAppend,
+            "{name}"
+        );
+    }
+}
+
+fn standalone_parts() -> (String, &'static str) {
+    (
+        document(
+            "codex-unstructured",
+            &base_command(RouteKind::CodexUnstructured),
+        ),
+        "pce log --file /tmp/events --kind dispatch --node m1-s1\n",
+    )
+}
+
+#[test]
+fn standalone_append_marker_absent_allows_legacy() {
+    let (anchor, append) = standalone_parts();
+    let markdown = format!("## One\n{anchor}{append}");
+    assert_eq!(markdown.matches(CONSOLIDATION_MARKER).count(), 0);
+    review_document(&markdown, &fixture().bindings).expect("marker absent");
+}
+
+#[test]
+fn standalone_append_marker_present_non_colocated_accepts() {
+    let (anchor, append) = standalone_parts();
+    let markdown = format!("{CONSOLIDATION_MARKER}\n## One\n{anchor}## Two\n{append}");
+    assert_eq!(markdown.matches(CONSOLIDATION_MARKER).count(), 1);
+    assert_eq!(extract_anchored_routes(&markdown).expect("anchor").len(), 1);
+    review_document(&markdown, &fixture().bindings).expect("non-colocated");
+}
+
+fn assert_colocated_append(name: &str, append_first: bool) {
+    let (anchor, append) = standalone_parts();
+    let body = if append_first {
+        format!("{append}{anchor}")
+    } else {
+        format!("{anchor}{append}")
+    };
+    let markdown = format!("{CONSOLIDATION_MARKER}\n## One\n{body}");
+    assert_eq!(
+        markdown.matches(CONSOLIDATION_MARKER).count(),
+        1,
+        "{name}: marker"
+    );
+    let routes = extract_anchored_routes(&markdown).expect("anchor extraction");
+    assert_eq!(routes.len(), 1, "{name}: anchor identity");
+    assert!(
+        markdown
+            .lines()
+            .any(|line| line.contains("pce log") && line.contains("--kind dispatch")),
+        "{name}: append identity"
+    );
+    assert_eq!(
+        review_document(&markdown, &fixture().bindings).expect_err(name),
+        ReviewError::CoLocatedStandaloneDispatchAppend,
+        "{name}"
+    );
+}
+
+#[test]
+fn standalone_append_after_anchor_reds() {
+    assert_colocated_append("standalone_append_after_anchor_reds", false);
+}
+
+#[test]
+fn standalone_append_before_anchor_reds() {
+    assert_colocated_append("standalone_append_before_anchor_reds", true);
+}
+
+fn independently_filtered_prior_count(events: &[serde_json::Value]) -> usize {
+    events
+        .iter()
+        .filter(|event| event["kind"] == "dispatch")
+        .filter(|event| event["node"] == "m7-s2")
+        .filter(|event| event["role"] == "pr-reviewer")
+        .count()
+}
+
+#[test]
+fn verdict_index_derived_from_prior_records() {
+    let f = fixture();
+    let events = &f.bindings.context.accepted_events;
+    let first = prior_dispatch_count(events, "m7-s2", "pr-reviewer");
+    let independently_filtered = independently_filtered_prior_count(events);
+    assert_eq!(
+        first, independently_filtered,
+        "verdict_index_derived_from_prior_records"
+    );
+    let next = first.checked_add(1).expect("checked successor");
+    let directory = &f.bindings.context.review_directories["pr-reviewer"];
+    let json = directory.join(format!("review-{next}.json"));
+    let markdown = directory.join(format!("review-{next}.md"));
+    let json_index = json
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .and_then(|name| name.strip_prefix("review-"))
+        .expect("json index");
+    let markdown_index = markdown
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .and_then(|name| name.strip_prefix("review-"))
+        .expect("markdown index");
+    assert_eq!(
+        json_index, markdown_index,
+        "verdict_index_derived_from_prior_records"
+    );
+}
+
+fn assert_other_record_not_counted(name: &str, extra: serde_json::Value) {
+    let f = fixture();
+    let events = &f.bindings.context.accepted_events;
+    let independently_filtered = independently_filtered_prior_count(events);
+    let mut changed = events.clone();
+    changed.push(extra);
+    assert_eq!(
+        prior_dispatch_count(&changed, "m7-s2", "pr-reviewer"),
+        independently_filtered,
+        "{name}"
+    );
+}
+
+#[test]
+fn verdict_other_kind_not_counted() {
+    assert_other_record_not_counted(
+        "verdict_other_kind_not_counted",
+        serde_json::json!({"kind":"dispatch-completion","node":"m7-s2","role":"pr-reviewer"}),
+    );
+}
+
+#[test]
+fn verdict_other_node_not_counted() {
+    assert_other_record_not_counted(
+        "verdict_other_node_not_counted",
+        serde_json::json!({"kind":"dispatch","node":"m8-s2","role":"pr-reviewer"}),
+    );
+}
+
+#[test]
+fn verdict_other_role_not_counted() {
+    assert_other_record_not_counted(
+        "verdict_other_role_not_counted",
+        serde_json::json!({"kind":"dispatch","node":"m7-s2","role":"step-plan-critic"}),
+    );
+}
+
+#[test]
+fn verdict_matching_record_increments_index() {
+    let f = fixture();
+    let events = &f.bindings.context.accepted_events;
+    let independently_filtered = independently_filtered_prior_count(events);
+    let mut incremented = events.clone();
+    incremented.push(serde_json::json!({"kind":"dispatch","node":"m7-s2","role":"pr-reviewer"}));
+    assert_eq!(
+        prior_dispatch_count(&incremented, "m7-s2", "pr-reviewer"),
+        independently_filtered.checked_add(1).expect("successor"),
+        "verdict_matching_record_increments_index"
+    );
+}
+
+#[test]
+fn prior_verdict_sentinel_survives_next_round() {
+    let f = fixture();
+    let events = &f.bindings.context.accepted_events;
+    let first = prior_dispatch_count(events, "m7-s2", "pr-reviewer");
+    let next = first.checked_add(1).expect("checked successor");
+    let directory = &f.bindings.context.review_directories["pr-reviewer"];
+    let json = directory.join(format!("review-{next}.json"));
+    let prior = directory.join(format!("review-{first}.json"));
+    fs::write(&prior, b"prior sentinel").expect("prior sentinel");
+    let before_path = prior.clone();
+    let before_bytes = fs::read(&prior).expect("prior bytes");
+    let before_kind = fs::metadata(&prior).expect("prior metadata").file_type();
+    let before_exists = prior.exists();
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("skill");
+    let route = extract_anchored_routes(&skill)
+        .expect("routes")
+        .into_iter()
+        .find(|route| route_role(route) == Some("pr-reviewer"))
+        .expect("reviewer");
+    let single = format!(
+        "{}\n```sh\n{}\n```\n",
+        marker("gate-structured"),
+        route.tokens.join(" ")
+    );
+    review_document(&single, &f.bindings).expect("next gate");
+    assert_eq!(
+        prior, before_path,
+        "prior_verdict_sentinel_survives_next_round/path"
+    );
+    assert_eq!(
+        fs::read(&prior).expect("after prior"),
+        before_bytes,
+        "prior_verdict_sentinel_survives_next_round/bytes"
+    );
+    assert_eq!(
+        fs::metadata(&prior).expect("after metadata").file_type(),
+        before_kind,
+        "prior_verdict_sentinel_survives_next_round/kind"
+    );
+    assert_eq!(
+        prior.exists(),
+        before_exists,
+        "prior_verdict_sentinel_survives_next_round/existence"
+    );
+    assert!(json.exists(), "new verdict exists");
+}
+
+#[test]
+fn verdict_routing_and_markdown_preservation() {
+    let f = fixture();
+    let schema = &f.bindings.verdict_schema;
+    let verdict = f.bindings.verdict_root.join("routing.json");
+    let markdown = f.bindings.verdict_root.join("routing.md");
+    fs::write(&markdown, b"explanatory sentinel").expect("markdown");
+    let markdown_before = fs::read(&markdown).expect("markdown before");
+    for (name, value, expected) in [
+        (
+            "verdict_approve_routes_forward",
+            "APPROVE",
+            VerdictRoute::Forward,
+        ),
+        (
+            "verdict_revise_routes_to_phase_codex_anchor",
+            "REVISE",
+            VerdictRoute::Revise,
+        ),
+        (
+            "verdict_block_routes_to_escalation",
+            "BLOCK",
+            VerdictRoute::Escalate,
+        ),
+    ] {
+        fs::write(&verdict, format!(r#"{{"verdict":"{value}","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"fixture"}}"#)).expect("verdict");
+        assert_eq!(route_verdict(&verdict, schema), Ok(expected), "{name}");
+    }
+    assert_eq!(
+        fs::read(&markdown).expect("markdown after"),
+        markdown_before,
+        "review_markdown_retained_separately"
+    );
+    let missing = f.bindings.verdict_root.join("missing.json");
+    assert_eq!(
+        route_verdict(&missing, schema),
+        Err(ReviewError::VerdictMissing),
+        "verdict_missing_reds"
+    );
+    fs::write(&verdict, b"{").expect("malformed");
+    assert_eq!(
+        route_verdict(&verdict, schema),
+        Err(ReviewError::VerdictMalformed),
+        "verdict_malformed_json_reds"
+    );
+    fs::write(&verdict, br#"{"verdict":"MAYBE"}"#).expect("invalid");
+    assert_eq!(
+        route_verdict(&verdict, schema),
+        Err(ReviewError::VerdictSchemaInvalid),
+        "verdict_schema_invalid_reds"
+    );
+}
+
+fn write_verdict(path: &Path, verdict: &str) {
+    fs::write(
+        path,
+        format!(
+            r#"{{"verdict":"{verdict}","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"fixture"}}"#
+        ),
+    )
+    .expect("verdict fixture");
+}
+
+#[test]
+fn verdict_approve_routes_forward() {
+    let f = fixture();
+    let path = f.bindings.verdict_root.join("approve.json");
+    write_verdict(&path, "APPROVE");
+    assert_eq!(
+        route_verdict(&path, &f.bindings.verdict_schema),
+        Ok(VerdictRoute::Forward)
+    );
+}
+
+#[test]
+fn verdict_revise_routes_to_phase_codex_anchor() {
+    let f = fixture();
+    let path = f.bindings.verdict_root.join("revise.json");
+    write_verdict(&path, "REVISE");
+    assert_eq!(
+        route_verdict(&path, &f.bindings.verdict_schema),
+        Ok(VerdictRoute::Revise)
+    );
+    assert_eq!(
+        expected_kind("milestone-planner"),
+        RouteKind::CodexStructured
+    );
+    assert_eq!(expected_kind("step-planner"), RouteKind::CodexStructured);
+}
+
+#[test]
+fn verdict_block_routes_to_escalation() {
+    let f = fixture();
+    let path = f.bindings.verdict_root.join("block.json");
+    write_verdict(&path, "BLOCK");
+    assert_eq!(
+        route_verdict(&path, &f.bindings.verdict_schema),
+        Ok(VerdictRoute::Escalate)
+    );
+}
+
+#[test]
+fn verdict_missing_reds() {
+    let f = fixture();
+    assert_eq!(
+        route_verdict(
+            &f.bindings.verdict_root.join("absent.json"),
+            &f.bindings.verdict_schema
+        ),
+        Err(ReviewError::VerdictMissing)
+    );
+}
+
+#[test]
+fn verdict_unreadable_reds() {
+    let f = fixture();
+    assert_eq!(
+        route_verdict(&f.bindings.verdict_root, &f.bindings.verdict_schema),
+        Err(ReviewError::VerdictUnreadable)
+    );
+}
+
+#[test]
+fn verdict_malformed_json_reds() {
+    let f = fixture();
+    let path = f.bindings.verdict_root.join("malformed.json");
+    fs::write(&path, b"{").expect("malformed");
+    assert_eq!(
+        route_verdict(&path, &f.bindings.verdict_schema),
+        Err(ReviewError::VerdictMalformed)
+    );
+}
+
+#[test]
+fn verdict_schema_invalid_reds() {
+    let f = fixture();
+    let path = f.bindings.verdict_root.join("invalid.json");
+    write_verdict(&path, "MAYBE");
+    assert_eq!(
+        route_verdict(&path, &f.bindings.verdict_schema),
+        Err(ReviewError::VerdictSchemaInvalid)
+    );
+}
+
+#[test]
+fn verdict_unknown_value_reds() {
+    let f = fixture();
+    let path = f.bindings.verdict_root.join("unknown.json");
+    let permissive = f.bindings.verdict_root.join("permissive.schema.json");
+    write_verdict(&path, "MAYBE");
+    fs::write(&permissive, br#"{"type":"object","required":["verdict"]}"#).expect("schema");
+    assert_eq!(
+        route_verdict(&path, &permissive),
+        Err(ReviewError::VerdictUnknown)
+    );
+}
+
+#[test]
+fn wrong_verdict_index_reds_before_spawn() {
+    let (f, route, mut argv) = gate_argv();
+    let role = route_role(&route).expect("role");
+    let node = argv
+        .windows(2)
+        .find(|pair| pair[0] == "--node")
+        .expect("node")[1]
+        .clone();
+    let prior = prior_dispatch_count(
+        &f.bindings.context.accepted_events,
+        node.to_str().expect("node text"),
+        role,
+    );
+    let wrong = f.bindings.context.review_directories[role].join(format!("review-{prior}.json"));
+    for flag in ["-o", "--append-system-prompt"] {
+        let index = argv
+            .iter()
+            .position(|arg| arg == flag)
+            .expect("output flag");
+        argv[index + 1] = wrong.as_os_str().to_owned();
+    }
+    assert_eq!(
+        argv.windows(2)
+            .find(|pair| pair[0] == "-o")
+            .expect("parent")[1],
+        argv.windows(2)
+            .find(|pair| pair[0] == "--append-system-prompt")
+            .expect("tail")[1],
+        "path equality remains true"
+    );
+    assert_eq!(
+        semantic_output_path(&route, &argv, &f.bindings),
+        Err(ReviewError::WrongVerdictIndex)
+    );
+    assert_eq!(f.bindings.pce_invocations.get(), 0);
+}
+
+#[test]
+fn wrong_verdict_directory_reds_before_spawn() {
+    let (f, route, mut argv) = gate_argv();
+    let correct = argv
+        .windows(2)
+        .find(|pair| pair[0] == "-o")
+        .expect("parent")[1]
+        .clone();
+    let wrong = f
+        .bindings
+        .verdict_root
+        .join("wrong-directory")
+        .join(Path::new(&correct).file_name().expect("filename"));
+    for flag in ["-o", "--append-system-prompt"] {
+        let index = argv
+            .iter()
+            .position(|arg| arg == flag)
+            .expect("output flag");
+        argv[index + 1] = wrong.as_os_str().to_owned();
+    }
+    assert_eq!(
+        semantic_output_path(&route, &argv, &f.bindings),
+        Err(ReviewError::WrongVerdictDirectory)
+    );
+    assert_eq!(f.bindings.pce_invocations.get(), 0);
+    for route in repository_routes()
+        .into_iter()
+        .filter(|route| route.kind == RouteKind::GateStructured)
+    {
+        let f = fixture();
+        let argv = substitute_route(&route, &f.bindings).expect("canonical gate binding");
+        assert_eq!(
+            semantic_output_path(&route, &argv, &f.bindings),
+            Ok(()),
+            "canonical gate directory/{}",
+            route_role(&route).expect("gate role")
+        );
+    }
+}
+
+#[test]
+fn review_markdown_retained_separately() {
+    let f = fixture();
+    let json = f.bindings.verdict_root.join("separate.json");
+    let markdown = f.bindings.verdict_root.join("separate.md");
+    write_verdict(&json, "APPROVE");
+    fs::write(&markdown, b"markdown sentinel").expect("markdown");
+    let before = (
+        markdown.clone(),
+        fs::read(&markdown).expect("bytes"),
+        fs::metadata(&markdown).expect("metadata").file_type(),
+        markdown.exists(),
+    );
+    assert_eq!(
+        route_verdict(&json, &f.bindings.verdict_schema),
+        Ok(VerdictRoute::Forward)
+    );
+    let after = (
+        markdown.clone(),
+        fs::read(&markdown).expect("bytes"),
+        fs::metadata(&markdown).expect("metadata").file_type(),
+        markdown.exists(),
+    );
+    assert_eq!(before, after);
+    assert_ne!(json, markdown);
+}
+
+#[test]
+fn conformance_paths_and_projection_limitation() {
+    let f = fixture();
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("skill");
+    let report = review_document(&skill, &f.bindings).expect("canonical conformance");
+    assert_eq!(
+        report.observations.len(),
+        9,
+        "codex_conformance_shim_terminal_envelope_accepts"
+    );
+    for role in ["milestone-planner", "step-planner"] {
+        let graph_output = &f.bindings.graph_outputs[role];
+        assert!(
+            graph_output.exists(),
+            "codex_conformance_shim_selects_payload_by_schema/{role}"
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(graph_output).expect("graph artifact"))
+                .expect("graph json");
+        let schema: serde_json::Value =
+            serde_json::from_slice(&fs::read(&f.bindings.graph_schema).expect("graph schema"))
+                .expect("graph schema json");
+        assert!(
+            jsonschema::validator_for(&schema)
+                .expect("graph validator")
+                .is_valid(&value),
+            "codex_conformance_shim_selects_payload_by_schema/{role}"
+        );
+    }
+    let recovered = PathBuf::from(
+        fs::read_to_string(f.bindings.cwd.join(".review/recovered-path")).expect("recorded path"),
+    );
+    let parent = f.bindings.context.review_directories["pr-reviewer"].join("review-3.json");
+    assert_eq!(
+        recovered, parent,
+        "gate_conformance_shim_recovers_path_from_argv/recorded-parent"
+    );
+    assert!(
+        parent.exists(),
+        "gate_conformance_shim_recovers_path_from_argv/artifact"
+    );
+    let env = fs::read_to_string(f.bindings.cwd.join(".review/env")).expect("environment");
+    assert!(
+        !env.contains("PCE_GATE_OUTPUT_PATH")
+            && !env.contains("PCE_CLAUDE_OUTPUT_PATH")
+            && !env.contains("ARTIFACT="),
+        "gate_conformance_shim_recovers_path_from_argv/environment"
+    );
+    let sentence = "`run_dispatch_projection` receives an already-parsed output path and performs no child artifact write, so it cannot inspect or falsify `-o` naming, verdict indexing, directory selection, gate-tail visibility, or sentinel preservation; a dry run is not evidence for those properties.";
+    assert_eq!(
+        skill.matches(sentence).count(),
+        1,
+        "projection_limitation_sentence_present"
+    );
+}
+
+fn gate_argv() -> (Fixture, AnchoredRoute, Vec<OsString>) {
+    let f = fixture();
+    let route = repository_route("pr-reviewer");
+    let argv = substitute_route(&route, &f.bindings).expect("gate argv");
+    (f, route, argv)
+}
+
+fn assert_gate_tail_error(
+    name: &str,
+    mutate: impl FnOnce(&mut Vec<OsString>),
+    expected: ReviewError,
+) {
+    let (_f, route, mut argv) = gate_argv();
+    mutate(&mut argv);
+    assert_eq!(validate_route(&route, &argv), Err(expected), "{name}");
+}
+
+#[test]
+fn gate_tail_output_path_equal_accepts() {
+    let (_f, route, argv) = gate_argv();
+    validate_route(&route, &argv).expect("gate_tail_output_path_equal_accepts");
+    let parent = argv
+        .windows(2)
+        .find(|pair| pair[0] == "-o")
+        .expect("parent output");
+    let tail = argv
+        .windows(2)
+        .find(|pair| pair[0] == "--append-system-prompt")
+        .expect("tail path");
+    assert_eq!(parent[1], tail[1]);
+    for route in repository_routes()
+        .into_iter()
+        .filter(|route| route.kind == RouteKind::GateStructured)
+    {
+        let f = fixture();
+        let argv = substitute_route(&route, &f.bindings).expect("canonical gate binding");
+        validate_route(&route, &argv)
+            .unwrap_or_else(|error| panic!("{}: {error:?}", route_role(&route).expect("role")));
+        let parent = argv
+            .windows(2)
+            .find(|pair| pair[0] == "-o")
+            .expect("parent");
+        let tail = argv
+            .windows(2)
+            .find(|pair| pair[0] == "--append-system-prompt")
+            .expect("tail");
+        assert_eq!(parent[1], tail[1], "{}", route_role(&route).expect("role"));
+    }
+}
+
+#[test]
+fn gate_tail_output_path_mismatch_reds() {
+    assert_gate_tail_error(
+        "gate_tail_output_path_mismatch_reds",
+        |argv| {
+            let index = argv
+                .iter()
+                .position(|arg| arg == "--append-system-prompt")
+                .expect("designator");
+            argv[index + 1] = "/tmp/same-name/review-3.json".into();
+        },
+        ReviewError::GateOutputPathMismatch,
+    );
+}
+
+#[test]
+fn gate_tail_missing_designator_reds() {
+    assert_gate_tail_error(
+        "gate_tail_missing_designator_reds",
+        |argv| {
+            let index = argv
+                .iter()
+                .position(|arg| arg == "--append-system-prompt")
+                .expect("designator");
+            argv[index] = "--missing-designator".into();
+        },
+        ReviewError::GateTailDesignator,
+    );
+}
+
+#[test]
+fn gate_tail_missing_path_reds() {
+    assert_gate_tail_error(
+        "gate_tail_missing_path_reds",
+        |argv| {
+            let index = argv
+                .iter()
+                .position(|arg| arg == "--append-system-prompt")
+                .expect("designator");
+            argv[index + 1] = "".into();
+        },
+        ReviewError::GateTailValue,
+    );
+}
+
+#[test]
+fn gate_tail_relative_path_reds() {
+    assert_gate_tail_error(
+        "gate_tail_relative_path_reds",
+        |argv| {
+            let index = argv
+                .iter()
+                .position(|arg| arg == "--append-system-prompt")
+                .expect("designator");
+            argv[index + 1] = "review.json".into();
+        },
+        ReviewError::GateTailAbsolute,
+    );
+}
+
+#[test]
+fn gate_tail_missing_prompt_reds() {
+    assert_gate_tail_error(
+        "gate_tail_missing_prompt_reds",
+        |argv| {
+            let prompt = argv.last_mut().expect("prompt");
+            *prompt = "".into();
+        },
+        ReviewError::GateTailPrompt,
+    );
+}
+
+#[test]
+fn gate_tail_extra_argument_reds() {
+    assert_gate_tail_error(
+        "gate_tail_extra_argument_reds",
+        |argv| argv.push("extra".into()),
+        ReviewError::GateTailCardinality,
+    );
+}
+
+fn codex_shim_args(f: &Fixture, schema: Option<&Path>, outputs: &[&Path]) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        "exec".into(),
+        "--json".into(),
+        "-C".into(),
+        f.bindings.cwd.as_os_str().to_owned(),
+        "--sandbox".into(),
+        "workspace-write".into(),
+    ];
+    if let Some(schema) = schema {
+        args.extend(["--output-schema".into(), schema.as_os_str().to_owned()]);
+    }
+    for output in outputs {
+        args.extend(["-o".into(), output.as_os_str().to_owned()]);
+    }
+    args.push("opaque prompt".into());
+    args
+}
+
+fn assert_schema_valid(path: &Path, schema: &Path, name: &str) {
+    let instance: serde_json::Value =
+        serde_json::from_slice(&fs::read(path).expect("artifact bytes")).expect("artifact JSON");
+    let schema: serde_json::Value =
+        serde_json::from_slice(&fs::read(schema).expect("schema bytes")).expect("schema JSON");
+    assert!(
+        jsonschema::validator_for(&schema)
+            .expect("validator")
+            .is_valid(&instance),
+        "{name}: schema validation"
+    );
+}
+
+#[test]
+fn codex_conformance_shim_recovers_output_from_argv() {
+    let f = fixture();
+    let parent = f.bindings.verdict_root.join("codex-recovered.json");
+    let output = run_direct_shim(
+        &f,
+        "codex",
+        &codex_shim_args(&f, Some(&f.bindings.verdict_schema), &[&parent]),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recovered = PathBuf::from(
+        fs::read_to_string(f.bindings.cwd.join(".review/recovered-path")).expect("recovered path"),
+    );
+    let artifact = fs::read_dir(parent.parent().expect("artifact directory"))
+        .expect("artifact directory")
+        .map(|entry| entry.expect("artifact entry").path())
+        .find(|path| path.file_name() == parent.file_name())
+        .expect("artifact path");
+    assert_eq!(recovered, parent, "parent/shim path");
+    assert_eq!(artifact, parent, "parent/artifact path");
+    assert_eq!(recovered, artifact, "shim/artifact path");
+    let environment = fs::read_to_string(f.bindings.cwd.join(".review/env")).expect("environment");
+    assert!(!environment.contains("ARTIFACT=") && !environment.contains("OUTPUT_PATH"));
+    assert_schema_valid(&parent, &f.bindings.verdict_schema, "codex recovery");
+}
+
+#[test]
+fn codex_conformance_shim_no_output_reds() {
+    let f = fixture();
+    let output = run_direct_shim(
+        &f,
+        "codex",
+        &codex_shim_args(&f, Some(&f.bindings.verdict_schema), &[]),
+    );
+    assert!(!output.status.success(), "zero -o must fail");
+    assert!(!f.bindings.output.exists(), "zero -o wrote no artifact");
+}
+
+#[test]
+fn codex_conformance_shim_duplicate_output_reds() {
+    let f = fixture();
+    let first = f.bindings.verdict_root.join("duplicate-first.json");
+    let second = f.bindings.verdict_root.join("duplicate-second.json");
+    let output = run_direct_shim(
+        &f,
+        "codex",
+        &codex_shim_args(&f, Some(&f.bindings.verdict_schema), &[&first, &second]),
+    );
+    assert!(!output.status.success(), "duplicate -o must fail");
+    assert!(
+        !first.exists() && !second.exists(),
+        "duplicate -o wrote no artifact"
+    );
+}
+
+#[test]
+fn codex_conformance_shim_selects_payload_by_schema() {
+    let f = fixture();
+    for (role, schema, expected_schema) in [
+        (
+            "milestone-planner",
+            &f.bindings.graph_schema,
+            &f.bindings.graph_schema,
+        ),
+        (
+            "step-planner",
+            &f.bindings.graph_schema,
+            &f.bindings.graph_schema,
+        ),
+        (
+            "step-executor",
+            &f.bindings.verdict_schema,
+            &f.bindings.verdict_schema,
+        ),
+    ] {
+        let path = f.bindings.verdict_root.join(format!("{role}.json"));
+        let output = run_direct_shim(&f, "codex", &codex_shim_args(&f, Some(schema), &[&path]));
+        assert!(
+            output.status.success(),
+            "{role}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_schema_valid(&path, expected_schema, role);
+    }
+}
+
+#[test]
+fn codex_conformance_shim_terminal_envelope_accepts() {
+    const ENVELOPE: &[u8] = b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":2,\"output_tokens\":3,\"reasoning_output_tokens\":4}}\n";
+    let f = fixture();
+    let structured = f.bindings.verdict_root.join("terminal.json");
+    let output = run_direct_shim(
+        &f,
+        "codex",
+        &codex_shim_args(&f, Some(&f.bindings.verdict_schema), &[&structured]),
+    );
+    assert_eq!(output.stdout, ENVELOPE, "structured direct envelope");
+    let output = run_direct_shim(&f, "codex", &codex_shim_args(&f, None, &[]));
+    assert_eq!(output.stdout, ENVELOPE, "unstructured direct envelope");
+    for role in [
+        "milestone-planner",
+        "step-planner",
+        "step-plan-writer",
+        "step-executor",
+    ] {
+        let f = fixture();
+        review_document(&route_document(&repository_route(role)), &f.bindings)
+            .unwrap_or_else(|error| panic!("{role} built-binary envelope: {error:?}"));
+    }
+}
+
+fn gate_shim_args(paths: &[&Path]) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec!["-p".into(), "--output-format".into(), "json".into()];
+    for path in paths {
+        args.extend(["--append-system-prompt".into(), path.as_os_str().to_owned()]);
+    }
+    args.push("opaque prompt".into());
+    args
+}
+
+#[test]
+fn gate_conformance_shim_recovers_path_from_argv() {
+    let f = fixture();
+    let parent = f.bindings.verdict_root.join("gate-recovered.json");
+    let output = run_direct_shim(&f, "claude", &gate_shim_args(&[&parent]));
+    assert!(output.status.success());
+    let recovered = PathBuf::from(
+        fs::read_to_string(f.bindings.cwd.join(".review/recovered-path")).expect("recovered path"),
+    );
+    let artifact = fs::read_dir(parent.parent().expect("artifact directory"))
+        .expect("artifact directory")
+        .map(|entry| entry.expect("artifact entry").path())
+        .find(|path| path.file_name() == parent.file_name())
+        .expect("artifact path");
+    assert_eq!(recovered, parent);
+    assert_eq!(artifact, parent);
+    assert_eq!(recovered, artifact);
+    assert_schema_valid(&parent, &f.bindings.verdict_schema, "gate recovery");
+    let environment = fs::read_to_string(f.bindings.cwd.join(".review/env")).expect("environment");
+    assert!(!environment.contains("ARTIFACT=") && !environment.contains("OUTPUT_PATH"));
+}
+
+#[test]
+fn gate_conformance_shim_no_designated_path_reds() {
+    let f = fixture();
+    let output = run_direct_shim(&f, "claude", &gate_shim_args(&[]));
+    assert!(!output.status.success());
+    assert!(!f.bindings.output.exists());
+}
+
+#[test]
+fn gate_conformance_shim_duplicate_designated_path_reds() {
+    let f = fixture();
+    let first = f.bindings.verdict_root.join("gate-first.json");
+    let second = f.bindings.verdict_root.join("gate-second.json");
+    let output = run_direct_shim(&f, "claude", &gate_shim_args(&[&first, &second]));
+    assert!(!output.status.success());
+    assert!(!first.exists() && !second.exists());
+}
+
+#[test]
+fn real_document_backstops_and_source_audit() {
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("skill");
+    reject_outside_fragments(&skill).expect("real_skill_has_no_prohibited_outside_anchor_fragment");
+    assert!(
+        !skill.contains(CONSOLIDATION_MARKER),
+        "real document marker absence"
+    );
+    let source = fs::read_to_string(file!()).expect("review source");
+    let forbidden = [
+        concat!("anchor_shell_", "operator"),
+        concat!("repeated_placeholder_values_are_", "byte_identical"),
+        concat!("PCE_REVIEW_", "CASE"),
+    ];
+    for symbol in forbidden {
+        assert!(
+            !source.contains(symbol),
+            "review_has_no_degenerate_controls/{symbol}"
+        );
+    }
 }
 
 #[test]
@@ -762,10 +3023,30 @@ fn automatic_coverage_added_anchor_green() {
 
 #[test]
 fn automatic_coverage_added_malformed_anchor_red() {
+    let prefix = "foundation prose\n";
     let command = base_command(RouteKind::CodexUnstructured).replace("{{CALLER_ARG}}", "exec");
+    let malformed = format!("{prefix}{}", document("codex-unstructured", &command));
+    let green = format!(
+        "{prefix}{}",
+        document(
+            "codex-unstructured",
+            &base_command(RouteKind::CodexUnstructured)
+        )
+    );
     assert_eq!(
-        error_for(&document("codex-unstructured", &command)),
+        &malformed.as_bytes()[..prefix.len()],
+        &green.as_bytes()[..prefix.len()]
+    );
+    assert_eq!(
+        error_for(&malformed),
         ReviewError::CallerTailResuppliesBinaryArgument
+    );
+    let outside_fence = "```text\npce dispatch gate --\n```\n";
+    assert!(unit_has_prohibited_fragment("pce dispatch gate --"));
+    assert_eq!(
+        review_document(outside_fence, &fixture().bindings)
+            .expect_err("outside fenced known-match must red"),
+        ReviewError::OutsideAnchorDispatchFragment
     );
 }
 
@@ -840,9 +3121,6 @@ fn anchor_metadata_and_fence_cases() {
         ),
     ];
     for (name, markdown, expected) in cases {
-        if !case_enabled(name) {
-            continue;
-        }
         assert_eq!(error_for(&markdown), expected, "{name}");
     }
 }
@@ -905,16 +3183,7 @@ fn anchor_prefix_and_shell_syntax_cases() {
             "&",
             ReviewError::ShellConstruct,
         ),
-        (
-            "anchor_shell_operator",
-            "{{CALLER_ARG}}",
-            "|",
-            ReviewError::ShellConstruct,
-        ),
     ] {
-        if !case_enabled(name) {
-            continue;
-        }
         assert_eq!(
             error_for(&document(
                 "codex-unstructured",
@@ -929,7 +3198,11 @@ fn anchor_prefix_and_shell_syntax_cases() {
 #[test]
 fn line_continuation_cases() {
     let good = base_command(RouteKind::CodexUnstructured);
-    let joined = good.replace("--sandbox", "\\\n--sandbox");
+    let joined = good.replace("{{CALLER_ARG}}", "\\\n{{CALLER_ARG}}");
+    assert!(
+        joined.contains("-- \\\n{{CALLER_ARG}}"),
+        "joined_line_continuation_accepts: caller-tail split precondition"
+    );
     let joined_fixture = fixture();
     let report = review_document(
         &document("codex-unstructured", &joined),
@@ -937,22 +3210,15 @@ fn line_continuation_cases() {
     )
     .expect("joined_line_continuation_accepts");
     assert_eq!(report.observations.len(), 1);
-    let unbroken_fixture = fixture();
     let unbroken = review_document(
         &document("codex-unstructured", &good),
-        &unbroken_fixture.bindings,
+        &joined_fixture.bindings,
     )
     .expect("unbroken control");
     let joined_argv = &report.observations[0].child_argv;
     let unbroken_argv = &unbroken.observations[0].child_argv;
     assert_eq!(
-        &joined_argv[..3],
-        &unbroken_argv[..3],
-        "joined_line_continuation_accepts"
-    );
-    assert_eq!(
-        &joined_argv[4..],
-        &unbroken_argv[4..],
+        joined_argv, unbroken_argv,
         "joined_line_continuation_accepts"
     );
     assert_eq!(
@@ -1039,9 +3305,6 @@ fn placeholder_cases() {
         ("empty_placeholder_ref_reds", "dispatch_ref"),
         ("empty_placeholder_evidence_reds", "evidence"),
     ] {
-        if !case_enabled(name) {
-            continue;
-        }
         let mut fixture = fixture();
         match field {
             "role" => fixture.bindings.role = OsString::new(),
@@ -1083,9 +3346,6 @@ fn route_shape_tail_and_delimiter_cases() {
         ),
         ("codex_tail_output_rejected", "-o"),
     ] {
-        if !case_enabled(name) {
-            continue;
-        }
         assert_eq!(
             error_for(&document(
                 "codex-unstructured",
@@ -1114,9 +3374,6 @@ fn route_shape_tail_and_delimiter_cases() {
             "--output-format=json",
         ),
     ] {
-        if !case_enabled(name) {
-            continue;
-        }
         assert_eq!(
             error_for(&document(
                 "gate-structured",
@@ -1126,26 +3383,22 @@ fn route_shape_tail_and_delimiter_cases() {
             "{name}"
         );
     }
-    if case_enabled("codex_multiple_delimiters_route") {
-        assert_eq!(
-            error_for(&document(
-                "codex-unstructured",
-                &codex.replace("{{CALLER_ARG}}", "x -- y")
-            )),
-            ReviewError::MultipleDelimiters,
-            "codex_multiple_delimiters_route"
-        );
-    }
-    if case_enabled("gate_multiple_delimiters_route") {
-        assert_eq!(
-            error_for(&document(
-                "gate-structured",
-                &gate.replace("{{CALLER_ARG}}", "x -- y")
-            )),
-            ReviewError::MultipleDelimiters,
-            "gate_multiple_delimiters_route"
-        );
-    }
+    assert_eq!(
+        error_for(&document(
+            "codex-unstructured",
+            &codex.replace("{{CALLER_ARG}}", "x -- y")
+        )),
+        ReviewError::MultipleDelimiters,
+        "codex_multiple_delimiters_route"
+    );
+    assert_eq!(
+        error_for(&document(
+            "gate-structured",
+            &gate.replace("{{CALLER_ARG}}", "x -- y")
+        )),
+        ReviewError::MultipleDelimiters,
+        "gate_multiple_delimiters_route"
+    );
     let pair = "--output-schema {{SCHEMA}} -o {{OUTPUT}} ";
     assert_eq!(
         error_for(&document(
@@ -1200,9 +3453,6 @@ fn route_shape_tail_and_delimiter_cases() {
             gate_logged.replace("--dry-run --", "-- --dry-run"),
         ),
     ] {
-        if !case_enabled(name) {
-            continue;
-        }
         assert_eq!(
             error_for(&document(kind, &command)),
             ReviewError::ParentGrammar,
@@ -1738,9 +3988,6 @@ fn direct_args(
 #[test]
 fn spawn_path_stdin_environment_shape_and_artifact_cases() {
     for target in ["codex", "gate"] {
-        if !target_enabled(target) {
-            continue;
-        }
         let f = fixture();
         let output = run_pce(
             &direct_args(
@@ -1908,9 +4155,6 @@ fn spawn_path_stdin_environment_shape_and_artifact_cases() {
 #[test]
 fn child_nonzero_completion() {
     for target in ["codex", "gate"] {
-        if !target_enabled(target) {
-            continue;
-        }
         let f = fixture();
         let mut args = direct_args(
             &f,
@@ -1982,19 +4226,6 @@ fn child_nonzero_completion() {
     }
 }
 
-#[test]
-fn repeated_placeholder_values_are_byte_identical() {
-    let f = fixture();
-    let command = base_command(RouteKind::CodexUnstructured)
-        .replace("{{CALLER_ARG}}", "{{CALLER_ARG}} {{CALLER_ARG}}");
-    let report = review_document(&document("codex-unstructured", &command), &f.bindings)
-        .expect("repeated route");
-    let argv = &report.observations[0].child_argv;
-    let length = argv.len();
-    assert!(length >= 2);
-    assert_eq!(argv[length - 2], argv[length - 1]);
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ManifestEntry {
     path: PathBuf,
@@ -2060,6 +4291,9 @@ fn review_child_with_stand_in_home() {
     let markdown = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
         .expect("skill");
     review_document(&markdown, &f.bindings).expect("child real review");
+    std::io::stdout()
+        .write_all(b"PCE_REVIEW_CHILD_RAN\n")
+        .expect("child sentinel");
 }
 
 #[test]
@@ -2104,6 +4338,16 @@ fn review_preserves_installed_skill_symlink_target() {
         output.status.success(),
         "child stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    let child_stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        child_stdout.matches("PCE_REVIEW_CHILD_RAN").count(),
+        1,
+        "child-run sentinel: {child_stdout}"
+    );
+    assert!(
+        child_stdout.contains("1 passed"),
+        "child test measurement: {child_stdout}"
     );
     let after_manifest = manifest(sentinel.path());
     let after_target = fs::read_link(&installed).expect("after link");

@@ -21,6 +21,7 @@ This skill runs in a **fresh ultracode session** (xhigh reasoning effort + dynam
 - Use Workflows / parallel Claude subagents only for bounded fan-out such as orientation, critic reviews, and PR reviews. Planner and executor work uses the Codex dispatch target and is not a subagent.
 - Workflow arguments are real JSON objects, never JSON-encoded strings.
 - A subagent completion and its later idle notification describe one result. After routing the result, ignore the idle notification.
+- Every issued unit uses its matching route in the anchored dispatch role registry. Completion is routed once; its later idle notification is ignored and creates no route.
 
 `SKILL.md` invokes the installed `pce` executable; `src/main.rs` adapters own subprocess, network, path, and file authority; `crates/core` receives only narrow typed inputs or injected capabilities.
 
@@ -29,6 +30,7 @@ This skill runs in a **fresh ultracode session** (xhigh reasoning effort + dynam
 **Codex authors every artifact; Claude adversarially gates every artifact; the orchestrator structures the live graph and owns git, event appends, live orientation, and escalation.**
 
 You are an active coordinator, not an implementer. You author only runtime graph adaptations. Codex authors milestone and step graphs, every `plan.md`, product code, and PR bodies. Claude subagents are pure adversarial gates. If code or plan content is needed, dispatch Codex.
+Claude work uses the matching anchored gate role and Codex work uses the matching anchored Codex role.
 
 ## The delegation contract
 
@@ -41,10 +43,11 @@ Every Claude subagent dispatch and Codex invocation receives:
 5. **Ground truth** — exact git refs and read commands (`git show <ref>:<path>` or `git diff <base>...<head>`).
 
 Critics and reviewers use the named ref, not their checkout. Every dispatch without `--plan-file` receives null standard input, while `--plan-file` supplies the plan bytes.
+Every role invocation uses the matching anchored registry route while retaining all five delegation fields and the exact-ref rule.
 
 ### Dispatch route anchors
 
-Future executable dispatch examples use a closed anchor convention. An HTML comment named
+Executable dispatch routes use a closed anchor convention. An HTML comment named
 `pce-dispatch-route` carries exactly one `kind` attribute whose value is
 `codex-unstructured`, `codex-structured`, or `gate-structured`. The comment immediately precedes,
 apart from blank lines, an `sh` fence containing exactly one shell-free logical command. A single
@@ -52,14 +55,70 @@ terminal backslash may continue a physical line. The fenced invocation spans the
 command and caller tail, contains exactly one standalone delimiter, and uses only unquoted,
 whitespace-separated tokens.
 
+The marker, opening `\`\`\`sh` fence, every physical command line, and closing `\`\`\`` fence begin at column 0. Only strictly empty physical lines may occur between the marker and opening fence. An anchor with leading spaces or tabs on any of those lines is invalid; numbered-list prose must end before the anchor and resume after it.
+
 The closed placeholder vocabulary is `CWD`, `SCHEMA`, `OUTPUT`, `PLAN_FILE`, `LOG_FILE`, `ENV`,
-`NODE`, `ROLE`, `REF`, `EVIDENCE`, `ABS_PATH`, and `CALLER_ARG`, each surrounded by two opening and
+`NODE`, `MILESTONE_NODE`, `STEP_NODE`, `ROLE`, `REF`, `EVIDENCE`, `ABS_PATH`, and `CALLER_ARG`, each surrounded by two opening and
 two closing braces and occupying a complete token. Embedded, malformed, unknown, or aliased names
 are invalid. Codex routes own their working-directory and workspace-write sandbox options. A
 structured Codex route additionally owns its adjacent schema and output options. Gate routes own
 their working-directory and adjacent schema and output options. Optional environment, plan-file,
-and complete logging groups retain the binary's strict order; dry-run is available only after a
-complete logging group. Binary-owned child arguments may not be repeated in the caller tail.
+and complete logging groups retain the binary's strict order. Every anchored route contains exactly one `--env {{ENV}}` entry. The plan-file and complete logging groups retain the binary's strict order; the plan-file group is optional, while the complete logging group is required for every canonical operating route. Dry-run remains available only after a complete logging group in synthetic review fixtures. Binary-owned child arguments may not be repeated in the caller tail.
+
+Outside a valid anchored fence, a prohibited dispatch fragment is one inline code span, one complete fenced code block, or one shell-like physical line that contains both (a) the contiguous route name `pce dispatch codex` or `pce dispatch gate` and (b) at least one whitespace-delimited token that is a dispatch-only parent option, the standalone `--` delimiter, or any caller argument represented by a whitespace-delimited token after that delimiter.
+
+Gate routes use the caller tail `--append-system-prompt ABSOLUTE_VERDICT_PATH PROMPT`. The path is byte-identical to the parent `-o` path. Claude treats the value after `--append-system-prompt` as system-prompt text, not as an output-file option; the caller prompt instructs the child to write one conforming verdict object to that absolute path. The child-visible option is not a second parent `-o` and does not repeat `-p` or an output-format option.
+
+`run_dispatch_projection` receives an already-parsed output path and performs no child artifact write, so it cannot inspect or falsify `-o` naming, verdict indexing, directory selection, gate-tail visibility, or sentinel preservation; a dry run is not evidence for those properties.
+
+### Anchored dispatch role registry
+
+These are the only canonical operating routes. `{{MILESTONE_NODE}}` is the canonical `m<m>-s1`; `{{STEP_NODE}}` is the actual canonical `m<m>-s<s>`. Gate prompts instruct the child to write the conforming verdict JSON to the absolute path supplied in the system prompt. `{{ABS_PATH}}` is the absolute complete parent repository `.git`; worktree metadata alone is not a runtime substitute. The closed placeholder projects that authority choice, so removal and position are document-semantic falsifiers while alternative path bindings are not expressible in this tranche.
+
+<!-- pce-dispatch-route kind="gate-structured" -->
+```sh
+pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node m1-s1 --role repository-analyst --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+```
+
+<!-- pce-dispatch-route kind="codex-structured" -->
+```sh
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node m1-s1 --role milestone-planner --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
+```
+
+<!-- pce-dispatch-route kind="gate-structured" -->
+```sh
+pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node m1-s1 --role milestone-critic --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+```
+
+<!-- pce-dispatch-route kind="codex-structured" -->
+```sh
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{MILESTONE_NODE}} --role step-planner --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
+```
+
+<!-- pce-dispatch-route kind="gate-structured" -->
+```sh
+pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{MILESTONE_NODE}} --role step-critic --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+```
+
+<!-- pce-dispatch-route kind="codex-unstructured" -->
+```sh
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-plan-writer --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
+```
+
+<!-- pce-dispatch-route kind="gate-structured" -->
+```sh
+pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-plan-critic --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+```
+
+<!-- pce-dispatch-route kind="codex-structured" -->
+```sh
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --plan-file {{PLAN_FILE}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-executor --ref {{REF}} --evidence {{EVIDENCE}} -- --add-dir {{ABS_PATH}} {{CALLER_ARG}}
+```
+
+<!-- pce-dispatch-route kind="gate-structured" -->
+```sh
+pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role pr-reviewer --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+```
 
 ## Event log contract
 
@@ -147,6 +206,8 @@ Append a `dispatch` when every Claude or Codex dispatch is issued, using its exa
 - Execution: `step-executor`.
 - Explicitly non-round-bearing: `repository-analyst`.
 
+The complete executable representation for each of these nine byte-exact roles is the single `### Anchored dispatch role registry` in `### Dispatch route anchors`; this role list and the node rules below are normative metadata, not a second route representation.
+
 Use `repository-analyst` only in Phase 0; `milestone-planner` and `milestone-critic` in Phase 1; `step-planner` and `step-critic` in Phase 2; `step-plan-writer` and `step-plan-critic` in Phase 3 step 1; `step-executor` in Phase 3 step 3; and `pr-reviewer` in Phase 3 step 5. Spellings are byte-exact. Any other spelling is unrecognized, creates no round series, and makes caps and stuck detection underivable without a parser error. Never invent aliases such as `claude-critic`, `codex-step-planner`, or `executor`.
 
 Node attribution is also exact. Phase 0 and Phase 1 use `m1-s1`. Phase 2 for milestone `m` uses `m<m>-s1`. Phase 3 uses the actual `m<m>-s<s>` node. A delta creating a stub uses the new stub's canonical id; other deltas use the canonical node concerned. Although any non-empty node can parse for an append, noncanonical nodes disappear from repository projection.
@@ -201,6 +262,8 @@ Round counts, hold status, per-milestone refs, resume position, merge state, and
 
 ## Phase 0 — Orientation and repository contracts
 
+Repository orientation uses the `repository-analyst` anchored registry route.
+
 Dispatch `repository-analyst` orientation in every declared repository only for cross-repository consumption edges containing `build_command` and `artifact_path`; it must not infer or override gates, version policy, branch conventions, pull-request conventions, workflow mappings, or appendable knowledge. Each dispatch names the exact orientation ref and supplies `git show <orientation-ref>:<path>` commands for every tracked input. Every repository-stated fact and stack-specific gate command comes from `.pce/repository-contract.json` at default-branch HEAD, is measured into a current `repository-contract` record, and flows from that record into plans and dispatches. Record the dispatch and key findings at bootstrap attribution and, only for a repository whose tracked contract is present at default-branch HEAD while its log has no current record, record the authorized initial repository contract at the same attribution:
 
 ```text
@@ -248,6 +311,8 @@ For each producer merge to `main`, read accepted records with `pce log read --fi
 
 ## Phase 1 — Vision to milestones
 
+Initial and revision graph authorship uses `milestone-planner`; adversarial review uses `milestone-critic`, through their anchored registry routes. Both use node `m1-s1`; the planner receives the graph schema and null stdin, while the critic receives the verdict schema. All later planner and executor dispatches carry every appendable entry verbatim; version policy is never supplied to planners or graph critics.
+
 1. Dispatch a cold `milestone-planner` Codex run at the primary root with `--sandbox workspace-write`, `-C <repo-abs>`, `--output-schema <graph-schema-abs>`, `-o <vision-abs>/milestones.json`, and `< /dev/null`. Supply `vision.md`, filtered contract records, current cross-repository consumption edges needed by the planner, exact refs and read commands. Require the planner to execute the supplied ref-based read commands and read source at each named ref before authoring ordering edges. Every `depends_on` entry must contain a non-empty `reason` naming the source-level code fact that makes the dependent milestone unbuildable until the dependency has merged; the default is no edge. Reading depth is determined by the claim made by that edge, not by a fixed rule assigned to milestone planning. The planner may and must cite symbols, APIs, modules, ownership boundaries, or other source facts at enough depth to sustain a milestone ordering edge, but it must not decompose the milestone into steps or add step-level implementation detail. Require an ordered milestone graph whose nodes contain `id`, `title`, `repo`, `depends_on`, and `summary`; allow only validated repositories, and avoid step-level detail. Every named path is absolute. Do not inline tracked planning content in its prompt. Record the dispatch with:
 
    ```text
@@ -272,6 +337,8 @@ pce log --file <LOG_PATH> --kind escalation-close --node m1-s1
 
 ## Phase 2 — Milestones to steps
 
+Every `ready` milestone is issued concurrently through the `step-planner` anchored route and reviewed through `step-critic`; revisions return to `step-planner`. Both use the canonical milestone node. `waiting` and `dependency-inconclusive` results are not dispatched.
+
 Invoke `pce ready` for the approved milestone graph, passing `--graph` with that approval record's exact path and no policy argument; readiness obtains each candidate repository's policy from its contract. Create artifact directories and dispatch every result classified `ready` concurrently; milestones with no ordering edge between them proceed concurrently. A milestone waits only for a justified ordering edge or its contract's version policy, never because of list order, shared files, or an orchestrator-side policy predicate. Concurrent milestone conflicts use the existing conflict-recovery path and are not prevented by a new prediction rule. For each dispatched milestone, run a cold `step-planner` with `--sandbox workspace-write`, `-C <repo-abs>`, `--output-schema <graph-schema-abs>`, `-o <vision-abs>/milestone-<m>/steps.json`, and `< /dev/null`, followed by a cold `step-critic`. Supply `vision.md`, `milestones.json`, filtered contracts, exact refs/read commands, and graph/verdict schemas as appropriate. Require the step planner to execute the supplied ref-based read commands and descend into source at the named ref before authoring step edges. Every `depends_on` entry must contain a non-empty `reason` naming the source-level code fact that makes the dependent step unbuildable until its dependency has merged; the default is no edge. Reading depth is determined by the claim made by that edge, not by a fixed rule assigned to step planning. Require ordered nodes containing `id`, `title`, `repo`, `depends_on`, and `summary`. Every step inherits its milestone repository. Give the step critic the graph artifact, `milestones.json`, exact named ref and ref-based read commands, and source material needed to test the graph. Its primary obligation is to try to refute every `depends_on` edge, not to verify or infer write-sets. For every edge, it checks every cited fact at the depth at which its reason cites it. If the reason does not survive contact with source at the named ref, delete the edge. An unjustified edge is a blocking finding exactly as a missing required semantic edge is. A shared file or likely overlap is not an ordering reason. It continues detecting missing semantic edges, but ordering is admitted only where source proves the dependent node cannot be built until the dependency has merged. Record dispatches and escalations with:
 
 ```text
@@ -289,6 +356,8 @@ pce log --file <LOG_PATH> --kind planning-artifact-approved --node m<m>-s1
 Use the exact approval payload and digest evidence. Provenance `approval_node` `m<m>-s1` is bootstrap attribution, not an authorship claim; no control flow branches on it. Plan critics set `self_sufficiency` to `PASS` or `FAIL`; other verdict producers use `NOT_APPLICABLE`.
 
 ## Phase 3 — Per step PCE-PR-C
+
+Every `ready` step is issued concurrently through the phase-appropriate anchored route. Plan authorship and revision use `step-plan-writer`, plan review uses `step-plan-critic`, execution and fixes use `step-executor`, and PR review uses `pr-reviewer`, all at the actual canonical step node.
 
 `pce ready` is the sole readiness authority at milestone and step altitude. Without `--graph`, it walks approvals newest-first and selects the first artifact whose current bytes parse as a conforming graph. With `--graph`, it selects that exact path's latest approval, verifies the current bytes' digest against that approval record, and fails loudly with no fallback if the path has no approval, the digest differs, or the bytes do not form a conforming graph. The same preliminary provenance check verifies the digest on both the default path without `--graph` and the explicit `--graph` path, and a digest mismatch fails loudly on either path. The supplied `--graph` value must byte-match the recorded approval payload's `path`; selection is exact `ArtifactPath` equality. Because the recorded path may be relative or absolute, pass the recorded path rather than reconstructing or normalizing an equivalent-looking path. A mismatch fails loudly instead of silently stalling.
 
@@ -354,6 +423,10 @@ Both graphs conform to installed `~/.claude/skills/pce/schemas/graph.schema.json
 
 ## Routing, caps, and adaptation
 
+Immediately before each verdict-producing gate issuance, read the accepted source event log and count only prior `dispatch` records whose node and role byte-match the route. Checked successor `n = prior_count + 1` names both distinct review artifacts in the already designated review directory: `review-<n>.json` is the absolute parent `-o` and gate-tail path, while `review-<n>.md` retains explanatory history. After the gate returns, read the exact JSON path and validate it again against the installed verdict schema. Missing, unreadable, malformed, schema-invalid, or unknown verdict data stops loudly. `APPROVE` proceeds, `REVISE` uses the phase-appropriate planning anchor for plan causes or `step-executor` for execution fixes at the exact current ref, and `BLOCK` escalates. The same prior `(node, role)` dispatch count determines the artifact index and round cap; no separate counter exists.
+
+“Delegate its plan” issues the phase-appropriate planning anchor for the new canonical stub node. Conflict recovery uses `step-executor` at the named base and head refs.
+
 - `APPROVE` proceeds, `REVISE` loops with blocking issues, and `BLOCK` escalates.
 - `execution` re-fixes from exact PR head; `step_plan` re-dispatches `step-plan-writer` cold with budget 2; `milestone_plan` replans remaining unmerged work cold with budget 1–2; `vision` always escalates. The step planner is the first actor that may descend deeply enough to expose a false milestone ordering edge, but it runs with `--output-schema <graph-schema-abs>` and cannot emit a verdict or `root_cause`. The step-critic is the carrier: it emits a verdict, already receives `milestones.json`, and reports the source-grounded refutation as `root_cause: milestone_plan`. This specific result licenses deleting the refuted milestone edge and cold re-running the affected remaining planning flow. It does not license re-cutting milestone identities, scopes, or decomposition, and needs no new artifact, schema field, event kind, or communication channel.
 - Plan/critic and PR/fix caps are 3. Derive rounds from dispatch records. On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the cap. Derive the comparison from review artifacts; do not update separate loop state.
@@ -372,7 +445,7 @@ VISION_DIR/
   vision.md  milestones.json  events.jsonl
   milestone-<m>/
     steps.json
-    step-<s>/  plan.md  pr-body.md  review-<n>.md
+    step-<s>/  plan.md  pr-body.md  review-<n>.json  review-<n>.md
 ```
 
 The verdict, graph, and run-snapshot schemas, including `~/.claude/skills/pce/schemas/run-snapshot.schema.json`, are installed schemas rather than per-run artifacts.
