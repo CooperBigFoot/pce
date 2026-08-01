@@ -25,12 +25,13 @@ use pce_core::{
     OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
     RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot, Sandbox,
-    Sha256Digest, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode, TagName,
-    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName,
-    VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
-    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
-    derive_run_state, event_record_matches, measure_contract_snapshot, parse_event_line,
-    parse_tracked_repository_contract, render_human_snapshot,
+    SeatbeltCapability, Sha256Digest, SquashCommitOid, StdinBinding, StepAuthorityObservation,
+    StepNode, TagName, TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload,
+    VersionPolicy, VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
+    admit_recurrent_finding, append_event, classify_seatbelt_capability, compute_dispatchability,
+    create_vision, derive_merge_status, derive_milestone_merge_status, derive_run_state,
+    event_record_matches, measure_contract_snapshot, parse_event_line,
+    parse_tracked_repository_contract, render_human_snapshot, seatbelt_capability_probe,
     serialize_tracked_repository_contract, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
@@ -1869,37 +1870,33 @@ fn execute_sandboxed_gate_command(
 }
 
 fn verify_seatbelt_execution_capability(repository_root: &Path) -> std::io::Result<()> {
+    if let SeatbeltCapability::Unavailable { status } =
+        seatbelt_execution_capability(repository_root)?
+    {
+        return Err(std::io::Error::other(format!(
+            "failed to verify Seatbelt execution capability: permissive profile probe exited with status {status}"
+        )));
+    }
+    Ok(())
+}
+
+fn seatbelt_execution_capability(repository_root: &Path) -> std::io::Result<SeatbeltCapability> {
     let canonical_root = std::fs::canonicalize(repository_root).map_err(|error| {
         std::io::Error::other(format!(
             "failed to canonicalize Seatbelt probe working directory {}: {error}",
             repository_root.display()
         ))
     })?;
-    let envelope = DispatchEnvelope::new(
-        Executable::parse("/usr/bin/sandbox-exec")
-            .map_err(|error| std::io::Error::other(error.to_string()))?,
-        AbsoluteWorkingDirectory::parse(canonical_root)
-            .map_err(|error| std::io::Error::other(error.to_string()))?,
-        StdinBinding::Null,
-    )
-    .with_arguments(ArgumentVector::new(vec![
-        "-p".to_owned(),
-        "(version 1)(allow default)".to_owned(),
-        "--".to_owned(),
-        "/usr/bin/true".to_owned(),
-    ]))
-    .with_environment(ChildEnvironment::new(BTreeMap::new()));
+    let working_directory = AbsoluteWorkingDirectory::parse(canonical_root)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let envelope = seatbelt_capability_probe(working_directory)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let status = spawn_envelope(&envelope).map_err(|error| {
         std::io::Error::other(format!(
             "failed to verify Seatbelt execution capability: {error:#}"
         ))
     })?;
-    if status.code() != 0 {
-        return Err(std::io::Error::other(format!(
-            "failed to verify Seatbelt execution capability: permissive profile probe exited with status {status}"
-        )));
-    }
-    Ok(())
+    Ok(classify_seatbelt_capability(status))
 }
 
 fn execute_sandboxed_gate_text(
@@ -3321,9 +3318,10 @@ mod tests {
         GitMergeObservation, KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId,
         ObservedExitStatus, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
         RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-        RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation,
-        StepNode, TagName, TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
-        WriteKind, derive_run_state, parse_event_line, render_human_snapshot,
+        RepositoryObservationFailure, RunSnapshot, SeatbeltCapability, Sha256Digest,
+        StepAuthorityObservation, StepNode, TagName, TagState, VersionPolicy, VisionSlug,
+        WorktreeIdentity, WorktreeState, WriteKind, derive_run_state, parse_event_line,
+        render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -3335,7 +3333,7 @@ mod tests {
         measure_tracked_contract_at_root, observe_git, parse_command, parse_dispatch_graph,
         parse_tracked_contract, read_at_default_branch_head, read_event_log,
         readiness_version_policies, repository_contracts, run, run_log_read,
-        select_bootstrap_candidate, validated_snapshot_value,
+        seatbelt_execution_capability, select_bootstrap_candidate, validated_snapshot_value,
     };
 
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
@@ -4972,6 +4970,14 @@ mod tests {
 
     #[test]
     fn successive_contract_measurements_do_not_reexecute_unchanged_gate_commands() {
+        if let SeatbeltCapability::Unavailable { .. } =
+            seatbelt_execution_capability(Path::new(".")).expect("Seatbelt probe should execute")
+        {
+            eprintln!(
+                "PCE_TEST_SKIP: nested Seatbelt unavailable; permissive capability probe was denied"
+            );
+            return;
+        }
         let directory = tempdir().expect("temporary directory should create");
         let repository_root = directory.path().join("repo");
         fs::create_dir(&repository_root).expect("repository fixture should create");

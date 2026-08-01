@@ -1,4 +1,5 @@
 //! DispatchEnvelope = Executable × ArgumentVector × AbsoluteWorkingDirectory × ChildEnvironment × StdinBinding   (pure, deterministic)
+//! SeatbeltCapability = classify(permissive_profile_probe_status)   (pure, deterministic)
 //! This module describes complete shell-free child invocations; the binary adapter performs all I/O and process work.
 
 use std::collections::BTreeMap;
@@ -6,6 +7,11 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use tracing::instrument;
+
+use crate::contract_measurement::ObservedExitStatus;
+
+const SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
+const PERMISSIVE_SEATBELT_PROFILE: &str = "(version 1)(allow default)";
 
 /// A program name passed directly to a process adapter, never to a shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +249,49 @@ impl DispatchEnvelope {
     }
 }
 
+/// Whether the permissive-profile probe proved that this process may apply Seatbelt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeatbeltCapability {
+    /// The probe applied Seatbelt and `/usr/bin/true` completed successfully.
+    Available,
+    /// The probe completed with a nonzero status, including a nested `sandbox_apply` denial.
+    Unavailable {
+        /// The exact status returned by `sandbox-exec`.
+        status: ObservedExitStatus,
+    },
+}
+
+/// Construct the permissive-profile probe used before applying a gate's Seatbelt profile.
+///
+/// # Errors
+///
+/// Returns [`DispatchError`] if a fixed probe executable cannot be represented as an executable.
+pub fn seatbelt_capability_probe(
+    working_directory: AbsoluteWorkingDirectory,
+) -> Result<DispatchEnvelope, DispatchError> {
+    Ok(DispatchEnvelope::new(
+        Executable::parse(SEATBELT_EXECUTABLE)?,
+        working_directory,
+        StdinBinding::Null,
+    )
+    .with_arguments(ArgumentVector::new(vec![
+        "-p".to_owned(),
+        PERMISSIVE_SEATBELT_PROFILE.to_owned(),
+        "--".to_owned(),
+        "/usr/bin/true".to_owned(),
+    ]))
+    .with_environment(ChildEnvironment::new(BTreeMap::new())))
+}
+
+/// Classify the observed status from [`seatbelt_capability_probe`].
+pub const fn classify_seatbelt_capability(status: ObservedExitStatus) -> SeatbeltCapability {
+    if status.code() == 0 {
+        SeatbeltCapability::Available
+    } else {
+        SeatbeltCapability::Unavailable { status }
+    }
+}
+
 /// A dispatch value failed pure parsing.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DispatchError {
@@ -267,8 +316,10 @@ mod tests {
 
     use super::{
         AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
-        ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, StdinBinding,
+        ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, SeatbeltCapability,
+        StdinBinding, classify_seatbelt_capability, seatbelt_capability_probe,
     };
+    use crate::contract_measurement::ObservedExitStatus;
 
     #[test]
     fn constructs_minimal_dispatch_envelope() -> Result<(), DispatchError> {
@@ -391,6 +442,29 @@ mod tests {
             &["positional prompt".to_owned()]
         );
         assert_eq!(envelope.stdin(), &StdinBinding::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn permissive_probe_success_reports_seatbelt_available() -> Result<(), DispatchError> {
+        let envelope =
+            seatbelt_capability_probe(AbsoluteWorkingDirectory::parse("/workspace/project")?)?;
+
+        assert_eq!(envelope.executable().as_str(), "/usr/bin/sandbox-exec");
+        assert_eq!(
+            envelope.arguments().as_slice(),
+            ["-p", "(version 1)(allow default)", "--", "/usr/bin/true"]
+        );
+        assert_eq!(
+            classify_seatbelt_capability(ObservedExitStatus::from_code(0)),
+            SeatbeltCapability::Available
+        );
+        assert_eq!(
+            classify_seatbelt_capability(ObservedExitStatus::from_code(71)),
+            SeatbeltCapability::Unavailable {
+                status: ObservedExitStatus::from_code(71)
+            }
+        );
         Ok(())
     }
 }

@@ -14,7 +14,8 @@ pub use contract_measurement::{
 };
 pub use dispatch::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
-    ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, StdinBinding,
+    ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, SeatbeltCapability,
+    StdinBinding, classify_seatbelt_capability, seatbelt_capability_probe,
 };
 pub use event_log::{
     AppendError, AppendIntent, AppendableRepositoryContract, ArtifactPath, DeltaPayload,

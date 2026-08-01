@@ -5,12 +5,66 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use pce_core::{
+    AbsoluteWorkingDirectory, ObservedExitStatus, SeatbeltCapability, StdinBinding,
+    classify_seatbelt_capability, seatbelt_capability_probe,
+};
 use support::CliHarness;
 
 static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static SEATBELT_CAPABILITY: OnceLock<SeatbeltProbeObservation> = OnceLock::new();
+
+const NESTED_SEATBELT_SKIP_MARKER: &str =
+    "PCE_TEST_SKIP: nested Seatbelt unavailable; permissive capability probe was denied";
+
+#[derive(Clone, Copy)]
+struct SeatbeltProbeObservation {
+    status: ObservedExitStatus,
+    capability: SeatbeltCapability,
+}
+
+fn observe_seatbelt_capability() -> SeatbeltProbeObservation {
+    *SEATBELT_CAPABILITY.get_or_init(|| {
+        let current_directory =
+            fs::canonicalize(std::env::current_dir().expect("test current directory should read"))
+                .expect("test current directory should canonicalize");
+        let working_directory = AbsoluteWorkingDirectory::parse(current_directory)
+            .expect("canonical test directory should be absolute");
+        let envelope = seatbelt_capability_probe(working_directory)
+            .expect("fixed Seatbelt capability probe should construct");
+        assert_eq!(envelope.stdin(), &StdinBinding::Null);
+
+        let output = Command::new(envelope.executable().as_str())
+            .args(envelope.arguments().as_slice())
+            .current_dir(envelope.working_directory().as_path())
+            .env_clear()
+            .stdin(Stdio::null())
+            .output()
+            .expect("Seatbelt capability probe should spawn");
+        let code = output
+            .status
+            .code()
+            .expect("Seatbelt capability probe should return an exit-status code");
+        let status = ObservedExitStatus::from_code(code);
+        SeatbeltProbeObservation {
+            status,
+            capability: classify_seatbelt_capability(status),
+        }
+    })
+}
+
+fn skip_without_nested_seatbelt() -> bool {
+    if let SeatbeltCapability::Unavailable { .. } = observe_seatbelt_capability().capability {
+        eprintln!("{NESTED_SEATBELT_SKIP_MARKER}");
+        true
+    } else {
+        false
+    }
+}
 
 struct ProbeGuard(PathBuf);
 
@@ -270,6 +324,9 @@ fn assert_uv_status_and_invocation(fixture: &SeatbeltFixture, output: std::proce
 
 #[test]
 fn contract_check_executes_gate_inside_seatbelt_boundary() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let fixture = seatbelt_fixture();
     let output = run_seatbelt_fixture(&fixture);
     assert!(
@@ -281,6 +338,9 @@ fn contract_check_executes_gate_inside_seatbelt_boundary() {
 
 #[test]
 fn seatbelt_profile_permits_repository_write_and_denies_external_probe() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let fixture = seatbelt_fixture();
     let output = run_seatbelt_fixture(&fixture);
     assert_uv_status_and_invocation(&fixture, output);
@@ -288,6 +348,9 @@ fn seatbelt_profile_permits_repository_write_and_denies_external_probe() {
 
 #[test]
 fn seatbelt_apply_failure_is_execution_failure_not_gate_status() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let fixture = seatbelt_fixture();
     let output = run_seatbelt_fixture_inside_seatbelt(&fixture);
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
@@ -309,6 +372,9 @@ fn seatbelt_apply_failure_is_execution_failure_not_gate_status() {
 
 #[test]
 fn seatbelt_probe_success_preserves_legitimate_gate_status_71() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let harness = CliHarness::new().expect("CLI harness should create");
     let repository_root = harness.path().join("repo");
     fs::create_dir(&repository_root).expect("repository fixture should create");
@@ -348,6 +414,9 @@ fn seatbelt_probe_success_preserves_legitimate_gate_status_71() {
 
 #[test]
 fn uv_fixture_distinguishes_log_failure_from_probe_denial() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let fixture = seatbelt_fixture();
     fs::write(&fixture.invocation_log, []).expect("uv log should pre-create");
     let mut permissions = fs::metadata(&fixture.invocation_log)
@@ -378,6 +447,9 @@ fn uv_fixture_distinguishes_log_failure_from_probe_denial() {
 
 #[test]
 fn contract_check_rejects_non_zero_base_gate_with_command_and_status() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let harness = CliHarness::new().expect("CLI harness should create");
     let repository_root = harness.path().join("repo");
     fs::create_dir(&repository_root).expect("repository fixture should create");
@@ -412,6 +484,9 @@ fn contract_check_rejects_non_zero_base_gate_with_command_and_status() {
 
 #[test]
 fn contract_check_rejects_omitted_workflow_and_accepts_explicit_none() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let harness = CliHarness::new().expect("CLI harness should create");
     let repository_root = harness.path().join("repo");
     let workflows_directory = repository_root.join(".github/workflows");
@@ -447,4 +522,14 @@ fn contract_check_rejects_omitted_workflow_and_accepts_explicit_none() {
         "stderr was: {}",
         String::from_utf8_lossy(&covered_output.stderr)
     );
+}
+
+#[test]
+fn host_permissive_probe_reports_nested_seatbelt_available() {
+    let observation = observe_seatbelt_capability();
+    if observation.status.code() != 0 {
+        eprintln!("{NESTED_SEATBELT_SKIP_MARKER}");
+        return;
+    }
+    assert_eq!(observation.capability, SeatbeltCapability::Available);
 }
