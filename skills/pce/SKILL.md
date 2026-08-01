@@ -18,7 +18,7 @@ This skill runs in a **fresh ultracode session** (xhigh reasoning effort + dynam
 
 - The top-level loop is turn-by-turn. The orchestrator owns git operations, append decisions, human escalation, and the current invocation's live orientation result.
 - Durable orchestration facts are appended once to `LOG_PATH`. Status is derived by invoking the installed binary. Do not create another progress file, map, narrative, or tally.
-- Use Workflows / parallel Claude subagents only for bounded fan-out such as orientation, critic reviews, and PR reviews. Planner and executor dispatches are `codex exec` shell invocations, not subagents.
+- Use Workflows / parallel Claude subagents only for bounded fan-out such as orientation, critic reviews, and PR reviews. Planner and executor work uses the Codex dispatch target and is not a subagent.
 - Workflow arguments are real JSON objects, never JSON-encoded strings.
 - A subagent completion and its later idle notification describe one result. After routing the result, ignore the idle notification.
 
@@ -40,7 +40,26 @@ Every Claude subagent dispatch and Codex invocation receives:
 4. **Boundaries** — prohibited actions, stopping rules, and failure signaling.
 5. **Ground truth** — exact git refs and read commands (`git show <ref>:<path>` or `git diff <base>...<head>`).
 
-Critics and reviewers use the named ref, not their checkout. Every `codex exec` that does not deliberately receive a plan through standard input closes it with `< /dev/null`. A plan needed by an executor is piped through standard input.
+Critics and reviewers use the named ref, not their checkout. Every dispatch without `--plan-file` receives null standard input, while `--plan-file` supplies the plan bytes.
+
+### Dispatch route anchors
+
+Future executable dispatch examples use a closed anchor convention. An HTML comment named
+`pce-dispatch-route` carries exactly one `kind` attribute whose value is
+`codex-unstructured`, `codex-structured`, or `gate-structured`. The comment immediately precedes,
+apart from blank lines, an `sh` fence containing exactly one shell-free logical command. A single
+terminal backslash may continue a physical line. The fenced invocation spans the complete parent
+command and caller tail, contains exactly one standalone delimiter, and uses only unquoted,
+whitespace-separated tokens.
+
+The closed placeholder vocabulary is `CWD`, `SCHEMA`, `OUTPUT`, `PLAN_FILE`, `LOG_FILE`, `ENV`,
+`NODE`, `ROLE`, `REF`, `EVIDENCE`, `ABS_PATH`, and `CALLER_ARG`, each surrounded by two opening and
+two closing braces and occupying a complete token. Embedded, malformed, unknown, or aliased names
+are invalid. Codex routes own their working-directory and workspace-write sandbox options. A
+structured Codex route additionally owns its adjacent schema and output options. Gate routes own
+their working-directory and adjacent schema and output options. Optional environment, plan-file,
+and complete logging groups retain the binary's strict order; dry-run is available only after a
+complete logging group. Binary-owned child arguments may not be repeated in the caller tail.
 
 ## Event log contract
 
@@ -236,7 +255,7 @@ For each producer merge to `main`, read accepted records with `pce log read --fi
    ```
 
 2. Dispatch `milestone-critic` with the graph artifact, exact named ref and ref-based read commands, source material needed to test the graph, and verdict schema; record it at the same command and node. Its primary obligation is to try to refute every `depends_on` edge, not to verify or infer write-sets. For every edge, check every cited fact at the depth at which its reason cites it. If the reason does not survive contact with source at the named ref, delete the edge. An unjustified edge is a blocking finding exactly as a missing required semantic edge is. A shared file or likely overlap is not an ordering reason. Continue detecting missing semantic edges, but place the burden of proof on the presence of an edge: admit ordering only where source proves the dependent node cannot be built until the dependency has merged.
-3. Iterate cold planner and critic to `APPROVE`, cap 3 with stuck detection. Derive rounds from dispatch records and blocker history from review artifacts. Every revision is a fresh invocation naming the artifact and `review-<n>.md`, never `codex exec resume`. On approval, digest the approved `milestones.json` bytes and append:
+3. Iterate cold planner and critic to `APPROVE`, cap 3 with stuck detection. Derive rounds from dispatch records and blocker history from review artifacts. Every revision is a fresh invocation naming the artifact and `review-<n>.md`; never resume a prior Codex session. On approval, digest the approved `milestones.json` bytes and append:
 
    ```text
    pce log --file <LOG_PATH> --kind planning-artifact-approved --node m1-s1
