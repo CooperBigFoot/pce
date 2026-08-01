@@ -2953,14 +2953,30 @@ fn gate_artifact_outcomes_cover_all_categories() {
         };
         let fixture = GateFixture::new(name, stdout);
         fs::write(&fixture.schema_path, schema).expect("replace schema fixture");
-        match artifact {
-            Some(bytes) => {
+        let mut environment = fixture.environment(0);
+        match (name, artifact) {
+            ("validated" | "truncated" | "schema-violating", Some(bytes)) => {
+                let bytes_path = fixture.harness.path().join(format!("{name}-artifact.bin"));
+                fs::write(&bytes_path, bytes).expect("write child artifact bytes");
+                fs::remove_file(&fixture.output_path).expect("remove pre-created artifact fixture");
+                environment.extend([
+                    (
+                        "PCE_CLAUDE_OUTPUT_BYTES_FILE".to_owned(),
+                        bytes_path.display().to_string(),
+                    ),
+                    (
+                        "PCE_CLAUDE_OUTPUT_PATH".to_owned(),
+                        fixture.output_path.display().to_string(),
+                    ),
+                ]);
+            }
+            (_, Some(bytes)) => {
                 fs::write(&fixture.output_path, bytes).expect("replace artifact fixture")
             }
-            None => fs::remove_file(&fixture.output_path).expect("remove artifact fixture"),
+            (_, None) => fs::remove_file(&fixture.output_path).expect("remove artifact fixture"),
         }
         let log = fixture.harness.path().join("events.jsonl");
-        let mut argv = fixture.argv(&fixture.environment(0), &[]);
+        let mut argv = fixture.argv(&environment, &[]);
         insert_gate_logging(&mut argv, &log, false);
         let result = fixture.harness.run(&argv, b"").expect("run artifact gate");
         assert_eq!(
@@ -3056,6 +3072,27 @@ fn gate_valid_artifact_succeeds_without_logging() {
     );
     assert_eq!(result.stdout, CLAUDE_SUCCESS);
     assert!(!log.exists());
+}
+
+#[test]
+fn gate_rejects_missing_structured_artifact_without_logging() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("no-log-missing", CLAUDE_SUCCESS);
+    fs::remove_file(&fixture.output_path).expect("remove no-log gate artifact");
+    let result = fixture
+        .harness
+        .run(fixture.argv(&fixture.environment(0), &["prompt"]), b"")
+        .expect("run unlogged gate with missing artifact");
+    assert!(!result.status.success());
+    assert_eq!(
+        result.stderr,
+        format!(
+            "Error: artifact output `{}` is missing\n",
+            fixture.output_path.display()
+        )
+        .as_bytes()
+    );
+    assert_no_jsonl_files(fixture.harness.path());
 }
 
 #[test]
