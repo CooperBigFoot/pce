@@ -1,4 +1,4 @@
-//! dispatch projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; terminal_usage : JSONL observations × ExitStatus → CodexTokenUsage   (pure, deterministic)
+//! dispatch_projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; codex_terminal_usage : CodexTerminalObservation* × DispatchExitStatus → DispatchTokenUsage; claude_result_usage : ClaudeResultEnvelope × DispatchExitStatus → DispatchTokenUsage   (pure, deterministic)
 //! This provisional module describes child invocations; the binary adapter performs all I/O and process work and will test the shape against the real tool surface in m2-s2.
 
 use std::collections::BTreeMap;
@@ -10,10 +10,11 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::event_log::{
-    ArtifactOutcome, CachedInputTokens, CodexTokenUsage, DispatchCompletionPayload,
-    DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef, DispatchRole, EventLogTail,
-    EventLogTailError, EventTimestamp, Evidence, InputTokens, NodeId, OutputTokens,
-    ReasoningOutputTokens, Sequence, UsageAbsenceReason, WriteKind, successor_sequence,
+    ArtifactOutcome, CacheCreationInputTokens, CacheReadInputTokens, CachedInputTokens,
+    DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef,
+    DispatchRole, DispatchTokenUsage, EventLogTail, EventLogTailError, EventTimestamp, Evidence,
+    InputTokens, NodeId, OutputTokens, ReasoningOutputTokens, Sequence, UsageAbsenceReason,
+    WriteKind, successor_sequence,
 };
 
 /// Typed log metadata carried beside, rather than inside, a child envelope.
@@ -38,7 +39,7 @@ pub fn dispatch_payload(logging: &DispatchLogging) -> DispatchPayload {
 pub fn dispatch_completion_payload(
     issuance_sequence: Sequence,
     duration_ms: DispatchDuration,
-    usage: CodexTokenUsage,
+    usage: DispatchTokenUsage,
     exit_status: DispatchExitStatus,
     artifact_outcome: ArtifactOutcome,
 ) -> DispatchCompletionPayload {
@@ -238,7 +239,7 @@ struct ProjectedCompletion<'a> {
 struct ProjectedCompletionPayload {
     issuance_sequence: Deferred<Sequence>,
     duration_ms: Deferred<DispatchDuration>,
-    usage: Deferred<CodexTokenUsage>,
+    usage: Deferred<DispatchTokenUsage>,
     exit_status: Deferred<DispatchExitStatus>,
     artifact_outcome: ProjectedArtifactOutcome,
 }
@@ -307,21 +308,21 @@ pub fn render_dispatch_projection(
 
 /// One adapter-observed JSONL fact relevant to terminal classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TerminalObservation {
+pub enum CodexTerminalObservation {
     /// The physical line did not parse as JSON.
     MalformedLine,
     /// A parseable JSON value other than an object, or an object with no known terminal `type`,
     /// is non-terminal rather than malformed.
     NonTerminal,
     /// A completed turn with either exact counters or malformed usage.
-    TurnCompleted(Option<TerminalUsage>),
+    TurnCompleted(Option<CodexTerminalUsage>),
     /// A failed turn, recording whether a forbidden usage key was present.
     TurnFailed { usage_present: bool },
 }
 
 /// The four exact counters from a well-formed completed turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalUsage {
+pub struct CodexTerminalUsage {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
     pub output_tokens: u64,
@@ -333,29 +334,29 @@ pub struct TerminalUsage {
 /// Invalid-data rows take precedence over well-formed outcomes, in their documented order.
 /// Signal termination counts as a nonzero exit: absent becomes `NoTerminalTurn`, completed is
 /// contradictory, and failed remains `TurnFailed`.
-pub fn classify_terminal_usage(
-    observations: &[TerminalObservation],
+pub fn classify_codex_terminal_usage(
+    observations: &[CodexTerminalObservation],
     exit_status: DispatchExitStatus,
-) -> Result<CodexTokenUsage, UsageAbsenceReason> {
+) -> Result<DispatchTokenUsage, UsageAbsenceReason> {
     let completed = observations
         .iter()
-        .filter(|item| matches!(item, TerminalObservation::TurnCompleted(_)))
+        .filter(|item| matches!(item, CodexTerminalObservation::TurnCompleted(_)))
         .collect::<Vec<_>>();
     let failed = observations
         .iter()
-        .filter(|item| matches!(item, TerminalObservation::TurnFailed { .. }))
+        .filter(|item| matches!(item, CodexTerminalObservation::TurnFailed { .. }))
         .collect::<Vec<_>>();
     // Precedence is specification: malformed, duplicate, contradictory, then valid outcomes.
     if observations
         .iter()
-        .any(|item| matches!(item, TerminalObservation::MalformedLine))
+        .any(|item| matches!(item, CodexTerminalObservation::MalformedLine))
         || completed
             .iter()
-            .any(|item| matches!(item, TerminalObservation::TurnCompleted(None)))
+            .any(|item| matches!(item, CodexTerminalObservation::TurnCompleted(None)))
         || failed.iter().any(|item| {
             matches!(
                 item,
-                TerminalObservation::TurnFailed {
+                CodexTerminalObservation::TurnFailed {
                     usage_present: true
                 }
             )
@@ -376,8 +377,8 @@ pub fn classify_terminal_usage(
     {
         return Err(UsageAbsenceReason::ContradictoryTerminalData);
     }
-    if let Some(TerminalObservation::TurnCompleted(Some(usage))) = completed.first().copied() {
-        return Ok(CodexTokenUsage::Measured {
+    if let Some(CodexTerminalObservation::TurnCompleted(Some(usage))) = completed.first().copied() {
+        return Ok(DispatchTokenUsage::Measured {
             input_tokens: InputTokens::new(usage.input_tokens),
             cached_input_tokens: CachedInputTokens::new(usage.cached_input_tokens),
             output_tokens: OutputTokens::new(usage.output_tokens),
@@ -385,13 +386,137 @@ pub fn classify_terminal_usage(
         });
     }
     if !failed.is_empty() {
-        return Ok(CodexTokenUsage::Absent {
+        return Ok(DispatchTokenUsage::Absent {
             reason: UsageAbsenceReason::TurnFailed,
         });
     }
-    Ok(CodexTokenUsage::Absent {
+    Ok(DispatchTokenUsage::Absent {
         reason: UsageAbsenceReason::NoTerminalTurn,
     })
+}
+
+/// One parsed Claude result envelope, closed over the states relevant to usage classification.
+#[derive(Debug, Clone)]
+pub enum ClaudeResultEnvelope {
+    /// The bytes did not form a valid Claude result envelope.
+    Malformed,
+    /// The result claims success and may contain all required typed usage counters.
+    Success { usage: Option<ClaudeResultUsage> },
+    /// The result claims failure; any supplied usage is intentionally discarded.
+    Error,
+}
+
+/// The four exact counters from a complete Claude success result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaudeResultUsage {
+    input_tokens: InputTokens,
+    output_tokens: OutputTokens,
+    cache_creation_input_tokens: CacheCreationInputTokens,
+    cache_read_input_tokens: CacheReadInputTokens,
+}
+
+/// Parse one Claude result envelope without performing I/O.
+pub fn parse_claude_result(bytes: &[u8]) -> ClaudeResultEnvelope {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return ClaudeResultEnvelope::Malformed;
+    };
+    let Some(object) = value.as_object() else {
+        return ClaudeResultEnvelope::Malformed;
+    };
+    let Some(is_error) = object.get("is_error").and_then(serde_json::Value::as_bool) else {
+        return ClaudeResultEnvelope::Malformed;
+    };
+    if is_error {
+        return ClaudeResultEnvelope::Error;
+    }
+    let Some(usage) = object.get("usage") else {
+        return ClaudeResultEnvelope::Success { usage: None };
+    };
+    let Some(usage) = usage.as_object() else {
+        return ClaudeResultEnvelope::Malformed;
+    };
+    for name in [
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ] {
+        if usage
+            .get(name)
+            .is_some_and(|value| value.as_u64().is_none())
+        {
+            return ClaudeResultEnvelope::Malformed;
+        }
+    }
+    let (
+        Some(input_tokens),
+        Some(output_tokens),
+        Some(cache_creation_input_tokens),
+        Some(cache_read_input_tokens),
+    ) = (
+        usage
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64),
+        usage
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64),
+        usage
+            .get("cache_creation_input_tokens")
+            .and_then(serde_json::Value::as_u64),
+        usage
+            .get("cache_read_input_tokens")
+            .and_then(serde_json::Value::as_u64),
+    )
+    else {
+        return ClaudeResultEnvelope::Success { usage: None };
+    };
+    ClaudeResultEnvelope::Success {
+        usage: Some(ClaudeResultUsage {
+            input_tokens: InputTokens::new(input_tokens),
+            output_tokens: OutputTokens::new(output_tokens),
+            cache_creation_input_tokens: CacheCreationInputTokens::new(cache_creation_input_tokens),
+            cache_read_input_tokens: CacheReadInputTokens::new(cache_read_input_tokens),
+        }),
+    }
+}
+
+/// Classify a parsed Claude result against its process exit.
+///
+/// # Errors
+///
+/// Returns [`UsageAbsenceReason::ClaudeMalformedResult`] for malformed envelopes,
+/// [`UsageAbsenceReason::ClaudeExitEnvelopeContradiction`] when the envelope meaning and exit
+/// disagree, [`UsageAbsenceReason::ClaudeErrorEnvelope`] for an agreeing error result, and
+/// [`UsageAbsenceReason::ClaudeMissingUsage`] for an agreeing success without all four counters.
+pub fn classify_claude_result(
+    envelope: &ClaudeResultEnvelope,
+    exit_status: DispatchExitStatus,
+) -> Result<DispatchTokenUsage, UsageAbsenceReason> {
+    if matches!(envelope, ClaudeResultEnvelope::Malformed) {
+        return Err(UsageAbsenceReason::ClaudeMalformedResult);
+    }
+    let zero = matches!(exit_status, DispatchExitStatus::Exited { code } if code.get() == 0);
+    match envelope {
+        ClaudeResultEnvelope::Malformed => Err(UsageAbsenceReason::ClaudeMalformedResult),
+        ClaudeResultEnvelope::Error if zero => {
+            Err(UsageAbsenceReason::ClaudeExitEnvelopeContradiction)
+        }
+        ClaudeResultEnvelope::Error => Err(UsageAbsenceReason::ClaudeErrorEnvelope),
+        ClaudeResultEnvelope::Success { .. } if !zero => {
+            Err(UsageAbsenceReason::ClaudeExitEnvelopeContradiction)
+        }
+        ClaudeResultEnvelope::Success { usage: None } => {
+            Err(UsageAbsenceReason::ClaudeMissingUsage)
+        }
+        ClaudeResultEnvelope::Success { usage: Some(usage) } => {
+            Ok(DispatchTokenUsage::ClaudeMeasured {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                cache_read_input_tokens: usage.cache_read_input_tokens,
+            })
+        }
+    }
 }
 
 /// A program name passed directly to a process adapter, never to a shell.
@@ -693,12 +818,13 @@ mod tests {
 
     use super::{
         AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
-        ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, StdinBinding,
-        TerminalObservation, TerminalUsage, classify_terminal_usage, dispatch_completion_payload,
+        ChildEnvironment, ClaudeResultEnvelope, CodexTerminalObservation, CodexTerminalUsage,
+        DispatchEnvelope, DispatchError, Executable, Sandbox, StdinBinding, classify_claude_result,
+        classify_codex_terminal_usage, dispatch_completion_payload, parse_claude_result,
     };
     use crate::event_log::{
-        ArtifactOutcome, CodexTokenUsage, DispatchDuration, DispatchExitStatus, ExitCode, Sequence,
-        SignalNumber, UsageAbsenceReason,
+        ArtifactOutcome, DispatchDuration, DispatchExitStatus, DispatchTokenUsage, ExitCode,
+        Sequence, SignalNumber, UsageAbsenceReason,
     };
 
     fn exited(code: u64) -> DispatchExitStatus {
@@ -712,7 +838,7 @@ mod tests {
         let payload = dispatch_completion_payload(
             Sequence::parse(7).expect("positive sequence"),
             DispatchDuration::new(12),
-            CodexTokenUsage::Absent {
+            DispatchTokenUsage::Absent {
                 reason: UsageAbsenceReason::NoTerminalTurn,
             },
             exited(0),
@@ -722,8 +848,8 @@ mod tests {
     }
 
     #[test]
-    fn terminal_partition_and_precedence_are_exhaustive() {
-        let usage = TerminalUsage {
+    fn codex_terminal_partition_and_precedence_are_exhaustive() {
+        let usage = CodexTerminalUsage {
             input_tokens: 101,
             cached_input_tokens: 23,
             output_tokens: 17,
@@ -731,17 +857,17 @@ mod tests {
         };
         let cases = [
             (
-                vec![TerminalObservation::MalformedLine],
+                vec![CodexTerminalObservation::MalformedLine],
                 exited(5),
                 Err(UsageAbsenceReason::MalformedTerminalData),
             ),
             (
-                vec![TerminalObservation::TurnCompleted(None)],
+                vec![CodexTerminalObservation::TurnCompleted(None)],
                 exited(0),
                 Err(UsageAbsenceReason::MalformedTerminalData),
             ),
             (
-                vec![TerminalObservation::TurnFailed {
+                vec![CodexTerminalObservation::TurnFailed {
                     usage_present: true,
                 }],
                 exited(0),
@@ -749,10 +875,10 @@ mod tests {
             ),
             (
                 vec![
-                    TerminalObservation::TurnFailed {
+                    CodexTerminalObservation::TurnFailed {
                         usage_present: false,
                     },
-                    TerminalObservation::TurnFailed {
+                    CodexTerminalObservation::TurnFailed {
                         usage_present: false,
                     },
                 ],
@@ -761,8 +887,8 @@ mod tests {
             ),
             (
                 vec![
-                    TerminalObservation::TurnCompleted(Some(usage)),
-                    TerminalObservation::TurnFailed {
+                    CodexTerminalObservation::TurnCompleted(Some(usage)),
+                    CodexTerminalObservation::TurnFailed {
                         usage_present: false,
                     },
                 ],
@@ -770,35 +896,35 @@ mod tests {
                 Err(UsageAbsenceReason::ContradictoryTerminalData),
             ),
             (
-                vec![TerminalObservation::TurnCompleted(Some(usage))],
+                vec![CodexTerminalObservation::TurnCompleted(Some(usage))],
                 exited(5),
                 Err(UsageAbsenceReason::ContradictoryTerminalData),
             ),
             (
-                vec![TerminalObservation::TurnFailed {
+                vec![CodexTerminalObservation::TurnFailed {
                     usage_present: false,
                 }],
                 exited(0),
                 Err(UsageAbsenceReason::ContradictoryTerminalData),
             ),
             (
-                vec![TerminalObservation::NonTerminal],
+                vec![CodexTerminalObservation::NonTerminal],
                 exited(0),
                 Err(UsageAbsenceReason::ContradictoryTerminalData),
             ),
             (
-                vec![TerminalObservation::TurnFailed {
+                vec![CodexTerminalObservation::TurnFailed {
                     usage_present: false,
                 }],
                 exited(41),
-                Ok(CodexTokenUsage::Absent {
+                Ok(DispatchTokenUsage::Absent {
                     reason: UsageAbsenceReason::TurnFailed,
                 }),
             ),
             (
-                vec![TerminalObservation::NonTerminal],
+                vec![CodexTerminalObservation::NonTerminal],
                 exited(42),
-                Ok(CodexTokenUsage::Absent {
+                Ok(DispatchTokenUsage::Absent {
                     reason: UsageAbsenceReason::NoTerminalTurn,
                 }),
             ),
@@ -807,30 +933,224 @@ mod tests {
                 DispatchExitStatus::Signaled {
                     signal: SignalNumber::new(15),
                 },
-                Ok(CodexTokenUsage::Absent {
+                Ok(DispatchTokenUsage::Absent {
                     reason: UsageAbsenceReason::NoTerminalTurn,
                 }),
             ),
         ];
         for (observations, status, expected) in cases {
-            assert_eq!(classify_terminal_usage(&observations, status), expected);
+            assert_eq!(
+                classify_codex_terminal_usage(&observations, status),
+                expected
+            );
         }
-        let measured = classify_terminal_usage(
+        let measured = classify_codex_terminal_usage(
             &[
-                TerminalObservation::NonTerminal,
-                TerminalObservation::TurnCompleted(Some(usage)),
+                CodexTerminalObservation::NonTerminal,
+                CodexTerminalObservation::TurnCompleted(Some(usage)),
             ],
             exited(0),
         );
         assert_eq!(
             measured,
-            Ok(CodexTokenUsage::Measured {
+            Ok(DispatchTokenUsage::Measured {
                 input_tokens: crate::event_log::InputTokens::new(101),
                 cached_input_tokens: crate::event_log::CachedInputTokens::new(23),
                 output_tokens: crate::event_log::OutputTokens::new(17),
                 reasoning_output_tokens: crate::event_log::ReasoningOutputTokens::new(5),
             })
         );
+    }
+
+    fn assert_claude_reason(
+        source: &[u8],
+        status: DispatchExitStatus,
+        expected: UsageAbsenceReason,
+    ) {
+        let envelope = parse_claude_result(source);
+        assert_eq!(classify_claude_result(&envelope, status), Err(expected));
+    }
+
+    const CLAUDE_ERROR: &[u8] =
+        br#"{"type":"result","subtype":"error","is_error":true,"result":"failed"}"#;
+    const CLAUDE_SUCCESS: &[u8] = br#"{"type":"result","subtype":"success","is_error":false,"result":"OK","usage":{"input_tokens":2,"output_tokens":4,"cache_creation_input_tokens":9572,"cache_read_input_tokens":15410}}"#;
+    const CLAUDE_MISSING: &[u8] =
+        br#"{"type":"result","subtype":"success","is_error":false,"result":"OK"}"#;
+
+    #[test]
+    fn claude_malformed_result_is_distinct() {
+        assert_claude_reason(
+            b"not-json",
+            exited(0),
+            UsageAbsenceReason::ClaudeMalformedResult,
+        );
+    }
+
+    #[test]
+    fn claude_missing_usage_is_distinct() {
+        assert_claude_reason(
+            CLAUDE_MISSING,
+            exited(0),
+            UsageAbsenceReason::ClaudeMissingUsage,
+        );
+    }
+
+    #[test]
+    fn claude_error_envelope_is_distinct() {
+        for status in [
+            exited(1),
+            DispatchExitStatus::Signaled {
+                signal: SignalNumber::new(15),
+            },
+        ] {
+            assert_claude_reason(
+                CLAUDE_ERROR,
+                status,
+                UsageAbsenceReason::ClaudeErrorEnvelope,
+            );
+        }
+    }
+
+    #[test]
+    fn claude_exit_envelope_contradiction_is_distinct() {
+        for (source, status) in [
+            (CLAUDE_SUCCESS, exited(42)),
+            (CLAUDE_ERROR, exited(0)),
+            (
+                CLAUDE_SUCCESS,
+                DispatchExitStatus::Signaled {
+                    signal: SignalNumber::new(15),
+                },
+            ),
+            (CLAUDE_MISSING, exited(42)),
+        ] {
+            assert_claude_reason(
+                source,
+                status,
+                UsageAbsenceReason::ClaudeExitEnvelopeContradiction,
+            );
+        }
+    }
+
+    #[test]
+    fn claude_classifier_completes_envelope_exit_product() {
+        for status in [
+            exited(42),
+            DispatchExitStatus::Signaled {
+                signal: SignalNumber::new(15),
+            },
+        ] {
+            assert_claude_reason(
+                b"not-json",
+                status,
+                UsageAbsenceReason::ClaudeMalformedResult,
+            );
+        }
+        assert_claude_reason(
+            CLAUDE_MISSING,
+            DispatchExitStatus::Signaled {
+                signal: SignalNumber::new(15),
+            },
+            UsageAbsenceReason::ClaudeExitEnvelopeContradiction,
+        );
+    }
+
+    #[test]
+    fn claude_parser_partitions_envelope_shapes() {
+        enum Expected {
+            Malformed,
+            Missing,
+            Error,
+        }
+        let cases: &[(&[u8], Expected)] = &[
+            (b"5", Expected::Malformed),
+            (br#""x""#, Expected::Malformed),
+            (b"[]", Expected::Malformed),
+            (b"{}", Expected::Malformed),
+            (br#"{"is_error":"false"}"#, Expected::Malformed),
+            (br#"{"is_error":false,"usage":5}"#, Expected::Malformed),
+            (br#"{"is_error":false,"usage":{"input_tokens":"2","output_tokens":4,"cache_creation_input_tokens":9572,"cache_read_input_tokens":15410}}"#, Expected::Malformed),
+            (br#"{"is_error":false,"usage":{"input_tokens":2,"output_tokens":"4","cache_creation_input_tokens":9572,"cache_read_input_tokens":15410}}"#, Expected::Malformed),
+            (br#"{"is_error":false,"usage":{"input_tokens":2,"output_tokens":4,"cache_creation_input_tokens":"9572","cache_read_input_tokens":15410}}"#, Expected::Malformed),
+            (br#"{"is_error":false,"usage":{"input_tokens":2,"output_tokens":4,"cache_creation_input_tokens":9572,"cache_read_input_tokens":"15410"}}"#, Expected::Malformed),
+            (br#"{"is_error":false,"usage":{"input_tokens":2,"output_tokens":"4","cache_creation_input_tokens":9572}}"#, Expected::Malformed),
+            (br#"{"is_error":false,"usage":{"output_tokens":4,"cache_creation_input_tokens":9572,"cache_read_input_tokens":15410}}"#, Expected::Missing),
+            (br#"{"is_error":false,"usage":{"input_tokens":2,"cache_creation_input_tokens":9572,"cache_read_input_tokens":15410}}"#, Expected::Missing),
+            (br#"{"is_error":false,"usage":{"input_tokens":2,"output_tokens":4,"cache_read_input_tokens":15410}}"#, Expected::Missing),
+            (br#"{"is_error":false,"usage":{"input_tokens":2,"output_tokens":4,"cache_creation_input_tokens":9572}}"#, Expected::Missing),
+            (br#"{"is_error":true,"usage":5}"#, Expected::Error),
+            (br#"{"is_error":true,"usage":{"input_tokens":2,"output_tokens":4,"cache_creation_input_tokens":9572,"cache_read_input_tokens":15410}}"#, Expected::Error),
+        ];
+        for (source, expected) in cases {
+            let envelope = parse_claude_result(source);
+            match expected {
+                Expected::Malformed => assert!(matches!(envelope, ClaudeResultEnvelope::Malformed)),
+                Expected::Missing => assert!(matches!(
+                    envelope,
+                    ClaudeResultEnvelope::Success { usage: None }
+                )),
+                Expected::Error => assert!(matches!(envelope, ClaudeResultEnvelope::Error)),
+            }
+        }
+        assert_claude_reason(
+            cases[14].0,
+            exited(0),
+            UsageAbsenceReason::ClaudeMissingUsage,
+        );
+        assert_claude_reason(
+            cases[16].0,
+            exited(1),
+            UsageAbsenceReason::ClaudeErrorEnvelope,
+        );
+    }
+
+    #[test]
+    fn claude_measured_results_preserve_and_compare_all_counters() {
+        let sources: [&[u8]; 2] = [
+            br#"{"type":"result","subtype":"success","is_error":false,"result":"OK","duration_ms":9307,"total_cost_usd":0.104116,"usage":{"input_tokens":2,"output_tokens":4,"cache_creation_input_tokens":9572,"cache_read_input_tokens":15410}}"#,
+            br#"{"type":"result","subtype":"success","is_error":false,"result":"OK","duration_ms":9307,"total_cost_usd":999.0,"modelUsage":{"input_tokens":999999},"usage":{"input_tokens":13,"output_tokens":21,"cache_creation_input_tokens":9606,"cache_read_input_tokens":15465}}"#,
+        ];
+        let first = classify_claude_result(&parse_claude_result(sources[0]), exited(0));
+        let second = classify_claude_result(&parse_claude_result(sources[1]), exited(0));
+        assert_eq!(
+            first,
+            Ok(DispatchTokenUsage::ClaudeMeasured {
+                input_tokens: crate::event_log::InputTokens::new(2),
+                output_tokens: crate::event_log::OutputTokens::new(4),
+                cache_creation_input_tokens: crate::event_log::CacheCreationInputTokens::new(9572),
+                cache_read_input_tokens: crate::event_log::CacheReadInputTokens::new(15410),
+            })
+        );
+        assert_eq!(
+            second,
+            Ok(DispatchTokenUsage::ClaudeMeasured {
+                input_tokens: crate::event_log::InputTokens::new(13),
+                output_tokens: crate::event_log::OutputTokens::new(21),
+                cache_creation_input_tokens: crate::event_log::CacheCreationInputTokens::new(9606),
+                cache_read_input_tokens: crate::event_log::CacheReadInputTokens::new(15465),
+            })
+        );
+        let (
+            Ok(DispatchTokenUsage::ClaudeMeasured {
+                input_tokens: first_input,
+                output_tokens: first_output,
+                cache_creation_input_tokens: first_creation,
+                cache_read_input_tokens: first_read,
+            }),
+            Ok(DispatchTokenUsage::ClaudeMeasured {
+                input_tokens: second_input,
+                output_tokens: second_output,
+                cache_creation_input_tokens: second_creation,
+                cache_read_input_tokens: second_read,
+            }),
+        ) = (first, second)
+        else {
+            panic!("both results must be measured");
+        };
+        assert_eq!(second_input.get() - first_input.get(), 11);
+        assert_eq!(second_output.get() - first_output.get(), 17);
+        assert_eq!(second_creation.get() - first_creation.get(), 34);
+        assert_eq!(second_read.get() - first_read.get(), 55);
     }
 
     #[test]

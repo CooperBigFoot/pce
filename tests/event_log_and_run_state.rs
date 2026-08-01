@@ -4,8 +4,8 @@ use std::ffi::OsString;
 use std::fs;
 
 use pce_core::{
-    ArtifactOutcome, CachedInputTokens, CodexTokenUsage, DispatchExitStatus, ExitCode, InputTokens,
-    OutputTokens, ReasoningOutputTokens, RecoveryLogPath, RunSnapshot, VisionSlug,
+    ArtifactOutcome, CachedInputTokens, DispatchExitStatus, DispatchTokenUsage, ExitCode,
+    InputTokens, OutputTokens, ReasoningOutputTokens, RecoveryLogPath, RunSnapshot, VisionSlug,
     derive_run_state, parse_event_line,
 };
 use serde_json::{Value, json};
@@ -137,7 +137,7 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
     assert!(lifecycle.duration().get() >= 100);
     assert_eq!(
         lifecycle.usage(),
-        &CodexTokenUsage::Measured {
+        &DispatchTokenUsage::Measured {
             input_tokens: InputTokens::new(101),
             cached_input_tokens: CachedInputTokens::new(23),
             output_tokens: OutputTokens::new(17),

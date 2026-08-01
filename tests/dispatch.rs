@@ -13,10 +13,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pce_core::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
-    ArtifactOutcome, ChildEnvironment, CodexTokenUsage, Deferred, DispatchDuration,
-    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchRef, DispatchRole, EventBodyRef,
-    EventRecord, EventTimestamp, Evidence, Executable, KnownPayload, NodeId, Sandbox, Sequence,
-    StdinBinding, UsageAbsenceReason, WriteKind, dispatch_invocation, dispatch_payload,
+    ArtifactOutcome, ChildEnvironment, Deferred, DispatchDuration, DispatchEnvelope,
+    DispatchExitStatus, DispatchLogging, DispatchRef, DispatchRole, DispatchTokenUsage,
+    EventBodyRef, EventRecord, EventTimestamp, Evidence, Executable, KnownPayload, NodeId, Sandbox,
+    Sequence, StdinBinding, UsageAbsenceReason, WriteKind, dispatch_invocation, dispatch_payload,
     parse_event_line, serialize_event_line,
 };
 use serde::Serialize;
@@ -623,7 +623,7 @@ fn assert_shared_serializer_family(
     let _: Deferred<DispatchDuration> =
         serde_json::from_value(actual["completion"]["payload"]["duration_ms"].clone())
             .expect("typed deferred duration");
-    let _: Deferred<CodexTokenUsage> =
+    let _: Deferred<DispatchTokenUsage> =
         serde_json::from_value(actual["completion"]["payload"]["usage"].clone())
             .expect("typed deferred usage");
     let _: Deferred<DispatchExitStatus> =
@@ -961,8 +961,8 @@ fn assert_logged_structured_rejection(
     }
 }
 
-fn measured_usage() -> CodexTokenUsage {
-    CodexTokenUsage::Measured {
+fn measured_usage() -> DispatchTokenUsage {
+    DispatchTokenUsage::Measured {
         input_tokens: pce_core::InputTokens::new(101),
         cached_input_tokens: pce_core::CachedInputTokens::new(23),
         output_tokens: pce_core::OutputTokens::new(17),
@@ -1325,7 +1325,7 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
     assert_eq!(completion.artifact_outcome, ArtifactOutcome::NotValidated);
     assert_eq!(
         completion.usage,
-        CodexTokenUsage::Measured {
+        DispatchTokenUsage::Measured {
             input_tokens: pce_core::InputTokens::new(101),
             cached_input_tokens: pce_core::CachedInputTokens::new(23),
             output_tokens: pce_core::OutputTokens::new(17),
@@ -1436,7 +1436,7 @@ fn records_failed_and_absent_terminal_reasons_before_reporting_exit() {
         let records = fs::read_to_string(&log_path).expect("read log").lines().map(|line| parse_event_line(line).expect("parse")).collect::<Vec<_>>();
         assert_eq!(records.len(), 2);
         let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref() else { panic!("missing completion") };
-        assert_eq!(completion.usage, CodexTokenUsage::Absent { reason });
+        assert_eq!(completion.usage, DispatchTokenUsage::Absent { reason });
         assert_eq!(completion.exit_status, DispatchExitStatus::Exited { code: pce_core::ExitCode::new(code as u64) });
         assert!(Duration::from_millis(completion.duration_ms.get()) <= elapsed);
         if matches!(reason, UsageAbsenceReason::MalformedTerminalData | UsageAbsenceReason::DuplicateTerminalData | UsageAbsenceReason::ContradictoryTerminalData) {
@@ -1499,7 +1499,7 @@ fn accepts_additive_usage_fields_and_blank_jsonl_lines() {
     };
     assert_eq!(
         completion.usage,
-        CodexTokenUsage::Measured {
+        DispatchTokenUsage::Measured {
             input_tokens: pce_core::InputTokens::new(101),
             cached_input_tokens: pce_core::CachedInputTokens::new(23),
             output_tokens: pce_core::OutputTokens::new(17),
@@ -1515,6 +1515,10 @@ fn usage_reason_name(reason: UsageAbsenceReason) -> &'static str {
         UsageAbsenceReason::MalformedTerminalData => "malformed-terminal-data",
         UsageAbsenceReason::DuplicateTerminalData => "duplicate-terminal-data",
         UsageAbsenceReason::ContradictoryTerminalData => "contradictory-terminal-data",
+        UsageAbsenceReason::ClaudeMalformedResult => "claude-malformed-result",
+        UsageAbsenceReason::ClaudeMissingUsage => "claude-missing-usage",
+        UsageAbsenceReason::ClaudeErrorEnvelope => "claude-error-envelope",
+        UsageAbsenceReason::ClaudeExitEnvelopeContradiction => "claude-exit-envelope-contradiction",
     }
 }
 
@@ -1570,7 +1574,7 @@ fn records_signal_and_no_terminal_usage_without_fabricating_exit_zero() {
     );
     assert_eq!(
         completion.usage,
-        CodexTokenUsage::Absent {
+        DispatchTokenUsage::Absent {
             reason: UsageAbsenceReason::NoTerminalTurn
         }
     );

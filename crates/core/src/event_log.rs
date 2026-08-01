@@ -492,9 +492,17 @@ transparent_u64!(
     DispatchDuration,
     "A checked elapsed wall-clock duration in milliseconds."
 );
-transparent_u64!(InputTokens, "A Codex input-token total.");
+transparent_u64!(InputTokens, "A dispatch-route input-token total.");
 transparent_u64!(CachedInputTokens, "A Codex cached-input-token total.");
-transparent_u64!(OutputTokens, "A Codex output-token total.");
+transparent_u64!(OutputTokens, "A dispatch-route output-token total.");
+transparent_u64!(
+    CacheCreationInputTokens,
+    "A Claude cache-creation input-token total."
+);
+transparent_u64!(
+    CacheReadInputTokens,
+    "A Claude cache-read input-token total."
+);
 transparent_u64!(
     ReasoningOutputTokens,
     "A Codex reasoning-output-token total."
@@ -514,18 +522,33 @@ pub enum UsageAbsenceReason {
     DuplicateTerminalData,
     /// Terminal facts disagreed with each other or the process exit.
     ContradictoryTerminalData,
+    /// The Claude result bytes do not form a valid result envelope.
+    ClaudeMalformedResult,
+    /// A successful Claude result lacks one or more required usage counters.
+    ClaudeMissingUsage,
+    /// A Claude error envelope agrees with a failing process exit.
+    ClaudeErrorEnvelope,
+    /// A Claude result envelope's success meaning contradicts the process exit.
+    ClaudeExitEnvelopeContradiction,
 }
 
-/// Codex token usage measured from, or absent from, terminal JSONL.
+/// Dispatch token usage measured by a route, or absent from its terminal result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "availability", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum CodexTokenUsage {
+pub enum DispatchTokenUsage {
     /// All four terminal counters were observed.
     Measured {
         input_tokens: InputTokens,
         cached_input_tokens: CachedInputTokens,
         output_tokens: OutputTokens,
         reasoning_output_tokens: ReasoningOutputTokens,
+    },
+    /// All four Claude result-envelope counters were observed.
+    ClaudeMeasured {
+        input_tokens: InputTokens,
+        output_tokens: OutputTokens,
+        cache_creation_input_tokens: CacheCreationInputTokens,
+        cache_read_input_tokens: CacheReadInputTokens,
     },
     /// No measured counters can be asserted.
     Absent { reason: UsageAbsenceReason },
@@ -568,7 +591,7 @@ pub enum ArtifactOutcome {
 pub struct DispatchCompletionPayload {
     pub issuance_sequence: Sequence,
     pub duration_ms: DispatchDuration,
-    pub usage: CodexTokenUsage,
+    pub usage: DispatchTokenUsage,
     pub exit_status: DispatchExitStatus,
     pub artifact_outcome: ArtifactOutcome,
 }
@@ -1443,12 +1466,13 @@ mod tests {
 
     use crate::contract_measurement::{ObservedExitStatus, measure_contract_snapshot};
     use crate::event_log::{
-        AppendError, ArtifactOutcome, EventBodyRef, EventKindName, EventLogError, EventLogTail,
+        AppendError, ArtifactOutcome, CacheCreationInputTokens, CacheReadInputTokens,
+        DispatchTokenUsage, EventBodyRef, EventKindName, EventLogError, EventLogTail,
         EventLogTailError, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
-        Evidence, EvidencePresence, KnownPayload, NodeId, ReadKind, ReadPayload,
-        RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence, Sha256Digest,
-        UnparsedPayload, WriteKind, append_event, event_record_matches, parse_event_line,
-        serialize_event_line, successor_sequence, validate_evidence_policy,
+        Evidence, EvidencePresence, InputTokens, KnownPayload, NodeId, OutputTokens, ReadKind,
+        ReadPayload, RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence,
+        Sha256Digest, UnparsedPayload, WriteKind, append_event, event_record_matches,
+        parse_event_line, serialize_event_line, successor_sequence, validate_evidence_policy,
     };
     use crate::run_state::VersionPolicy;
     use crate::tracked_contract::{GateKind, parse_tracked_repository_contract};
@@ -2402,6 +2426,54 @@ mod tests {
                 kind: WriteKind::DispatchCompletion
             })
         ));
+    }
+
+    #[test]
+    fn dispatch_absence_literals_remain_byte_stable() {
+        for reason in [
+            "turn-failed",
+            "no-terminal-turn",
+            "malformed-terminal-data",
+            "duplicate-terminal-data",
+            "contradictory-terminal-data",
+            "claude-malformed-result",
+            "claude-missing-usage",
+            "claude-error-envelope",
+            "claude-exit-envelope-contradiction",
+        ] {
+            let literal = format!(
+                r#"{{"sequence":8,"timestamp":"2026-07-27T12:34:56.000Z","kind":"dispatch-completion","node":"m3-s1","payload":{{"issuance_sequence":7,"duration_ms":200,"usage":{{"availability":"absent","reason":"{reason}"}},"exit_status":{{"kind":"exited","code":1}},"artifact_outcome":"not-validated"}}}}"#
+            );
+            let record = parse_event_line(&literal).expect("parse absent completion literal");
+            assert_eq!(
+                serialize_event_line(&record).expect("serialize absent completion"),
+                literal
+            );
+        }
+    }
+
+    #[test]
+    fn claude_measured_usage_has_exact_closed_serialization() {
+        let usage = DispatchTokenUsage::ClaudeMeasured {
+            input_tokens: InputTokens::new(2),
+            output_tokens: OutputTokens::new(4),
+            cache_creation_input_tokens: CacheCreationInputTokens::new(9572),
+            cache_read_input_tokens: CacheReadInputTokens::new(15410),
+        };
+        let literal = r#"{"availability":"claude-measured","input_tokens":2,"output_tokens":4,"cache_creation_input_tokens":9572,"cache_read_input_tokens":15410}"#;
+        assert_eq!(
+            serde_json::to_string(&usage).expect("serialize usage"),
+            literal
+        );
+        assert_eq!(
+            serde_json::from_str::<DispatchTokenUsage>(literal).expect("parse usage"),
+            usage
+        );
+        let with_billing = literal.replace(
+            "\"cache_read_input_tokens\":15410",
+            "\"cache_read_input_tokens\":15410,\"total_cost_usd\":0.104116",
+        );
+        assert!(serde_json::from_str::<DispatchTokenUsage>(&with_billing).is_err());
     }
 
     #[test]
