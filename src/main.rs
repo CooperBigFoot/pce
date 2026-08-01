@@ -13,28 +13,28 @@ use pce_core::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
     AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath,
     AuthorityFailure, BranchState, CanonicalNode as DispatchNode, ChildEnvironment,
-    CodexTokenUsage, CreationDate, CurrentArtifactObservation, CurrentArtifactState,
-    DispatchCandidate, DispatchDuration, DispatchEnvelope, DispatchExitStatus, DispatchLogging,
-    DispatchProjectionInput, DispatchRef, DispatchRole, DispatchRoleClass, DispatchabilityResult,
-    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
-    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable,
-    ExitCode, FileObservation, FindingAdmission, GateObservations, GitAuthorityObservation,
-    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
+    CodexTerminalObservation, CodexTerminalUsage, CreationDate, CurrentArtifactObservation,
+    CurrentArtifactState, DispatchCandidate, DispatchDuration, DispatchEnvelope,
+    DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole,
+    DispatchRoleClass, DispatchTokenUsage, DispatchabilityResult, EventBodyRef, EventKindName,
+    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
+    ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode, FileObservation,
+    FindingAdmission, GateObservations, GitAuthorityObservation, GitHubAuthorityObservation,
+    GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
     OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
     RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot, Sandbox,
     Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
-    StructuredArtifactObservation, TagName, TagState, TagTarget, TerminalObservation,
-    TerminalUsage, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy,
-    VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
-    append_event, classify_terminal_usage, compute_dispatchability, create_vision,
-    derive_merge_status, derive_milestone_merge_status, derive_run_state,
-    dispatch_completion_payload, dispatch_invocation, dispatch_payload, event_record_matches,
-    measure_contract_snapshot, parse_event_line, parse_tracked_repository_contract,
-    render_dispatch_projection, render_human_snapshot, serialize_tracked_repository_contract,
-    validate_artifact, validate_workflow_coverage,
+    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
+    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
+    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_codex_terminal_usage,
+    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
+    derive_run_state, dispatch_completion_payload, dispatch_invocation, dispatch_payload,
+    event_record_matches, measure_contract_snapshot, parse_event_line,
+    parse_tracked_repository_contract, render_dispatch_projection, render_human_snapshot,
+    serialize_tracked_repository_contract, validate_artifact, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -3159,7 +3159,7 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
     let duration_ms = u64::try_from(started.elapsed().as_millis())
         .context("dispatch duration in milliseconds exceeds u64")?;
     let exit_status = dispatch_exit_status(status)?;
-    let classification = classify_terminal_usage(&observations, exit_status);
+    let classification = classify_codex_terminal_usage(&observations, exit_status);
     let artifact_validation: Result<ArtifactOutcome, pce_core::ArtifactValidationError> =
         match (envelope.schema_path(), envelope.output_path()) {
             (Some(schema_path), Some(output_path)) => {
@@ -3181,7 +3181,7 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
     if let (Some(logging), Some(issuance)) = (logging, issuance) {
         let usage = classification
             .clone()
-            .unwrap_or_else(|reason| CodexTokenUsage::Absent { reason });
+            .unwrap_or_else(|reason| DispatchTokenUsage::Absent { reason });
         let completion = dispatch_completion_payload(
             issuance.sequence(),
             DispatchDuration::new(duration_ms),
@@ -3219,30 +3219,30 @@ fn read_file_observation(path: &Path) -> OwnedFileObservation {
     }
 }
 
-fn observe_terminal_line(line: &[u8]) -> TerminalObservation {
+fn observe_terminal_line(line: &[u8]) -> CodexTerminalObservation {
     let Ok(value) = serde_json::from_slice::<Value>(line) else {
-        return TerminalObservation::MalformedLine;
+        return CodexTerminalObservation::MalformedLine;
     };
     let Some(object) = value.as_object() else {
-        return TerminalObservation::NonTerminal;
+        return CodexTerminalObservation::NonTerminal;
     };
     match object.get("type").and_then(Value::as_str) {
         Some("turn.completed") => {
             let usage = object.get("usage").and_then(Value::as_object);
             let usage = usage.and_then(|usage| {
-                Some(TerminalUsage {
+                Some(CodexTerminalUsage {
                     input_tokens: usage.get("input_tokens")?.as_u64()?,
                     cached_input_tokens: usage.get("cached_input_tokens")?.as_u64()?,
                     output_tokens: usage.get("output_tokens")?.as_u64()?,
                     reasoning_output_tokens: usage.get("reasoning_output_tokens")?.as_u64()?,
                 })
             });
-            TerminalObservation::TurnCompleted(usage)
+            CodexTerminalObservation::TurnCompleted(usage)
         }
-        Some("turn.failed") => TerminalObservation::TurnFailed {
+        Some("turn.failed") => CodexTerminalObservation::TurnFailed {
             usage_present: object.contains_key("usage"),
         },
-        _ => TerminalObservation::NonTerminal,
+        _ => CodexTerminalObservation::NonTerminal,
     }
 }
 
@@ -3270,6 +3270,10 @@ fn usage_absence_name(reason: UsageAbsenceReason) -> &'static str {
         UsageAbsenceReason::MalformedTerminalData => "malformed-terminal-data",
         UsageAbsenceReason::DuplicateTerminalData => "duplicate-terminal-data",
         UsageAbsenceReason::ContradictoryTerminalData => "contradictory-terminal-data",
+        UsageAbsenceReason::ClaudeMalformedResult => "claude-malformed-result",
+        UsageAbsenceReason::ClaudeMissingUsage => "claude-missing-usage",
+        UsageAbsenceReason::ClaudeErrorEnvelope => "claude-error-envelope",
+        UsageAbsenceReason::ClaudeExitEnvelopeContradiction => "claude-exit-envelope-contradiction",
     }
 }
 
@@ -3439,17 +3443,17 @@ mod tests {
     use std::time::SystemTime;
 
     use pce_core::{
-        AppendableFinding, ArtifactPath, BranchState, CachedInputTokens, CodexTokenUsage,
-        CurrentArtifactObservation, CurrentArtifactState, DispatchExitStatus, EventKindName,
-        EventRecord, EventRecordFilter, ExitCode, GitAuthorityObservation,
+        AppendableFinding, ArtifactPath, BranchState, CachedInputTokens, CodexTerminalObservation,
+        CurrentArtifactObservation, CurrentArtifactState, DispatchExitStatus, DispatchTokenUsage,
+        EventKindName, EventRecord, EventRecordFilter, ExitCode, GitAuthorityObservation,
         GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, InputTokens,
         KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus,
         OutputTokens, ReadKind, ReadPayload, ReasoningOutputTokens, RecoveryLogPath,
         RepositoryBranchName, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
         RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation,
-        StepNode, TagName, TagState, TerminalObservation, VersionPolicy, VisionSlug,
-        WorktreeIdentity, WorktreeState, WriteKind, classify_terminal_usage, derive_run_state,
-        parse_event_line, render_human_snapshot,
+        StepNode, TagName, TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
+        WriteKind, classify_codex_terminal_usage, derive_run_state, parse_event_line,
+        render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -5898,13 +5902,13 @@ mod tests {
     fn terminal_observation_ignores_additive_usage_and_non_object_json() {
         let observation = observe_terminal_line(br#"{"type":"turn.completed","usage":{"total_tokens":146,"input_tokens":101,"cached_input_tokens":23,"output_tokens":17,"reasoning_output_tokens":5}}"#);
         assert_eq!(
-            classify_terminal_usage(
+            classify_codex_terminal_usage(
                 &[observation],
                 DispatchExitStatus::Exited {
                     code: ExitCode::new(0)
                 }
             ),
-            Ok(CodexTokenUsage::Measured {
+            Ok(DispatchTokenUsage::Measured {
                 input_tokens: InputTokens::new(101),
                 cached_input_tokens: CachedInputTokens::new(23),
                 output_tokens: OutputTokens::new(17),
@@ -5914,7 +5918,7 @@ mod tests {
         for fixture in [b"5".as_slice(), b"\"x\"".as_slice(), b"[]".as_slice()] {
             assert_eq!(
                 observe_terminal_line(fixture),
-                TerminalObservation::NonTerminal
+                CodexTerminalObservation::NonTerminal
             );
         }
     }
