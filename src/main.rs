@@ -18,19 +18,18 @@ use pce_core::{
     DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail,
     EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
     ExactPullRequestIdentity, ExactPullRequestState, Executable, FindingAdmission,
-    GateObservations, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
-    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
-    MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
-    OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
-    RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot, Sandbox,
-    SeatbeltCapability, Sha256Digest, SquashCommitOid, StdinBinding, StepAuthorityObservation,
-    StepNode, TagName, TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload,
-    VersionPolicy, VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
-    admit_recurrent_finding, append_event, classify_seatbelt_capability, compute_dispatchability,
-    create_vision, derive_merge_status, derive_milestone_merge_status, derive_run_state,
-    event_record_matches, measure_contract_snapshot, parse_event_line,
+    GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
+    GitMergeObservation, KnownPayload, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
+    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus,
+    ObservedWorkflowName, OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
+    RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation, RepositoryName,
+    RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot,
+    RunSnapshot, Sandbox, SeatbeltCapability, Sha256Digest, SquashCommitOid, StdinBinding,
+    StepAuthorityObservation, StepNode, TagName, TagState, TagTarget, TrackedRepositoryContract,
+    UnparsedPayload, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity, WorktreeState,
+    WriteKind, admit_recurrent_finding, append_event, classify_seatbelt_capability,
+    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
+    derive_run_state, event_record_matches, measure_contract_snapshot, parse_event_line,
     parse_tracked_repository_contract, render_human_snapshot, seatbelt_capability_probe,
     serialize_tracked_repository_contract, validate_workflow_coverage,
 };
@@ -1087,7 +1086,7 @@ pub fn parse_tracked_contract(bytes: &[u8]) -> Result<TrackedRepositoryContract>
 }
 
 fn run_contract_check(contract_path: &Path, repository_root: &Path) -> Result<()> {
-    measure_tracked_contract_at_root(contract_path, repository_root, None)?;
+    measure_tracked_contract_at_root(contract_path, repository_root)?;
     Ok(())
 }
 
@@ -1211,7 +1210,7 @@ fn bootstrap_locked(
         let mut reader = BufReader::new(&mut *file);
         read_event_log_lines(&mut reader, log_path)?
     };
-    let previous =
+    let _previous =
         matching_bootstrap_contract(&parsed_lines, &repository, &normalized_repository_root)?;
 
     let branch = resolve_default_branch(repository_root)?;
@@ -1251,15 +1250,7 @@ fn bootstrap_locked(
         let tracked = parse_tracked_contract(&bytes)?;
         validate_workflow_coverage(tracked.stated().workflows(), &workflow_identities)
             .context("failed to validate tracked workflow coverage")?;
-        let previous_snapshot = previous
-            .as_ref()
-            .map(|prior| previous_measured_snapshot(&tracked, prior))
-            .transpose()?;
-        let measured =
-            measure_contract_snapshot(tracked.stated(), previous_snapshot.as_ref(), |command| {
-                execute_gate_command(repository_root, command)
-            })
-            .context("failed to measure tracked repository contract")?;
+        let measured = measure_stated_contract_at_root(tracked.stated(), repository_root)?;
         (tracked, measured)
     } else {
         derive_bootstrap_contract(
@@ -1359,28 +1350,29 @@ fn derive_bootstrap_contract(
         if !path_exists_at_default_branch_head(repository_root, branch, "Cargo.toml")? {
             bail!("cannot bootstrap CI-less repository without Cargo.toml at default-branch HEAD");
         }
+        verify_seatbelt_execution_capability(repository_root)?;
         BootstrapDerivation::CargoFallback {
             gates: BootstrapGateCommands {
                 format: select_bootstrap_candidate(
                     "format",
                     FORMAT_BOOTSTRAP_CANDIDATES,
-                    |command| execute_shell_gate_command(repository_root, command),
+                    |command| execute_sandboxed_gate_text(repository_root, command),
                 )?,
                 lint: select_bootstrap_candidate("lint", LINT_BOOTSTRAP_CANDIDATES, |command| {
-                    execute_shell_gate_command(repository_root, command)
+                    execute_sandboxed_gate_text(repository_root, command)
                 })?,
                 typecheck: select_bootstrap_candidate(
                     "typecheck",
                     TYPECHECK_BOOTSTRAP_CANDIDATES,
-                    |command| execute_shell_gate_command(repository_root, command),
+                    |command| execute_sandboxed_gate_text(repository_root, command),
                 )?,
                 test: select_bootstrap_candidate("test", TEST_BOOTSTRAP_CANDIDATES, |command| {
-                    execute_shell_gate_command(repository_root, command)
+                    execute_sandboxed_gate_text(repository_root, command)
                 })?,
                 build: select_bootstrap_candidate(
                     "build",
                     BUILD_BOOTSTRAP_CANDIDATES,
-                    |command| execute_shell_gate_command(repository_root, command),
+                    |command| execute_sandboxed_gate_text(repository_root, command),
                 )?,
             },
         }
@@ -1473,25 +1465,7 @@ fn derive_bootstrap_contract(
     let tracked = parse_tracked_contract(&bytes)?;
     validate_workflow_coverage(tracked.stated().workflows(), workflow_identities)
         .context("failed to validate tracked workflow coverage")?;
-    let measured = match derivation {
-        BootstrapDerivation::Ci { .. } => {
-            measure_contract_snapshot(tracked.stated(), None, |command| {
-                execute_gate_command(repository_root, command)
-            })
-            .context("failed to measure tracked repository contract")?
-        }
-        BootstrapDerivation::CargoFallback { .. } => {
-            let observations = GateObservations {
-                format: ObservedExitStatus::from_code(0),
-                lint: ObservedExitStatus::from_code(0),
-                typecheck: ObservedExitStatus::from_code(0),
-                test: ObservedExitStatus::from_code(0),
-                build: ObservedExitStatus::from_code(0),
-            };
-            MeasuredContractSnapshot::from_observations(tracked.stated(), &observations)
-                .context("failed to construct bootstrap observations")?
-        }
-    };
+    let measured = measure_stated_contract_at_root(tracked.stated(), repository_root)?;
     Ok((tracked, measured))
 }
 
@@ -1710,12 +1684,7 @@ fn persist_refreshed_contract_locked(
     let observed = observed_workflows(repository_root)?;
     validate_workflow_coverage(tracked.stated().workflows(), &observed)
         .context("failed to validate tracked workflow coverage")?;
-    let previous_snapshot = previous_measured_snapshot(tracked, previous)?;
-    let measured =
-        measure_contract_snapshot(tracked.stated(), Some(&previous_snapshot), |command| {
-            execute_gate_command(repository_root, command)
-        })
-        .context("failed to measure tracked repository contract")?;
+    let measured = measure_stated_contract_at_root(tracked.stated(), repository_root)?;
     let evidence_text = measured
         .gates()
         .iter()
@@ -1750,40 +1719,9 @@ fn persist_refreshed_contract_locked(
     )
 }
 
-fn previous_measured_snapshot(
-    tracked: &TrackedRepositoryContract,
-    previous: &RepositoryContractPayload,
-) -> Result<MeasuredContractSnapshot> {
-    (|| {
-        let bytes = serialize_tracked_repository_contract(tracked)?;
-        let mut value: Value = serde_json::from_slice(&bytes)?;
-        for (pointer, command) in [
-            ("/stated/gates/format", previous.stated.format.as_str()),
-            ("/stated/gates/lint", previous.stated.lint.as_str()),
-            (
-                "/stated/gates/typecheck",
-                previous.stated.typecheck.as_str(),
-            ),
-            ("/stated/gates/test", previous.stated.test.as_str()),
-            ("/stated/gates/build", previous.stated.build.as_str()),
-        ] {
-            let slot = value
-                .pointer_mut(pointer)
-                .with_context(|| format!("canonical tracked contract lacks {pointer}"))?;
-            *slot = Value::String(command.to_owned());
-        }
-        let prior_bytes = serde_json::to_vec(&value)?;
-        let prior_tracked = parse_tracked_contract(&prior_bytes)?;
-        MeasuredContractSnapshot::from_observations(prior_tracked.stated(), &previous.observations)
-            .map_err(Error::from)
-    })()
-    .context("failed to reconstruct previous measured contract snapshot")
-}
-
 fn measure_tracked_contract_at_root(
     contract_path: &Path,
     repository_root: &Path,
-    previous: Option<&MeasuredContractSnapshot>,
 ) -> Result<MeasuredContractSnapshot> {
     let bytes = std::fs::read(contract_path).with_context(|| {
         format!(
@@ -1795,12 +1733,15 @@ fn measure_tracked_contract_at_root(
     let observed = observed_workflows(repository_root)?;
     validate_workflow_coverage(contract.stated().workflows(), &observed)
         .context("failed to validate tracked workflow coverage")?;
-    let mut seatbelt_capability_verified = false;
-    measure_contract_snapshot(contract.stated(), previous, |command| {
-        if !seatbelt_capability_verified {
-            verify_seatbelt_execution_capability(repository_root)?;
-            seatbelt_capability_verified = true;
-        }
+    measure_stated_contract_at_root(contract.stated(), repository_root)
+}
+
+fn measure_stated_contract_at_root(
+    stated: &pce_core::StatedContract,
+    repository_root: &Path,
+) -> Result<MeasuredContractSnapshot> {
+    verify_seatbelt_execution_capability(repository_root)?;
+    measure_contract_snapshot(stated, |command| {
         execute_sandboxed_gate_command(repository_root, command)
     })
     .context("failed to measure tracked repository contract")
@@ -1853,13 +1794,6 @@ fn observed_workflows(repository_root: &Path) -> Result<Vec<ObservedWorkflowName
     }
     observed.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     Ok(observed)
-}
-
-fn execute_gate_command(
-    repository_root: &Path,
-    command: &GateCommand,
-) -> std::io::Result<ObservedExitStatus> {
-    execute_shell_gate_command(repository_root, command.as_str())
 }
 
 fn execute_sandboxed_gate_command(
@@ -2051,26 +1985,6 @@ fn seatbelt_path(path: &Path) -> std::io::Result<String> {
         ))
     })?;
     Ok(raw.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-fn execute_shell_gate_command(
-    repository_root: &Path,
-    command: &str,
-) -> std::io::Result<ObservedExitStatus> {
-    let args = [OsString::from("-c"), OsString::from(command)];
-    match execute_process("/bin/sh", &args, Some(repository_root)) {
-        ProcessAttempt::SpawnFailed { detail } => Err(std::io::Error::other(detail)),
-        ProcessAttempt::Completed(result) => result
-            .status
-            .code()
-            .map(ObservedExitStatus::from_code)
-            .ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "stated gate command `{}` terminated without an exit-status code",
-                    command
-                ))
-            }),
-    }
 }
 
 fn parse_dispatch_graph(bytes: &[u8]) -> Result<DispatchGraph> {
@@ -3315,12 +3229,12 @@ mod tests {
         AppendableFinding, ArtifactPath, BranchState, CurrentArtifactObservation,
         CurrentArtifactState, EventKindName, EventRecord, EventRecordFilter,
         GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
-        GitMergeObservation, KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId,
-        ObservedExitStatus, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
-        RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-        RepositoryObservationFailure, RunSnapshot, SeatbeltCapability, Sha256Digest,
-        StepAuthorityObservation, StepNode, TagName, TagState, VersionPolicy, VisionSlug,
-        WorktreeIdentity, WorktreeState, WriteKind, derive_run_state, parse_event_line,
+        GitMergeObservation, KnownPayload, MilestoneMergeSubject, MilestoneNode,
+        NESTED_SEATBELT_SKIP_MARKER, NodeId, ObservedExitStatus, ReadKind, ReadPayload,
+        RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation, RepositoryName,
+        RepositoryObservation, RepositoryObservationFailure, RunSnapshot, SeatbeltCapability,
+        Sha256Digest, StepAuthorityObservation, StepNode, TagName, TagState, VersionPolicy,
+        VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, derive_run_state, parse_event_line,
         render_human_snapshot,
     };
     use serde_json::json;
@@ -3335,9 +3249,6 @@ mod tests {
         readiness_version_policies, repository_contracts, run, run_log_read,
         seatbelt_execution_capability, select_bootstrap_candidate, validated_snapshot_value,
     };
-
-    const NESTED_SEATBELT_SKIP_MARKER: &str =
-        "PCE_TEST_SKIP: nested Seatbelt unavailable; permissive capability probe was denied";
 
     fn record_nested_seatbelt_skip() {
         let status = ProcessCommand::new("/bin/sh")
@@ -3866,12 +3777,26 @@ mod tests {
 
     #[test]
     fn contract_refresh_reads_default_branch_head_not_feature_worktree() {
+        if let SeatbeltCapability::Unavailable { .. } =
+            seatbelt_execution_capability(Path::new(".")).expect("Seatbelt probe should execute")
+        {
+            record_nested_seatbelt_skip();
+            return;
+        }
         let directory = tempdir().expect("temporary directory should create");
         let root = directory.path().join("repository");
         let log_path = directory.path().join("events.jsonl");
-        let strict = ["true", "true", "true", "exit 23", "true"];
-        let relaxed = ["true", "true", "true", "true", "true"];
         initialize_git_repository(&root);
+        let strict_test = root.join("strict-test");
+        fs::write(&strict_test, "#!/bin/sh\nexit 23\n").expect("strict shim should write");
+        let mut permissions = fs::metadata(&strict_test)
+            .expect("strict shim metadata should read")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&strict_test, permissions).expect("strict shim should be executable");
+        let strict_command = strict_test.display().to_string();
+        let strict = ["true", "true", "true", strict_command.as_str(), "true"];
+        let relaxed = ["true", "true", "true", "true", "true"];
         commit_contract(&root, &tracked_contract_bytes(strict), "initial contract");
         establish_remote_head(&root);
         fs::write(&log_path, current_contract_line(&root, relaxed)).expect("event log should seed");
@@ -3894,14 +3819,16 @@ mod tests {
             output.stdout
         };
         let main = parse_tracked_contract(&main_bytes).expect("main contract should parse");
-        assert_eq!(main.stated().gates().test().as_str(), "exit 23");
+        assert_eq!(main.stated().gates().test().as_str(), strict_command);
         let before = fs::read(&log_path).expect("event log should read");
 
         let err = invoke_refresh(&log_path, &root).expect_err("strict test gate should fail");
 
         let rendered = format!("{err:#}");
         assert!(rendered.contains("failed to measure tracked repository contract"));
-        assert!(rendered.contains("stated gate command `exit 23` exited with status 23"));
+        assert!(rendered.contains(&format!(
+            "stated gate command `{strict_command}` exited with status 23"
+        )));
         assert_eq!(fs::read(&log_path).expect("event log should read"), before);
         assert_eq!(
             read_event_log(&log_path)
@@ -3912,45 +3839,78 @@ mod tests {
     }
 
     #[test]
-    fn contract_refresh_rereads_post_merge_command_and_reuses_unchanged_observations() {
+    fn contract_refresh_rereads_post_merge_command_and_reexecutes_all_gates() {
+        if let SeatbeltCapability::Unavailable { .. } =
+            seatbelt_execution_capability(Path::new(".")).expect("Seatbelt probe should execute")
+        {
+            record_nested_seatbelt_skip();
+            return;
+        }
         let directory = tempdir().expect("temporary directory should create");
         let root = directory.path().join("repository");
         let log_path = directory.path().join("events.jsonl");
-        let initial = [
-            "touch format-ran",
-            "touch lint-ran",
-            "touch typecheck-ran",
-            "touch old-test-ran",
-            "touch build-ran",
-        ];
         initialize_git_repository(&root);
+        let invocation_log = root.join("gate-invocations");
+        let make_shim = |name: &str| {
+            let path = root.join(name);
+            fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' '{}' >> '{}' || exit 74\n",
+                    path.display(),
+                    invocation_log.display()
+                ),
+            )
+            .expect("recording shim should write");
+            let mut permissions = fs::metadata(&path)
+                .expect("recording shim metadata should read")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("recording shim should be executable");
+            path.display().to_string()
+        };
+        let format = make_shim("format-gate");
+        let lint = make_shim("lint-gate");
+        let typecheck = make_shim("typecheck-gate");
+        let old_test = make_shim("old-test-gate");
+        let new_test = make_shim("new-test-gate");
+        let build = make_shim("build-gate");
+        let initial = [
+            format.as_str(),
+            lint.as_str(),
+            typecheck.as_str(),
+            old_test.as_str(),
+            build.as_str(),
+        ];
         commit_contract(&root, &tracked_contract_bytes(initial), "initial contract");
         establish_remote_head(&root);
         fs::write(&log_path, current_contract_line(&root, initial)).expect("event log should seed");
 
         invoke_refresh(&log_path, &root).expect("unchanged refresh should succeed");
+        let first_invocations =
+            fs::read_to_string(&invocation_log).expect("first invocation log should read");
+        let expected_first = [
+            format.as_str(),
+            lint.as_str(),
+            typecheck.as_str(),
+            old_test.as_str(),
+            build.as_str(),
+        ]
+        .join("\n")
+            + "\n";
+        assert_eq!(first_invocations, expected_first);
         assert_eq!(
             read_event_log(&log_path)
                 .expect("event log should parse")
                 .len(),
             2
         );
-        for marker in [
-            "format-ran",
-            "lint-ran",
-            "typecheck-ran",
-            "old-test-ran",
-            "build-ran",
-        ] {
-            assert!(!root.join(marker).exists(), "{marker} must not exist");
-        }
-
         let changed = [
-            "touch format-ran",
-            "touch lint-ran",
-            "touch typecheck-ran",
-            "touch new-test-ran",
-            "touch build-ran",
+            format.as_str(),
+            lint.as_str(),
+            typecheck.as_str(),
+            new_test.as_str(),
+            build.as_str(),
         ];
         commit_contract(
             &root,
@@ -3961,16 +3921,21 @@ mod tests {
 
         let lines = read_event_log(&log_path).expect("event log should parse");
         assert_eq!(lines.len(), 3);
-        assert!(root.join("new-test-ran").exists());
-        for marker in [
-            "format-ran",
-            "lint-ran",
-            "typecheck-ran",
-            "old-test-ran",
-            "build-ran",
-        ] {
-            assert!(!root.join(marker).exists(), "{marker} must not exist");
-        }
+        let all_invocations =
+            fs::read_to_string(&invocation_log).expect("second invocation log should read");
+        let expected_second = [
+            format.as_str(),
+            lint.as_str(),
+            typecheck.as_str(),
+            new_test.as_str(),
+            build.as_str(),
+        ]
+        .join("\n")
+            + "\n";
+        assert_eq!(
+            all_invocations,
+            format!("{first_invocations}{expected_second}")
+        );
         let records = lines
             .iter()
             .map(|line| line.record.clone())
@@ -3979,7 +3944,7 @@ mod tests {
         let [RepositoryContract::Current(latest)] = contracts.as_slice() else {
             panic!("one latest current contract expected");
         };
-        assert_eq!(latest.stated.test, "touch new-test-ran");
+        assert_eq!(latest.stated.test, new_test);
         assert_eq!(latest.observations.format.get(), 0);
         assert_eq!(latest.observations.lint.get(), 0);
         assert_eq!(latest.observations.typecheck.get(), 0);
@@ -4988,7 +4953,7 @@ mod tests {
     }
 
     #[test]
-    fn successive_contract_measurements_do_not_reexecute_unchanged_gate_commands() {
+    fn successive_contract_measurements_reexecute_every_gate() {
         if let SeatbeltCapability::Unavailable { .. } =
             seatbelt_execution_capability(Path::new(".")).expect("Seatbelt probe should execute")
         {
@@ -5050,18 +5015,20 @@ mod tests {
         )
         .expect("contract fixture should write");
 
-        let first = measure_tracked_contract_at_root(&contract_path, &repository_root, None)
+        let _first = measure_tracked_contract_at_root(&contract_path, &repository_root)
             .expect("first measurement should succeed");
         assert_eq!(
             fs::read_to_string(&marker_path).expect("marker should read"),
             "xxxxx"
         );
 
-        measure_tracked_contract_at_root(&contract_path, &repository_root, Some(&first))
-            .expect("second measurement should reuse prior observations");
+        let first_invocations =
+            fs::read_to_string(&marker_path).expect("first invocation log should read");
+        measure_tracked_contract_at_root(&contract_path, &repository_root)
+            .expect("second measurement should freshly execute every gate");
         assert_eq!(
             fs::read_to_string(marker_path).expect("marker should read"),
-            "xxxxx"
+            format!("{first_invocations}{first_invocations}")
         );
     }
 

@@ -1,4 +1,4 @@
-//! measure_contract_snapshot : StatedContract × PreviousMeasuredContractSnapshot? × ExecuteGate → MeasuredContractSnapshot ∪ ContractMeasurementError; rehydrate_measured_contract_snapshot : StatedContract × GateObservations → MeasuredContractSnapshot ∪ ContractSnapshotRehydrationError
+//! measure_contract_snapshot : StatedContract × ExecuteGate → MeasuredContractSnapshot ∪ ContractMeasurementError
 //! This module performs no ambient I/O; only the injected execution capability may observe a gate.
 
 use std::fmt::{self, Display, Formatter};
@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
-use crate::event_log::GateObservations;
 use crate::tracked_contract::{GateCommand, GateKind, StatedContract};
 
 /// An exit-status code observed by the injected gate execution capability.
@@ -115,35 +114,6 @@ pub struct MeasuredContractSnapshot {
 }
 
 impl MeasuredContractSnapshot {
-    /// Pair persisted role-specific statuses with commands from the supplied stated contract.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ContractSnapshotRehydrationError::NonZeroGate`] when a persisted observation
-    /// is not successful.
-    #[instrument(skip(stated, observations))]
-    pub fn from_observations(
-        stated: &StatedContract,
-        observations: &GateObservations,
-    ) -> Result<Self, ContractSnapshotRehydrationError> {
-        let commands = stated.gates();
-        let gates = GateMeasurements {
-            format: rehydrate_gate(GateKind::Format, commands.format(), observations.format)?,
-            lint: rehydrate_gate(GateKind::Lint, commands.lint(), observations.lint)?,
-            typecheck: rehydrate_gate(
-                GateKind::Typecheck,
-                commands.typecheck(),
-                observations.typecheck,
-            )?,
-            test: rehydrate_gate(GateKind::Test, commands.test(), observations.test)?,
-            build: rehydrate_gate(GateKind::Build, commands.build(), observations.build)?,
-        };
-        Ok(Self {
-            stated: stated.clone(),
-            gates,
-        })
-    }
-
     /// Return the current stated contract represented by this snapshot.
     pub const fn stated(&self) -> &StatedContract {
         &self.stated
@@ -153,21 +123,6 @@ impl MeasuredContractSnapshot {
     pub const fn gates(&self) -> &GateMeasurements {
         &self.gates
     }
-}
-
-/// A failure to rehydrate a successful measured snapshot from persisted observations.
-#[derive(Debug, Error)]
-pub enum ContractSnapshotRehydrationError {
-    /// Fires when a persisted observation cannot inhabit a successful measured snapshot.
-    #[error(
-        "persisted observation for stated gate command `{command}` has non-zero status {status}"
-    )]
-    NonZeroGate {
-        /// The exact stated command paired with the rejected observation.
-        command: String,
-        /// The persisted non-zero exit status.
-        status: ObservedExitStatus,
-    },
 }
 
 /// A failure to obtain a complete successful measured-contract snapshot.
@@ -195,35 +150,16 @@ where
     },
 }
 
-fn rehydrate_gate(
-    kind: GateKind,
-    command: &GateCommand,
-    status: ObservedExitStatus,
-) -> Result<GateMeasurement, ContractSnapshotRehydrationError> {
-    if !status.is_success() {
-        return Err(ContractSnapshotRehydrationError::NonZeroGate {
-            command: command.as_str().to_owned(),
-            status,
-        });
-    }
-    Ok(GateMeasurement {
-        kind,
-        command: command.clone(),
-        status,
-    })
-}
-
-/// Measure all changed stated gates and retain same-role byte-identical observations.
+/// Measure all stated gates in role order.
 ///
 /// # Errors
 ///
 /// Returns [`ContractMeasurementError::ExecutionFailed`] when the injected capability cannot
 /// observe a gate. Returns [`ContractMeasurementError::NonZeroGate`] when a newly executed gate
 /// reports a non-zero status.
-#[instrument(skip(stated, previous, execute))]
+#[instrument(skip(stated, execute))]
 pub fn measure_contract_snapshot<E>(
     stated: &StatedContract,
-    previous: Option<&MeasuredContractSnapshot>,
     mut execute: impl FnMut(&GateCommand) -> Result<ObservedExitStatus, E>,
 ) -> Result<MeasuredContractSnapshot, ContractMeasurementError<E>>
 where
@@ -231,36 +167,11 @@ where
 {
     let commands = stated.gates();
     let gates = GateMeasurements {
-        format: measure_gate(
-            GateKind::Format,
-            commands.format(),
-            previous.map(|snapshot| snapshot.gates().get(GateKind::Format)),
-            &mut execute,
-        )?,
-        lint: measure_gate(
-            GateKind::Lint,
-            commands.lint(),
-            previous.map(|snapshot| snapshot.gates().get(GateKind::Lint)),
-            &mut execute,
-        )?,
-        typecheck: measure_gate(
-            GateKind::Typecheck,
-            commands.typecheck(),
-            previous.map(|snapshot| snapshot.gates().get(GateKind::Typecheck)),
-            &mut execute,
-        )?,
-        test: measure_gate(
-            GateKind::Test,
-            commands.test(),
-            previous.map(|snapshot| snapshot.gates().get(GateKind::Test)),
-            &mut execute,
-        )?,
-        build: measure_gate(
-            GateKind::Build,
-            commands.build(),
-            previous.map(|snapshot| snapshot.gates().get(GateKind::Build)),
-            &mut execute,
-        )?,
+        format: measure_gate(GateKind::Format, commands.format(), &mut execute)?,
+        lint: measure_gate(GateKind::Lint, commands.lint(), &mut execute)?,
+        typecheck: measure_gate(GateKind::Typecheck, commands.typecheck(), &mut execute)?,
+        test: measure_gate(GateKind::Test, commands.test(), &mut execute)?,
+        build: measure_gate(GateKind::Build, commands.build(), &mut execute)?,
     };
 
     Ok(MeasuredContractSnapshot {
@@ -272,18 +183,11 @@ where
 fn measure_gate<E>(
     kind: GateKind,
     command: &GateCommand,
-    prior: Option<&GateMeasurement>,
     execute: &mut impl FnMut(&GateCommand) -> Result<ObservedExitStatus, E>,
 ) -> Result<GateMeasurement, ContractMeasurementError<E>>
 where
     E: std::error::Error + 'static,
 {
-    if let Some(prior) = prior
-        && prior.command().as_str() == command.as_str()
-    {
-        return Ok(prior.clone());
-    }
-
     let status = execute(command).map_err(|source| ContractMeasurementError::ExecutionFailed {
         command: command.as_str().to_owned(),
         source,
@@ -310,11 +214,7 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{
-        ContractMeasurementError, ContractSnapshotRehydrationError, MeasuredContractSnapshot,
-        ObservedExitStatus, measure_contract_snapshot,
-    };
-    use crate::event_log::GateObservations;
+    use super::{ContractMeasurementError, ObservedExitStatus, measure_contract_snapshot};
     use crate::tracked_contract::{
         GateKind, TrackedRepositoryContract, parse_tracked_repository_contract,
     };
@@ -386,7 +286,7 @@ mod tests {
         let stated = contract.stated();
         let calls = RefCell::new(Vec::new());
 
-        let snapshot = measure_contract_snapshot(stated, None, |command| {
+        let snapshot = measure_contract_snapshot(stated, |command| {
             calls.borrow_mut().push(command.as_str().to_owned());
             Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
         })
@@ -436,7 +336,7 @@ mod tests {
         let contract = parsed_contract(VALID_TRACKED_CONTRACT);
         let calls = RefCell::new(Vec::new());
 
-        let result = measure_contract_snapshot(contract.stated(), None, |command| {
+        let result = measure_contract_snapshot(contract.stated(), |command| {
             calls.borrow_mut().push(command.as_str().to_owned());
             let code = if command.as_str() == "cargo test --workspace" {
                 17
@@ -473,10 +373,10 @@ mod tests {
     }
 
     #[test]
-    fn changed_command_reexecutes_only_its_gate_and_retains_prior_observations() {
+    fn changed_command_reexecutes_every_current_gate() {
         let contract = parsed_contract(VALID_TRACKED_CONTRACT);
         let calls = RefCell::new(Vec::new());
-        let first_snapshot = measure_contract_snapshot(contract.stated(), None, |command| {
+        let _first_snapshot = measure_contract_snapshot(contract.stated(), |command| {
             calls.borrow_mut().push(command.as_str().to_owned());
             Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
         })
@@ -485,19 +385,30 @@ mod tests {
             value["stated"]["gates"]["test"] =
                 Value::String("cargo test --workspace --all-targets".to_owned());
         });
-        calls.borrow_mut().clear();
+        let first_calls = calls.borrow().clone();
 
-        let second_snapshot = measure_contract_snapshot(
-            changed_contract.stated(),
-            Some(&first_snapshot),
-            |command| {
-                calls.borrow_mut().push(command.as_str().to_owned());
-                Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
-            },
-        )
+        let second_snapshot = measure_contract_snapshot(changed_contract.stated(), |command| {
+            calls.borrow_mut().push(command.as_str().to_owned());
+            Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
+        })
         .expect("changed test gate must succeed");
 
-        assert_eq!(calls.into_inner(), ["cargo test --workspace --all-targets"]);
+        let all_calls = calls.into_inner();
+        assert_eq!(
+            &all_calls[..first_calls.len()],
+            first_calls.as_slice(),
+            "first measurement establishes the five-call baseline"
+        );
+        assert_eq!(
+            &all_calls[first_calls.len()..],
+            [
+                "cargo fmt --check",
+                "cargo clippy --workspace --all-targets",
+                "cargo check --workspace --all-targets",
+                "cargo test --workspace --all-targets",
+                "cargo build --release",
+            ]
+        );
         assert_eq!(second_snapshot.stated(), changed_contract.stated());
         let changed_test = second_snapshot.gates().get(GateKind::Test);
         assert_eq!(
@@ -505,24 +416,13 @@ mod tests {
             "cargo test --workspace --all-targets"
         );
         assert_eq!(changed_test.status().code(), 0);
-        for kind in [
-            GateKind::Format,
-            GateKind::Lint,
-            GateKind::Typecheck,
-            GateKind::Build,
-        ] {
-            assert_eq!(
-                second_snapshot.gates().get(kind),
-                first_snapshot.gates().get(kind)
-            );
-        }
     }
 
     #[test]
-    fn unchanged_commands_execute_zero_times_while_new_stated_contract_is_kept() {
+    fn unchanged_commands_execute_freshly_while_new_stated_contract_is_kept() {
         let contract = parsed_contract(VALID_TRACKED_CONTRACT);
         let calls = RefCell::new(Vec::new());
-        let first_snapshot = measure_contract_snapshot(contract.stated(), None, |command| {
+        let first_snapshot = measure_contract_snapshot(contract.stated(), |command| {
             calls.borrow_mut().push(command.as_str().to_owned());
             Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
         })
@@ -530,19 +430,17 @@ mod tests {
         let changed_contract = stated_with_mutation(|value| {
             value["stated"]["branches"]["default"] = Value::String("trunk".to_owned());
         });
-        calls.borrow_mut().clear();
+        let first_calls = calls.borrow().clone();
 
-        let second_snapshot = measure_contract_snapshot(
-            changed_contract.stated(),
-            Some(&first_snapshot),
-            |command| {
-                calls.borrow_mut().push(command.as_str().to_owned());
-                Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
-            },
-        )
-        .expect("unchanged gates must be reused");
+        let second_snapshot = measure_contract_snapshot(changed_contract.stated(), |command| {
+            calls.borrow_mut().push(command.as_str().to_owned());
+            Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
+        })
+        .expect("unchanged gates must be freshly measured");
 
-        assert!(calls.into_inner().is_empty());
+        let all_calls = calls.into_inner();
+        assert_eq!(&all_calls[..first_calls.len()], first_calls.as_slice());
+        assert_eq!(&all_calls[first_calls.len()..], first_calls.as_slice());
         assert_eq!(second_snapshot.gates(), first_snapshot.gates());
         assert_eq!(second_snapshot.stated(), changed_contract.stated());
         assert_eq!(
@@ -556,7 +454,7 @@ mod tests {
         let contract = parsed_contract(VALID_TRACKED_CONTRACT);
         let calls = RefCell::new(Vec::new());
 
-        let result = measure_contract_snapshot(contract.stated(), None, |command| {
+        let result = measure_contract_snapshot(contract.stated(), |command| {
             calls.borrow_mut().push(command.as_str().to_owned());
             Err(io::Error::other("executor unavailable"))
         });
@@ -577,76 +475,5 @@ mod tests {
             "failed to execute stated gate command `cargo fmt --check`: executor unavailable"
         );
         assert_eq!(calls.borrow().len(), 1);
-    }
-
-    #[test]
-    fn rehydrates_persisted_gate_observations_for_previous_snapshot_reuse() {
-        let contract = parsed_contract(VALID_TRACKED_CONTRACT);
-        let observations = GateObservations {
-            format: ObservedExitStatus::from_code(0),
-            lint: ObservedExitStatus::from_code(0),
-            typecheck: ObservedExitStatus::from_code(0),
-            test: ObservedExitStatus::from_code(0),
-            build: ObservedExitStatus::from_code(0),
-        };
-
-        let previous =
-            MeasuredContractSnapshot::from_observations(contract.stated(), &observations)
-                .expect("successful observations should rehydrate");
-        assert_eq!(previous.stated(), contract.stated());
-        let measured = previous
-            .gates()
-            .iter()
-            .map(|gate| (gate.kind(), gate.command().as_str(), gate.status().code()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            measured,
-            [
-                (GateKind::Format, "cargo fmt --check", 0),
-                (GateKind::Lint, "cargo clippy --workspace --all-targets", 0),
-                (
-                    GateKind::Typecheck,
-                    "cargo check --workspace --all-targets",
-                    0,
-                ),
-                (GateKind::Test, "cargo test --workspace", 0),
-                (GateKind::Build, "cargo build --release", 0),
-            ]
-        );
-
-        let calls = RefCell::new(0);
-        let reused = measure_contract_snapshot(contract.stated(), Some(&previous), |_command| {
-            *calls.borrow_mut() += 1;
-            Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
-        })
-        .expect("unchanged rehydrated gates should be reused");
-        assert_eq!(*calls.borrow(), 0);
-        assert_eq!(reused.gates(), previous.gates());
-    }
-
-    #[test]
-    fn rejects_nonzero_persisted_observation_during_rehydration() {
-        let contract = parsed_contract(VALID_TRACKED_CONTRACT);
-        let observations = GateObservations {
-            format: ObservedExitStatus::from_code(0),
-            lint: ObservedExitStatus::from_code(0),
-            typecheck: ObservedExitStatus::from_code(0),
-            test: ObservedExitStatus::from_code(17),
-            build: ObservedExitStatus::from_code(0),
-        };
-
-        let error = MeasuredContractSnapshot::from_observations(contract.stated(), &observations)
-            .expect_err("non-zero persisted observations must be rejected");
-        let display = error.to_string();
-        match error {
-            ContractSnapshotRehydrationError::NonZeroGate { command, status } => {
-                assert_eq!(command, "cargo test --workspace");
-                assert_eq!(status.code(), 17);
-            }
-        }
-        assert_eq!(
-            display,
-            "persisted observation for stated gate command `cargo test --workspace` has non-zero status 17"
-        );
     }
 }

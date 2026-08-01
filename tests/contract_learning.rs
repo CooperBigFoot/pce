@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+mod support;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -10,6 +13,8 @@ use pce_core::{
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
+
+use support::skip_without_nested_seatbelt;
 
 const FINDING: &str = "Cargo.lock must be regenerated before cargo test";
 const CURRENT_FINDING: &str = r#"{"sequence":2,"timestamp":"2026-07-29T12:00:01.000Z","kind":"key-finding","node":"m3-s5","payload":{"finding":"Cargo.lock must be regenerated before cargo test","evidence":"cargo test --workspace"}}"#;
@@ -257,6 +262,19 @@ fn fixture(prior_finding: &str) -> Fixture {
     }
 }
 
+fn invocation_measurement(fixture: &Fixture) -> Vec<Vec<u8>> {
+    ["format", "lint", "typecheck", "test", "build"]
+        .into_iter()
+        .map(|role| {
+            fs::read(fixture.root.join(format!("gate-{role}-invocations.bin"))).unwrap_or_default()
+        })
+        .collect()
+}
+
+fn assert_no_gate_invocations(fixture: &Fixture) {
+    assert_eq!(invocation_measurement(fixture), vec![Vec::<u8>::new(); 5]);
+}
+
 fn learn_args(current: &Path, prior: &Path, root: &Path) -> Vec<String> {
     vec![
         "contract".to_owned(),
@@ -376,12 +394,17 @@ fn first_occurrence_leaves_tracked_contract_and_current_log_unchanged() {
         fs::read(&fixture.current_log).expect("current log should read"),
         log_before
     );
+    assert_no_gate_invocations(&fixture);
 }
 
 #[test]
 fn recurrence_appends_once_and_preserves_stated_half_byte_for_byte() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let fixture = fixture(PRIOR_FINDING);
     let stated_before = stated_range(&git_show_contract(&fixture.root));
+    let before = invocation_measurement(&fixture);
 
     let output = invoke_learn(&fixture);
 
@@ -456,11 +479,23 @@ fn recurrence_appends_once_and_preserves_stated_half_byte_for_byte() {
     assert!(tracked.appendable().environment_hazards().is_empty());
     assert!(tracked.appendable().gate_orderings().is_empty());
     assert_selected_appendable(&fixture.current_log);
+    let after = invocation_measurement(&fixture);
+    assert!(
+        before
+            .iter()
+            .zip(&after)
+            .all(|(first, second)| first.is_empty() && !second.is_empty()),
+        "admitted learning must freshly invoke every role"
+    );
 }
 
 #[test]
 fn duplicate_recurrence_is_idempotent() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let fixture = fixture(PRIOR_FINDING);
+    let baseline = invocation_measurement(&fixture);
     let first = invoke_learn(&fixture);
     assert!(
         first.status.success(),
@@ -473,6 +508,7 @@ fn duplicate_recurrence_is_idempotent() {
     assert_eq!(committed_text.matches(FINDING).count(), 1);
     let stated_before = stated_range(&committed);
     let count_before = repository_payloads(&fixture.current_log).len();
+    let first_measurement = invocation_measurement(&fixture);
 
     let second = invoke_learn(&fixture);
 
@@ -494,6 +530,15 @@ fn duplicate_recurrence_is_idempotent() {
             .collect::<Vec<_>>(),
         [FINDING]
     );
+    let second_measurement = invocation_measurement(&fixture);
+    for ((baseline, first), second) in baseline
+        .iter()
+        .zip(&first_measurement)
+        .zip(&second_measurement)
+    {
+        assert!(baseline.is_empty());
+        assert_eq!(second.len(), first.len() * 2);
+    }
     assert!(tracked.appendable().environment_hazards().is_empty());
     assert!(tracked.appendable().gate_orderings().is_empty());
     assert_eq!(stated_range(&tracked_bytes), stated_before);
@@ -531,6 +576,7 @@ fn same_log_path_is_rejected() {
         fs::read(&fixture.current_log).expect("current log should read"),
         log_before
     );
+    assert_no_gate_invocations(&fixture);
 }
 
 #[test]
@@ -564,6 +610,7 @@ fn prior_repository_identity_mismatch_is_rejected() {
         fs::read(&fixture.current_log).expect("current log should read"),
         log_before
     );
+    assert_no_gate_invocations(&fixture);
 }
 
 #[test]
@@ -597,11 +644,16 @@ fn missing_current_key_finding_is_rejected() {
         fs::read(&fixture.current_log).expect("current log should read"),
         log_before
     );
+    assert_no_gate_invocations(&fixture);
 }
 
 #[test]
 fn later_lifecycle_invocation_recovers_exact_entry_without_key_finding() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
     let fixture = fixture(PRIOR_FINDING);
+    let baseline = invocation_measurement(&fixture);
     let learned = invoke_learn(&fixture);
     assert!(
         learned.status.success(),
@@ -609,6 +661,7 @@ fn later_lifecycle_invocation_recovers_exact_entry_without_key_finding() {
         stderr(&learned)
     );
     commit_learned_contract(&fixture.root);
+    let learned_measurement = invocation_measurement(&fixture);
     let later_log = fixture._directory.path().join("later.jsonl");
     fs::write(
         &later_log,
@@ -645,4 +698,16 @@ fn later_lifecycle_invocation_recovers_exact_entry_without_key_finding() {
             )
         });
     assert!(!has_key_finding);
+    let refreshed_measurement = invocation_measurement(&fixture);
+    for ((baseline, learned), refreshed) in baseline
+        .iter()
+        .zip(&learned_measurement)
+        .zip(&refreshed_measurement)
+    {
+        assert!(baseline.is_empty());
+        let learn_delta = &learned[baseline.len()..];
+        let refresh_delta = &refreshed[learned.len()..];
+        assert!(!learn_delta.is_empty());
+        assert_eq!(refresh_delta, learn_delta);
+    }
 }

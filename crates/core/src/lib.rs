@@ -9,9 +9,13 @@ pub mod vision;
 pub mod workflow_coverage;
 
 pub use contract_measurement::{
-    ContractMeasurementError, ContractSnapshotRehydrationError, GateMeasurement, GateMeasurements,
-    MeasuredContractSnapshot, ObservedExitStatus, measure_contract_snapshot,
+    ContractMeasurementError, GateMeasurement, GateMeasurements, MeasuredContractSnapshot,
+    ObservedExitStatus, measure_contract_snapshot,
 };
+
+/// Exact diagnostic emitted when a nested Seatbelt capability probe is denied.
+pub const NESTED_SEATBELT_SKIP_MARKER: &str =
+    "PCE_TEST_SKIP: nested Seatbelt unavailable; permissive capability probe was denied";
 pub use dispatch::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
     ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, SeatbeltCapability,
