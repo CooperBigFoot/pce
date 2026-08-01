@@ -526,10 +526,26 @@ fn contract_check_rejects_omitted_workflow_and_accepts_explicit_none() {
 
 #[test]
 fn host_permissive_probe_reports_nested_seatbelt_available() {
-    let observation = observe_seatbelt_capability();
-    if observation.status.code() != 0 {
+    let direct_status = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "--", "/usr/bin/true"])
+        .env_clear()
+        .stdin(Stdio::null())
+        .status()
+        .expect("direct permissive Seatbelt probe should spawn");
+    if !direct_status.success() {
         eprintln!("{NESTED_SEATBELT_SKIP_MARKER}");
         return;
     }
-    assert_eq!(observation.capability, SeatbeltCapability::Available);
+
+    let observation = observe_seatbelt_capability();
+    assert_eq!(
+        observation.capability,
+        SeatbeltCapability::Available,
+        "the shared probe returned status {} after the independent direct probe succeeded",
+        observation.status.code()
+    );
+    assert!(
+        !skip_without_nested_seatbelt(),
+        "the shared skip decision must remain false when the independent direct probe succeeds"
+    );
 }
