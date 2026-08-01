@@ -108,7 +108,7 @@ struct ReviewBindings {
     shim_dir: PathBuf,
     graph_schema: PathBuf,
     verdict_schema: PathBuf,
-    graph_output: PathBuf,
+    graph_outputs: BTreeMap<String, PathBuf>,
     verdict_root: PathBuf,
     complete_git_dir: PathBuf,
     context: ReviewContext,
@@ -264,7 +264,10 @@ fn fixture() -> Fixture {
         .join("skills/pce/schemas/verdict.schema.json")
         .canonicalize()
         .expect("verdict schema");
-    let graph_output = root.path().join("graph.json");
+    let graph_outputs = ["milestone-planner", "step-planner"]
+        .into_iter()
+        .map(|role| (role.to_owned(), root.path().join(format!("{role}.json"))))
+        .collect();
     let verdict_root = root.path().join("reviews");
     fs::create_dir_all(&verdict_root).expect("review root");
     let mut review_directories = BTreeMap::new();
@@ -391,7 +394,7 @@ printf '{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"e
             shim_dir,
             graph_schema,
             verdict_schema,
-            graph_output,
+            graph_outputs,
             verdict_root,
             complete_git_dir,
             context: ReviewContext {
@@ -626,7 +629,11 @@ fn substitute_route(
                         matches!(role, "milestone-planner" | "step-planner")
                     }) =>
                 {
-                    bindings.graph_output.as_os_str()
+                    bindings
+                        .graph_outputs
+                        .get(role.expect("planner role"))
+                        .expect("planner output")
+                        .as_os_str()
                 }
                 Placeholder::Output if role.is_some_and(|role| role == "step-executor") => {
                     contextual = bindings.verdict_root.join("executor-result.json");
@@ -2176,17 +2183,21 @@ fn standalone_append_before_anchor_reds() {
     assert_colocated_append("standalone_append_before_anchor_reds", true);
 }
 
-#[test]
-fn verdict_index_and_sentinel_semantics() {
-    let f = fixture();
-    let events = &f.bindings.context.accepted_events;
-    let first = prior_dispatch_count(events, "m7-s2", "pr-reviewer");
-    let independently_filtered = events
+fn independently_filtered_prior_count(events: &[serde_json::Value]) -> usize {
+    events
         .iter()
         .filter(|event| event["kind"] == "dispatch")
         .filter(|event| event["node"] == "m7-s2")
         .filter(|event| event["role"] == "pr-reviewer")
-        .count();
+        .count()
+}
+
+#[test]
+fn verdict_index_derived_from_prior_records() {
+    let f = fixture();
+    let events = &f.bindings.context.accepted_events;
+    let first = prior_dispatch_count(events, "m7-s2", "pr-reviewer");
+    let independently_filtered = independently_filtered_prior_count(events);
     assert_eq!(
         first, independently_filtered,
         "verdict_index_derived_from_prior_records"
@@ -2209,37 +2220,67 @@ fn verdict_index_and_sentinel_semantics() {
         json_index, markdown_index,
         "verdict_index_derived_from_prior_records"
     );
+}
 
-    for (name, extra) in [
-        (
-            "verdict_other_kind_not_counted",
-            serde_json::json!({"kind":"dispatch-completion","node":"m7-s2","role":"pr-reviewer"}),
-        ),
-        (
-            "verdict_other_node_not_counted",
-            serde_json::json!({"kind":"dispatch","node":"m8-s2","role":"pr-reviewer"}),
-        ),
-        (
-            "verdict_other_role_not_counted",
-            serde_json::json!({"kind":"dispatch","node":"m7-s2","role":"step-plan-critic"}),
-        ),
-    ] {
-        let mut changed = events.clone();
-        changed.push(extra);
-        assert_eq!(
-            prior_dispatch_count(&changed, "m7-s2", "pr-reviewer"),
-            first,
-            "{name}"
-        );
-    }
+fn assert_other_record_not_counted(name: &str, extra: serde_json::Value) {
+    let f = fixture();
+    let events = &f.bindings.context.accepted_events;
+    let independently_filtered = independently_filtered_prior_count(events);
+    let mut changed = events.clone();
+    changed.push(extra);
+    assert_eq!(
+        prior_dispatch_count(&changed, "m7-s2", "pr-reviewer"),
+        independently_filtered,
+        "{name}"
+    );
+}
+
+#[test]
+fn verdict_other_kind_not_counted() {
+    assert_other_record_not_counted(
+        "verdict_other_kind_not_counted",
+        serde_json::json!({"kind":"dispatch-completion","node":"m7-s2","role":"pr-reviewer"}),
+    );
+}
+
+#[test]
+fn verdict_other_node_not_counted() {
+    assert_other_record_not_counted(
+        "verdict_other_node_not_counted",
+        serde_json::json!({"kind":"dispatch","node":"m8-s2","role":"pr-reviewer"}),
+    );
+}
+
+#[test]
+fn verdict_other_role_not_counted() {
+    assert_other_record_not_counted(
+        "verdict_other_role_not_counted",
+        serde_json::json!({"kind":"dispatch","node":"m7-s2","role":"step-plan-critic"}),
+    );
+}
+
+#[test]
+fn verdict_matching_record_increments_index() {
+    let f = fixture();
+    let events = &f.bindings.context.accepted_events;
+    let independently_filtered = independently_filtered_prior_count(events);
     let mut incremented = events.clone();
     incremented.push(serde_json::json!({"kind":"dispatch","node":"m7-s2","role":"pr-reviewer"}));
     assert_eq!(
         prior_dispatch_count(&incremented, "m7-s2", "pr-reviewer"),
-        first.checked_add(1).expect("successor"),
+        independently_filtered.checked_add(1).expect("successor"),
         "verdict_matching_record_increments_index"
     );
+}
 
+#[test]
+fn prior_verdict_sentinel_survives_next_round() {
+    let f = fixture();
+    let events = &f.bindings.context.accepted_events;
+    let first = prior_dispatch_count(events, "m7-s2", "pr-reviewer");
+    let next = first.checked_add(1).expect("checked successor");
+    let directory = &f.bindings.context.review_directories["pr-reviewer"];
+    let json = directory.join(format!("review-{next}.json"));
     let prior = directory.join(format!("review-{first}.json"));
     fs::write(&prior, b"prior sentinel").expect("prior sentinel");
     let before_path = prior.clone();
@@ -2555,12 +2596,13 @@ fn conformance_paths_and_projection_limitation() {
         "codex_conformance_shim_terminal_envelope_accepts"
     );
     for role in ["milestone-planner", "step-planner"] {
+        let graph_output = &f.bindings.graph_outputs[role];
         assert!(
-            f.bindings.graph_output.exists(),
+            graph_output.exists(),
             "codex_conformance_shim_selects_payload_by_schema/{role}"
         );
         let value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&f.bindings.graph_output).expect("graph artifact"))
+            serde_json::from_slice(&fs::read(graph_output).expect("graph artifact"))
                 .expect("graph json");
         let schema: serde_json::Value =
             serde_json::from_slice(&fs::read(&f.bindings.graph_schema).expect("graph schema"))
@@ -2568,7 +2610,8 @@ fn conformance_paths_and_projection_limitation() {
         assert!(
             jsonschema::validator_for(&schema)
                 .expect("graph validator")
-                .is_valid(&value)
+                .is_valid(&value),
+            "codex_conformance_shim_selects_payload_by_schema/{role}"
         );
     }
     let recovered = PathBuf::from(
