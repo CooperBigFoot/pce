@@ -1,11 +1,17 @@
-//! DispatchEnvelope = Executable × ArgumentVector × AbsoluteWorkingDirectory × ChildEnvironment × StdinBinding × Option<Sandbox> × Option<AbsoluteSchemaPath> × Option<AbsoluteOutputPath>   (pure, deterministic)
-//! This provisional module describes child invocations; the binary adapter performs all I/O and process work and will test the shape against the real tool surface in m2-s2.
+//! DispatchEnvelope = Executable × ArgumentVector × AbsoluteWorkingDirectory × ChildEnvironment × StdinBinding   (pure, deterministic)
+//! SeatbeltCapability = classify(permissive_profile_probe_status)   (pure, deterministic)
+//! This module describes complete shell-free child invocations; the binary adapter performs all I/O and process work.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use tracing::instrument;
+
+use crate::contract_measurement::ObservedExitStatus;
+
+const SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
+const PERMISSIVE_SEATBELT_PROFILE: &str = "(version 1)(allow default)";
 
 /// A program name passed directly to a process adapter, never to a shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,22 +39,22 @@ impl Executable {
     }
 }
 
-/// The caller-supplied argument tail in caller order.
+/// The complete child argument vector in caller order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ArgumentVector(Vec<String>);
 
 impl ArgumentVector {
-    /// Store caller-supplied arguments without filtering or normalization.
+    /// Store complete child arguments without filtering or normalization.
     pub fn new(arguments: Vec<String>) -> Self {
         Self(arguments)
     }
 
-    /// Borrow the ordered caller-supplied arguments.
+    /// Borrow the ordered complete child arguments.
     pub fn as_slice(&self) -> &[String] {
         &self.0
     }
 
-    /// Report whether the caller supplied no arguments.
+    /// Report whether the child has no arguments.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -187,9 +193,6 @@ pub struct DispatchEnvelope {
     working_directory: AbsoluteWorkingDirectory,
     environment: ChildEnvironment,
     stdin: StdinBinding,
-    sandbox: Option<Sandbox>,
-    schema_path: Option<AbsoluteSchemaPath>,
-    output_path: Option<AbsoluteOutputPath>,
 }
 
 impl DispatchEnvelope {
@@ -205,13 +208,10 @@ impl DispatchEnvelope {
             working_directory,
             environment: ChildEnvironment::default(),
             stdin,
-            sandbox: None,
-            schema_path: None,
-            output_path: None,
         }
     }
 
-    /// Set the caller-supplied argument tail.
+    /// Set the complete child argument vector.
     pub fn with_arguments(mut self, arguments: ArgumentVector) -> Self {
         self.arguments = arguments;
         self
@@ -223,30 +223,12 @@ impl DispatchEnvelope {
         self
     }
 
-    /// Set the optional sandbox capability.
-    pub fn with_sandbox(mut self, sandbox: Sandbox) -> Self {
-        self.sandbox = Some(sandbox);
-        self
-    }
-
-    /// Set the optional absolute schema path.
-    pub fn with_schema_path(mut self, schema_path: AbsoluteSchemaPath) -> Self {
-        self.schema_path = Some(schema_path);
-        self
-    }
-
-    /// Set the optional absolute output path.
-    pub fn with_output_path(mut self, output_path: AbsoluteOutputPath) -> Self {
-        self.output_path = Some(output_path);
-        self
-    }
-
     /// Borrow the executable.
     pub fn executable(&self) -> &Executable {
         &self.executable
     }
 
-    /// Borrow the caller-supplied arguments.
+    /// Borrow the complete child arguments.
     pub fn arguments(&self) -> &ArgumentVector {
         &self.arguments
     }
@@ -265,20 +247,48 @@ impl DispatchEnvelope {
     pub fn stdin(&self) -> &StdinBinding {
         &self.stdin
     }
+}
 
-    /// Return the optional sandbox capability.
-    pub fn sandbox(&self) -> Option<Sandbox> {
-        self.sandbox
-    }
+/// Whether the permissive-profile probe proved that this process may apply Seatbelt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeatbeltCapability {
+    /// The probe applied Seatbelt and `/usr/bin/true` completed successfully.
+    Available,
+    /// The probe completed with a nonzero status, including a nested `sandbox_apply` denial.
+    Unavailable {
+        /// The exact status returned by `sandbox-exec`.
+        status: ObservedExitStatus,
+    },
+}
 
-    /// Borrow the optional absolute schema path.
-    pub fn schema_path(&self) -> Option<&AbsoluteSchemaPath> {
-        self.schema_path.as_ref()
-    }
+/// Construct the permissive-profile probe used before applying a gate's Seatbelt profile.
+///
+/// # Errors
+///
+/// Returns [`DispatchError`] if a fixed probe executable cannot be represented as an executable.
+pub fn seatbelt_capability_probe(
+    working_directory: AbsoluteWorkingDirectory,
+) -> Result<DispatchEnvelope, DispatchError> {
+    Ok(DispatchEnvelope::new(
+        Executable::parse(SEATBELT_EXECUTABLE)?,
+        working_directory,
+        StdinBinding::Null,
+    )
+    .with_arguments(ArgumentVector::new(vec![
+        "-p".to_owned(),
+        PERMISSIVE_SEATBELT_PROFILE.to_owned(),
+        "--".to_owned(),
+        "/usr/bin/true".to_owned(),
+    ]))
+    .with_environment(ChildEnvironment::new(BTreeMap::new())))
+}
 
-    /// Borrow the optional absolute output path.
-    pub fn output_path(&self) -> Option<&AbsoluteOutputPath> {
-        self.output_path.as_ref()
+/// Classify the observed status from [`seatbelt_capability_probe`].
+pub const fn classify_seatbelt_capability(status: ObservedExitStatus) -> SeatbeltCapability {
+    if status.code() == 0 {
+        SeatbeltCapability::Available
+    } else {
+        SeatbeltCapability::Unavailable { status }
     }
 }
 
@@ -306,8 +316,10 @@ mod tests {
 
     use super::{
         AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
-        ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, StdinBinding,
+        ChildEnvironment, DispatchEnvelope, DispatchError, Executable, Sandbox, SeatbeltCapability,
+        StdinBinding, classify_seatbelt_capability, seatbelt_capability_probe,
     };
+    use crate::contract_measurement::ObservedExitStatus;
 
     #[test]
     fn constructs_minimal_dispatch_envelope() -> Result<(), DispatchError> {
@@ -325,9 +337,6 @@ mod tests {
         assert_eq!(envelope.stdin(), &StdinBinding::Null);
         assert!(envelope.arguments().is_empty());
         assert!(envelope.environment().is_empty());
-        assert_eq!(envelope.sandbox(), None);
-        assert_eq!(envelope.schema_path(), None);
-        assert_eq!(envelope.output_path(), None);
         Ok(())
     }
 
@@ -383,6 +392,7 @@ mod tests {
     #[test]
     fn constructs_structured_dispatch_value() -> Result<(), DispatchError> {
         let arguments = vec![
+            "exec".to_owned(),
             "--caller-option".to_owned(),
             "POSITIONAL_PROMPT_PLACEHOLDER".to_owned(),
             String::new(),
@@ -398,10 +408,7 @@ mod tests {
             StdinBinding::PlanBytes(plan_bytes.clone()),
         )
         .with_arguments(ArgumentVector::new(arguments.clone()))
-        .with_environment(ChildEnvironment::new(environment.clone()))
-        .with_sandbox(Sandbox::WorkspaceWrite)
-        .with_schema_path(AbsoluteSchemaPath::parse("/workspace/schema.json")?)
-        .with_output_path(AbsoluteOutputPath::parse("/workspace/output.json")?);
+        .with_environment(ChildEnvironment::new(environment.clone()));
 
         assert_eq!(envelope.executable().as_str(), "codex");
         assert_eq!(envelope.arguments().as_slice(), arguments.as_slice());
@@ -416,16 +423,7 @@ mod tests {
             envelope.stdin(),
             &StdinBinding::PlanBytes(plan_bytes.clone())
         );
-        assert_eq!(envelope.sandbox(), Some(Sandbox::WorkspaceWrite));
         assert_eq!(Sandbox::WorkspaceWrite.as_str(), "workspace-write");
-        assert_eq!(
-            envelope.schema_path().map(AbsoluteSchemaPath::as_path),
-            Some(Path::new("/workspace/schema.json"))
-        );
-        assert_eq!(
-            envelope.output_path().map(AbsoluteOutputPath::as_path),
-            Some(Path::new("/workspace/output.json"))
-        );
         Ok(())
     }
 
@@ -444,9 +442,29 @@ mod tests {
             &["positional prompt".to_owned()]
         );
         assert_eq!(envelope.stdin(), &StdinBinding::Null);
-        assert_eq!(envelope.sandbox(), None);
-        assert_eq!(envelope.schema_path(), None);
-        assert_eq!(envelope.output_path(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn permissive_probe_success_reports_seatbelt_available() -> Result<(), DispatchError> {
+        let envelope =
+            seatbelt_capability_probe(AbsoluteWorkingDirectory::parse("/workspace/project")?)?;
+
+        assert_eq!(envelope.executable().as_str(), "/usr/bin/sandbox-exec");
+        assert_eq!(
+            envelope.arguments().as_slice(),
+            ["-p", "(version 1)(allow default)", "--", "/usr/bin/true"]
+        );
+        assert_eq!(
+            classify_seatbelt_capability(ObservedExitStatus::from_code(0)),
+            SeatbeltCapability::Available
+        );
+        assert_eq!(
+            classify_seatbelt_capability(ObservedExitStatus::from_code(71)),
+            SeatbeltCapability::Unavailable {
+                status: ObservedExitStatus::from_code(71)
+            }
+        );
         Ok(())
     }
 }

@@ -142,6 +142,13 @@ impl CliHarness {
     }
 
     #[allow(dead_code)]
+    pub fn install_shim(&self, name: &str, source: &str) -> io::Result<PathBuf> {
+        let path = self.shim_dir.join(name);
+        write_shim(&path, source)?;
+        Ok(path)
+    }
+
+    #[allow(dead_code)]
     pub fn shim_path(&self) -> String {
         format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.shim_dir.display())
     }
@@ -178,6 +185,38 @@ impl CliHarness {
             .env_clear()
             .env("PATH", path)
             .env("PCE_SHIM_ROOT", self.tempdir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut child_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("pce child stdin was not piped"))?;
+        child_stdin.write_all(stdin)?;
+        drop(child_stdin);
+        child.wait_with_output()
+    }
+
+    #[allow(dead_code)]
+    pub fn run_with_parent_environment<I, S>(
+        &self,
+        argv: I,
+        stdin: &[u8],
+        name: &str,
+        value: &str,
+    ) -> io::Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.shim_dir.display());
+        let mut child = Command::new(env!("CARGO_BIN_EXE_pce"))
+            .args(argv)
+            .env_clear()
+            .env("PATH", path)
+            .env("PCE_SHIM_ROOT", self.tempdir.path())
+            .env(name, value)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

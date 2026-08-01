@@ -2,12 +2,14 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
 use std::time::SystemTime;
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::GateCommand;
+use pce_core::tracked_contract::parse_gate_command;
 use pce_core::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
     AppendableCategory, AppendableFinding, ArgumentVector, ArtifactPath, AuthorityFailure,
@@ -23,12 +25,13 @@ use pce_core::{
     OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
     RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot, Sandbox,
-    Sha256Digest, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode, TagName,
-    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, VersionPolicy, VisionName,
-    VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
-    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
-    derive_run_state, event_record_matches, measure_contract_snapshot, parse_event_line,
-    parse_tracked_repository_contract, render_human_snapshot,
+    SeatbeltCapability, Sha256Digest, SquashCommitOid, StdinBinding, StepAuthorityObservation,
+    StepNode, TagName, TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload,
+    VersionPolicy, VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
+    admit_recurrent_finding, append_event, classify_seatbelt_capability, compute_dispatchability,
+    create_vision, derive_merge_status, derive_milestone_merge_status, derive_run_state,
+    event_record_matches, measure_contract_snapshot, parse_event_line,
+    parse_tracked_repository_contract, render_human_snapshot, seatbelt_capability_probe,
     serialize_tracked_repository_contract, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
@@ -252,7 +255,17 @@ fn main() -> Result<()> {
 
 fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
     match parse_command(args)? {
-        Command::Dispatch(envelope) => spawn_dispatch(&envelope),
+        Command::Dispatch(envelope) => {
+            let status = spawn_envelope(&envelope)?;
+            if status.code() != 0 {
+                bail!(
+                    "`{}` child exited with status {}",
+                    envelope.executable().as_str(),
+                    status.code()
+                );
+            }
+            Ok(())
+        }
         Command::VisionNew { name } => run_vision_new(&name),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
@@ -373,7 +386,7 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         bail!("dispatch arguments require the `--` delimiter");
     }
     position += 1;
-    let arguments = rest[position..].to_vec();
+    let caller_arguments = rest[position..].to_vec();
 
     let executable = Executable::parse("codex").context("failed to parse Codex executable")?;
     let working_directory = AbsoluteWorkingDirectory::parse(PathBuf::from(raw_cwd))
@@ -384,21 +397,29 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         ),
         None => StdinBinding::Null,
     };
-    let mut envelope = DispatchEnvelope::new(executable, working_directory, stdin)
-        .with_arguments(ArgumentVector::new(arguments))
-        .with_environment(ChildEnvironment::new(environment))
-        .with_sandbox(Sandbox::WorkspaceWrite);
+    let mut arguments = vec![
+        "exec".to_owned(),
+        "-C".to_owned(),
+        working_directory.as_path().display().to_string(),
+        "--sandbox".to_owned(),
+        Sandbox::WorkspaceWrite.as_str().to_owned(),
+    ];
     if let Some((schema, output)) = structured {
-        envelope = envelope
-            .with_schema_path(
-                AbsoluteSchemaPath::parse(PathBuf::from(schema))
-                    .context("failed to parse dispatch schema path")?,
-            )
-            .with_output_path(
-                AbsoluteOutputPath::parse(PathBuf::from(output))
-                    .context("failed to parse dispatch output path")?,
-            );
+        let schema_path = AbsoluteSchemaPath::parse(PathBuf::from(schema))
+            .context("failed to parse dispatch schema path")?;
+        let output_path = AbsoluteOutputPath::parse(PathBuf::from(output))
+            .context("failed to parse dispatch output path")?;
+        arguments.extend([
+            "--output-schema".to_owned(),
+            schema_path.as_path().display().to_string(),
+            "-o".to_owned(),
+            output_path.as_path().display().to_string(),
+        ]);
     }
+    arguments.extend(caller_arguments);
+    let envelope = DispatchEnvelope::new(executable, working_directory, stdin)
+        .with_arguments(ArgumentVector::new(arguments))
+        .with_environment(ChildEnvironment::new(environment));
     Ok(Command::Dispatch(envelope))
 }
 
@@ -1774,8 +1795,13 @@ fn measure_tracked_contract_at_root(
     let observed = observed_workflows(repository_root)?;
     validate_workflow_coverage(contract.stated().workflows(), &observed)
         .context("failed to validate tracked workflow coverage")?;
+    let mut seatbelt_capability_verified = false;
     measure_contract_snapshot(contract.stated(), previous, |command| {
-        execute_gate_command(repository_root, command)
+        if !seatbelt_capability_verified {
+            verify_seatbelt_execution_capability(repository_root)?;
+            seatbelt_capability_verified = true;
+        }
+        execute_sandboxed_gate_command(repository_root, command)
     })
     .context("failed to measure tracked repository contract")
 }
@@ -1834,6 +1860,197 @@ fn execute_gate_command(
     command: &GateCommand,
 ) -> std::io::Result<ObservedExitStatus> {
     execute_shell_gate_command(repository_root, command.as_str())
+}
+
+fn execute_sandboxed_gate_command(
+    repository_root: &Path,
+    command: &GateCommand,
+) -> std::io::Result<ObservedExitStatus> {
+    execute_sandboxed_gate_text(repository_root, command.as_str())
+}
+
+fn verify_seatbelt_execution_capability(repository_root: &Path) -> std::io::Result<()> {
+    if let SeatbeltCapability::Unavailable { status } =
+        seatbelt_execution_capability(repository_root)?
+    {
+        return Err(std::io::Error::other(format!(
+            "failed to verify Seatbelt execution capability: permissive profile probe exited with status {status}"
+        )));
+    }
+    Ok(())
+}
+
+fn seatbelt_execution_capability(repository_root: &Path) -> std::io::Result<SeatbeltCapability> {
+    let canonical_root = std::fs::canonicalize(repository_root).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to canonicalize Seatbelt probe working directory {}: {error}",
+            repository_root.display()
+        ))
+    })?;
+    let working_directory = AbsoluteWorkingDirectory::parse(canonical_root)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let envelope = seatbelt_capability_probe(working_directory)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let status = spawn_envelope(&envelope).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to verify Seatbelt execution capability: {error:#}"
+        ))
+    })?;
+    Ok(classify_seatbelt_capability(status))
+}
+
+fn execute_sandboxed_gate_text(
+    repository_root: &Path,
+    command: &str,
+) -> std::io::Result<ObservedExitStatus> {
+    let parsed = parse_gate_command(command).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to parse stated gate command `{command}`: {error}"
+        ))
+    })?;
+    let canonical_root = std::fs::canonicalize(repository_root).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to canonicalize gate repository root {}: {error}",
+            repository_root.display()
+        ))
+    })?;
+    let canonical_temp = std::fs::canonicalize(std::env::temp_dir()).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to canonicalize platform temporary directory {}: {error}",
+            std::env::temp_dir().display()
+        ))
+    })?;
+    let mut temporary_directories = std::collections::BTreeSet::new();
+    temporary_directories.insert(canonical_temp);
+    let profile = render_seatbelt_profile(&canonical_root, &temporary_directories)?;
+
+    let environment = gate_child_environment();
+    let resolved_executable = resolve_gate_executable(parsed.executable(), &environment)?;
+    let mut arguments = vec![
+        "-p".to_owned(),
+        profile,
+        "--".to_owned(),
+        resolved_executable.as_str().to_owned(),
+    ];
+    arguments.extend(parsed.arguments().as_slice().iter().cloned());
+    let envelope = DispatchEnvelope::new(
+        Executable::parse("/usr/bin/sandbox-exec")
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        AbsoluteWorkingDirectory::parse(canonical_root)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        StdinBinding::Null,
+    )
+    .with_arguments(ArgumentVector::new(arguments))
+    .with_environment(environment);
+    spawn_envelope(&envelope).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to execute stated gate command `{command}` in Seatbelt: {error:#}"
+        ))
+    })
+}
+
+fn gate_child_environment() -> ChildEnvironment {
+    let mut environment = BTreeMap::new();
+    for name in ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME"] {
+        if let Ok(value) = std::env::var(name) {
+            environment.insert(name.to_owned(), value);
+        }
+    }
+    ChildEnvironment::new(environment)
+}
+
+fn resolve_gate_executable(
+    executable: &Executable,
+    environment: &ChildEnvironment,
+) -> std::io::Result<Executable> {
+    let raw = Path::new(executable.as_str());
+    if raw.is_absolute() {
+        return executable_path(raw);
+    }
+    let path = environment
+        .iter()
+        .find_map(|(name, value)| (name == "PATH").then_some(value))
+        .ok_or_else(|| {
+            std::io::Error::other(format!(
+                "cannot resolve gate executable `{}` without forwarded PATH",
+                executable.as_str()
+            ))
+        })?;
+    for directory in std::env::split_paths(path) {
+        let candidate = directory.join(raw);
+        if let Ok(resolved) = executable_path(&candidate) {
+            return Ok(resolved);
+        }
+    }
+    Err(std::io::Error::other(format!(
+        "gate executable `{}` was not found as an executable file on forwarded PATH",
+        executable.as_str()
+    )))
+}
+
+fn executable_path(path: &Path) -> std::io::Result<Executable> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to inspect gate executable {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(std::io::Error::other(format!(
+            "gate executable {} is not an executable file",
+            path.display()
+        )));
+    }
+    let raw = path.to_str().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "gate executable path {} is not valid UTF-8",
+            path.display()
+        ))
+    })?;
+    Executable::parse(raw).map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+fn render_seatbelt_profile(
+    repository_root: &Path,
+    temporary_directories: &std::collections::BTreeSet<PathBuf>,
+) -> std::io::Result<String> {
+    let repository_root = seatbelt_path(repository_root)?;
+    let temporary_directories = temporary_directories
+        .iter()
+        .map(|directory| seatbelt_path(directory))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut profile = concat!(
+        "(version 1)\n",
+        "(deny default)\n",
+        "(import \"system.sb\")\n",
+        "(allow process*)\n",
+        "(allow file-read*)\n"
+    )
+    .to_owned();
+    profile.push_str("(deny file-write*\n  (require-all\n");
+    profile.push_str(&format!(
+        "    (require-not (subpath \"{repository_root}\"))\n"
+    ));
+    for directory in &temporary_directories {
+        profile.push_str(&format!("    (require-not (subpath \"{directory}\"))\n"));
+    }
+    profile.push_str("  ))\n(allow file-write*\n");
+    profile.push_str(&format!("  (subpath \"{repository_root}\")\n"));
+    for directory in temporary_directories {
+        profile.push_str(&format!("  (subpath \"{directory}\")\n"));
+    }
+    profile.push_str(")\n(deny network*)");
+    Ok(profile)
+}
+
+fn seatbelt_path(path: &Path) -> std::io::Result<String> {
+    let raw = path.to_str().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "Seatbelt path {} is not valid UTF-8",
+            path.display()
+        ))
+    })?;
+    Ok(raw.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn execute_shell_gate_command(
@@ -2899,22 +3116,9 @@ fn tracked_contract_at_branch_head(
     }
 }
 
-fn spawn_dispatch(envelope: &DispatchEnvelope) -> Result<()> {
+fn spawn_envelope(envelope: &DispatchEnvelope) -> Result<ObservedExitStatus> {
     let executable = envelope.executable().as_str();
     let mut command = std::process::Command::new(executable);
-    command.arg("exec");
-    command
-        .arg("-C")
-        .arg(envelope.working_directory().as_path());
-    if let Some(sandbox) = envelope.sandbox() {
-        command.arg("--sandbox").arg(sandbox.as_str());
-    }
-    if let Some(schema_path) = envelope.schema_path() {
-        command.arg("--output-schema").arg(schema_path.as_path());
-    }
-    if let Some(output_path) = envelope.output_path() {
-        command.arg("-o").arg(output_path.as_path());
-    }
     command.args(envelope.arguments().as_slice());
     command.current_dir(envelope.working_directory().as_path());
     command.env_clear();
@@ -2946,10 +3150,12 @@ fn spawn_dispatch(envelope: &DispatchEnvelope) -> Result<()> {
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for `{executable}`"))?;
-    if !status.success() {
-        bail!("`{executable}` child exited with status {status}");
-    }
-    Ok(())
+    status
+        .code()
+        .map(ObservedExitStatus::from_code)
+        .ok_or_else(|| {
+            anyhow!("`{executable}` child terminated without an exit-status code: {status}")
+        })
 }
 
 fn execute_process(program: &str, args: &[OsString], current_dir: Option<&Path>) -> ProcessAttempt {
@@ -3100,6 +3306,7 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::io::{Cursor, Read};
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command as ProcessCommand;
     use std::time::SystemTime;
@@ -3111,9 +3318,10 @@ mod tests {
         GitMergeObservation, KnownPayload, MilestoneMergeSubject, MilestoneNode, NodeId,
         ObservedExitStatus, ReadKind, ReadPayload, RecoveryLogPath, RepositoryBranchName,
         RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-        RepositoryObservationFailure, RunSnapshot, Sha256Digest, StepAuthorityObservation,
-        StepNode, TagName, TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
-        WriteKind, derive_run_state, parse_event_line, render_human_snapshot,
+        RepositoryObservationFailure, RunSnapshot, SeatbeltCapability, Sha256Digest,
+        StepAuthorityObservation, StepNode, TagName, TagState, VersionPolicy, VisionSlug,
+        WorktreeIdentity, WorktreeState, WriteKind, derive_run_state, parse_event_line,
+        render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -3125,8 +3333,27 @@ mod tests {
         measure_tracked_contract_at_root, observe_git, parse_command, parse_dispatch_graph,
         parse_tracked_contract, read_at_default_branch_head, read_event_log,
         readiness_version_policies, repository_contracts, run, run_log_read,
-        select_bootstrap_candidate, validated_snapshot_value,
+        seatbelt_execution_capability, select_bootstrap_candidate, validated_snapshot_value,
     };
+
+    const NESTED_SEATBELT_SKIP_MARKER: &str =
+        "PCE_TEST_SKIP: nested Seatbelt unavailable; permissive capability probe was denied";
+
+    fn record_nested_seatbelt_skip() {
+        let status = ProcessCommand::new("/bin/sh")
+            .args([
+                "-c",
+                "printf '%s\\n' \"$1\" >&2",
+                "pce-test-skip",
+                NESTED_SEATBELT_SKIP_MARKER,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .expect("skip marker process should spawn");
+        assert!(status.success(), "skip marker process should succeed");
+    }
 
     const VALID_TRACKED_CONTRACT: &[u8] = br#"{
   "stated": {
@@ -4762,46 +4989,69 @@ mod tests {
 
     #[test]
     fn successive_contract_measurements_do_not_reexecute_unchanged_gate_commands() {
+        if let SeatbeltCapability::Unavailable { .. } =
+            seatbelt_execution_capability(Path::new(".")).expect("Seatbelt probe should execute")
+        {
+            record_nested_seatbelt_skip();
+            return;
+        }
         let directory = tempdir().expect("temporary directory should create");
         let repository_root = directory.path().join("repo");
         fs::create_dir(&repository_root).expect("repository fixture should create");
         let contract_path = directory.path().join("contract.json");
+        let marker_path = repository_root.join("gate-runs");
+        let shim_path = repository_root.join("record-gate");
+        fs::write(
+            &shim_path,
+            format!(
+                "#!/bin/sh\nprintf x >> '{}' || exit 74\n",
+                marker_path.display()
+            ),
+        )
+        .expect("gate shim should write");
+        let mut permissions = fs::metadata(&shim_path)
+            .expect("gate shim metadata should read")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&shim_path, permissions).expect("gate shim should be executable");
+        let command = shim_path.display().to_string();
         fs::write(
             &contract_path,
-            br#"{
-  "stated": {
-    "gates": {
-      "format": "printf x >> gate-runs",
-      "lint": "printf x >> gate-runs",
-      "typecheck": "printf x >> gate-runs",
-      "test": "printf x >> gate-runs",
-      "build": "printf x >> gate-runs"
-    },
+            format!(
+                r#"{{
+  "stated": {{
+    "gates": {{
+      "format": "{command}",
+      "lint": "{command}",
+      "typecheck": "{command}",
+      "test": "{command}",
+      "build": "{command}"
+    }},
     "version_policy": "NONE",
-    "branches": {
+    "branches": {{
       "default": "main",
-      "milestone": "pce/{vision}/milestone-{milestone}",
-      "step": "pce/{vision}/m{milestone}-s{step}"
-    },
-    "pull_requests": {
+      "milestone": "pce/{{vision}}/milestone-{{milestone}}",
+      "step": "pce/{{vision}}/m{{milestone}}-s{{step}}"
+    }},
+    "pull_requests": {{
       "step_base": "MILESTONE",
       "milestone_base": "DEFAULT",
       "merge_method": "SQUASH"
-    },
+    }},
     "workflows": []
-  },
-  "appendable": {
+  }},
+  "appendable": {{
     "environment_hazards": [],
     "gate_orderings": [],
     "lockfile_rules": []
-  }
-}"#,
+  }}
+}}"#
+            ),
         )
         .expect("contract fixture should write");
 
         let first = measure_tracked_contract_at_root(&contract_path, &repository_root, None)
             .expect("first measurement should succeed");
-        let marker_path = repository_root.join("gate-runs");
         assert_eq!(
             fs::read_to_string(&marker_path).expect("marker should read"),
             "xxxxx"
