@@ -24,6 +24,20 @@ use support::{CliHarness, CodexInvocation};
 
 const INHERITED_MARKER: (&str, &str) = ("PCE_INHERITED_ONLY", "must-not-reach-codex");
 const CHILD_MARKER: (&str, &str) = ("PCE_CHILD_MARKER", "explicit-child-value");
+const VALID_ARTIFACT_SCHEMA: &[u8] = br#"{
+  "type": "object",
+  "required": ["verdict", "summary"],
+  "properties": {
+    "verdict": { "type": "string" },
+    "summary": { "type": "string" },
+    "nested": {
+      "type": "object",
+      "properties": { "count": { "type": "integer" } }
+    }
+  }
+}"#;
+const CONFORMING_ARTIFACT: &[u8] = br#"{"verdict":"pass","summary":"ok"}"#;
+const SUCCESSFUL_STRUCTURED_TRANSCRIPT: &[u8] = b"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"verdict\\\":\\\"SUCCESS\\\",\\\"summary\\\":\\\"transcript says success\\\"}\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":101,\"cached_input_tokens\":23,\"output_tokens\":17,\"reasoning_output_tokens\":5}}\n";
 static DISPATCH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn dispatch_test_guard() -> MutexGuard<'static, ()> {
@@ -144,6 +158,10 @@ fn assert_dry_projection_case(name: &str, structured: bool, plan: Option<&[u8]>)
     environment.push(("AAA_EXPLICIT".to_owned(), "first".to_owned()));
     let schema_path = cwd.join(format!("{name}-schema.json"));
     let output_path = cwd.join(format!("{name}-output.json"));
+    if structured {
+        fs::write(&schema_path, VALID_ARTIFACT_SCHEMA).expect("write structured schema");
+        fs::write(&output_path, CONFORMING_ARTIFACT).expect("write structured artifact");
+    }
     let plan_path = plan.map(|bytes| {
         let path = harness.path().join(format!("{name}.plan"));
         fs::write(&path, bytes).expect("write plan");
@@ -680,6 +698,10 @@ fn assert_dispatch(case: DispatchCase<'_>) {
         child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
     let schema_path = cwd.join("schema.json");
     let output_path = cwd.join("output.json");
+    if case.structured {
+        fs::write(&schema_path, VALID_ARTIFACT_SCHEMA).expect("write structured schema");
+        fs::write(&output_path, CONFORMING_ARTIFACT).expect("write structured artifact");
+    }
     let plan_path = case.plan.map(|bytes| {
         let path = harness.path().join(format!("{}.plan", case.name));
         fs::write(&path, bytes).expect("write plan fixture");
@@ -718,6 +740,350 @@ fn assert_dispatch(case: DispatchCase<'_>) {
     assert_eq!(output.stdout, expected_stdout);
     assert!(output.stderr.ends_with(&expected_stderr));
     assert_no_jsonl_files(harness.path());
+}
+
+#[derive(Clone, Copy)]
+enum StructuredRejectionFixture {
+    Missing,
+    Truncated,
+    SchemaInvalid,
+    SchemaViolating,
+    UnreadableSchema,
+}
+
+#[test]
+fn rejects_logged_structured_artifacts_from_successful_children() {
+    let _guard = dispatch_test_guard();
+    let mut common_status = None;
+    for fixture in [
+        StructuredRejectionFixture::Missing,
+        StructuredRejectionFixture::Truncated,
+        StructuredRejectionFixture::SchemaInvalid,
+        StructuredRejectionFixture::SchemaViolating,
+        StructuredRejectionFixture::UnreadableSchema,
+    ] {
+        assert_logged_structured_rejection(fixture, &mut common_status);
+    }
+}
+
+#[test]
+fn rejects_logged_missing_artifact() {
+    assert_logged_structured_rejection(StructuredRejectionFixture::Missing, &mut None);
+}
+
+#[test]
+fn rejects_logged_truncated_artifact() {
+    assert_logged_structured_rejection(StructuredRejectionFixture::Truncated, &mut None);
+}
+
+#[test]
+fn rejects_logged_invalid_schema() {
+    assert_logged_structured_rejection(StructuredRejectionFixture::SchemaInvalid, &mut None);
+}
+
+#[test]
+fn rejects_logged_schema_violations() {
+    assert_logged_structured_rejection(StructuredRejectionFixture::SchemaViolating, &mut None);
+}
+
+#[test]
+fn rejects_logged_unreadable_schema() {
+    assert_logged_structured_rejection(StructuredRejectionFixture::UnreadableSchema, &mut None);
+}
+
+fn assert_logged_structured_rejection(
+    fixture: StructuredRejectionFixture,
+    common_status: &mut Option<std::process::ExitStatus>,
+) {
+    let name = match fixture {
+        StructuredRejectionFixture::Missing => "missing",
+        StructuredRejectionFixture::Truncated => "truncated",
+        StructuredRejectionFixture::SchemaInvalid => "schema-invalid",
+        StructuredRejectionFixture::SchemaViolating => "schema-violating",
+        StructuredRejectionFixture::UnreadableSchema => "unreadable-schema",
+    };
+    let harness = CliHarness::new().expect("create rejection harness");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize rejection cwd");
+    let record_root = harness.path().join(format!("{name}-records"));
+    fs::create_dir(&record_root).expect("create rejection record root");
+    let stdout_path = harness.path().join(format!("{name}.stdout"));
+    let stderr_path = harness.path().join(format!("{name}.stderr"));
+    let log_path = harness.path().join(format!("{name}.jsonl"));
+    let schema_path = cwd.join(format!("{name}-schema.json"));
+    let output_path = cwd.join(format!("{name}-output.json"));
+    let bytes_path = harness.path().join(format!("{name}-bytes"));
+    fs::write(&stdout_path, SUCCESSFUL_STRUCTURED_TRANSCRIPT).expect("write transcript");
+    fs::write(&stderr_path, []).expect("write empty child stderr");
+    let (expected_outcome, spelling, diagnostic, artifact): (_, _, _, Option<&[u8]>) = match fixture
+    {
+        StructuredRejectionFixture::Missing => {
+            fs::write(&schema_path, VALID_ARTIFACT_SCHEMA).expect("write valid schema");
+            (
+                ArtifactOutcome::Missing,
+                "missing",
+                format!("artifact output `{}` is missing", output_path.display()),
+                None,
+            )
+        }
+        StructuredRejectionFixture::Truncated => {
+            fs::write(&schema_path, VALID_ARTIFACT_SCHEMA).expect("write valid schema");
+            (
+                ArtifactOutcome::Truncated,
+                "truncated",
+                format!(
+                    "artifact output `{}` is not complete valid JSON: EOF while parsing an object at line 1 column 1",
+                    output_path.display()
+                ),
+                Some(b"{"),
+            )
+        }
+        StructuredRejectionFixture::SchemaInvalid => {
+            fs::write(&schema_path, br#"{"type":5}"#).expect("write invalid schema");
+            (
+                ArtifactOutcome::SchemaInvalid,
+                "schema-invalid",
+                format!(
+                    "artifact schema `{}` cannot be compiled: 5 is not valid under any of the schemas listed in the 'anyOf' keyword",
+                    schema_path.display()
+                ),
+                Some(CONFORMING_ARTIFACT),
+            )
+        }
+        StructuredRejectionFixture::SchemaViolating => {
+            fs::write(&schema_path, VALID_ARTIFACT_SCHEMA).expect("write valid schema");
+            let first = format!(
+                "artifact output `{}` violates schema keyword/location `required` at instance `<root>`: \"verdict\" is a required property",
+                output_path.display()
+            );
+            let second = format!(
+                "artifact output `{}` violates schema keyword/location `type` at instance `/nested/count`: \"not-an-int\" is not of type \"integer\"",
+                output_path.display()
+            );
+            (
+                ArtifactOutcome::SchemaViolating,
+                "schema-violating",
+                format!("{first}; {second}"),
+                Some(br#"{"summary":"ok","nested":{"count":"not-an-int"}}"#),
+            )
+        }
+        StructuredRejectionFixture::UnreadableSchema => {
+            fs::create_dir(&schema_path).expect("create schema directory");
+            let detail = fs::read(&schema_path)
+                .expect_err("directory read must fail")
+                .to_string();
+            (
+                ArtifactOutcome::SchemaInvalid,
+                "schema-invalid",
+                format!(
+                    "artifact schema `{}` is unreadable: {detail}",
+                    schema_path.display()
+                ),
+                Some(CONFORMING_ARTIFACT),
+            )
+        }
+    };
+    let mut environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+    if let Some(bytes) = artifact {
+        fs::write(&bytes_path, bytes).expect("write artifact byte fixture");
+        environment.push((
+            "PCE_CODEX_OUTPUT_BYTES_FILE".to_owned(),
+            bytes_path.display().to_string(),
+        ));
+    }
+    let mut argv = dispatch_argv(
+        &cwd,
+        &environment,
+        Some((&schema_path, &output_path)),
+        None,
+        "STRUCTURED_REJECTION",
+    );
+    let delimiter = argv
+        .iter()
+        .position(|value| value == "--")
+        .expect("delimiter");
+    argv.splice(delimiter..delimiter, logging_arguments(&log_path));
+    let output = harness.run(&argv, b"").expect("run rejection");
+    assert!(!output.status.success(), "{name} unexpectedly succeeded");
+    if let Some(status) = common_status {
+        assert_eq!(output.status, *status, "{name} common CLI status");
+    } else {
+        *common_status = Some(output.status);
+    }
+    assert_eq!(
+        output.stderr,
+        format!("Error: {diagnostic}\n").as_bytes(),
+        "{name} exact diagnostic"
+    );
+    assert_eq!(output.stdout, SUCCESSFUL_STRUCTURED_TRANSCRIPT);
+    let lines = fs::read_to_string(&log_path).expect("read rejection lifecycle");
+    let records = lines
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse lifecycle record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2, "{name} record count");
+    assert!(matches!(
+        records[0].body_ref(),
+        EventBodyRef::Known(KnownPayload::Dispatch(_))
+    ));
+    let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref()
+    else {
+        panic!("{name} completion expected");
+    };
+    assert_eq!(
+        completion.issuance_sequence,
+        records[0].sequence(),
+        "{name} correlation"
+    );
+    assert_eq!(completion.usage, measured_usage(), "{name} measured usage");
+    assert_eq!(
+        completion.exit_status,
+        DispatchExitStatus::Exited {
+            code: pce_core::ExitCode::new(0)
+        },
+        "{name} zero child exit"
+    );
+    assert_eq!(
+        completion.artifact_outcome, expected_outcome,
+        "{name} typed outcome"
+    );
+    let completion_json: serde_json::Value =
+        serde_json::from_str(lines.lines().nth(1).expect("completion line"))
+            .expect("parse completion JSON");
+    assert_eq!(
+        completion_json["payload"]["artifact_outcome"], spelling,
+        "{name} outcome spelling"
+    );
+    if let Some(bytes) = artifact {
+        assert_eq!(
+            fs::read(&output_path).expect("shim-created artifact"),
+            bytes
+        );
+    }
+}
+
+fn measured_usage() -> CodexTokenUsage {
+    CodexTokenUsage::Measured {
+        input_tokens: pce_core::InputTokens::new(101),
+        cached_input_tokens: pce_core::CachedInputTokens::new(23),
+        output_tokens: pce_core::OutputTokens::new(17),
+        reasoning_output_tokens: pce_core::ReasoningOutputTokens::new(5),
+    }
+}
+
+#[test]
+fn accepts_valid_structured_artifact_with_transcript_verdict() {
+    assert_valid_structured_artifact(SUCCESSFUL_STRUCTURED_TRANSCRIPT);
+}
+
+#[test]
+fn accepts_valid_structured_artifact_without_transcript_verdict() {
+    assert_valid_structured_artifact(b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":101,\"cached_input_tokens\":23,\"output_tokens\":17,\"reasoning_output_tokens\":5}}\n");
+}
+
+fn assert_valid_structured_artifact(transcript: &[u8]) {
+    let _guard = dispatch_test_guard();
+    let harness = CliHarness::new().expect("create positive harness");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize positive cwd");
+    let record_root = harness.path().join("positive-records");
+    fs::create_dir(&record_root).expect("create positive record root");
+    let stdout_path = harness.path().join("positive.stdout");
+    let stderr_path = harness.path().join("positive.stderr");
+    let bytes_path = harness.path().join("positive-bytes");
+    let schema_path = cwd.join("positive-schema.json");
+    let output_path = cwd.join("positive-output.json");
+    let log_path = harness.path().join("positive.jsonl");
+    fs::write(&stdout_path, transcript).expect("write positive transcript");
+    fs::write(&stderr_path, []).expect("write empty child stderr");
+    fs::write(&bytes_path, CONFORMING_ARTIFACT).expect("write artifact fixture");
+    fs::write(&schema_path, VALID_ARTIFACT_SCHEMA).expect("write schema");
+    let mut environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+    environment.push((
+        "PCE_CODEX_OUTPUT_BYTES_FILE".to_owned(),
+        bytes_path.display().to_string(),
+    ));
+    let mut argv = dispatch_argv(
+        &cwd,
+        &environment,
+        Some((&schema_path, &output_path)),
+        None,
+        "STRUCTURED_POSITIVE",
+    );
+    let delimiter = argv
+        .iter()
+        .position(|value| value == "--")
+        .expect("delimiter");
+    argv.splice(delimiter..delimiter, logging_arguments(&log_path));
+    let output = harness.run(&argv, b"").expect("run positive dispatch");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stderr, b"");
+    assert_eq!(
+        fs::read(&output_path).expect("shim artifact"),
+        CONFORMING_ARTIFACT
+    );
+    let lines = fs::read_to_string(&log_path).expect("read positive lifecycle");
+    let records = lines
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse positive record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref()
+    else {
+        panic!("positive completion expected");
+    };
+    assert_eq!(completion.issuance_sequence, records[0].sequence());
+    assert_eq!(completion.artifact_outcome, ArtifactOutcome::Validated);
+    assert_eq!(completion.usage, measured_usage());
+    assert_eq!(
+        completion.exit_status,
+        DispatchExitStatus::Exited {
+            code: pce_core::ExitCode::new(0)
+        }
+    );
+    let completion_json: serde_json::Value =
+        serde_json::from_str(lines.lines().nth(1).expect("completion line"))
+            .expect("parse completion JSON");
+    assert_eq!(completion_json["payload"]["artifact_outcome"], "validated");
+}
+
+#[test]
+fn rejects_missing_structured_artifact_without_logging() {
+    let _guard = dispatch_test_guard();
+    let harness = CliHarness::new().expect("create no-log harness");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize no-log cwd");
+    let record_root = harness.path().join("no-log-records");
+    fs::create_dir(&record_root).expect("create no-log record root");
+    let stdout_path = harness.path().join("no-log.stdout");
+    let stderr_path = harness.path().join("no-log.stderr");
+    let schema_path = cwd.join("no-log-schema.json");
+    let output_path = cwd.join("no-log-output.json");
+    fs::write(&stdout_path, SUCCESSFUL_STRUCTURED_TRANSCRIPT).expect("write no-log transcript");
+    fs::write(&stderr_path, []).expect("write empty child stderr");
+    fs::write(&schema_path, VALID_ARTIFACT_SCHEMA).expect("write no-log schema");
+    let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+    let argv = dispatch_argv(
+        &cwd,
+        &environment,
+        Some((&schema_path, &output_path)),
+        None,
+        "NO_LOG_MISSING",
+    );
+    let output = harness.run(&argv, b"").expect("run no-log rejection");
+    assert!(!output.status.success());
+    assert_eq!(
+        output.stderr,
+        format!(
+            "Error: artifact output `{}` is missing\n",
+            output_path.display()
+        )
+        .as_bytes()
+    );
+    assert_no_jsonl_files(harness.path());
+    let mut logged_status = Some(output.status);
+    assert_logged_structured_rejection(StructuredRejectionFixture::Missing, &mut logged_status);
 }
 
 fn assert_no_jsonl_files(root: &Path) {
