@@ -11,15 +11,15 @@ use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::GateCommand;
 use pce_core::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
-    AppendableCategory, AppendableFinding, ArgumentVector, ArtifactPath, AuthorityFailure,
-    BranchState, CanonicalNode as DispatchNode, ChildEnvironment, CodexTokenUsage, CreationDate,
-    CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchDuration,
-    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef,
-    DispatchRole, DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName,
-    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
-    ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode, FindingAdmission,
-    GateObservations, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
+    AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath,
+    AuthorityFailure, BranchState, CanonicalNode as DispatchNode, ChildEnvironment,
+    CodexTokenUsage, CreationDate, CurrentArtifactObservation, CurrentArtifactState,
+    DispatchCandidate, DispatchDuration, DispatchEnvelope, DispatchExitStatus, DispatchLogging,
+    DispatchProjectionInput, DispatchRef, DispatchRole, DispatchRoleClass, DispatchabilityResult,
+    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
+    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable,
+    ExitCode, FindingAdmission, GateObservations, GitAuthorityObservation,
+    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
     OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
@@ -3148,6 +3148,7 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
             DispatchDuration::new(duration_ms),
             usage,
             exit_status,
+            ArtifactOutcome::NotValidated,
         );
         append_one(
             logging.path,
