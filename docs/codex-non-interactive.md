@@ -30,13 +30,17 @@ While `codex exec` runs, Codex streams progress to `stderr` and prints only the 
 event stream. Stderr remains live progress. Use `-o` with `--output-schema` for the final-message
 file channel. Supplying the complete `--log-file`, `--node`, `--role`, `--ref`, and `--evidence`
 group opts into two durable records: issuance before spawn and measured completion after exit.
-The completion correlates by the exact issuance sequence, records elapsed milliseconds, terminal
-usage or an explicit absence reason, normal exit or Unix signal, and `not-validated` artifact state.
+The completion correlates by the exact issuance sequence and records elapsed milliseconds, terminal
+usage or an explicit absence reason, and normal exit or Unix signal. An unstructured live dispatch
+records `not-validated`; a structured live dispatch records `validated`, `missing`, `truncated`,
+`schema-invalid`, or `schema-violating`. Every structured rejection exits nonzero even without
+logging. Lifecycle recording occurs only when the complete `--log-file`, `--node`, `--role`,
+`--ref`, and `--evidence` group is supplied.
 Place `--dry-run` after that complete logging group and immediately before `--` to print one compact
 JSON projection instead. The projection includes the complete shell-free child invocation and both
-prospective lifecycle records, with values that require a process or clock observation marked
-`deferred`. This mode reads an existing event-log tail only to validate that a successor is legal;
-it neither creates or appends the log nor starts Codex.
+prospective lifecycle records. Process, clock, and structured artifact outcomes are `deferred`;
+structured artifact outcome is deferred because projection makes no filesystem observation. This
+mode reads an existing event-log tail only to validate a successor; it does not append or start Codex.
 
 ```bash
 codex exec "generate release notes for the last 10 commits" | tee release-notes.md

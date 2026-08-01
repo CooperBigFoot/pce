@@ -11,29 +11,30 @@ use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::GateCommand;
 use pce_core::{
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
-    AppendableCategory, AppendableFinding, ArgumentVector, ArtifactPath, AuthorityFailure,
-    BranchState, CanonicalNode as DispatchNode, ChildEnvironment, CodexTokenUsage, CreationDate,
-    CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchDuration,
-    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef,
-    DispatchRole, DispatchRoleClass, DispatchabilityResult, EventBodyRef, EventKindName,
-    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
-    ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode, FindingAdmission,
-    GateObservations, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
+    AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath,
+    AuthorityFailure, BranchState, CanonicalNode as DispatchNode, ChildEnvironment,
+    CodexTokenUsage, CreationDate, CurrentArtifactObservation, CurrentArtifactState,
+    DispatchCandidate, DispatchDuration, DispatchEnvelope, DispatchExitStatus, DispatchLogging,
+    DispatchProjectionInput, DispatchRef, DispatchRole, DispatchRoleClass, DispatchabilityResult,
+    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
+    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable,
+    ExitCode, FileObservation, FindingAdmission, GateObservations, GitAuthorityObservation,
+    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
     OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
     RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot, Sandbox,
     Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
-    TagName, TagState, TagTarget, TerminalObservation, TerminalUsage, TrackedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
-    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_terminal_usage,
-    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
-    derive_run_state, dispatch_completion_payload, dispatch_invocation, dispatch_payload,
-    event_record_matches, measure_contract_snapshot, parse_event_line,
-    parse_tracked_repository_contract, render_dispatch_projection, render_human_snapshot,
-    serialize_tracked_repository_contract, validate_workflow_coverage,
+    StructuredArtifactObservation, TagName, TagState, TagTarget, TerminalObservation,
+    TerminalUsage, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy,
+    VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
+    append_event, classify_terminal_usage, compute_dispatchability, create_vision,
+    derive_merge_status, derive_milestone_merge_status, derive_run_state,
+    dispatch_completion_payload, dispatch_invocation, dispatch_payload, event_record_matches,
+    measure_contract_snapshot, parse_event_line, parse_tracked_repository_contract,
+    render_dispatch_projection, render_human_snapshot, serialize_tracked_repository_contract,
+    validate_artifact, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -145,6 +146,26 @@ enum DispatchLoggingMode {
 struct LiveDispatchLog<'a> {
     path: &'a Path,
     metadata: &'a DispatchLogging,
+}
+
+enum OwnedFileObservation {
+    Missing,
+    Unreadable(String),
+    Readable(Vec<u8>),
+}
+
+impl OwnedFileObservation {
+    fn as_observation(&self) -> FileObservation<'_> {
+        match self {
+            Self::Missing => FileObservation::Missing,
+            Self::Unreadable(detail) => FileObservation::Unreadable {
+                detail: detail.as_str(),
+            },
+            Self::Readable(bytes) => FileObservation::Readable {
+                bytes: bytes.as_slice(),
+            },
+        }
+    }
 }
 
 enum DefaultBranchContract {
@@ -3139,6 +3160,24 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
         .context("dispatch duration in milliseconds exceeds u64")?;
     let exit_status = dispatch_exit_status(status)?;
     let classification = classify_terminal_usage(&observations, exit_status);
+    let artifact_validation: Result<ArtifactOutcome, pce_core::ArtifactValidationError> =
+        match (envelope.schema_path(), envelope.output_path()) {
+            (Some(schema_path), Some(output_path)) => {
+                let schema = read_file_observation(schema_path.as_path());
+                let artifact = read_file_observation(output_path.as_path());
+                validate_artifact(StructuredArtifactObservation::new(
+                    schema_path,
+                    schema.as_observation(),
+                    output_path,
+                    artifact.as_observation(),
+                ))
+            }
+            _ => Ok(ArtifactOutcome::NotValidated),
+        };
+    let artifact_outcome = artifact_validation
+        .as_ref()
+        .copied()
+        .unwrap_or_else(|error| error.outcome());
     if let (Some(logging), Some(issuance)) = (logging, issuance) {
         let usage = classification
             .clone()
@@ -3148,6 +3187,7 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
             DispatchDuration::new(duration_ms),
             usage,
             exit_status,
+            artifact_outcome,
         );
         append_one(
             logging.path,
@@ -3167,7 +3207,16 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
     if !status.success() {
         bail!("`{executable}` child exited with status {status}");
     }
+    artifact_validation.map_err(Error::new)?;
     Ok(())
+}
+
+fn read_file_observation(path: &Path) -> OwnedFileObservation {
+    match std::fs::read(path) {
+        Ok(bytes) => OwnedFileObservation::Readable(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => OwnedFileObservation::Missing,
+        Err(error) => OwnedFileObservation::Unreadable(error.to_string()),
+    }
 }
 
 fn observe_terminal_line(line: &[u8]) -> TerminalObservation {

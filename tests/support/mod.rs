@@ -88,6 +88,16 @@ if [ -n "${PCE_CODEX_BLOCK_FILE:-}" ]; then
     while [ ! -e "$PCE_CODEX_BLOCK_FILE" ]; do sleep 0.01; done
 fi
 if [ -n "${PCE_CODEX_SLEEP_SECONDS:-}" ]; then sleep "$PCE_CODEX_SLEEP_SECONDS"; fi
+if [ -n "${PCE_CODEX_OUTPUT_BYTES_FILE:-}" ]; then
+    output_path=
+    previous=
+    for argument in "$@"; do
+        if [ "$previous" = -o ]; then output_path=$argument; break; fi
+        previous=$argument
+    done
+    [ -n "$output_path" ] || exit 126
+    cat "$PCE_CODEX_OUTPUT_BYTES_FILE" > "$output_path" || exit 126
+fi
 cat "$PCE_CODEX_STDOUT_FILE" || exit 126
 cat "$PCE_CODEX_STDERR_FILE" >&2 || exit 126
 if [ -n "${PCE_CODEX_SIGNAL:-}" ]; then kill -"$PCE_CODEX_SIGNAL" "$$"; fi
