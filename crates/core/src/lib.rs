@@ -21,9 +21,9 @@ pub use dispatch::{
     ChildEnvironment, ClaudeResultEnvelope, ClaudeResultUsage, CodexTerminalObservation,
     CodexTerminalUsage, Deferred, DispatchEnvelope, DispatchError, DispatchInvocation,
     DispatchInvocationStdin, DispatchLogging, DispatchProjectionError, DispatchProjectionInput,
-    Executable, Sandbox, StdinBinding, classify_claude_result, classify_codex_terminal_usage,
-    dispatch_completion_payload, dispatch_invocation, dispatch_payload, parse_claude_result,
-    render_dispatch_projection,
+    DispatchTarget, Executable, Sandbox, StdinBinding, classify_claude_result,
+    classify_codex_terminal_usage, dispatch_completion_payload, dispatch_invocation,
+    dispatch_payload, parse_claude_result, render_dispatch_projection,
 };
 pub use event_log::{
     AppendError, AppendIntent, AppendableRepositoryContract, ArtifactOutcome, ArtifactPath,

@@ -80,13 +80,15 @@ contained `ANTHROPIC`, `TOKEN`, or `KEY`. `/Library/Application
 Support/ClaudeCode/managed-settings.json` did not exist, excluding an enterprise managed setting as
 a credential source.
 
-The measurement therefore establishes that nested subscription OAuth is inherited. Milestone `m6`
-must implement direct headless `claude -p` children with `ANTHROPIC_API_KEY` stripped. The
-registered-subagent fallback remains documented but is not selected. The child's
-`--output-format json` result exposes per-child `usage` and per-model `modelUsage` token data usable
-by the gate meter: `usage.input_tokens` was 2, `usage.output_tokens` was 4,
-`cache_creation_input_tokens` was 9572, and `cache_read_input_tokens` was 15410. Its
-`total_cost_usd` value of 0.104116 was computed locally at list rates and is not subscription-billing
+The experiment establishes only that a headless child succeeds while `ANTHROPIC_API_KEY` is absent
+or stripped and reports all four usage counters. It does not establish whether OAuth was inherited
+from the parent process or independently read from the same keychain item. Milestone `m6` selects
+direct headless `claude -p` children; the registered-subagent fallback is deliberately not
+implemented. The route selects `--output-format json` rather than `stream-json`. Pce tees every byte
+as it receives it, but Claude emits the single JSON result object only at exit, so the selected route
+provides no live child progress. The four durable counters are input tokens, output tokens,
+cache-creation input tokens, and cache-read input tokens. `total_cost_usd` is excluded from the
+durable usage type because it is a local list-price estimate rather than subscription-billing
 evidence.
 
 Two records rather than one follows from the placement rule: cost and duration are unknowable when a

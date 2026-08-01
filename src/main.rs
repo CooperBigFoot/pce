@@ -16,9 +16,9 @@ use pce_core::{
     CodexTerminalObservation, CodexTerminalUsage, CreationDate, CurrentArtifactObservation,
     CurrentArtifactState, DispatchCandidate, DispatchDuration, DispatchEnvelope,
     DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole,
-    DispatchRoleClass, DispatchTokenUsage, DispatchabilityResult, EventBodyRef, EventKindName,
-    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
-    ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode, FileObservation,
+    DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef,
+    EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
+    Evidence, ExactPullRequestIdentity, ExactPullRequestState, ExitCode, FileObservation,
     FindingAdmission, GateObservations, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
@@ -29,12 +29,13 @@ use pce_core::{
     Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
     StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
     UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
-    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_codex_terminal_usage,
-    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
-    derive_run_state, dispatch_completion_payload, dispatch_invocation, dispatch_payload,
-    event_record_matches, measure_contract_snapshot, parse_event_line,
-    parse_tracked_repository_contract, render_dispatch_projection, render_human_snapshot,
-    serialize_tracked_repository_contract, validate_artifact, validate_workflow_coverage,
+    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
+    classify_codex_terminal_usage, compute_dispatchability, create_vision, derive_merge_status,
+    derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
+    dispatch_invocation, dispatch_payload, event_record_matches, measure_contract_snapshot,
+    parse_claude_result, parse_event_line, parse_tracked_repository_contract,
+    render_dispatch_projection, render_human_snapshot, serialize_tracked_repository_contract,
+    validate_artifact, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -49,7 +50,8 @@ const USAGE: &str = concat!(
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
-    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CODEX_ARGUMENT>..."
+    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CODEX_ARGUMENT>...\n",
+    "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CLAUDE_ARGUMENT>..."
 );
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const ORIGIN: &str = "origin";
@@ -366,9 +368,12 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "status" => parse_status_command(action, rest),
         [verb, rest @ ..] if verb == "ready" => parse_ready_command(rest),
         [verb, action, rest @ ..] if verb == "contract" => parse_contract_command(action, rest),
-        [verb, target, rest @ ..] if verb == "dispatch" => {
-            parse_codex_dispatch(target, rest).with_context(|| USAGE)
+        [verb, target, rest @ ..] if verb == "dispatch" => match target.as_str() {
+            "codex" => parse_codex_dispatch(target, rest),
+            "gate" => parse_gate_dispatch(rest),
+            _ => bail!("unsupported dispatch target `{target}`"),
         }
+        .with_context(|| USAGE),
         _ => bail!(USAGE),
     }
 }
@@ -464,7 +469,6 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
     position += 1;
     let arguments = rest[position..].to_vec();
 
-    let executable = Executable::parse("codex").context("failed to parse Codex executable")?;
     let working_directory = AbsoluteWorkingDirectory::parse(PathBuf::from(raw_cwd))
         .context("failed to parse dispatch working directory")?;
     let stdin = match plan_path {
@@ -473,7 +477,7 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         ),
         None => StdinBinding::Null,
     };
-    let mut envelope = DispatchEnvelope::new(executable, working_directory, stdin)
+    let mut envelope = DispatchEnvelope::new(DispatchTarget::Codex, working_directory, stdin)
         .with_arguments(ArgumentVector::new(arguments))
         .with_environment(ChildEnvironment::new(environment))
         .with_sandbox(Sandbox::WorkspaceWrite);
@@ -488,6 +492,121 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
                     .context("failed to parse dispatch output path")?,
             );
     }
+    let logging = logging_raw
+        .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
+            let path = PathBuf::from(path);
+            let metadata = DispatchLogging {
+                node: NodeId::parse(node).context("failed to parse dispatch logging node")?,
+                role: DispatchRole::new(role),
+                dispatch_ref: DispatchRef::new(dispatch_ref),
+                evidence: Evidence::parse(evidence)
+                    .context("failed to parse dispatch logging evidence")?,
+            };
+            Ok(if dry_run {
+                DispatchLoggingMode::DryRun { path, metadata }
+            } else {
+                DispatchLoggingMode::Live { path, metadata }
+            })
+        })
+        .transpose()?;
+    Ok(Command::Dispatch { envelope, logging })
+}
+
+fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
+    let mut position = 0;
+    let raw_cwd = required_option(rest, &mut position, "--cwd")?;
+    let mut environment = BTreeMap::new();
+    while rest.get(position).is_some_and(|value| value == "--env") {
+        let raw_entry = required_option(rest, &mut position, "--env")?;
+        let (name, value) = raw_entry
+            .split_once('=')
+            .ok_or_else(|| anyhow!("environment entry must contain `=`: `{raw_entry}`"))?;
+        if name.is_empty() {
+            bail!("environment name must not be empty");
+        }
+        if name == "ANTHROPIC_API_KEY" {
+            bail!("gate dispatch environment must not contain `ANTHROPIC_API_KEY`");
+        }
+        if environment
+            .insert(name.to_owned(), value.to_owned())
+            .is_some()
+        {
+            bail!("duplicate environment name `{name}`");
+        }
+    }
+    let schema = required_option(rest, &mut position, "--output-schema")?;
+    let output = required_option(rest, &mut position, "-o")?;
+    let plan_path = if rest
+        .get(position)
+        .is_some_and(|value| value == "--plan-file")
+    {
+        Some(required_option(rest, &mut position, "--plan-file")?)
+    } else {
+        None
+    };
+    const LOGGING_DIAGNOSTIC: &str = "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence";
+    let logging_raw = if rest
+        .get(position)
+        .is_some_and(|value| value == "--log-file")
+    {
+        let parsed = (|| -> Result<(&str, &str, &str, &str, &str)> {
+            Ok((
+                required_option(rest, &mut position, "--log-file")?,
+                required_option(rest, &mut position, "--node")?,
+                required_option(rest, &mut position, "--role")?,
+                required_option(rest, &mut position, "--ref")?,
+                required_option(rest, &mut position, "--evidence")?,
+            ))
+        })();
+        match parsed {
+            Ok(values) => Some(values),
+            Err(_) => bail!(LOGGING_DIAGNOSTIC),
+        }
+    } else if rest.get(position).is_some_and(|value| {
+        matches!(
+            value.as_str(),
+            "--node" | "--role" | "--ref" | "--evidence" | "--dry-run"
+        )
+    }) {
+        bail!(LOGGING_DIAGNOSTIC)
+    } else {
+        None
+    };
+    let dry_run =
+        if logging_raw.is_some() && rest.get(position).is_some_and(|value| value == "--dry-run") {
+            position += 1;
+            true
+        } else {
+            false
+        };
+    if rest.get(position).is_none_or(|value| value != "--") {
+        bail!("dispatch arguments require the `--` delimiter");
+    }
+    position += 1;
+    let arguments = rest[position..].to_vec();
+    if arguments
+        .iter()
+        .any(|argument| argument == "--output-format" || argument.starts_with("--output-format="))
+    {
+        bail!("gate caller arguments must not contain `--output-format`");
+    }
+    let working_directory = AbsoluteWorkingDirectory::parse(PathBuf::from(raw_cwd))
+        .context("failed to parse dispatch working directory")?;
+    let schema_path = AbsoluteSchemaPath::parse(PathBuf::from(schema))
+        .context("failed to parse dispatch schema path")?;
+    let output_path = AbsoluteOutputPath::parse(PathBuf::from(output))
+        .context("failed to parse dispatch output path")?;
+    let stdin = match plan_path {
+        Some(path) => StdinBinding::PlanBytes(
+            std::fs::read(path).with_context(|| format!("failed to read plan file `{path}`"))?,
+        ),
+        None => StdinBinding::Null,
+    };
+    let envelope = DispatchEnvelope::new(DispatchTarget::Gate, working_directory, stdin)
+        .with_arguments(ArgumentVector::new(arguments))
+        .with_environment(ChildEnvironment::new(environment))
+        .with_schema_path(schema_path)
+        .with_output_path(output_path);
     let logging = logging_raw
         .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
             let path = PathBuf::from(path);
@@ -3090,11 +3209,11 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
     command.current_dir(invocation.cwd());
     command.env_clear();
     command.envs(invocation.environment());
-    match envelope.stdin() {
-        StdinBinding::Null => {
+    match invocation.stdin_bytes() {
+        None => {
             command.stdin(Stdio::null());
         }
-        StdinBinding::PlanBytes(_) => {
+        Some(_) => {
             command.stdin(Stdio::piped());
         }
     }
@@ -3105,12 +3224,12 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to spawn `{executable}`"))?;
-    let stdin_writer = if let StdinBinding::PlanBytes(bytes) = envelope.stdin() {
+    let stdin_writer = if let Some(bytes) = invocation.stdin_bytes() {
         let mut child_stdin = child
             .stdin
             .take()
             .ok_or_else(|| anyhow!("`{executable}` child stdin was not piped"))?;
-        let bytes = bytes.clone();
+        let bytes = bytes.to_vec();
         let executable = executable.to_owned();
         Some(std::thread::spawn(move || -> Result<()> {
             child_stdin
@@ -3126,26 +3245,51 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
         .stdout
         .take()
         .ok_or_else(|| anyhow!("`{executable}` child stdout was not piped"))?;
-    let mut reader = BufReader::new(child_stdout);
     let stdout = std::io::stdout();
     let mut parent_stdout = stdout.lock();
     let mut observations = Vec::new();
-    loop {
-        let mut line = Vec::new();
-        let count = reader
-            .read_until(b'\n', &mut line)
-            .with_context(|| format!("failed to read JSONL from `{executable}`"))?;
-        if count == 0 {
-            break;
+    let mut claude_stdout = Vec::new();
+    match invocation.target() {
+        DispatchTarget::Codex => {
+            let mut reader = BufReader::new(child_stdout);
+            loop {
+                let mut line = Vec::new();
+                let count = reader
+                    .read_until(b'\n', &mut line)
+                    .with_context(|| format!("failed to read JSONL from `{executable}`"))?;
+                if count == 0 {
+                    break;
+                }
+                parent_stdout
+                    .write_all(&line)
+                    .context("failed to tee Codex JSONL to stdout")?;
+                parent_stdout
+                    .flush()
+                    .context("failed to flush Codex JSONL")?;
+                if !line.iter().all(u8::is_ascii_whitespace) {
+                    observations.push(observe_terminal_line(&line));
+                }
+            }
         }
-        parent_stdout
-            .write_all(&line)
-            .context("failed to tee Codex JSONL to stdout")?;
-        parent_stdout
-            .flush()
-            .context("failed to flush Codex JSONL")?;
-        if !line.iter().all(u8::is_ascii_whitespace) {
-            observations.push(observe_terminal_line(&line));
+        DispatchTarget::Gate => {
+            let mut reader = BufReader::new(child_stdout);
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let count = reader
+                    .read(&mut buffer)
+                    .with_context(|| format!("failed to read Claude result from `{executable}`"))?;
+                if count == 0 {
+                    break;
+                }
+                let bytes = &buffer[..count];
+                parent_stdout
+                    .write_all(bytes)
+                    .context("failed to tee Claude result to stdout")?;
+                parent_stdout
+                    .flush()
+                    .context("failed to flush Claude result")?;
+                claude_stdout.extend_from_slice(bytes);
+            }
         }
     }
     if let Some(writer) = stdin_writer {
@@ -3159,7 +3303,12 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
     let duration_ms = u64::try_from(started.elapsed().as_millis())
         .context("dispatch duration in milliseconds exceeds u64")?;
     let exit_status = dispatch_exit_status(status)?;
-    let classification = classify_codex_terminal_usage(&observations, exit_status);
+    let classification = match invocation.target() {
+        DispatchTarget::Codex => classify_codex_terminal_usage(&observations, exit_status),
+        DispatchTarget::Gate => {
+            classify_claude_result(&parse_claude_result(&claude_stdout), exit_status)
+        }
+    };
     let artifact_validation: Result<ArtifactOutcome, pce_core::ArtifactValidationError> =
         match (envelope.schema_path(), envelope.output_path()) {
             (Some(schema_path), Some(output_path)) => {
@@ -3199,10 +3348,17 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
         .context("failed to append dispatch completion after child exit")?;
     }
     if let Err(reason) = classification {
-        bail!(
-            "invalid Codex terminal data: {}",
-            usage_absence_name(reason)
-        );
+        match invocation.target() {
+            DispatchTarget::Codex => {
+                bail!(
+                    "invalid Codex terminal data: {}",
+                    usage_absence_name(reason)
+                );
+            }
+            DispatchTarget::Gate => {
+                bail!("invalid Claude result data: {}", usage_absence_name(reason));
+            }
+        }
     }
     if !status.success() {
         bail!("`{executable}` child exited with status {status}");
@@ -5896,6 +6052,81 @@ mod tests {
             .map(str::to_owned);
         let error = parse_command(before_plan).expect_err("logging before plan must fail");
         assert!(format!("{error:#}").contains("dispatch arguments require the `--` delimiter"));
+
+        let gate_prefix = [
+            "dispatch",
+            "gate",
+            "--cwd",
+            "/tmp",
+            "--output-schema",
+            "/tmp/schema.json",
+            "-o",
+            "/tmp/output.json",
+        ];
+        let no_logging = gate_prefix.into_iter().chain(["--"]).map(str::to_owned);
+        let Command::Dispatch { logging, .. } =
+            parse_command(no_logging).expect("gate logging is optional")
+        else {
+            panic!("parsed another command")
+        };
+        assert!(logging.is_none());
+        for dry_run in [false, true] {
+            let mut suffix = vec![
+                "--log-file",
+                "/tmp/gate.jsonl",
+                "--node",
+                "m6-s2",
+                "--role",
+                "critic",
+                "--ref",
+                "ref",
+                "--evidence",
+                "evidence",
+            ];
+            if dry_run {
+                suffix.push("--dry-run");
+            }
+            suffix.push("--");
+            let command = parse_command(gate_prefix.into_iter().chain(suffix).map(str::to_owned))
+                .expect("complete gate logging group");
+            let Command::Dispatch { logging, .. } = command else {
+                panic!("parsed another command")
+            };
+            assert!(matches!(
+                (dry_run, logging),
+                (false, Some(DispatchLoggingMode::Live { .. }))
+                    | (true, Some(DispatchLoggingMode::DryRun { .. }))
+            ));
+        }
+        let members = ["--log-file", "--node", "--role", "--ref", "--evidence"];
+        for missing in members {
+            let values = [
+                ("--log-file", "/tmp/gate.jsonl"),
+                ("--node", "m6-s2"),
+                ("--role", "critic"),
+                ("--ref", "ref"),
+                ("--evidence", "evidence"),
+            ];
+            let suffix = values
+                .into_iter()
+                .filter(|(flag, _)| *flag != missing)
+                .flat_map(|(flag, value)| [flag, value])
+                .chain(["--"]);
+            let error = parse_command(gate_prefix.into_iter().chain(suffix).map(str::to_owned))
+                .expect_err("missing gate logging member must fail");
+            assert!(
+                format!("{error:#}").contains("dispatch logging options must be supplied together"),
+                "missing {missing}"
+            );
+        }
+        let stray_dry = gate_prefix
+            .into_iter()
+            .chain(["--dry-run", "--"])
+            .map(str::to_owned);
+        let error = parse_command(stray_dry).expect_err("gate dry-run without logging must fail");
+        assert!(
+            format!("{error:#}").contains("dispatch logging options must be supplied together")
+        );
     }
 
     #[test]
