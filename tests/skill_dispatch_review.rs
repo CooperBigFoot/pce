@@ -3216,7 +3216,33 @@ fn gate_conformance_shim_duplicate_designated_path_reds() {
     assert!(!first.exists() && !second.exists());
 }
 
-const CONSOLIDATION_EXPLANATION: &str = "The dispatch-issuance consolidation marker immediately above declares that every dispatch issuance is appended by `pce dispatch` from its complete ordered logging envelope. It activates the executable prohibition on standalone dispatch appends; keep exactly one marker while binary-owned issuance is the operating contract. The marker is protocol state, not a decorative comment.";
+const CONSOLIDATION_EXPLANATION: &str = "The dispatch-issuance consolidation marker immediately above activates only `reject_colocated_standalone_append`, which rejects a standalone `pce log ... --kind dispatch` append in the same ATX section as an anchored dispatch route when the marker is present. That marker-gated co-location predicate is strictly weaker than, and is subsumed by, the separate document-wide `real_skill_has_no_standalone_dispatch_append_anywhere` backstop, which rejects such an append in every venue; keep exactly one marker while binary-owned issuance is the operating contract. The marker is protocol state, not a decorative comment.";
+
+const CONSOLIDATION_SCOPE_CLAUSES: [(&str, &str); 3] = [
+    (
+        "co-location-only",
+        "activates only `reject_colocated_standalone_append`",
+    ),
+    (
+        "strictly-weaker",
+        "strictly weaker than, and is subsumed by",
+    ),
+    (
+        "document-wide-backstop",
+        "separate document-wide `real_skill_has_no_standalone_dispatch_append_anywhere` backstop",
+    ),
+];
+
+const METER_DOCUMENTATION_CLAIMS: [(&str, &str); 2] = [
+    (
+        "surface",
+        "pce log meter                                                     JSONL read from STDIN to EOF",
+    ),
+    (
+        "stdin-only-rationale",
+        "The meter accepts JSONL only on standard input so it has no path or transcript-read capability, while `pce log` and `pce log read` retain path arguments for append and raw retrieval.",
+    ),
+];
 
 const BINARY_OWNED_SENTENCES: [&str; 4] = [
     "`pce dispatch` appends dispatch issuance from its complete ordered logging envelope; the orchestrator invokes the following manual append, read, status, readiness, and contract surfaces in their exact argument order:",
@@ -3290,6 +3316,39 @@ fn real_skill_explains_consolidation_marker() {
         (1, 1),
         "real_skill_explains_consolidation_marker: explanation_count={explanation_count}, adjacent_count={adjacent_count}"
     );
+}
+
+#[test]
+fn consolidation_marker_scope_claim_is_exact() {
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("skill");
+    let marker_count = skill.matches(CONSOLIDATION_MARKER).count();
+    let clause_counts: Vec<_> = CONSOLIDATION_SCOPE_CLAUSES
+        .iter()
+        .map(|(label, clause)| (*label, skill.matches(clause).count()))
+        .collect();
+    for (label, current) in &clause_counts {
+        assert_eq!(
+            *current, marker_count,
+            "consolidation_marker_scope_claim_is_exact/{label}: marker_count={marker_count}, clause_counts={clause_counts:?}"
+        );
+    }
+}
+
+#[test]
+fn meter_stdin_only_surface_is_documented() {
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("skill");
+    let claim_counts: Vec<_> = METER_DOCUMENTATION_CLAIMS
+        .iter()
+        .map(|(label, claim)| (*label, skill.matches(claim).count()))
+        .collect();
+    for (label, current) in &claim_counts {
+        assert_eq!(
+            *current, 1,
+            "meter_stdin_only_surface_is_documented/{label}: claim_counts={claim_counts:?}"
+        );
+    }
 }
 
 #[test]
@@ -4759,6 +4818,14 @@ const BOUNDED_EVIDENCE_CLAUSE: &str = "names one bounded evidence question and i
 const CONFINED_SCOPE_CLAUSE: &str =
     "confines work to that evidence request and the single caller-tail token";
 const NO_MUTATION_CLAUSE: &str = "neither implements a remedy nor mutates unrelated work";
+const BOUNDEDNESS_DISCLOSURE_CLAUSES: [(&str, &str); 3] = [
+    (
+        "documentary-caller-tail",
+        "documentary and caller-tail validated",
+    ),
+    ("not-enforced", "not environmentally enforced"),
+    ("cause", "child retains workspace-write capability"),
+];
 
 fn real_skill_markdown() -> String {
     fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
@@ -5042,6 +5109,22 @@ fn diagnostics_boundedness_contract_is_exact() {
         current, "workspace-write",
         "diagnostics_boundedness_contract_is_exact/sandbox-ownership: expected workspace-write, current {current}"
     );
+}
+
+#[test]
+fn diagnostics_boundedness_environmental_limit_is_disclosed() {
+    let markdown = real_skill_markdown();
+    let bounded_evidence_count = markdown.matches(BOUNDED_EVIDENCE_CLAUSE).count();
+    let clause_counts: Vec<_> = BOUNDEDNESS_DISCLOSURE_CLAUSES
+        .iter()
+        .map(|(label, clause)| (*label, markdown.matches(clause).count()))
+        .collect();
+    for (label, current) in &clause_counts {
+        assert_eq!(
+            *current, bounded_evidence_count,
+            "diagnostics_boundedness_environmental_limit_is_disclosed/{label}: bounded_evidence_count={bounded_evidence_count}, clause_counts={clause_counts:?}"
+        );
+    }
 }
 
 #[test]

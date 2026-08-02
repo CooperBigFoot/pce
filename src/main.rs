@@ -36,7 +36,7 @@ use pce_core::{
     classify_seatbelt_capability, compute_dispatchability, create_vision, derive_merge_status,
     derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
     dispatch_invocation, dispatch_payload, event_record_matches, measure_contract_snapshot,
-    parse_claude_result, parse_event_line, parse_tracked_repository_contract,
+    meter_dispatches, parse_claude_result, parse_event_line, parse_tracked_repository_contract,
     render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
     serialize_tracked_repository_contract, validate_artifact, validate_workflow_coverage,
 };
@@ -47,6 +47,7 @@ const USAGE: &str = concat!(
     "usage: pce vision new \"<name>\"\n",
     "       pce log --file <LOG_PATH> --kind <KIND> --node <NODE>\n",
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
+    "       pce log meter\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>]\n",
     "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>\n",
@@ -100,6 +101,7 @@ enum Command {
         path: PathBuf,
         filter: EventRecordFilter,
     },
+    LogMeter,
     Status {
         log_path: PathBuf,
         recovery_log_path: RecoveryLogPath,
@@ -317,6 +319,11 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
             run_log_read(&path, &filter, &mut output)
+        }
+        Command::LogMeter => {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            run_log_meter(input, &mut output)
         }
         Command::Status {
             log_path,
@@ -760,6 +767,7 @@ fn parse_contract_command(action: &str, rest: &[String]) -> Result<Command> {
 
 fn parse_log_command(action: &str, rest: &[String]) -> Result<Command> {
     match (action, rest) {
+        ("meter", []) => Ok(Command::LogMeter),
         ("--file", [raw_path, kind_flag, raw_kind, node_flag, raw_node])
             if kind_flag == "--kind"
                 && node_flag == "--node"
@@ -2402,6 +2410,58 @@ fn run_log_read(path: &Path, filter: &EventRecordFilter, output: &mut dyn Write)
     output
         .flush()
         .with_context(|| format!("failed to flush selected events from {}", path.display()))
+}
+
+fn run_log_meter(input: &mut dyn Read, output: &mut dyn Write) -> Result<()> {
+    // The meter accepts JSONL only on standard input so it has no path or transcript-read
+    // capability, while `pce log` and `pce log read` retain path arguments for append and raw
+    // retrieval.
+    let mut reader = BufReader::new(input);
+    let mut records = Vec::<EventRecord>::new();
+    let mut physical_line = 0_u64;
+    let mut buffer = String::new();
+    loop {
+        buffer.clear();
+        let bytes = reader.read_line(&mut buffer).with_context(|| {
+            format!(
+                "failed to read physical line {} from meter stdin",
+                physical_line + 1
+            )
+        })?;
+        if bytes == 0 {
+            break;
+        }
+        physical_line += 1;
+        let parsed = buffer.strip_suffix('\n').unwrap_or(&buffer);
+        let record = parse_event_line(parsed).with_context(|| {
+            format!("failed to parse physical line {physical_line} from meter stdin")
+        })?;
+        if let Some(previous) = records.last()
+            && record.sequence().get() <= previous.sequence().get()
+        {
+            bail!(
+                "meter stdin has non-increasing sequence {} at physical line {} after {}",
+                record.sequence().get(),
+                physical_line,
+                previous.sequence().get()
+            );
+        }
+        records.push(record);
+    }
+
+    let report = meter_dispatches(records.as_slice())?;
+    let mut serialized = Vec::new();
+    for record in &report {
+        serde_json::to_writer(&mut serialized, record)
+            .context("failed to serialize dispatch meter report")?;
+        serialized.push(b'\n');
+    }
+    output
+        .write_all(&serialized)
+        .context("failed to write dispatch meter report")?;
+    output
+        .flush()
+        .context("failed to flush dispatch meter report")
 }
 
 fn lexically_normalized_repository_root(root: &str) -> PathBuf {
