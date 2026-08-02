@@ -126,7 +126,7 @@ pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OU
 
 ### Anchored dispatch purpose routes
 
-These are the only purpose routes. They bind `{{CWD}}` to the exact worktree, `{{REF}}` to its measured current head, `{{NODE}}` to the canonical node concerned, and `{{ROLE}}` to the applicable existing registry role. Commit completion first verifies the worktree and head, then creates the already-required single conventional commit and writes `pr-body.md` at the worktree root without tracking it; it performs no implementation. Diagnostics names one bounded evidence question and its permitted reads, confines work to that evidence request and the single caller-tail token, and neither implements a remedy nor mutates unrelated work. Both children are awaited.
+These are the only purpose routes. They bind `{{CWD}}` to the exact worktree, `{{REF}}` to its measured current head, `{{NODE}}` to the canonical node concerned, and `{{ROLE}}` to the applicable existing registry role. Commit completion first verifies the worktree and head, then creates the already-required single conventional commit and writes `pr-body.md` at the worktree root without tracking it; it performs no implementation. Diagnostics names one bounded evidence question and its permitted reads, confines work to that evidence request and the single caller-tail token, and neither implements a remedy nor mutates unrelated work. Diagnostics boundedness is documentary and caller-tail validated, not environmentally enforced, because the child retains workspace-write capability. Both children are awaited.
 
 <!-- pce-dispatch-route kind="codex-commit-completion" -->
 ```sh
@@ -142,13 +142,14 @@ pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --log-f
 
 <!-- pce-dispatch-issuance-consolidated -->
 
-The dispatch-issuance consolidation marker immediately above declares that every dispatch issuance is appended by `pce dispatch` from its complete ordered logging envelope. It activates the executable prohibition on standalone dispatch appends; keep exactly one marker while binary-owned issuance is the operating contract. The marker is protocol state, not a decorative comment.
+The dispatch-issuance consolidation marker immediately above activates only `reject_colocated_standalone_append`, which rejects a standalone `pce log ... --kind dispatch` append in the same ATX section as an anchored dispatch route when the marker is present. That marker-gated co-location predicate is strictly weaker than, and is subsumed by, the separate document-wide `real_skill_has_no_standalone_dispatch_append_anywhere` backstop, which rejects such an append in every venue; keep exactly one marker while binary-owned issuance is the operating contract. The marker is protocol state, not a decorative comment.
 
 The orchestrator owns append decisions. `pce dispatch` appends dispatch issuance from its complete ordered logging envelope; the orchestrator invokes the following manual append, read, status, readiness, and contract surfaces in their exact argument order:
 
 ```text
 pce log --file <LOG_PATH> --kind <KIND> --node <NODE>          payload read from STDIN to EOF
 pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]
+pce log meter                                                     JSONL read from STDIN to EOF
 pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]
 pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>]
 pce contract check --file <REPOSITORY_ROOT>/.pce/repository-contract.json --repo-root <REPOSITORY_ROOT>
@@ -156,6 +157,8 @@ pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --reposit
 pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>
 pce contract learn --file <LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>
 ```
+
+The meter accepts JSONL only on standard input so it has no path or transcript-read capability, while `pce log` and `pce log read` retain path arguments for append and raw retrieval.
 
 Raw reads may omit filters or supply either filter. With both filters, only this order is valid:
 
