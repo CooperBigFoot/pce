@@ -179,6 +179,8 @@ enum ReviewError {
     EmptyRef,
     EmptyEvidence,
     ParentGrammar,
+    ZeroEnvironmentEntries(usize),
+    MultipleEnvironmentEntries(usize),
     MultipleDelimiters,
     CallerTailResuppliesBinaryArgument,
     IndentedMarker,
@@ -747,8 +749,11 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
         }
         env_count += 1;
     }
-    if env_count != 1 {
-        return Err(ReviewError::ParentGrammar);
+    if env_count == 0 {
+        return Err(ReviewError::ZeroEnvironmentEntries(env_count));
+    }
+    if env_count > 1 {
+        return Err(ReviewError::MultipleEnvironmentEntries(env_count));
     }
     let has_structured = argv
         .get(position)
@@ -912,22 +917,7 @@ fn canonical_semantics(route: &AnchoredRoute) -> Result<(), ReviewError> {
     if count("--env") != 1 || count("{{ENV}}") != 1 {
         return Err(ReviewError::RoleSemantics);
     }
-    let logging = [
-        "--log-file",
-        "{{LOG_FILE}}",
-        "--node",
-        expected_node(role),
-        "--role",
-        role,
-        "--ref",
-        "{{REF}}",
-        "--evidence",
-        "{{EVIDENCE}}",
-    ];
-    if !tokens
-        .windows(logging.len())
-        .any(|window| window.iter().map(String::as_str).eq(logging))
-    {
+    if !has_complete_logging_group(route) {
         return Err(ReviewError::RoleSemantics);
     }
     if count("--ref") != 1
@@ -965,6 +955,28 @@ fn canonical_semantics(route: &AnchoredRoute) -> Result<(), ReviewError> {
         }
     }
     Ok(())
+}
+
+fn has_complete_logging_group(route: &AnchoredRoute) -> bool {
+    let Some(role) = route_role(route) else {
+        return true;
+    };
+    let logging = [
+        "--log-file",
+        "{{LOG_FILE}}",
+        "--node",
+        expected_node(role),
+        "--role",
+        role,
+        "--ref",
+        "{{REF}}",
+        "--evidence",
+        "{{EVIDENCE}}",
+    ];
+    route
+        .tokens
+        .windows(logging.len())
+        .any(|window| window.iter().map(String::as_str).eq(logging))
 }
 
 fn semantic_output_path(
@@ -1079,8 +1091,9 @@ fn shell_like(line: &str) -> bool {
         })
 }
 
-fn reject_outside_fragments(markdown: &str) -> Result<(), ReviewError> {
+fn outside_fragment_units(markdown: &str) -> Vec<String> {
     let lines: Vec<&str> = markdown.lines().collect();
+    let mut units = Vec::new();
     let mut in_anchor = false;
     let mut in_fence = false;
     let mut fence = String::new();
@@ -1097,9 +1110,7 @@ fn reject_outside_fragments(markdown: &str) -> Result<(), ReviewError> {
         }
         if line.starts_with("```") {
             if in_fence {
-                if unit_has_prohibited_fragment(&fence) {
-                    return Err(ReviewError::OutsideAnchorDispatchFragment);
-                }
+                units.push(fence.clone());
                 fence.clear();
                 in_fence = false;
             } else {
@@ -1116,16 +1127,59 @@ fn reject_outside_fragments(markdown: &str) -> Result<(), ReviewError> {
         while let Some(start) = rest.find('`') {
             rest = &rest[start + 1..];
             let Some(end) = rest.find('`') else { break };
-            if unit_has_prohibited_fragment(&rest[..end]) {
-                return Err(ReviewError::OutsideAnchorDispatchFragment);
-            }
+            units.push(rest[..end].to_owned());
             rest = &rest[end + 1..];
         }
-        if shell_like(line) && unit_has_prohibited_fragment(line) {
-            return Err(ReviewError::OutsideAnchorDispatchFragment);
+        if shell_like(line) {
+            units.push(line.to_owned());
         }
     }
+    units
+}
+
+fn reject_outside_fragments(markdown: &str) -> Result<(), ReviewError> {
+    if outside_fragment_units(markdown)
+        .iter()
+        .any(|unit| unit_has_prohibited_fragment(unit))
+    {
+        return Err(ReviewError::OutsideAnchorDispatchFragment);
+    }
     Ok(())
+}
+
+fn is_standalone_dispatch_append(line: &str) -> bool {
+    if !shell_like(line) {
+        return false;
+    }
+    let tokens: Vec<_> = line.split_ascii_whitespace().collect();
+    let command = tokens.windows(2).position(|pair| pair == ["pce", "log"]);
+    let kind = tokens
+        .windows(2)
+        .position(|pair| pair == ["--kind", "dispatch"]);
+    command
+        .zip(kind)
+        .is_some_and(|(command, kind)| command < kind)
+}
+
+fn standalone_dispatch_append_lines(markdown: &str) -> Vec<usize> {
+    let mut in_anchor = false;
+    let mut matches = Vec::new();
+    for (index, line) in markdown.lines().enumerate() {
+        if line.starts_with(MARKER_START) {
+            in_anchor = true;
+            continue;
+        }
+        if in_anchor {
+            if line == "```" {
+                in_anchor = false;
+            }
+            continue;
+        }
+        if is_standalone_dispatch_append(line) {
+            matches.push(index + 1);
+        }
+    }
+    matches
 }
 
 fn reject_colocated_standalone_append(markdown: &str) -> Result<(), ReviewError> {
@@ -1135,15 +1189,7 @@ fn reject_colocated_standalone_append(markdown: &str) -> Result<(), ReviewError>
     let mut section = String::new();
     let inspect = |section: &str| {
         let anchor = section.contains(MARKER_START);
-        let append = section.lines().any(|line| {
-            shell_like(line)
-                && line
-                    .split_ascii_whitespace()
-                    .collect::<Vec<_>>()
-                    .windows(2)
-                    .any(|pair| pair == ["pce", "log"])
-                && line.contains("--kind dispatch")
-        });
+        let append = section.lines().any(is_standalone_dispatch_append);
         anchor && append
     };
     for line in markdown.lines() {
@@ -1367,44 +1413,6 @@ fn real_skill_has_exact_pinned_anchor_count_nine() {
     assert_eq!(roles, expected);
 }
 
-#[test]
-fn column_zero_and_environment_protocol() {
-    let good = document(
-        "codex-unstructured",
-        &base_command(RouteKind::CodexUnstructured),
-    );
-    review_document(&good, &fixture().bindings).expect("column_zero_anchor_accepts");
-    for (name, mutated, expected) in [
-        (
-            "indented_anchor_marker_reds",
-            good.replacen(MARKER_START, &format!(" {MARKER_START}"), 1),
-            ReviewError::IndentedMarker,
-        ),
-        (
-            "indented_anchor_opening_fence_reds",
-            good.replacen("```sh", " ```sh", 1),
-            ReviewError::IndentedOpeningFence,
-        ),
-        (
-            "indented_anchor_command_reds",
-            good.replacen("pce dispatch", " pce dispatch", 1),
-            ReviewError::IndentedCommand,
-        ),
-        (
-            "indented_anchor_closing_fence_reds",
-            good.replacen("\n```\n", "\n ```\n", 1),
-            ReviewError::IndentedClosingFence,
-        ),
-    ] {
-        assert_document_error_before_pce(name, &mutated, expected);
-    }
-    let zero = good.replace("--env {{ENV}} ", "");
-    assert_document_error_before_pce("route_zero_env_reds", &zero, ReviewError::ParentGrammar);
-    let two = good.replace("--env {{ENV}}", "--env {{ENV}} --env {{ENV}}");
-    assert_document_error_before_pce("route_two_env_reds", &two, ReviewError::ParentGrammar);
-    review_document(&good, &fixture().bindings).expect("route_exactly_one_env_accepts");
-}
-
 fn assert_indentation_fixture(name: &str, mutation: fn(String) -> String, expected: ReviewError) {
     let document = document(
         "codex-unstructured",
@@ -1467,7 +1475,11 @@ fn route_zero_env_reds() {
         "codex-unstructured",
         &base_command(RouteKind::CodexUnstructured).replace("--env {{ENV}} ", ""),
     );
-    assert_document_error_before_pce("route_zero_env_reds", &markdown, ReviewError::ParentGrammar);
+    assert_document_error_before_pce(
+        "route_zero_env_reds",
+        &markdown,
+        ReviewError::ZeroEnvironmentEntries(0),
+    );
 }
 
 #[test]
@@ -1486,7 +1498,11 @@ fn route_two_env_reds() {
         &base_command(RouteKind::CodexUnstructured)
             .replace("--env {{ENV}}", "--env {{ENV}} --env {{ENV}}"),
     );
-    assert_document_error_before_pce("route_two_env_reds", &markdown, ReviewError::ParentGrammar);
+    assert_document_error_before_pce(
+        "route_two_env_reds",
+        &markdown,
+        ReviewError::MultipleEnvironmentEntries(2),
+    );
 }
 
 #[test]
@@ -1690,9 +1706,10 @@ fn environment_cardinality_by_role() {
 fn logging_group_by_role() {
     for route in repository_routes() {
         let role = route_role(&route).expect("canonical role");
-        assert!(
-            canonical_semantics(&route).is_ok(),
-            "logging_group_by_role/{role}"
+        let current = usize::from(has_complete_logging_group(&route));
+        assert_eq!(
+            current, 1,
+            "logging_group_by_role/{role}: removed_member=--log-file, green=1, current={current}"
         );
     }
 }
@@ -1910,84 +1927,12 @@ fn executor_complete_git_parent_required() {
     );
 }
 
-#[test]
-fn outside_fragment_controls() {
-    let f = fixture();
-    for (name, unit) in [
-        (
-            "outside_fragment_code_span_target_then_option_reds",
-            "`pce dispatch codex --cwd`",
-        ),
-        (
-            "outside_fragment_code_span_option_then_target_reds",
-            "`--cwd pce dispatch codex`",
-        ),
-        (
-            "outside_fragment_fence_target_then_delimiter_reds",
-            "```text\npce dispatch gate --\n```",
-        ),
-        (
-            "outside_fragment_fence_delimiter_then_target_reds",
-            "```text\n-- pce dispatch gate\n```",
-        ),
-        (
-            "outside_fragment_shell_line_target_then_caller_reds",
-            "pce dispatch codex -- caller",
-        ),
-        (
-            "outside_fragment_shell_line_caller_then_target_reds",
-            "-- caller pce dispatch codex",
-        ),
-    ] {
-        assert!(
-            (unit.contains("pce dispatch codex") || unit.contains("pce dispatch gate"))
-                && unit.contains("--"),
-            "{name}: conjunct precondition"
-        );
-        assert_eq!(
-            review_document(unit, &f.bindings).expect_err(name),
-            ReviewError::OutsideAnchorDispatchFragment,
-            "{name}"
-        );
-    }
-    for (name, unit) in [
-        (
-            "outside_fragment_bare_route_accepts",
-            "`pce dispatch codex`",
-        ),
-        ("outside_fragment_option_only_accepts", "`--cwd`"),
-        (
-            "outside_fragment_split_units_accepts",
-            "`pce dispatch codex` and `--cwd`",
-        ),
-    ] {
-        review_document(unit, &f.bindings).unwrap_or_else(|error| panic!("{name}: {error:?}"));
-    }
-    let protocol = "Outside a valid anchored fence, a prohibited dispatch fragment is one inline code span, one complete fenced code block, or one shell-like physical line that contains both (a) the contiguous route name `pce dispatch codex` or `pce dispatch gate` and (b) at least one whitespace-delimited token that is a dispatch-only parent option, the standalone `--` delimiter, or any caller argument represented by a whitespace-delimited token after that delimiter.";
-    review_document(protocol, &f.bindings).expect("outside_fragment_protocol_definition_accepts");
-    let control =
-        "> Prose control: pce dispatch codex --cwd names tokens without presenting a command.";
-    assert!(unit_has_prohibited_fragment(control));
-    assert!(!shell_like(control));
-    review_document(control, &f.bindings)
-        .expect("outside_fragment_non_shell_line_with_both_conjuncts_accepts");
-    review_document(
-        &document(
-            "codex-unstructured",
-            &base_command(RouteKind::CodexUnstructured),
-        ),
-        &f.bindings,
-    )
-    .expect("outside_fragment_valid_anchor_accepts");
-}
-
 fn assert_outside_red(name: &str, unit: &str) {
-    let measured = unit
-        .strip_prefix('`')
-        .and_then(|text| text.strip_suffix('`'))
-        .unwrap_or(unit);
+    let measured = outside_fragment_units(unit);
     assert!(
-        unit_has_prohibited_fragment(measured),
+        measured
+            .iter()
+            .any(|item| unit_has_prohibited_fragment(item)),
         "{name}: both conjuncts"
     );
     assert_eq!(
@@ -2087,37 +2032,6 @@ fn outside_fragment_non_shell_line_with_both_conjuncts_accepts() {
     review_document(control, &fixture().bindings).expect("first-token boundary");
 }
 
-#[test]
-fn standalone_append_marker_controls() {
-    let anchor = document(
-        "codex-unstructured",
-        &base_command(RouteKind::CodexUnstructured),
-    );
-    let append = "pce log --file /tmp/events --kind dispatch --node m1-s1\n";
-    let absent = format!("## One\n{anchor}{append}");
-    review_document(&absent, &fixture().bindings)
-        .expect("standalone_append_marker_absent_allows_legacy");
-    let separate = format!("{CONSOLIDATION_MARKER}\n## One\n{anchor}## Two\n{append}");
-    review_document(&separate, &fixture().bindings)
-        .expect("standalone_append_marker_present_non_colocated_accepts");
-    for (name, body) in [
-        (
-            "standalone_append_after_anchor_reds",
-            format!("{CONSOLIDATION_MARKER}\n## One\n{anchor}{append}"),
-        ),
-        (
-            "standalone_append_before_anchor_reds",
-            format!("{CONSOLIDATION_MARKER}\n## One\n{append}{anchor}"),
-        ),
-    ] {
-        assert_eq!(
-            review_document(&body, &fixture().bindings).expect_err(name),
-            ReviewError::CoLocatedStandaloneDispatchAppend,
-            "{name}"
-        );
-    }
-}
-
 fn standalone_parts() -> (String, &'static str) {
     (
         document(
@@ -2181,6 +2095,76 @@ fn standalone_append_after_anchor_reds() {
 #[test]
 fn standalone_append_before_anchor_reds() {
     assert_colocated_append("standalone_append_before_anchor_reds", true);
+}
+
+fn independently_tokenized_append_lines(markdown: &str) -> Vec<usize> {
+    markdown
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let tokens: Vec<_> = line.split_ascii_whitespace().collect();
+            let command = tokens.windows(2).position(|pair| pair == ["pce", "log"])?;
+            let kind = tokens
+                .windows(2)
+                .position(|pair| pair == ["--kind", "dispatch"])?;
+            (shell_like(line) && command < kind).then_some(index + 1)
+        })
+        .collect()
+}
+
+#[test]
+fn standalone_append_document_wide_without_anchor_reds() {
+    let markdown = "pce log --file /tmp/events --kind  dispatch --node m1-s1\n";
+    let independently_tokenized = independently_tokenized_append_lines(markdown);
+    let detector: Vec<_> = markdown
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| is_standalone_dispatch_append(line).then_some(index + 1))
+        .collect();
+    let walker = standalone_dispatch_append_lines(markdown);
+    assert_eq!(
+        detector, independently_tokenized,
+        "standalone_append_document_wide_without_anchor_reds/detector-agreement: independent={independently_tokenized:?}, detector={detector:?}"
+    );
+    assert_eq!(
+        walker, independently_tokenized,
+        "standalone_append_document_wide_without_anchor_reds/walker-agreement: independent={independently_tokenized:?}, walker={walker:?}"
+    );
+    assert!(!independently_tokenized.is_empty());
+}
+
+fn assert_document_wide_across_heading(name: &str, append_first: bool) {
+    let (anchor, append) = standalone_parts();
+    let markdown = if append_first {
+        format!("{CONSOLIDATION_MARKER}\n## Append\n{append}## Anchor\n{anchor}")
+    } else {
+        format!("{CONSOLIDATION_MARKER}\n## Anchor\n{anchor}## Append\n{append}")
+    };
+    reject_colocated_standalone_append(&markdown)
+        .unwrap_or_else(|error| panic!("{name}/co-location-acceptance: {error:?}"));
+    let expected = independently_tokenized_append_lines(&markdown);
+    let measured = standalone_dispatch_append_lines(&markdown);
+    assert_eq!(
+        measured, expected,
+        "{name}: expected={expected:?}, measured={measured:?}"
+    );
+    assert_eq!(measured.len(), 1, "{name}: one separated append");
+}
+
+#[test]
+fn standalone_append_document_wide_after_separate_heading_reds() {
+    assert_document_wide_across_heading(
+        "standalone_append_document_wide_after_separate_heading_reds",
+        false,
+    );
+}
+
+#[test]
+fn standalone_append_document_wide_before_separate_heading_reds() {
+    assert_document_wide_across_heading(
+        "standalone_append_document_wide_before_separate_heading_reds",
+        true,
+    );
 }
 
 fn independently_filtered_prior_count(events: &[serde_json::Value]) -> usize {
@@ -2617,7 +2601,16 @@ fn conformance_paths_and_projection_limitation() {
     let recovered = PathBuf::from(
         fs::read_to_string(f.bindings.cwd.join(".review/recovered-path")).expect("recorded path"),
     );
-    let parent = f.bindings.context.review_directories["pr-reviewer"].join("review-3.json");
+    let reviewer = repository_route("pr-reviewer");
+    let reviewer_argv = substitute_route(&reviewer, &f.bindings).expect("reviewer binding");
+    semantic_output_path(&reviewer, &reviewer_argv, &f.bindings).expect("reviewer semantic path");
+    let parent = PathBuf::from(
+        reviewer_argv
+            .windows(2)
+            .find(|pair| pair[0] == "-o")
+            .expect("measured reviewer output")[1]
+            .clone(),
+    );
     assert_eq!(
         recovered, parent,
         "gate_conformance_shim_recovers_path_from_argv/recorded-parent"
@@ -2968,27 +2961,172 @@ fn gate_conformance_shim_duplicate_designated_path_reds() {
     assert!(!first.exists() && !second.exists());
 }
 
+const CONSOLIDATION_EXPLANATION: &str = "The dispatch-issuance consolidation marker immediately above declares that every dispatch issuance is appended by `pce dispatch` from its complete ordered logging envelope. It activates the executable prohibition on standalone dispatch appends; keep exactly one marker while binary-owned issuance is the operating contract. The marker is protocol state, not a decorative comment.";
+
+const BINARY_OWNED_SENTENCES: [&str; 4] = [
+    "`pce dispatch` appends dispatch issuance from its complete ordered logging envelope; the orchestrator invokes the following manual append, read, status, readiness, and contract surfaces in their exact argument order:",
+    "The `dispatch` payload is binary-owned: each anchored route supplies `node`, an exact registry `role`, the exact repository `ref`, and non-empty exact invocation `evidence` through the complete ordered logging envelope, and `pce dispatch` appends issuance before it spawns the child.",
+    "For binary-owned `dispatch`, `evidence` is the non-empty exact invocation supplied through the ordered dispatch envelope.",
+    "`pce dispatch` appends one `dispatch` record from the complete ordered logging envelope before spawning every Claude or Codex child.",
+];
+
+const BINARY_OWNED_CLAUSES: [(&str, &str); 6] = [
+    (
+        "binary-owner",
+        "`pce dispatch` appends dispatch issuance from its complete ordered logging envelope",
+    ),
+    ("payload-role", "an exact registry `role`"),
+    ("payload-ref", "the exact repository `ref`"),
+    ("payload-evidence", "non-empty exact invocation `evidence`"),
+    (
+        "pre-spawn",
+        "`pce dispatch` appends issuance before it spawns the child",
+    ),
+    (
+        "round-source",
+        "sole source for round counts and dispatch refs",
+    ),
+];
+
+fn forbidden_symbol_matches(source: &str) -> Vec<String> {
+    [
+        ["anchor_shell_", "operator"].concat(),
+        ["repeated_placeholder_values_are_", "byte_identical"].concat(),
+        ["PCE_REVIEW_", "CASE"].concat(),
+    ]
+    .into_iter()
+    .filter(|symbol| source.contains(symbol))
+    .collect()
+}
+
 #[test]
-fn real_document_backstops_and_source_audit() {
+fn real_skill_has_no_prohibited_outside_anchor_fragment() {
     let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
         .expect("skill");
     reject_outside_fragments(&skill).expect("real_skill_has_no_prohibited_outside_anchor_fragment");
-    assert!(
-        !skill.contains(CONSOLIDATION_MARKER),
-        "real document marker absence"
+}
+
+#[test]
+fn real_skill_has_exactly_one_consolidation_marker() {
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("skill");
+    let offsets: Vec<_> = skill
+        .match_indices(CONSOLIDATION_MARKER)
+        .map(|(offset, _)| offset)
+        .collect();
+    assert_eq!(
+        offsets.len(),
+        1,
+        "real_skill_has_exactly_one_consolidation_marker: measured_count={}, offsets={offsets:?}",
+        offsets.len()
     );
-    let source = fs::read_to_string(file!()).expect("review source");
-    let forbidden = [
-        concat!("anchor_shell_", "operator"),
-        concat!("repeated_placeholder_values_are_", "byte_identical"),
-        concat!("PCE_REVIEW_", "CASE"),
-    ];
-    for symbol in forbidden {
-        assert!(
-            !source.contains(symbol),
-            "review_has_no_degenerate_controls/{symbol}"
+    reject_colocated_standalone_append(&skill).expect("marker-activated co-location review");
+}
+
+#[test]
+fn real_skill_explains_consolidation_marker() {
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("skill");
+    let explanation_count = skill.matches(CONSOLIDATION_EXPLANATION).count();
+    let adjacent = format!("{CONSOLIDATION_MARKER}\n\n{CONSOLIDATION_EXPLANATION}");
+    let adjacent_count = skill.matches(&adjacent).count();
+    assert_eq!(
+        (explanation_count, adjacent_count),
+        (1, 1),
+        "real_skill_explains_consolidation_marker: explanation_count={explanation_count}, adjacent_count={adjacent_count}"
+    );
+}
+
+#[test]
+fn binary_owned_issuance_semantics_are_exact() {
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("skill");
+    let clause_counts: Vec<_> = BINARY_OWNED_CLAUSES
+        .iter()
+        .map(|(label, clause)| (*label, skill.matches(clause).count()))
+        .collect();
+    let sentence_counts: Vec<_> = BINARY_OWNED_SENTENCES
+        .iter()
+        .map(|sentence| skill.matches(sentence).count())
+        .collect();
+    for (label, current) in clause_counts {
+        assert_eq!(
+            current, 1,
+            "binary_owned_issuance_semantics_are_exact/{label}: green=1, current={current}"
         );
     }
+    for (index, current) in sentence_counts.into_iter().enumerate() {
+        assert_eq!(
+            current, 1,
+            "binary_owned_issuance_semantics_are_exact/sentence-{index}: green=1, current={current}"
+        );
+    }
+}
+
+#[test]
+fn real_skill_has_no_standalone_dispatch_append_anywhere() {
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("skill");
+    let matches = standalone_dispatch_append_lines(&skill);
+    let lines: Vec<_> = skill.lines().collect();
+    let mut by_venue: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for source_line in &matches {
+        let heading = lines[..*source_line]
+            .iter()
+            .rev()
+            .find(|line| line.starts_with("## "))
+            .copied()
+            .unwrap_or("");
+        let venue = if heading == "## Event log contract" {
+            "general-surface"
+        } else if heading.starts_with("## Phase 0") {
+            "phase-0"
+        } else if heading.starts_with("## Phase 1") {
+            "phase-1"
+        } else if heading.starts_with("## Phase 2") {
+            "phase-2"
+        } else if heading.starts_with("## Phase 3") {
+            "phase-3"
+        } else {
+            "other"
+        };
+        by_venue.entry(venue).or_default().push(*source_line);
+    }
+    for venue in [
+        "general-surface",
+        "phase-0",
+        "phase-1",
+        "phase-2",
+        "phase-3",
+        "other",
+    ] {
+        let current = by_venue.get(venue).cloned().unwrap_or_default();
+        assert!(
+            current.is_empty(),
+            "real_skill_has_no_standalone_dispatch_append_anywhere/{venue}: green=[], current={current:?}"
+        );
+    }
+    assert!(matches.is_empty());
+}
+
+#[test]
+fn degenerate_control_audit_known_match_reds() {
+    let known = ["anchor_shell_", "operator"].concat();
+    assert_eq!(
+        forbidden_symbol_matches(&known),
+        vec![known],
+        "degenerate_control_audit_known_match_reds: green=1, current=0"
+    );
+}
+
+#[test]
+fn review_has_no_degenerate_controls() {
+    let source = fs::read_to_string(file!()).expect("review source");
+    let matches = forbidden_symbol_matches(&source);
+    assert!(
+        matches.is_empty(),
+        "review_has_no_degenerate_controls: {matches:?}"
+    );
 }
 
 #[test]
