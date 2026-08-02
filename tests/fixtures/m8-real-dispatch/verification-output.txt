@@ -1,0 +1,14 @@
+m8-s2 orchestrator level-0 host verification
+date_utc=2026-08-02T23:10:43Z
+base_ref=ff96d11e6fb5054c9e6e0b037ca26767344e2602
+nesting_level=0 (sandbox-exec applies; nested returns 71)
+--- strict transcript-exclusion harness ---
+exit=0
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.37s
+nested_seatbelt_skip_markers=0
+--- tracked-log-only meter reproduction ---
+meter_exit=0
+tracked_meter_sha256=f24874094bf5451b5082e88cbecfa3056d08ecbbb1eb5f86f36afe7203003e3f
+reproduced_sha256=f24874094bf5451b5082e88cbecfa3056d08ecbbb1eb5f86f36afe7203003e3f
+byte_identical=yes
