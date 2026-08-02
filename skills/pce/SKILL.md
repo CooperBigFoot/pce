@@ -49,7 +49,9 @@ Every role invocation uses the matching anchored registry route while retaining 
 
 Executable dispatch routes use a closed anchor convention. An HTML comment named
 `pce-dispatch-route` carries exactly one `kind` attribute whose value is
-`codex-unstructured`, `codex-structured`, or `gate-structured`. The comment immediately precedes,
+`codex-unstructured`, `codex-structured`, `gate-structured`, `codex-commit-completion`, or
+`codex-diagnostics`. The first three kinds are canonical role anchors and the latter two are purpose
+anchors. The comment immediately precedes,
 apart from blank lines, an `sh` fence containing exactly one shell-free logical command. A single
 terminal backslash may continue a physical line. The fenced invocation spans the complete parent
 command and caller tail, contains exactly one standalone delimiter, and uses only unquoted,
@@ -68,6 +70,8 @@ and complete logging groups retain the binary's strict order. Every anchored rou
 Outside a valid anchored fence, a prohibited dispatch fragment is one inline code span, one complete fenced code block, or one shell-like physical line that contains both (a) the contiguous route name `pce dispatch codex` or `pce dispatch gate` and (b) at least one whitespace-delimited token that is a dispatch-only parent option, the standalone `--` delimiter, or any caller argument represented by a whitespace-delimited token after that delimiter.
 
 Gate routes use the caller tail `--append-system-prompt ABSOLUTE_VERDICT_PATH PROMPT`. The path is byte-identical to the parent `-o` path. Claude treats the value after `--append-system-prompt` as system-prompt text, not as an output-file option; the caller prompt instructs the child to write one conforming verdict object to that absolute path. The child-visible option is not a second parent `-o` and does not repeat `-p` or an output-format option.
+
+Purpose anchors are a separate closed class from canonical role anchors. `codex-commit-completion` resumes the exact worktree and recorded head with null standard input and no output artifact; `codex-diagnostics` performs one bounded evidence-only request with null standard input and no output artifact. Each uses `{{NODE}}` and `{{ROLE}}`, bound at issuance to the applicable canonical node and an existing registry role. Purpose anchors neither define role spellings nor create a second fixed anchor for a role.
 
 `run_dispatch_projection` receives an already-parsed output path and performs no child artifact write, so it cannot inspect or falsify `-o` naming, verdict indexing, directory selection, gate-tail visibility, or sentinel preservation; a dry run is not evidence for those properties.
 
@@ -118,6 +122,20 @@ pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --outpu
 <!-- pce-dispatch-route kind="gate-structured" -->
 ```sh
 pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role pr-reviewer --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+```
+
+### Anchored dispatch purpose routes
+
+These are the only purpose routes. They bind `{{CWD}}` to the exact worktree, `{{REF}}` to its measured current head, `{{NODE}}` to the canonical node concerned, and `{{ROLE}}` to the applicable existing registry role. Commit completion first verifies the worktree and head, then creates the already-required single conventional commit and writes `pr-body.md` at the worktree root without tracking it; it performs no implementation. Diagnostics names one bounded evidence question and its permitted reads, confines work to that evidence request and the single caller-tail token, and neither implements a remedy nor mutates unrelated work. Both children are awaited.
+
+<!-- pce-dispatch-route kind="codex-commit-completion" -->
+```sh
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
+```
+
+<!-- pce-dispatch-route kind="codex-diagnostics" -->
+```sh
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
 ```
 
 ## Event log contract
@@ -423,6 +441,22 @@ Immediately before each verdict-producing gate issuance, read the accepted sourc
 - Plan/critic and PR/fix caps are 3. Derive rounds from dispatch records. On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the cap. Derive the comparison from review artifacts; do not update separate loop state.
 - Cap exhaustion, `BLOCK`, or vision cause appends `escalation-open` and stops. Resolution appends `escalation-close`. Never proceed on an unconverged plan.
 - Runtime graph adaptation authors only a node stub (`id`, `repo`, `depends_on`, `rationale`) and appends a delta. Because the runtime stub is prose-only and is not graph-schema validated, every `depends_on` entry must explicitly have an `id` and a non-empty `reason` naming the code fact that makes the stub unbuildable until the dependency has merged. A new-stub append is `pce log --file <LOG_PATH> --kind delta --node m<m>-s<s>` using the new id. There is no second durable representation. Delegate its plan. Route cross-component gaps to the violated contract owner. If no contract decides ownership, default to the producer because parse-don't-validate obligations live where data is emitted, and require that delta to document the missing producer contract so the ambiguity cannot recur.
+
+## Cold-orchestrator falsification rules
+
+A detached dispatch uses the anchored `pce dispatch codex` route and must be paired with a registered wait. `pce dispatch` has no detached option and awaits its child. If a recorded dispatch has no required product, append a `delta` at the canonical node to reconcile that fact; never invent a result.
+
+1. State every remedy as an addition: preserve and never remove the constraint being refined.
+2. Falsify a measured quantity by comparing the before and after measurements; an expected literal is not a measurement.
+3. After every step merge or milestone merge, refresh the local integration ref from the remote before branching from it.
+4. After every post-PR commit, republish `pr-body.md`; measure the repository setting with `gh api repos/{owner}/{repo} --jq .squash_merge_commit_message` and never infer it from `merge_method`.
+5. For detached work, use the anchored `pce dispatch codex` route, pair the dispatch with a registered wait, and reconcile a missing required product with a `delta` at the canonical node instead of inventing a result.
+6. Enumerate fixtures for every negation, alternative, exception, and ordering branch stated in a specification.
+7. Treat any harness option, fixture switch, shim behavior, or injected capability not driven through its production path as a receipt for a missing falsifier: add that falsifier or remove the unused control.
+8. Pair every `compile_fail` doctest with a positive twin whose imports and bindings are byte-identical.
+9. Prove grep and every other inspection audit against a known match so that zero matches cannot read as clean without a demonstrated detector.
+10. Describe a prior fix only from landed code verified at the cited ref. A figure supplied as context is never a measurement; when a prompt states an expected value, report it alongside the independently measured value and compare them.
+11. Sweep every remedy as a new claim under the same falsification standard as the repaired text.
 
 ## Conflict and recovery
 

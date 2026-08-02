@@ -11,7 +11,9 @@ use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 
-const EXPECTED_ANCHORED_ROUTE_COUNT: usize = 9;
+const EXPECTED_ANCHORED_ROUTE_COUNT: usize = 11;
+const EXPECTED_ROLE_ANCHOR_COUNT: usize = 9;
+const EXPECTED_PURPOSE_ANCHOR_COUNT: usize = 2;
 const MARKER_START: &str = "<!-- pce-dispatch-route";
 const CONSOLIDATION_MARKER: &str = "<!-- pce-dispatch-issuance-consolidated -->";
 const ROLE_REGISTRY: [&str; 9] = [
@@ -31,6 +33,8 @@ enum RouteKind {
     CodexUnstructured,
     CodexStructured,
     GateStructured,
+    CodexCommitCompletion,
+    CodexDiagnostics,
 }
 
 impl RouteKind {
@@ -39,15 +43,58 @@ impl RouteKind {
             "codex-unstructured" => Ok(Self::CodexUnstructured),
             "codex-structured" => Ok(Self::CodexStructured),
             "gate-structured" => Ok(Self::GateStructured),
+            "codex-commit-completion" => Ok(Self::CodexCommitCompletion),
+            "codex-diagnostics" => Ok(Self::CodexDiagnostics),
             _ => Err(ReviewError::UnknownKind),
         }
     }
 
     const fn target(self) -> &'static str {
         match self {
-            Self::CodexUnstructured | Self::CodexStructured => "codex",
+            Self::CodexUnstructured
+            | Self::CodexStructured
+            | Self::CodexCommitCompletion
+            | Self::CodexDiagnostics => "codex",
             Self::GateStructured => "gate",
         }
+    }
+
+    const fn is_purpose(self) -> bool {
+        matches!(self, Self::CodexCommitCompletion | Self::CodexDiagnostics)
+    }
+
+    const fn is_canonical_role(self) -> bool {
+        !self.is_purpose()
+    }
+
+    const fn purpose_kind(self) -> Option<&'static str> {
+        match self {
+            Self::CodexCommitCompletion => Some("codex-commit-completion"),
+            Self::CodexDiagnostics => Some("codex-diagnostics"),
+            _ => None,
+        }
+    }
+
+    const fn requires_structured(self) -> bool {
+        matches!(self, Self::CodexStructured | Self::GateStructured)
+    }
+
+    const fn required_sandbox(self) -> Option<&'static str> {
+        match self {
+            Self::CodexUnstructured
+            | Self::CodexStructured
+            | Self::CodexCommitCompletion
+            | Self::CodexDiagnostics => Some("workspace-write"),
+            Self::GateStructured => None,
+        }
+    }
+
+    const fn permits_plan_input(self) -> bool {
+        !self.is_purpose()
+    }
+
+    const fn caller_tail_arity(self) -> Option<usize> {
+        if self.is_purpose() { Some(1) } else { None }
     }
 }
 
@@ -203,6 +250,7 @@ enum ReviewError {
     VerdictMalformed,
     VerdictSchemaInvalid,
     VerdictUnknown,
+    PurposeTailCardinality(usize),
     Spawn(String),
 }
 
@@ -432,6 +480,12 @@ fn base_command(kind: RouteKind) -> String {
         RouteKind::CodexStructured => concat!(
             "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write ",
             "--env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} -- {{CALLER_ARG}}"
+        )
+        .to_owned(),
+        RouteKind::CodexCommitCompletion | RouteKind::CodexDiagnostics => concat!(
+            "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} ",
+            "--log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} ",
+            "--evidence {{EVIDENCE}} -- {{CALLER_ARG}}"
         )
         .to_owned(),
         RouteKind::GateStructured => concat!(
@@ -732,8 +786,8 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
     if !Path::new(cwd).is_absolute() {
         return Err(ReviewError::ParentGrammar);
     }
-    if route.kind != RouteKind::GateStructured
-        && value(argv, &mut position, "--sandbox")? != "workspace-write"
+    if let Some(required) = route.kind.required_sandbox()
+        && value(argv, &mut position, "--sandbox")? != required
     {
         return Err(ReviewError::ParentGrammar);
     }
@@ -767,7 +821,7 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
         }
         parent_output = Some(output.to_owned());
     }
-    if (route.kind == RouteKind::CodexUnstructured) == has_structured {
+    if route.kind.requires_structured() != has_structured {
         return Err(ReviewError::ParentGrammar);
     }
     if argv
@@ -775,7 +829,7 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
         .is_some_and(|token| token == "--plan-file")
     {
         let plan = value(argv, &mut position, "--plan-file")?;
-        if !Path::new(plan).is_file() {
+        if !route.kind.permits_plan_input() || !Path::new(plan).is_file() {
             return Err(ReviewError::ParentGrammar);
         }
     }
@@ -798,6 +852,11 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
     let tail = &argv[position + 1..];
     if tail.iter().any(|token| token == "--dry-run") {
         return Err(ReviewError::ParentGrammar);
+    }
+    if let Some(arity) = route.kind.caller_tail_arity()
+        && tail.len() != arity
+    {
+        return Err(ReviewError::PurposeTailCardinality(tail.len()));
     }
     if route.kind != RouteKind::GateStructured {
         for (index, token) in tail.iter().enumerate() {
@@ -957,26 +1016,93 @@ fn canonical_semantics(route: &AnchoredRoute) -> Result<(), ReviewError> {
     Ok(())
 }
 
-fn has_complete_logging_group(route: &AnchoredRoute) -> bool {
-    let Some(role) = route_role(route) else {
-        return true;
+fn expected_logging_group(route: &AnchoredRoute) -> Option<Vec<String>> {
+    let (node, role) = match (route_role(route), route.kind.is_purpose()) {
+        (Some(role), false) => (expected_node(role).to_owned(), role.to_owned()),
+        (None, true) => ("{{NODE}}".to_owned(), "{{ROLE}}".to_owned()),
+        _ => return None,
     };
-    let logging = [
-        "--log-file",
-        "{{LOG_FILE}}",
-        "--node",
-        expected_node(role),
-        "--role",
+    Some(vec![
+        "--log-file".to_owned(),
+        "{{LOG_FILE}}".to_owned(),
+        "--node".to_owned(),
+        node,
+        "--role".to_owned(),
         role,
-        "--ref",
-        "{{REF}}",
-        "--evidence",
-        "{{EVIDENCE}}",
-    ];
+        "--ref".to_owned(),
+        "{{REF}}".to_owned(),
+        "--evidence".to_owned(),
+        "{{EVIDENCE}}".to_owned(),
+    ])
+}
+
+fn measured_logging_group(route: &AnchoredRoute) -> Vec<String> {
+    let start = route
+        .tokens
+        .iter()
+        .position(|token| token == "--log-file")
+        .unwrap_or(route.tokens.len());
+    route.tokens[start..]
+        .iter()
+        .take_while(|token| *token != "--")
+        .cloned()
+        .collect()
+}
+
+fn missing_logging_member(route: &AnchoredRoute) -> Option<String> {
+    let expected = expected_logging_group(route)?;
+    let measured = measured_logging_group(route);
+    expected
+        .iter()
+        .find(|member| !measured.contains(member))
+        .cloned()
+}
+
+fn has_complete_logging_group(route: &AnchoredRoute) -> bool {
+    let Some(logging) = expected_logging_group(route) else {
+        return false;
+    };
     route
         .tokens
         .windows(logging.len())
-        .any(|window| window.iter().map(String::as_str).eq(logging))
+        .any(|window| window.iter().eq(logging.iter()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnchorClass {
+    CanonicalRole,
+    Purpose,
+}
+
+fn token_value<'a>(route: &'a AnchoredRoute, flag: &str) -> Option<&'a str> {
+    route
+        .tokens
+        .windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].as_str())
+}
+
+fn classify_anchor(route: &AnchoredRoute) -> Option<AnchorClass> {
+    if route.kind.is_purpose() {
+        if route_role(route).is_none()
+            && token_value(route, "--role") == Some("{{ROLE}}")
+            && token_value(route, "--node") == Some("{{NODE}}")
+        {
+            return Some(AnchorClass::Purpose);
+        }
+        return None;
+    }
+    if route.kind.is_canonical_role() && route_role(route).is_some() {
+        return Some(AnchorClass::CanonicalRole);
+    }
+    None
+}
+
+fn anchor_identity(route: &AnchoredRoute) -> Option<String> {
+    match classify_anchor(route)? {
+        AnchorClass::CanonicalRole => Some(format!("role/{}", route_role(route)?)),
+        AnchorClass::Purpose => Some(format!("purpose/{}", route.kind.purpose_kind()?)),
+    }
 }
 
 fn semantic_output_path(
@@ -1182,6 +1308,53 @@ fn standalone_dispatch_append_lines(markdown: &str) -> Vec<usize> {
     matches
 }
 
+fn atx_heading_lines(markdown: &str) -> Vec<bool> {
+    let mut fenced = false;
+    markdown
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                return false;
+            }
+            if fenced {
+                return false;
+            }
+            line.split_once(' ').is_some_and(|(hashes, _)| {
+                (1..=6).contains(&hashes.len()) && hashes.chars().all(|c| c == '#')
+            })
+        })
+        .collect()
+}
+
+fn append_lines_by_venue(markdown: &str) -> BTreeMap<&'static str, Vec<usize>> {
+    let lines: Vec<_> = markdown.lines().collect();
+    let mut by_venue: BTreeMap<&'static str, Vec<usize>> = BTreeMap::new();
+    for source_line in standalone_dispatch_append_lines(markdown) {
+        let heading = lines[..source_line]
+            .iter()
+            .rev()
+            .find(|line| line.starts_with("## "))
+            .copied()
+            .unwrap_or("");
+        let venue = if heading == "## Event log contract" {
+            "general-surface"
+        } else if heading.starts_with("## Phase 0") {
+            "phase-0"
+        } else if heading.starts_with("## Phase 1") {
+            "phase-1"
+        } else if heading.starts_with("## Phase 2") {
+            "phase-2"
+        } else if heading.starts_with("## Phase 3") {
+            "phase-3"
+        } else {
+            "other"
+        };
+        by_venue.entry(venue).or_default().push(source_line);
+    }
+    by_venue
+}
+
 fn reject_colocated_standalone_append(markdown: &str) -> Result<(), ReviewError> {
     if !markdown.contains(CONSOLIDATION_MARKER) {
         return Ok(());
@@ -1192,10 +1365,9 @@ fn reject_colocated_standalone_append(markdown: &str) -> Result<(), ReviewError>
         let append = section.lines().any(is_standalone_dispatch_append);
         anchor && append
     };
-    for line in markdown.lines() {
-        let heading = line.split_once(' ').is_some_and(|(hashes, _)| {
-            (1..=6).contains(&hashes.len()) && hashes.chars().all(|c| c == '#')
-        });
+    let headings = atx_heading_lines(markdown);
+    for (index, line) in markdown.lines().enumerate() {
+        let heading = headings[index];
         if heading && inspect(&section) {
             return Err(ReviewError::CoLocatedStandaloneDispatchAppend);
         }
@@ -1339,6 +1511,8 @@ fn route_document(route: &AnchoredRoute) -> String {
             RouteKind::CodexUnstructured => "codex-unstructured",
             RouteKind::CodexStructured => "codex-structured",
             RouteKind::GateStructured => "gate-structured",
+            RouteKind::CodexCommitCompletion => "codex-commit-completion",
+            RouteKind::CodexDiagnostics => "codex-diagnostics",
         }),
         route.tokens.join(" ")
     )
@@ -1400,17 +1574,53 @@ fn complete_args(f: &Fixture, target: &str) -> Vec<OsString> {
 }
 
 #[test]
-fn real_skill_has_exact_pinned_anchor_count_nine() {
+fn real_skill_has_exact_pinned_anchor_partition_eleven() {
     let fixture = fixture();
     let markdown = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
         .expect("repository skill");
     let report = review_document(&markdown, &fixture.bindings).expect("real skill review");
-    assert_eq!(report.routes.len(), EXPECTED_ANCHORED_ROUTE_COUNT);
-    assert_eq!(report.observations.len(), EXPECTED_ANCHORED_ROUTE_COUNT);
     let routes = extract_anchored_routes(&markdown).expect("route extraction");
+    assert_classification_total(&routes);
     let roles: std::collections::BTreeSet<_> = routes.iter().filter_map(route_role).collect();
     let expected: std::collections::BTreeSet<_> = ROLE_REGISTRY.into_iter().collect();
     assert_eq!(roles, expected);
+    let role_measured = routes
+        .iter()
+        .filter(|route| classify_anchor(route) == Some(AnchorClass::CanonicalRole))
+        .count();
+    let purpose_measured = routes
+        .iter()
+        .filter(|route| classify_anchor(route) == Some(AnchorClass::Purpose))
+        .count();
+    assert!(
+        report.routes.len() == EXPECTED_ANCHORED_ROUTE_COUNT
+            && report.observations.len() == EXPECTED_ANCHORED_ROUTE_COUNT
+            && role_measured == EXPECTED_ROLE_ANCHOR_COUNT
+            && purpose_measured == EXPECTED_PURPOSE_ANCHOR_COUNT,
+        "real_skill_has_exact_pinned_anchor_partition_eleven/partition: routes={} expected={}, observations={} expected={}, roles={} expected={}, purposes={} expected={}",
+        report.routes.len(),
+        EXPECTED_ANCHORED_ROUTE_COUNT,
+        report.observations.len(),
+        EXPECTED_ANCHORED_ROUTE_COUNT,
+        role_measured,
+        EXPECTED_ROLE_ANCHOR_COUNT,
+        purpose_measured,
+        EXPECTED_PURPOSE_ANCHOR_COUNT
+    );
+    let identities: std::collections::BTreeSet<String> =
+        routes.iter().filter_map(anchor_identity).collect();
+    let mut expected_identities: std::collections::BTreeSet<String> = ROLE_REGISTRY
+        .into_iter()
+        .map(|role| format!("role/{role}"))
+        .collect();
+    expected_identities.insert("purpose/codex-commit-completion".to_owned());
+    expected_identities.insert("purpose/codex-diagnostics".to_owned());
+    assert_eq!(identities, expected_identities);
+    assert!(
+        routes
+            .iter()
+            .all(|route| route.kind.is_purpose() != route.kind.is_canonical_role())
+    );
 }
 
 fn assert_indentation_fixture(name: &str, mutation: fn(String) -> String, expected: ReviewError) {
@@ -1562,10 +1772,15 @@ fn two_anchor_first_error_stops_before_second() {
 fn canonical_role_semantics_by_role() {
     let markdown = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
         .expect("repository skill");
-    let routes = extract_anchored_routes(&markdown).expect("routes");
+    let all_routes = extract_anchored_routes(&markdown).expect("routes");
+    assert_classification_total(&all_routes);
+    let routes: Vec<AnchoredRoute> = all_routes
+        .into_iter()
+        .filter(|route| classify_anchor(route) == Some(AnchorClass::CanonicalRole))
+        .collect();
     let mut counts = std::collections::BTreeMap::new();
     for route in &routes {
-        let role = route_role(route).expect("one_anchor_per_role");
+        let role = route_role(route).expect("canonical role");
         *counts.entry(role).or_insert(0usize) += 1;
         assert_eq!(route.kind, expected_kind(role), "route_kind_by_role/{role}");
         assert_eq!(
@@ -1643,6 +1858,35 @@ fn repository_routes() -> Vec<AnchoredRoute> {
     extract_anchored_routes(&markdown).expect("repository routes")
 }
 
+fn assert_classification_total(routes: &[AnchoredRoute]) {
+    let unclassified: Vec<_> = routes
+        .iter()
+        .filter(|route| classify_anchor(route).is_none())
+        .map(|route| {
+            (
+                route.source_line,
+                route.kind,
+                token_value(route, "--node").unwrap_or("<none>").to_owned(),
+                token_value(route, "--role").unwrap_or("<none>").to_owned(),
+            )
+        })
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "anchor_class_is_total: unclassified={unclassified:?}, \
+expected node source {{{{NODE}}}} and role source {{{{ROLE}}}} for purpose anchors"
+    );
+}
+
+fn canonical_role_routes() -> Vec<AnchoredRoute> {
+    let routes = repository_routes();
+    assert_classification_total(&routes);
+    routes
+        .into_iter()
+        .filter(|route| classify_anchor(route) == Some(AnchorClass::CanonicalRole))
+        .collect()
+}
+
 #[test]
 fn role_registry_exact_set() {
     let measured: std::collections::BTreeSet<_> = repository_routes()
@@ -1679,7 +1923,7 @@ fn one_anchor_per_role() {
 
 #[test]
 fn environment_cardinality_by_role() {
-    for route in repository_routes() {
+    for route in canonical_role_routes() {
         let role = route_role(&route).expect("canonical role");
         assert_eq!(
             route
@@ -1703,20 +1947,30 @@ fn environment_cardinality_by_role() {
 }
 
 #[test]
-fn logging_group_by_role() {
-    for route in repository_routes() {
-        let role = route_role(&route).expect("canonical role");
+fn logging_group_by_anchor() {
+    let routes = repository_routes();
+    assert_eq!(routes.len(), EXPECTED_ANCHORED_ROUTE_COUNT);
+    for route in routes {
+        let identity = anchor_identity(&route).unwrap_or_else(|| {
+            format!(
+                "purpose/{}",
+                route.kind.purpose_kind().unwrap_or("unclassified")
+            )
+        });
         let current = usize::from(has_complete_logging_group(&route));
+        let removed = missing_logging_member(&route);
+        let measured = measured_logging_group(&route);
         assert_eq!(
             current, 1,
-            "logging_group_by_role/{role}: removed_member=--log-file, green=1, current={current}"
+            "logging_group_by_anchor/{identity}: removed_member={removed:?}, \
+measured={measured:?}, green=1, current={current}"
         );
     }
 }
 
 #[test]
 fn route_kind_by_role() {
-    for route in repository_routes() {
+    for route in canonical_role_routes() {
         let role = route_role(&route).expect("canonical role");
         assert_eq!(route.kind, expected_kind(role), "route_kind_by_role/{role}");
     }
@@ -1724,7 +1978,7 @@ fn route_kind_by_role() {
 
 #[test]
 fn node_class_by_role() {
-    for route in repository_routes() {
+    for route in canonical_role_routes() {
         let role = route_role(&route).expect("canonical role");
         let node = route
             .tokens
@@ -1737,7 +1991,7 @@ fn node_class_by_role() {
 
 #[test]
 fn ref_source_by_role() {
-    for route in repository_routes() {
+    for route in canonical_role_routes() {
         let role = route_role(&route).expect("canonical role");
         let source = route
             .tokens
@@ -1752,7 +2006,7 @@ fn ref_source_by_role() {
 #[test]
 fn evidence_source_by_role() {
     let fixture = fixture();
-    for route in repository_routes() {
+    for route in canonical_role_routes() {
         let role = route_role(&route).expect("canonical role");
         let source = route
             .tokens
@@ -1777,7 +2031,7 @@ fn evidence_source_by_role() {
 
 #[test]
 fn remaining_role_metadata_classes() {
-    for route in repository_routes() {
+    for route in canonical_role_routes() {
         let role = route_role(&route).expect("canonical role");
         let structured = route.tokens.iter().any(|token| token == "--output-schema");
         assert_eq!(
@@ -1827,7 +2081,7 @@ fn remaining_role_metadata_classes() {
 
 #[test]
 fn schema_and_output_class_by_role() {
-    for route in repository_routes() {
+    for route in canonical_role_routes() {
         let role = route_role(&route).expect("canonical role");
         let pair = route
             .tokens
@@ -1858,7 +2112,7 @@ fn schema_and_output_class_by_role() {
 
 #[test]
 fn stdin_class_by_role() {
-    for route in repository_routes() {
+    for route in canonical_role_routes() {
         let role = route_role(&route).expect("canonical role");
         assert_eq!(
             route
@@ -1874,7 +2128,7 @@ fn stdin_class_by_role() {
 
 #[test]
 fn caller_tail_class_by_role() {
-    for route in repository_routes() {
+    for route in canonical_role_routes() {
         let role = route_role(&route).expect("canonical role");
         let delimiter = route
             .tokens
@@ -1891,6 +2145,7 @@ fn caller_tail_class_by_role() {
                 &["--add-dir", "{{ABS_PATH}}", "{{CALLER_ARG}}"]
             }
             RouteKind::CodexStructured | RouteKind::CodexUnstructured => &["{{CALLER_ARG}}"],
+            RouteKind::CodexCommitCompletion | RouteKind::CodexDiagnostics => &["{{CALLER_ARG}}"],
         };
         assert!(
             route.tokens[delimiter + 1..]
@@ -2576,7 +2831,7 @@ fn conformance_paths_and_projection_limitation() {
     let report = review_document(&skill, &f.bindings).expect("canonical conformance");
     assert_eq!(
         report.observations.len(),
-        9,
+        EXPECTED_ANCHORED_ROUTE_COUNT,
         "codex_conformance_shim_terminal_envelope_accepts"
     );
     for role in ["milestone-planner", "step-planner"] {
@@ -3068,30 +3323,7 @@ fn real_skill_has_no_standalone_dispatch_append_anywhere() {
     let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
         .expect("skill");
     let matches = standalone_dispatch_append_lines(&skill);
-    let lines: Vec<_> = skill.lines().collect();
-    let mut by_venue: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-    for source_line in &matches {
-        let heading = lines[..*source_line]
-            .iter()
-            .rev()
-            .find(|line| line.starts_with("## "))
-            .copied()
-            .unwrap_or("");
-        let venue = if heading == "## Event log contract" {
-            "general-surface"
-        } else if heading.starts_with("## Phase 0") {
-            "phase-0"
-        } else if heading.starts_with("## Phase 1") {
-            "phase-1"
-        } else if heading.starts_with("## Phase 2") {
-            "phase-2"
-        } else if heading.starts_with("## Phase 3") {
-            "phase-3"
-        } else {
-            "other"
-        };
-        by_venue.entry(venue).or_default().push(*source_line);
-    }
+    let by_venue = append_lines_by_venue(&skill);
     for venue in [
         "general-surface",
         "phase-0",
@@ -4497,5 +4729,580 @@ fn review_preserves_installed_skill_symlink_target() {
             .expect("installed state")
             .file_type()
             .is_symlink()
+    );
+}
+
+const DETACHED_PARAGRAPH: &str = "A detached dispatch uses the anchored `pce dispatch codex` route and must be paired with a registered wait. `pce dispatch` has no detached option and awaits its child. If a recorded dispatch has no required product, append a `delta` at the canonical node to reconcile that fact; never invent a result.";
+
+const COLD_RULES_HEADING: &str = "## Cold-orchestrator falsification rules";
+
+const COLD_RULES: [&str; 11] = [
+    "1. State every remedy as an addition: preserve and never remove the constraint being refined.",
+    "2. Falsify a measured quantity by comparing the before and after measurements; an expected literal is not a measurement.",
+    "3. After every step merge or milestone merge, refresh the local integration ref from the remote before branching from it.",
+    "4. After every post-PR commit, republish `pr-body.md`; measure the repository setting with `gh api repos/{owner}/{repo} --jq .squash_merge_commit_message` and never infer it from `merge_method`.",
+    "5. For detached work, use the anchored `pce dispatch codex` route, pair the dispatch with a registered wait, and reconcile a missing required product with a `delta` at the canonical node instead of inventing a result.",
+    "6. Enumerate fixtures for every negation, alternative, exception, and ordering branch stated in a specification.",
+    "7. Treat any harness option, fixture switch, shim behavior, or injected capability not driven through its production path as a receipt for a missing falsifier: add that falsifier or remove the unused control.",
+    "8. Pair every `compile_fail` doctest with a positive twin whose imports and bindings are byte-identical.",
+    "9. Prove grep and every other inspection audit against a known match so that zero matches cannot read as clean without a demonstrated detector.",
+    "10. Describe a prior fix only from landed code verified at the cited ref. A figure supplied as context is never a measurement; when a prompt states an expected value, report it alongside the independently measured value and compare them.",
+    "11. Sweep every remedy as a new claim under the same falsification standard as the repaired text.",
+];
+
+const PURPOSE_IDENTITIES: [&str; 2] = [
+    "purpose/codex-commit-completion",
+    "purpose/codex-diagnostics",
+];
+
+const BOUNDED_EVIDENCE_CLAUSE: &str = "names one bounded evidence question and its permitted reads";
+const CONFINED_SCOPE_CLAUSE: &str =
+    "confines work to that evidence request and the single caller-tail token";
+const NO_MUTATION_CLAUSE: &str = "neither implements a remedy nor mutates unrelated work";
+
+fn real_skill_markdown() -> String {
+    fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("repository skill")
+}
+
+fn cold_rules_section(markdown: &str) -> String {
+    let start = markdown
+        .find(COLD_RULES_HEADING)
+        .expect("cold_orchestrator_rules_are_exact/heading");
+    let rest = &markdown[start + COLD_RULES_HEADING.len()..];
+    let end = rest.find("\n## ").map_or(markdown.len(), |offset| {
+        start + COLD_RULES_HEADING.len() + offset
+    });
+    markdown[start..end].to_owned()
+}
+
+fn purpose_route(kind: RouteKind) -> AnchoredRoute {
+    repository_routes()
+        .into_iter()
+        .find(|route| route.kind == kind)
+        .unwrap_or_else(|| panic!("missing purpose anchor {kind:?}"))
+}
+
+#[test]
+fn anchor_class_is_total() {
+    let routes = repository_routes();
+    assert_classification_total(&routes);
+    assert_eq!(routes.len(), EXPECTED_ANCHORED_ROUTE_COUNT);
+}
+
+#[test]
+fn purpose_anchor_exact_set() {
+    let routes = repository_routes();
+    let total = routes.len();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for route in &routes {
+        if let Some(kind) = route.kind.purpose_kind() {
+            *counts.entry(format!("purpose/{kind}")).or_insert(0usize) += 1;
+        }
+    }
+    let measured: std::collections::BTreeSet<String> = counts.keys().cloned().collect();
+    let expected: std::collections::BTreeSet<String> = PURPOSE_IDENTITIES
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect();
+    assert_eq!(
+        measured, expected,
+        "purpose_anchor_exact_set: total routes {total}, measured {counts:?}"
+    );
+    for identity in PURPOSE_IDENTITIES {
+        let current = counts.get(identity).copied().unwrap_or(0);
+        assert_eq!(
+            current, 1,
+            "purpose_anchor_exact_set/{identity}: expected 1, current {current}, total routes {total}"
+        );
+    }
+    assert_eq!(
+        counts.values().sum::<usize>(),
+        EXPECTED_PURPOSE_ANCHOR_COUNT,
+        "purpose_anchor_exact_set/cardinality: total routes {total}"
+    );
+}
+
+#[test]
+fn purpose_anchor_generic_coverage() {
+    let f = fixture();
+    let markdown = real_skill_markdown();
+    let marker_kinds: Vec<String> = markdown
+        .lines()
+        .filter(|line| line.starts_with(MARKER_START))
+        .map(ToOwned::to_owned)
+        .collect();
+    let routes = match extract_anchored_routes(&markdown) {
+        Ok(routes) => routes,
+        Err(error) => panic!(
+            "purpose_anchor_generic_coverage/extraction: variant={error:?}, \
+observations=0, measured markers={marker_kinds:?}"
+        ),
+    };
+    let identities: std::collections::BTreeSet<String> = routes
+        .iter()
+        .filter(|route| route.kind.is_purpose())
+        .filter_map(anchor_identity)
+        .collect();
+    let expected: std::collections::BTreeSet<String> = PURPOSE_IDENTITIES
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect();
+    assert_eq!(
+        identities, expected,
+        "purpose_anchor_generic_coverage/identities"
+    );
+    let report = match review_document_attributed(&markdown, &f.bindings) {
+        Ok(report) => report,
+        Err(failure) => {
+            let unknown_placeholders: Vec<_> = routes
+                .iter()
+                .find(|route| route.source_line == failure.source_line)
+                .into_iter()
+                .flat_map(|route| route.tokens.iter())
+                .filter(|token| {
+                    token.starts_with("{{")
+                        && token.ends_with("}}")
+                        && Placeholder::parse(token).is_err()
+                })
+                .map(|token| token.trim_start_matches("{{").trim_end_matches("}}"))
+                .collect();
+            panic!(
+                "purpose_anchor_generic_coverage/review: variant={:?}, source_line={}, unknown_placeholders={unknown_placeholders:?}, observations={}, invocations={}",
+                failure.error,
+                failure.source_line,
+                failure.observations.len(),
+                f.bindings.pce_invocations.get()
+            )
+        }
+    };
+    for route in routes.iter().filter(|route| route.kind.is_purpose()) {
+        let identity = anchor_identity(route).expect("purpose identity");
+        let observed = report
+            .observations
+            .iter()
+            .find(|observation| observation.source_line == route.source_line);
+        assert!(
+            observed.is_some_and(|observation| observation.status == 0),
+            "purpose_anchor_generic_coverage/{identity}: no successful observation at source line {}, observed={observed:?}",
+            route.source_line
+        );
+    }
+}
+
+fn assert_purpose_route_grammar(name: &str, kind: RouteKind) {
+    let route = purpose_route(kind);
+    let tokens = &route.tokens;
+    let count = |needle: &str| {
+        tokens
+            .iter()
+            .filter(|token| token.as_str() == needle)
+            .count()
+    };
+    assert_eq!(route.kind.target(), "codex", "{name}/target");
+    assert_eq!(
+        token_value(&route, "--sandbox"),
+        route.kind.required_sandbox(),
+        "{name}/sandbox: expected {:?}, current {:?}",
+        route.kind.required_sandbox(),
+        token_value(&route, "--sandbox")
+    );
+    assert_eq!(count("--env"), 1, "{name}/environment");
+    let artifact = count("--output-schema") + count("-o");
+    assert_eq!(
+        artifact, 0,
+        "{name}/no-output-artifact: left {artifact}, right 0"
+    );
+    let plan_input = count("--plan-file");
+    assert_eq!(
+        plan_input, 0,
+        "{name}/null-stdin: left {plan_input}, right 0"
+    );
+    assert_eq!(
+        token_value(&route, "--node"),
+        Some("{{NODE}}"),
+        "{name}/dynamic-node: left {:?}, right {:?}",
+        token_value(&route, "--node"),
+        Some("{{NODE}}")
+    );
+    assert_eq!(
+        token_value(&route, "--role"),
+        Some("{{ROLE}}"),
+        "{name}/dynamic-role: left {:?}, right {:?}",
+        token_value(&route, "--role"),
+        Some("{{ROLE}}")
+    );
+    assert_eq!(
+        token_value(&route, "--ref"),
+        Some("{{REF}}"),
+        "{name}/ref-source: left {:?}, right {:?}",
+        token_value(&route, "--ref"),
+        Some("{{REF}}")
+    );
+    assert_eq!(
+        token_value(&route, "--evidence"),
+        Some("{{EVIDENCE}}"),
+        "{name}/evidence-source: left {:?}, right {:?}",
+        token_value(&route, "--evidence"),
+        Some("{{EVIDENCE}}")
+    );
+    assert!(
+        has_complete_logging_group(&route),
+        "{name}/logging: removed_member={:?}, measured={:?}",
+        missing_logging_member(&route),
+        measured_logging_group(&route)
+    );
+    assert_eq!(count("--"), 1, "{name}/delimiter");
+    let delimiter = tokens
+        .iter()
+        .position(|token| token == "--")
+        .expect("delimiter");
+    let tail: Vec<&str> = tokens[delimiter + 1..].iter().map(String::as_str).collect();
+    assert_eq!(tail, ["{{CALLER_ARG}}"], "{name}/caller-tail");
+    let f = fixture();
+    let argv = substitute_route(&route, &f.bindings)
+        .unwrap_or_else(|error| panic!("{name}/substitution: {error:?}"));
+    let position = argv
+        .iter()
+        .position(|token| token == "--")
+        .expect("substituted delimiter");
+    let substituted_tail = &argv[position + 1..];
+    assert_eq!(
+        substituted_tail.len(),
+        1,
+        "{name}/post-substitution-tail: left {}, right 1",
+        substituted_tail.len()
+    );
+    validate_route(&route, &argv)
+        .unwrap_or_else(|error| panic!("{name}/parent-grammar: {error:?}"));
+    assert_eq!(
+        f.bindings.pce_invocations.get(),
+        0,
+        "{name}/before-execution"
+    );
+}
+
+#[test]
+fn commit_completion_route_grammar() {
+    assert_purpose_route_grammar(
+        "commit_completion_route_grammar",
+        RouteKind::CodexCommitCompletion,
+    );
+}
+
+#[test]
+fn diagnostics_route_grammar() {
+    assert_purpose_route_grammar("diagnostics_route_grammar", RouteKind::CodexDiagnostics);
+}
+
+#[test]
+fn purpose_routes_use_complete_logging_envelope() {
+    for kind in [
+        RouteKind::CodexCommitCompletion,
+        RouteKind::CodexDiagnostics,
+    ] {
+        let route = purpose_route(kind);
+        let identity = format!("purpose/{}", kind.purpose_kind().expect("purpose kind"));
+        let expected = expected_logging_group(&route).expect("purpose logging group");
+        let measured = measured_logging_group(&route);
+        let removed = missing_logging_member(&route);
+        assert_eq!(
+            removed, None,
+            "purpose_routes_use_complete_logging_envelope/{identity}: removed_member={removed:?}, measured={measured:?}, expected={expected:?}"
+        );
+        assert!(
+            has_complete_logging_group(&route),
+            "purpose_routes_use_complete_logging_envelope/{identity}: ordered group measured={measured:?}, expected={expected:?}"
+        );
+    }
+}
+
+#[test]
+fn diagnostics_boundedness_contract_is_exact() {
+    let markdown = real_skill_markdown();
+    for (arm, clause) in [
+        ("bounded-evidence", BOUNDED_EVIDENCE_CLAUSE),
+        ("confined-scope", CONFINED_SCOPE_CLAUSE),
+        ("no-mutation", NO_MUTATION_CLAUSE),
+    ] {
+        let current = markdown.matches(clause).count();
+        assert_eq!(
+            current, 1,
+            "diagnostics_boundedness_contract_is_exact/{arm}: expected 1, current {current}"
+        );
+    }
+    let current = markdown
+        .lines()
+        .find(|line| line.contains("Codex routes own their working-directory and "))
+        .and_then(|line| line.split_once("working-directory and "))
+        .and_then(|(_, rest)| rest.split_once(" sandbox options."))
+        .map(|(sandbox, _)| sandbox)
+        .unwrap_or("<missing>");
+    assert_eq!(
+        current, "workspace-write",
+        "diagnostics_boundedness_contract_is_exact/sandbox-ownership: expected workspace-write, current {current}"
+    );
+}
+
+#[test]
+fn detached_dispatch_rule_is_exact() {
+    let markdown = real_skill_markdown();
+    let paragraphs = markdown.matches(DETACHED_PARAGRAPH).count();
+    let invented = markdown.matches("--detached").count();
+    assert_eq!(
+        invented, 0,
+        "detached_dispatch_rule_is_exact/no-invented-option: expected 0, current {invented}"
+    );
+    let section = cold_rules_section(&markdown);
+    for (arm, clause) in [
+        ("route-name", "`pce dispatch codex`"),
+        ("registered-wait", "must be paired with a registered wait"),
+        ("awaited-child", "awaits its child"),
+        (
+            "reconciliation",
+            "append a `delta` at the canonical node to reconcile that fact",
+        ),
+        ("no-invented-result", "never invent a result"),
+    ] {
+        let current = section.matches(clause).count();
+        assert!(
+            current >= 1,
+            "detached_dispatch_rule_is_exact/{arm}: expected >=1, current {current}"
+        );
+    }
+    for (arm, clause) in [
+        ("registered-wait", "must be paired with a registered wait"),
+        ("awaited-child", "awaits its child"),
+        (
+            "reconciliation",
+            "append a `delta` at the canonical node to reconcile that fact",
+        ),
+        ("no-invented-result", "never invent a result"),
+    ] {
+        let current = markdown.matches(clause).count();
+        assert_eq!(
+            current, 1,
+            "detached_dispatch_rule_is_exact/{arm}: expected 1, current {current}"
+        );
+    }
+    assert_eq!(
+        paragraphs, 1,
+        "detached_dispatch_rule_is_exact/paragraph: expected 1, current {paragraphs}"
+    );
+}
+
+#[test]
+fn cold_orchestrator_rules_are_exact() {
+    let markdown = real_skill_markdown();
+    let headings = markdown.matches(COLD_RULES_HEADING).count();
+    assert_eq!(
+        headings, 1,
+        "cold_orchestrator_rules_are_exact/heading: expected 1, current {headings}"
+    );
+    let section = cold_rules_section(&markdown);
+    let detached = section.matches(DETACHED_PARAGRAPH).count();
+    assert_eq!(
+        detached, 1,
+        "cold_orchestrator_rules_are_exact/detached-paragraph: expected 1, current {detached}"
+    );
+    for (arm, clause) in [
+        (
+            "remedy-addition",
+            "preserve and never remove the constraint being refined",
+        ),
+        (
+            "measurement-comparison",
+            "comparing the before and after measurements",
+        ),
+        ("remote-refresh", "from the remote"),
+        ("pr-body-republication", "republish `pr-body.md`; "),
+        (
+            "setting-measurement",
+            "`gh api repos/{owner}/{repo} --jq .squash_merge_commit_message`",
+        ),
+        (
+            "rule5-wait",
+            "pair the dispatch with a registered wait, and ",
+        ),
+        (
+            "rule5-reconciliation",
+            "reconcile a missing required product with a `delta` at the canonical node instead of inventing a result",
+        ),
+        ("negation", "negation, "),
+        ("alternative", "alternative, "),
+        ("exception", "exception, "),
+        ("ordering", "and ordering "),
+    ] {
+        let current = section.matches(clause).count();
+        assert_eq!(
+            current, 1,
+            "cold_orchestrator_rules_are_exact/{arm}: expected 1, current {current}"
+        );
+    }
+    let mut offsets = Vec::new();
+    for (index, rule) in COLD_RULES.iter().enumerate() {
+        let current = section.matches(rule).count();
+        let arm = COLD_RULE_ARMS[index];
+        assert_eq!(
+            current, 1,
+            "cold_orchestrator_rules_are_exact/{arm}: expected 1, current {current}"
+        );
+        offsets.push(section.find(rule).expect("rule offset"));
+    }
+    let mut ascending = offsets.clone();
+    ascending.sort_unstable();
+    assert_eq!(
+        offsets, ascending,
+        "cold_orchestrator_rules_are_exact/order: measured offsets {offsets:?}"
+    );
+    let detached_offset = section.find(DETACHED_PARAGRAPH).expect("detached offset");
+    assert!(
+        detached_offset < offsets[0],
+        "cold_orchestrator_rules_are_exact/order: detached {detached_offset}, first rule {}",
+        offsets[0]
+    );
+}
+
+const COLD_RULE_ARMS: [&str; 11] = [
+    "remedy-addition",
+    "measurement-comparison",
+    "remote-refresh",
+    "pr-body-republication",
+    "detached-route",
+    "branch-enumeration",
+    "unused-control-rule",
+    "compile-fail-twin",
+    "known-match-audit",
+    "prior-fix-measurement",
+    "remedy-sweep",
+];
+
+#[test]
+fn cold_rule_branch_controls() {
+    let section = cold_rules_section(&real_skill_markdown());
+    let controls: [(&str, &str, &str); 16] = [
+        (
+            "remedy-addition",
+            "preserve and never remove the constraint being refined",
+            "restate the constraint being refined",
+        ),
+        (
+            "measurement-comparison",
+            "comparing the before and after measurements",
+            "comparing it with the expected literal",
+        ),
+        ("remote-refresh", "from the remote", ""),
+        ("pr-body-republication", "republish `pr-body.md`; ", ""),
+        (
+            "setting-measurement",
+            "`gh api repos/{owner}/{repo} --jq .squash_merge_commit_message`",
+            "`merge_method`",
+        ),
+        (
+            "rule5-wait",
+            "pair the dispatch with a registered wait, and ",
+            "",
+        ),
+        (
+            "rule5-reconciliation",
+            "reconcile a missing required product with a `delta` at the canonical node instead of inventing a result",
+            "proceed",
+        ),
+        ("negation", "negation, ", ""),
+        ("alternative", "alternative, ", ""),
+        ("exception", "exception, ", ""),
+        ("ordering", "and ordering ", ""),
+        (
+            "unused-control",
+            ": add that falsifier or remove the unused control",
+            "",
+        ),
+        ("compile-fail-imports", "imports", "sources"),
+        ("compile-fail-bindings", "bindings", "locals"),
+        (
+            "supplied-figure",
+            "A figure supplied as context is never a measurement",
+            "A figure supplied as context may be reported as observed",
+        ),
+        (
+            "expected-comparison",
+            "report it alongside the independently measured value and compare them",
+            "report it",
+        ),
+    ];
+    for (arm, clause, replacement) in controls {
+        let green = section.matches(clause).count();
+        assert_eq!(
+            green, 1,
+            "cold_rule_branch_controls/{arm}: green expected 1, current {green}"
+        );
+        let mutated = section.replacen(clause, replacement, 1);
+        let current = mutated.matches(clause).count();
+        assert_eq!(
+            current, 0,
+            "cold_rule_branch_controls/{arm}: mutated expected 0, current {current}"
+        );
+    }
+    let remedy_sweep = "under the same falsification standard as the repaired text";
+    let green = section.matches(remedy_sweep).count();
+    assert_eq!(
+        green, 1,
+        "cold_rule_branch_controls/remedy-sweep: green expected 1, current {green}"
+    );
+    let exempted = section.replacen(remedy_sweep, "except where the claim is a remedy", 1);
+    assert_eq!(
+        exempted.matches(remedy_sweep).count(),
+        0,
+        "cold_rule_branch_controls/remedy-sweep: mutated expected 0"
+    );
+}
+
+#[test]
+fn fenced_hash_is_not_atx_heading() {
+    let document = format!(
+        "{CONSOLIDATION_MARKER}\n\n## Real section\n\n{}\n```sh\npce dispatch codex --cwd {{{{CWD}}}} --sandbox workspace-write --env {{{{ENV}}}} --log-file {{{{LOG_FILE}}}} --node {{{{NODE}}}} --role {{{{ROLE}}}} --ref {{{{REF}}}} --evidence {{{{EVIDENCE}}}} -- {{{{CALLER_ARG}}}}\n```\n\n```sh\n# Only for the tracked-file-present, no-current-record initial case:\npce status\n```\n\npce log --file /tmp/events --kind dispatch --node m7-s4\n\n## Next real section\n",
+        marker("codex-commit-completion")
+    );
+    let headings = atx_heading_lines(&document);
+    let fenced_hash = document
+        .lines()
+        .position(|line| line.starts_with("# Only for the tracked-file-present"))
+        .expect("fenced hash line");
+    assert!(
+        !headings[fenced_hash],
+        "fenced_hash_is_not_atx_heading/detector: fenced # classified as heading"
+    );
+    assert_eq!(
+        reject_colocated_standalone_append(&document),
+        Err(ReviewError::CoLocatedStandaloneDispatchAppend),
+        "fenced_hash_is_not_atx_heading: detector sets headings={:?}",
+        headings
+            .iter()
+            .enumerate()
+            .filter(|(_, heading)| **heading)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn standalone_append_venue_known_match_control() {
+    let markdown = real_skill_markdown();
+    let control = markdown.replace(
+        COLD_RULES_HEADING,
+        &format!(
+            "{COLD_RULES_HEADING}\n\npce log --file /tmp/events --kind dispatch --node m7-s4\n"
+        ),
+    );
+    let by_venue = append_lines_by_venue(&control);
+    let current = by_venue.get("other").cloned().unwrap_or_default();
+    assert_eq!(
+        current.len(),
+        1,
+        "standalone_append_venue_known_match_control/other: known match must measure venue other, current={current:?}"
+    );
+    assert!(
+        append_lines_by_venue(&markdown).is_empty(),
+        "standalone_append_venue_known_match_control/green: real document must measure zero"
     );
 }
