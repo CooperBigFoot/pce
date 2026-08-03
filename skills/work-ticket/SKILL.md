@@ -109,7 +109,7 @@ Ask exactly one prose question at a time, with a recommended answer and its reas
 The grill is not finished until three things exist, and `/to-vision` will need all three:
 
 1. **An end-state picture** the user has reacted to — what is true today, what is true after, **what disappears**, and how the follow-on work happens once this lands. Plain language, no jargon, concrete enough that the user could repeat it to someone else. Show what goes away every time; that is where silent assumptions live.
-2. **Bets**, one per claim the vision makes. Each names an input and an observation, never a test that must exist. At least one names an input designed to make the thing fail. The user supplies the fear, you supply the probe, and they ratify in plain words that the probe would catch the fear — never ask them to ratify something they cannot evaluate. Flag any bet checkable only outside the run that delivers it.
+2. **Acceptance criteria**, one per claim the vision makes. Each has exactly the three fields handed to `/to-vision`: a non-blank name, input, and observation, never a test that must exist. At least one names an input designed to make the thing fail. The user supplies the fear, you supply the probe, and they ratify in plain words that the probe would catch the fear — never ask them to ratify something they cannot evaluate. Flag any acceptance criterion checkable only outside the run that delivers it.
 3. **A reversibility judgement.** State whether this vision contains an act that cannot be repeated — minting an immutable artifact, publishing a release or tag, consuming a one-shot quota, destroying history. Where it does, name that act; it is the only place that earns front-loaded proof. Where it does not, say so, and expect a light brief with heavy falsification of what was built.
 
 Require the result to be sufficiently settled to name one contained vision. If discovery cannot converge on one contained vision, report the mismatch and stop without reserving a directory or stamping a speculative linkage.
@@ -157,7 +157,7 @@ After the edit, re-fetch the complete issue body. Verify that exactly one root-l
 
 Lead with what the user can act on. Bookkeeping goes underneath, or waits until they ask.
 
-Open with the **end-state picture** in plain words — where we start, where we end, what disappears, what someone does next. Then the **bets**, one line each as an input and an observation. Then anything still open, without guessing at answers. Then the reversibility judgement in one sentence.
+Open with the **end-state picture** in plain words — where we start, where we end, what disappears, what someone does next. Then the **acceptance criteria**, one line each with the exact three fields handed to `/to-vision`: name, input, and observation. Then anything still open, without guessing at answers. Then the reversibility judgement in one sentence.
 
 Only after that, and clearly marked as detail they may skip:
 

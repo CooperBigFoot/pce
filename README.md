@@ -10,8 +10,11 @@ Post-run orchestrator reviews can be recorded using the
 - `pce vision new "<name>"` creates an idempotent dated vision directory under
   `planning/`, seeds it with the fixed `vision.md` template, and prints the
   relative path.
+- `pce vision check` reads one candidate `vision.md` from stdin, writes nothing,
+  and refuses malformed acceptance criteria.
 - `/to-vision` turns the current conversation's shared understanding into the
-  seven-section `vision.md` used by the workflow.
+  seven-section `vision.md` used by the workflow, including the executable
+  acceptance-criteria input/observation contract.
 - `/pce` takes a vision directory, decomposes it into milestones and steps,
   drives plan, critique, execution, PR review, and merge, appends durable events,
   and derives current status on read from the event log, git, and GitHub
