@@ -33,13 +33,13 @@ use pce_core::{
     TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy,
     VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
     append_event, classify_claude_result, classify_codex_terminal_usage,
-    classify_seatbelt_capability, compute_dispatchability, create_vision, derive_merge_status,
-    derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
-    dispatch_invocation, dispatch_payload, event_record_matches, measure_contract_snapshot,
-    meter_dispatches, parse_acceptance_criteria, parse_claude_result, parse_event_line,
-    parse_tracked_repository_contract, render_dispatch_projection, render_human_snapshot,
-    seatbelt_capability_probe, serialize_tracked_repository_contract, validate_artifact,
-    validate_workflow_coverage,
+    classify_seatbelt_capability, compose_gate_arguments, compute_dispatchability, create_vision,
+    derive_merge_status, derive_milestone_merge_status, derive_run_state,
+    dispatch_completion_payload, dispatch_invocation, dispatch_payload, event_record_matches,
+    measure_contract_snapshot, meter_dispatches, parse_acceptance_criteria, parse_claude_result,
+    parse_event_line, parse_tracked_repository_contract, render_dispatch_projection,
+    render_human_snapshot, seatbelt_capability_probe, serialize_tracked_repository_contract,
+    validate_artifact, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -598,8 +598,8 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
         bail!("dispatch arguments require the `--` delimiter");
     }
     position += 1;
-    let arguments = rest[position..].to_vec();
-    if arguments
+    let caller_arguments = rest[position..].to_vec();
+    if caller_arguments
         .iter()
         .any(|argument| argument == "--output-format" || argument.starts_with("--output-format="))
     {
@@ -617,8 +617,15 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
         ),
         None => StdinBinding::Null,
     };
+    let role = logging_raw.map(|(_, _, role, _, _)| DispatchRole::new(role));
+    let arguments = compose_gate_arguments(
+        role.as_ref(),
+        &output_path,
+        ArgumentVector::new(caller_arguments),
+    )
+    .context("failed to compose gate caller arguments")?;
     let envelope = DispatchEnvelope::new(DispatchTarget::Gate, working_directory, stdin)
-        .with_arguments(ArgumentVector::new(arguments))
+        .with_arguments(arguments)
         .with_environment(ChildEnvironment::new(environment))
         .with_schema_path(schema_path)
         .with_output_path(output_path);

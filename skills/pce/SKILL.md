@@ -70,7 +70,7 @@ and complete logging groups retain the binary's strict order. Every anchored rou
 
 Outside a valid anchored fence, a prohibited dispatch fragment is one inline code span, one complete fenced code block, or one shell-like physical line that contains both (a) the contiguous route name `pce dispatch codex` or `pce dispatch gate` and (b) at least one whitespace-delimited token that is a dispatch-only parent option, the standalone `--` delimiter, or any caller argument represented by a whitespace-delimited token after that delimiter.
 
-Gate routes use the caller tail `--append-system-prompt ABSOLUTE_VERDICT_PATH PROMPT`. The path is byte-identical to the parent `-o` path. Claude treats the value after `--append-system-prompt` as system-prompt text, not as an output-file option; the caller prompt instructs the child to write one conforming verdict object to that absolute path. The child-visible option is not a second parent `-o` and does not repeat `-p` or an output-format option.
+The five caller-authored gate routes use the caller tail `--append-system-prompt ABSOLUTE_VERDICT_PATH PROMPT`. The path is byte-identical to the parent `-o` path. Claude treats the value after `--append-system-prompt` as system-prompt text, not as an output-file option; the caller prompt instructs the child to write one conforming verdict object to that absolute path. The child-visible option is not a second parent `-o` and does not repeat `-p` or an output-format option. The `falsification-critic` gate route supplies only `{{CALLER_ARG}}` after the delimiter; `pce` inserts its sole `--append-system-prompt` argument from the exact role and absolute parent output path.
 
 Purpose anchors are a separate closed class from canonical role anchors. `codex-commit-completion` resumes the exact worktree and recorded head with null standard input and no output artifact; `codex-diagnostics` performs one bounded evidence-only request with null standard input and no output artifact. Each uses `{{NODE}}` and `{{ROLE}}`, bound at issuance to the applicable canonical node and an existing registry role. Purpose anchors neither define role spellings nor create a second fixed anchor for a role.
 
@@ -118,6 +118,11 @@ pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{US
 <!-- pce-dispatch-route kind="codex-structured" -->
 ```sh
 pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --plan-file {{PLAN_FILE}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-executor --ref {{REF}} --evidence {{EVIDENCE}} -- --add-dir {{ABS_PATH}} {{CALLER_ARG}}
+```
+
+<!-- pce-dispatch-route kind="gate-structured" -->
+```sh
+pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role falsification-critic --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="gate-structured" -->
@@ -225,13 +230,15 @@ For binary-owned `dispatch`, `evidence` is the non-empty exact invocation suppli
 `pce dispatch` appends one `dispatch` record from the complete ordered logging envelope before spawning every Claude or Codex child. Its exact ref and non-empty invocation evidence come from the same anchored route. These binary-owned issuance records are the sole source for round counts and dispatch refs. The exact role vocabulary is:
 
 - Plan-producing: `milestone-planner`, `step-planner`, `step-plan-writer`.
-- Critique-producing: `milestone-critic`, `step-critic`, `step-plan-critic`, `pr-reviewer`.
+- Critique-producing: `milestone-critic`, `step-critic`, `step-plan-critic`, `falsification-critic`, `pr-reviewer`.
 - Execution: `step-executor`.
 - Explicitly non-round-bearing: `repository-analyst`.
 
-The complete executable representation for each of these nine byte-exact roles is the single `### Anchored dispatch role registry` in `### Dispatch route anchors`; this role list and the node rules below are normative metadata, not a second route representation.
+The complete executable representation for each of these ten byte-exact roles is the single `### Anchored dispatch role registry` in `### Dispatch route anchors`; this role list and the node rules below are normative metadata, not a second route representation.
 
 Use `repository-analyst` only in Phase 0; `milestone-planner` and `milestone-critic` in Phase 1; `step-planner` and `step-critic` in Phase 2; `step-plan-writer` and `step-plan-critic` in Phase 3 step 1; `step-executor` in Phase 3 step 3; and `pr-reviewer` in Phase 3 step 5. Spellings are byte-exact. Any other spelling is unrecognized, creates no round series, and makes caps and stuck detection underivable without a parser error. Never invent aliases such as `claude-critic`, `codex-step-planner`, or `executor`.
+
+`falsification-critic` is the binary-framed executable critic available to later gate orchestration; its canonical route supplies only the caller task because `pce` inserts its mandate and absolute verdict path.
 
 Node attribution is also exact. Phase 0 and Phase 1 use `m1-s1`. Phase 2 for milestone `m` uses `m<m>-s1`. Phase 3 uses the actual `m<m>-s<s>` node. A delta creating a stub uses the new stub's canonical id; other deltas use the canonical node concerned. Although any non-empty node can parse for an append, noncanonical nodes disappear from repository projection.
 
@@ -426,7 +433,7 @@ Every verdict conforms to installed `~/.claude/skills/pce/schemas/verdict.schema
 - `verdict`: `APPROVE` | `REVISE` | `BLOCK`.
 - `self_sufficiency`: `PASS`/`FAIL` from plan critics; `NOT_APPLICABLE` otherwise.
 - `root_cause`: `execution` | `step_plan` | `milestone_plan` | `vision`.
-- `blocking_issues[]`: `id`, `severity`, `location`, `problem`, `required_change`.
+- `blocking_issues[]`: `id`, `severity`, `location`, `problem`, `input`, `observation`, `required_change`, and `replacement_execution`, whose exact fields are `input` and `observation`.
 - `severity`: `critical` | `major`; `non_blocking_notes` and `summary` complete the top-level response.
 - All six top-level keys are required.
 

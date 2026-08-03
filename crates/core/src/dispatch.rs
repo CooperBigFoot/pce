@@ -1,4 +1,4 @@
-//! dispatch_invocation : DispatchTarget × DispatchEnvelope → Executable × Argv; dispatch_projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; codex_terminal_usage : CodexTerminalObservation* × DispatchExitStatus → DispatchTokenUsage; claude_result_usage : ClaudeResultEnvelope × DispatchExitStatus → DispatchTokenUsage; SeatbeltCapability = classify(permissive_profile_probe_status)   (pure, deterministic)
+//! dispatch_invocation : DispatchTarget × DispatchEnvelope → Executable × Argv; compose_gate_arguments : Option<DispatchRole> × AbsoluteOutputPath × ArgumentVector → Result<ArgumentVector, DispatchError>; dispatch_projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; codex_terminal_usage : CodexTerminalObservation* × DispatchExitStatus → DispatchTokenUsage; claude_result_usage : ClaudeResultEnvelope × DispatchExitStatus → DispatchTokenUsage; SeatbeltCapability = classify(permissive_profile_probe_status)   (pure, deterministic)
 //! This module describes complete shell-free child invocations; the binary adapter performs all I/O and process work.
 
 use std::collections::BTreeMap;
@@ -613,6 +613,37 @@ impl ArgumentVector {
     }
 }
 
+/// Compose the role-owned argument frame for a gate dispatch.
+///
+/// # Errors
+///
+/// Returns [`DispatchError::FalsificationCriticCallerSystemPrompt`] when the exact
+/// `falsification-critic` role's caller tail attempts to supply the binary-owned system prompt.
+pub fn compose_gate_arguments(
+    role: Option<&DispatchRole>,
+    output_path: &AbsoluteOutputPath,
+    arguments: ArgumentVector,
+) -> Result<ArgumentVector, DispatchError> {
+    if role.is_none_or(|role| role.as_str() != "falsification-critic") {
+        return Ok(arguments);
+    }
+    if let Some(argument) = arguments.as_slice().iter().find(|argument| {
+        argument.as_str() == "--append-system-prompt"
+            || argument.starts_with("--append-system-prompt=")
+    }) {
+        return Err(DispatchError::FalsificationCriticCallerSystemPrompt {
+            argument: argument.clone(),
+        });
+    }
+    let mandate = format!(
+        "You are the falsification critic. Judge the built artifact by executing probes, never by reviewing prose alone. A blocking issue is admissible only for a demonstrated break. For every blocking_issues entry, record the exact input fed in input and the exact observed result in observation; do not block on style, naming, design preference, scope, or any other reading-based opinion. Put the exact replacement you executed in required_change and record the exact input and observation from that replacement run in replacement_execution. If you cannot demonstrate a break, emit no blocking issue. Write exactly one conforming verdict JSON object to the absolute path between the markers below: <output-path>{}</output-path>",
+        output_path.as_path().display()
+    );
+    let mut composed = vec!["--append-system-prompt".to_owned(), mandate];
+    composed.extend(arguments.as_slice().iter().cloned());
+    Ok(ArgumentVector::new(composed))
+}
+
 /// The complete explicit child environment.
 ///
 /// A later process adapter must clear the inherited environment before applying these entries.
@@ -894,6 +925,9 @@ pub const fn classify_seatbelt_capability(status: ObservedExitStatus) -> Seatbel
 /// A dispatch value failed pure parsing.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DispatchError {
+    /// The exact falsification critic caller attempted to replace the binary-owned system prompt.
+    #[error("falsification-critic caller arguments must not contain `--append-system-prompt`")]
+    FalsificationCriticCallerSystemPrompt { argument: String },
     /// The executable parser received a zero-byte program name.
     #[error("executable must not be empty; rejected {executable:?}")]
     EmptyExecutable { executable: String },
@@ -918,13 +952,13 @@ mod tests {
         ChildEnvironment, ClaudeResultEnvelope, CodexTerminalObservation, CodexTerminalUsage,
         DispatchEnvelope, DispatchError, DispatchTarget, Executable, Sandbox, SeatbeltCapability,
         StdinBinding, classify_claude_result, classify_codex_terminal_usage,
-        classify_seatbelt_capability, dispatch_completion_payload, parse_claude_result,
-        seatbelt_capability_probe,
+        classify_seatbelt_capability, compose_gate_arguments, dispatch_completion_payload,
+        parse_claude_result, seatbelt_capability_probe,
     };
     use crate::contract_measurement::ObservedExitStatus;
     use crate::event_log::{
-        ArtifactOutcome, DispatchDuration, DispatchExitStatus, DispatchTokenUsage, ExitCode,
-        Sequence, SignalNumber, UsageAbsenceReason,
+        ArtifactOutcome, DispatchDuration, DispatchExitStatus, DispatchRole, DispatchTokenUsage,
+        ExitCode, Sequence, SignalNumber, UsageAbsenceReason,
     };
 
     fn exited(code: u64) -> DispatchExitStatus {
@@ -1379,6 +1413,53 @@ mod tests {
             &["positional prompt".to_owned()]
         );
         assert_eq!(envelope.stdin(), &StdinBinding::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn composes_only_the_exact_falsification_critic_frame() -> Result<(), DispatchError> {
+        let output = AbsoluteOutputPath::parse("/workspace/path with spaces/verdict.json")?;
+        let caller = ArgumentVector::new(vec!["probe".to_owned(), "--flag".to_owned()]);
+        for role in [
+            None,
+            Some(DispatchRole::new("pr-reviewer")),
+            Some(DispatchRole::new("step-plan-critic")),
+            Some(DispatchRole::new("Falsification-Critic")),
+            Some(DispatchRole::new("falsification_critic")),
+        ] {
+            assert_eq!(
+                compose_gate_arguments(role.as_ref(), &output, caller.clone())?,
+                caller
+            );
+        }
+
+        let role = DispatchRole::new("falsification-critic");
+        let composed = compose_gate_arguments(Some(&role), &output, caller.clone())?;
+        assert_eq!(composed.as_slice()[0], "--append-system-prompt");
+        assert_eq!(&composed.as_slice()[2..], caller.as_slice());
+        let mandate = &composed.as_slice()[1];
+        assert_eq!(mandate.matches("<output-path>").count(), 1);
+        assert_eq!(mandate.matches("</output-path>").count(), 1);
+        assert!(
+            mandate.contains("<output-path>/workspace/path with spaces/verdict.json</output-path>")
+        );
+        assert!(!mandate.contains("schema"));
+
+        for forbidden in [
+            "--append-system-prompt",
+            "--append-system-prompt=caller-value",
+        ] {
+            let error = compose_gate_arguments(
+                Some(&role),
+                &output,
+                ArgumentVector::new(vec![forbidden.to_owned()]),
+            )
+            .expect_err("caller override must fail");
+            assert_eq!(
+                error.to_string(),
+                "falsification-critic caller arguments must not contain `--append-system-prompt`"
+            );
+        }
         Ok(())
     }
 

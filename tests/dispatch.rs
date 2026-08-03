@@ -2106,6 +2106,21 @@ fn insert_gate_logging(argv: &mut Vec<String>, log_path: &Path, dry_run: bool) {
     argv.splice(delimiter..delimiter, logging);
 }
 
+fn select_falsification_critic(argv: &mut [String]) {
+    let role = argv
+        .iter()
+        .position(|value| value == "--role")
+        .expect("logging role");
+    argv[role + 1] = "falsification-critic".to_owned();
+}
+
+fn falsification_mandate(output: &Path) -> String {
+    format!(
+        "You are the falsification critic. Judge the built artifact by executing probes, never by reviewing prose alone. A blocking issue is admissible only for a demonstrated break. For every blocking_issues entry, record the exact input fed in input and the exact observed result in observation; do not block on style, naming, design preference, scope, or any other reading-based opinion. Put the exact replacement you executed in required_change and record the exact input and observation from that replacement run in replacement_execution. If you cannot demonstrate a break, emit no blocking issue. Write exactly one conforming verdict JSON object to the absolute path between the markers below: <output-path>{}</output-path>",
+        output.display()
+    )
+}
+
 fn gate_completion(log_path: &Path) -> pce_core::DispatchCompletionPayload {
     let records = fs::read_to_string(log_path)
         .expect("read gate log")
@@ -2350,6 +2365,112 @@ fn gate_rejects_caller_output_format_spellings() {
         ]
         .map(OsString::from)
     );
+}
+
+#[test]
+fn falsification_critic_dry_run_and_live_share_binary_owned_frame() {
+    let _guard = dispatch_test_guard();
+    let mut projected = None;
+    let fixture = GateFixture::new("falsification path with spaces", CLAUDE_SUCCESS);
+    for dry_run in [true, false] {
+        let log = fixture.harness.path().join("falsification.jsonl");
+        let mut argv = fixture.argv(&fixture.environment(0), &["probe the built artifact"]);
+        insert_gate_logging(&mut argv, &log, dry_run);
+        select_falsification_critic(&mut argv);
+        let output = fixture
+            .harness
+            .run(&argv, b"")
+            .expect("run falsification critic");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = [
+            "-p".to_owned(),
+            "--output-format".to_owned(),
+            "json".to_owned(),
+            "--append-system-prompt".to_owned(),
+            falsification_mandate(&fixture.output_path),
+            "probe the built artifact".to_owned(),
+        ];
+        let actual = if dry_run {
+            let value: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("projection");
+            value["envelope"]["argv"]
+                .as_array()
+                .expect("argv")
+                .iter()
+                .map(|value| value.as_str().expect("argument").to_owned())
+                .collect::<Vec<_>>()
+        } else {
+            let invocation = fixture.invocation();
+            invocation
+                .argv
+                .iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual
+                .iter()
+                .filter(|arg| *arg == "--append-system-prompt")
+                .count(),
+            1
+        );
+        let mandate = &actual[4];
+        assert_eq!(mandate.matches("<output-path>").count(), 1);
+        assert_eq!(mandate.matches("</output-path>").count(), 1);
+        assert!(!mandate.contains(&fixture.schema_path.display().to_string()));
+        if dry_run {
+            projected = Some(actual);
+            assert!(!log.exists());
+        } else {
+            assert_eq!(projected.as_ref().expect("dry projection"), &actual);
+            let records = fs::read_to_string(&log).expect("event log");
+            assert_eq!(records.lines().count(), 2);
+            assert!(
+                records
+                    .lines()
+                    .next()
+                    .expect("issuance")
+                    .contains("\"role\":\"falsification-critic\"")
+            );
+        }
+    }
+}
+
+#[test]
+fn falsification_critic_rejects_caller_owned_system_prompt_before_issuance() {
+    let _guard = dispatch_test_guard();
+    for token in [
+        "--append-system-prompt",
+        "--append-system-prompt=caller-value",
+    ] {
+        let fixture = GateFixture::new("falsification reject", CLAUDE_SUCCESS);
+        let log = fixture.harness.path().join("rejected.jsonl");
+        let mut argv = fixture.argv(&fixture.environment(0), &[token]);
+        insert_gate_logging(&mut argv, &log, false);
+        select_falsification_critic(&mut argv);
+        let output = fixture
+            .harness
+            .run(&argv, b"")
+            .expect("reject caller frame");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(
+            "falsification-critic caller arguments must not contain `--append-system-prompt`"
+        ));
+        assert!(!log.exists() || fs::read(&log).expect("log bytes").is_empty());
+        assert!(
+            fixture
+                .harness
+                .claude_invocations(&fixture.record_root)
+                .expect("invocations")
+                .is_empty()
+        );
+    }
 }
 
 #[test]
