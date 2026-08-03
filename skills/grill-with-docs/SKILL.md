@@ -1,38 +1,84 @@
 ---
 name: grill-with-docs
-description: Interview the user one question at a time about a program, vision, plan, or design, keeping the project glossary current and writing an ADR only for decisions that are hard to undo. Use when a plan needs stress-testing and the shared understanding needs to survive in CONTEXT.md.
+description: Interview the user one question at a time about a program, vision, plan, or design until they can say how it could go wrong, keeping the project glossary current and writing an ADR only for decisions that are hard to undo. Use when a plan needs stress-testing and the shared understanding needs to survive in CONTEXT.md.
 ---
 
 # Grill with docs
 
-Interview the user one question at a time until both sides understand the plan the same way. Keep the project glossary current as you go. Write an ADR only for decisions that are hard to undo.
+The grill exists so **the user understands what is being built** — well enough that their taste can bite. It is not requirements extraction. They supply ideas, taste and vision; you supply every piece of technique.
 
-## The interview
+You are done when the user can say how this could turn out wrong. That is the test, and it is why the grill produces an end-state picture and a set of falsifiable bets rather than a feeling of agreement.
 
-Work down the decision tree one branch at a time. Settle the decisions that other decisions depend on first.
+## What the user owns, and what you own
 
-Each turn has exactly three parts:
+**Theirs:** what the thing is for, where it should end up, what would make them unhappy, what they would regret, what matters more than what.
 
-1. One question, in prose.
-2. Your recommended answer.
-3. Why you recommend it, in a sentence or two. Be concise, clear, and to the point.
+**Yours:** everything else. Mechanism, tooling, technique, topology, naming, sequencing, trade-offs between approaches they have no stake in.
+
+If you catch yourself wanting a ruling on mechanism, that is a question you answer yourself. Decide it, state it in one line with the reason, and say it is reversible if they disagree. A question the user cannot answer from taste is a defect in the question, not a gap in the user.
+
+Never offer two options when you already know one is right. A recommendation accepted without understanding is a decision you made wearing their name.
+
+## Asking
+
+Each turn:
+
+1. Enough context that they can form an opinion — what breaks today, what it costs, in plain words.
+2. What is already settled, and why, stated rather than asked.
+3. One question, in prose, on the part that is genuinely theirs.
+4. Your recommended answer and why, in a sentence or two.
 
 Rules:
 
-- Stay on goals, boundaries, concepts, constraints, alternatives, risks, and what counts as success. Do not break the work into milestones, steps, or code tasks.
+- No jargon in a question. If a term is unavoidable, define it in the sentence that uses it. Never open with role names, file paths, field names or tool vocabulary.
+- Stay on goals, boundaries, concepts, constraints, alternatives, risks, and what counts as success. Do not break work into milestones, steps, or code tasks.
 - If the codebase or the committed docs answer a question, go read them instead of asking.
 - If what you read contradicts what the user said, make that the next question.
-- If a word is vague or used two ways, pick one meaning and ask the user to confirm it.
+- If a word is vague or used two ways, pick one meaning and ask them to confirm it.
 - Test a boundary with a concrete case, not an abstract one.
-- Never ask a question while a subagent is still gathering context. Wait for it to come back, read what it found, then ask. Otherwise you spend the user's turn on something the subagent was already answering.
+- Never ask while a subagent is still gathering context. Wait, read what it found, then ask.
+
+## The end-state picture
+
+Build it during the grill and show it back before you finish. Plain language, no jargon:
+
+- **Where we start.** What is true today.
+- **Where we end.** What is true after this lands — including **what disappears**.
+- **What someone does next.** How the follow-on work happens once this is done.
+
+The picture exists because a user cannot enumerate their own tacit assumptions on request, but reacts instantly to a concrete description that violates one. Once, a decomposition deleted eleven legacy implementations — correct against its vision, approved by two critics, three commits landed — and was the wrong build, because the user's method for porting is to read the legacy code. Nobody had written down that code is the documentation. It surfaced only when they saw the size of the deletion.
+
+So describe the finished world concretely enough for them to flinch at the part that is wrong. Show what goes away, always. That is where silent assumptions live.
+
+## The bets
+
+Every claim the vision makes needs a named way to be proven wrong.
+
+A bet names **an input and an observation**. Not a test that must exist — "must be tested" is satisfied by a test existing, including one that cannot fail.
+
+- Weak: *a test proves standard input is bound for every dispatch shape.*
+- Strong: *set the API key in the parent, look in the child, it must be gone.*
+- Strong: *feed the checker a seal whose predicate is the string `"NOT THE FROZEN PREDICATE"` and whose hashes are zeros — it must refuse.*
+
+At least one bet names an input designed to make the thing fail.
+
+Write them in this division of labour:
+
+1. **The user supplies the fear** — "an agent could quietly bill my API account instead of my subscription."
+2. **You supply the probe** — the input and the observation that would catch it.
+3. **They ratify in plain words** — "if that variable is gone from the child, does that settle your worry?" That question they can always answer, because it is about their fear and not about the mechanism.
+
+Never ask them to ratify something they cannot evaluate.
+
+Note when a bet is only checkable outside the run that delivers it — a global hook, a live environment measurement — and say so rather than letting it be discovered late.
 
 ## Writing things down
 
-Follow `../domain-modeling/CONTEXT-FORMAT.md` and `../domain-modeling/ADR-FORMAT.md` exactly. Write files as you go, not in one batch at the end. Do not narrate the writing: no running commentary on what might be glossary-worthy. The user hears about it in the recap.
+Follow `../domain-modeling/CONTEXT-FORMAT.md` and `../domain-modeling/ADR-FORMAT.md` exactly. Write files as you go, not in one batch. Do not narrate the writing; the user hears about it in the recap.
 
 ### CONTEXT.md
 
-Edit `CONTEXT.md` the moment the interview settles one of these: what a project-specific term means, which of two competing words wins, how two concepts relate, or an ambiguity that is still open.
+Edit it the moment the interview settles one of these: what a project-specific term means, which of two competing words wins, how two concepts relate, or an ambiguity that is still open.
 
 It is a glossary and nothing else. Keep out implementation detail, specs, scratch notes, and general programming ideas.
 
@@ -46,19 +92,21 @@ Offer an ADR only when all three are true:
 2. A future reader would ask why it was made.
 3. There was a real choice between real alternatives.
 
-If the user says yes, write it straight away in `docs/adr/`. Find the highest existing number and use the next one: `NNNN-short-slug.md`. Create the directory if it is missing.
+If the user says yes, write it straight away in `docs/adr/` as `NNNN-short-slug.md`, using the next number. Create the directory if missing.
 
 The default ADR is three sentences or fewer: the situation, the decision, the reason. Add status, options, or consequences only when they earn the space.
 
 No ADR for: easy reversals, obvious calls, decisions with no alternative, open questions, implementation notes.
 
-A settled term goes in `CONTEXT.md` on its own. It needs an ADR only if the three tests above also pass.
-
 ## Ending
 
-Stop when every branch is resolved or deliberately left open. Then give:
+Stop when every branch is resolved or deliberately left open, and every claim has a bet.
 
-- What you both now understand.
-- Which `CONTEXT.md` entries changed.
-- Which ADRs you wrote.
-- What is still open, without guessing at answers.
+Give, in this order:
+
+1. **The end-state picture** — where we start, where we end, what disappears, what happens next. Plain words.
+2. **The bets** — each as an input and an observation, in one line each.
+3. What is still open, without guessing at answers.
+4. Underneath, or on request: which `CONTEXT.md` entries changed and which ADRs you wrote.
+
+If you cannot state the picture in language the user could repeat back to someone else, the grill is not finished.

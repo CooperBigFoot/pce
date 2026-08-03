@@ -106,6 +106,12 @@ Conduct a **deep** survey of this one Effort ticket toward one ambitious, contai
 
 Ask exactly one prose question at a time, with a recommended answer and its reason. Inspect code and committed documentation instead of asking questions those sources answer. Resolve decision branches and dependencies, challenge language against `CONTEXT.md`, test boundaries with concrete edge cases, and capture crystallized terminology or qualifying decisions after each answer. Apply the sibling's domain-modeling formats and documentation rule during the interview: update glossary language immediately and offer an ADR only when all three of its durable-decision conditions hold. Finish only after every relevant branch is resolved or explicitly left open, then recap shared understanding, glossary entries updated, ADRs created, and unresolved questions without inventing answers.
 
+The grill is not finished until three things exist, and `/to-vision` will need all three:
+
+1. **An end-state picture** the user has reacted to — what is true today, what is true after, **what disappears**, and how the follow-on work happens once this lands. Plain language, no jargon, concrete enough that the user could repeat it to someone else. Show what goes away every time; that is where silent assumptions live.
+2. **Bets**, one per claim the vision makes. Each names an input and an observation, never a test that must exist. At least one names an input designed to make the thing fail. The user supplies the fear, you supply the probe, and they ratify in plain words that the probe would catch the fear — never ask them to ratify something they cannot evaluate. Flag any bet checkable only outside the run that delivers it.
+3. **A reversibility judgement.** State whether this vision contains an act that cannot be repeated — minting an immutable artifact, publishing a release or tag, consuming a one-shot quota, destroying history. Where it does, name that act; it is the only place that earns front-loaded proof. Where it does not, say so, and expect a light brief with heavy falsification of what was built.
+
 Require the result to be sufficiently settled to name one contained vision. If discovery cannot converge on one contained vision, report the mismatch and stop without reserving a directory or stamping a speculative linkage.
 
 ## 6. Derive the name once and reserve the directory
@@ -149,16 +155,22 @@ After the edit, re-fetch the complete issue body. Verify that exactly one root-l
 
 ## 8. Report and hand off
 
-Conclude with all of the following:
+Lead with what the user can act on. Bookkeeping goes underneath, or waits until they ask.
+
+Open with the **end-state picture** in plain words — where we start, where we end, what disappears, what someone does next. Then the **bets**, one line each as an input and an observation. Then anything still open, without guessing at answers. Then the reversibility judgement in one sentence.
+
+Only after that, and clearly marked as detail they may skip:
 
 1. The selected Effort ticket and active Program Map.
-2. The deep-grill decision recap, including glossary entries updated, ADRs created, and explicitly unresolved matters.
+2. Glossary entries updated and ADRs created.
 3. The reserved directory and verified `Vision: $VISION_DIR` linkage line.
 4. This exact invocation, substituting the byte-identical retained `<name>`:
 
    ```text
    /to-vision "<name>"
    ```
+
+Never open a report with an issue number, a directory path, a linkage line, or a validation result. Those are yours to have verified, not theirs to read first.
 
 Tell the user to complete the `/to-vision` handoff in the same session and on the same calendar day. `/to-vision` runs its own `pce vision new "<name>"`; the same byte-identical name on the same day reuses the reserved directory untouched. Warn that if the handoff crosses midnight, the date-stamped directory can diverge because `pce vision new` creates a new current-date directory.
 

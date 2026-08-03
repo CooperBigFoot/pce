@@ -35,7 +35,9 @@ Invoke and follow the sibling `grill-with-docs` skill. Do not replace or weaken 
 
 Interview relentlessly until shared understanding is reached. Walk each relevant decision branch and resolve dependencies between decisions one by one.
 
-- Ask exactly one prose question at a time.
+- Ask exactly one prose question at a time, and give enough context first that the human can form an opinion — what breaks today, what it costs, in plain words. No jargon in a question; define an unavoidable term in the sentence that uses it.
+- Ask only what is genuinely theirs: what the Program is for, where it should end up, what would make them unhappy, what matters more than what. Mechanism, tooling, technique and topology are yours to decide. Decide them, state them in one line with the reason, and note they are reversible.
+- Never offer two options when you already know one is right. A question the human cannot answer from taste is a defect in the question, not a gap in the human.
 - Keep questions at Program/vision altitude: goals, boundaries, domain concepts, durable constraints, alternatives, risks, and success conditions. Do not decompose work into milestones, implementation steps, or code tasks.
 - With every question, provide a recommended answer and the reason for it.
 - Inspect the codebase and committed documentation instead of asking when they can answer the question. Present contradictions between those sources and the user's model as the next question.
@@ -68,7 +70,18 @@ In re-survey mode, classify the entire existing Map again. Keep still-valid Effo
 
 ## 4. Present the complete proposal and obtain approval
 
-Before creating or updating any label, issue, Effort ticket, assignment, closure, or blocking edge, present one complete proposed change set containing:
+Before creating or updating any label, issue, Effort ticket, assignment, closure, or blocking edge, present one complete proposed change set — **layered, decision on top, mechanics underneath.**
+
+The approval must be one the human can actually evaluate. An approval they cannot evaluate is worse than none: it lets the machine record its own choice as a human ruling. This has happened, and it is the failure this layering exists to prevent.
+
+**What they read first**, in plain language with no issue numbers, no placeholders, no header counts, no reconciliation tables:
+
+- What the Program is for, in a few sentences.
+- What each proposed Effort ticket asks, as a plain question.
+- What changed since last time and why, if this is a re-survey.
+- What is deliberately being left vague.
+
+**Underneath, clearly marked as skippable detail**, present the complete proposal so the gate is genuinely complete:
 
 1. The complete proposed Program Map title and full body, with every template section populated or intentionally empty.
 2. Every proposed Effort ticket title and complete seeded-lean body.
@@ -76,7 +89,7 @@ Before creating or updating any label, issue, Effort ticket, assignment, closure
 4. In re-survey mode, an explicit reconciliation of creates, edits, unchanged items, Fog changes, and dependency additions and removals against current GitHub state.
 5. Every issue-number placeholder required before GitHub assigns numbers, with its mechanical substitution explained.
 
-Ask for explicit human approval of the entire proposal. Questions or revisions return to the proposal/grill cycle. Any change to the proposed Map, Effort tickets, or edges invalidates earlier approval: present the revised complete proposal and obtain approval again. Approval of a partial draft never satisfies this gate.
+Ask for approval of the whole set. Questions or revisions return to the proposal/grill cycle. Any change to the proposed Map, Effort tickets, or edges invalidates earlier approval: present the revised complete proposal and obtain approval again. Approval of a partial draft never satisfies this gate.
 
 Do not mutate GitHub before that approval. Runtime glossary edits and user-accepted ADRs occur under the composed grill's documentation rules; they do not authorize issue mutations.
 
@@ -151,6 +164,8 @@ Apply mutations in a sequence that makes partial state auditable: labels, Map cr
 
 Charting resolves nothing. Never assign or claim an Effort ticket, close or reopen an Effort ticket, close or reopen the Map, or treat the Chart as delivery. Leave every newly created Effort ticket open and unassigned. Mutate only approved Map and Effort-ticket titles/bodies and approved dependency relationships.
 
-Conclude with a concise report listing the Map issue, Effort-ticket issues, dependency representation, retained Fog, and any `CONTEXT.md` or ADR updates.
+Conclude at intent altitude. Open with what the Program now says it is for and which question is worth taking next, in plain language. Then, marked as skippable detail: the Map issue, Effort-ticket issues, dependency representation, retained Fog, and any `CONTEXT.md` or ADR updates.
+
+Never open a report with issue numbers or a change tally. If the human cannot tell from the first paragraph what they are now building and what they would do next, the report has failed regardless of its accuracy.
 
 On every rerun, repeat discovery, load all existing Program state, run the full breadth-first survey, classify all territory, and enforce a new complete review gate. Exactly one open Map triggers a full re-survey, never an error or narrow incremental append.
