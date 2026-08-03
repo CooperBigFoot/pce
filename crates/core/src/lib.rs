@@ -3,6 +3,7 @@
 pub mod artifact_validation;
 pub mod contract_measurement;
 pub mod dispatch;
+pub mod dispatch_meter;
 pub mod event_log;
 pub mod run_state;
 pub mod tracked_contract;
@@ -29,6 +30,10 @@ pub use dispatch::{
     classify_codex_terminal_usage, classify_seatbelt_capability, dispatch_completion_payload,
     dispatch_invocation, dispatch_payload, parse_claude_result, render_dispatch_projection,
     seatbelt_capability_probe,
+};
+pub use dispatch_meter::{
+    DispatchMeterCompletion, DispatchMeterError, DispatchMeterIssuance, DispatchMeterRecord,
+    meter_dispatches,
 };
 pub use event_log::{
     AppendError, AppendIntent, AppendableRepositoryContract, ArtifactOutcome, ArtifactPath,
