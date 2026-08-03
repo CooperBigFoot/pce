@@ -1,5 +1,6 @@
 //! Core domain logic for PCE workflows.
 
+pub mod acceptance_criteria;
 pub mod artifact_validation;
 pub mod contract_measurement;
 pub mod dispatch;
@@ -10,6 +11,10 @@ pub mod tracked_contract;
 pub mod vision;
 pub mod workflow_coverage;
 
+pub use acceptance_criteria::{
+    AcceptanceCriteria, AcceptanceCriteriaError, AcceptanceCriterion, CriterionField,
+    CriterionInput, CriterionName, CriterionObservation, parse_acceptance_criteria,
+};
 pub use artifact_validation::{
     ArtifactValidationError, FileObservation, StructuredArtifactObservation, validate_artifact,
 };

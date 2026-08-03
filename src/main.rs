@@ -36,15 +36,17 @@ use pce_core::{
     classify_seatbelt_capability, compute_dispatchability, create_vision, derive_merge_status,
     derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
     dispatch_invocation, dispatch_payload, event_record_matches, measure_contract_snapshot,
-    meter_dispatches, parse_claude_result, parse_event_line, parse_tracked_repository_contract,
-    render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
-    serialize_tracked_repository_contract, validate_artifact, validate_workflow_coverage,
+    meter_dispatches, parse_acceptance_criteria, parse_claude_result, parse_event_line,
+    parse_tracked_repository_contract, render_dispatch_projection, render_human_snapshot,
+    seatbelt_capability_probe, serialize_tracked_repository_contract, validate_artifact,
+    validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = concat!(
     "usage: pce vision new \"<name>\"\n",
+    "       pce vision check\n",
     "       pce log --file <LOG_PATH> --kind <KIND> --node <NODE>\n",
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
     "       pce log meter\n",
@@ -92,6 +94,7 @@ enum Command {
     VisionNew {
         name: VisionName,
     },
+    VisionCheck,
     LogWrite {
         path: PathBuf,
         kind: WriteKind,
@@ -314,6 +317,7 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             None => spawn_dispatch(&envelope, None),
         },
         Command::VisionNew { name } => run_vision_new(&name),
+        Command::VisionCheck => run_vision_check(input),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
             let stdout = std::io::stdout();
@@ -370,6 +374,7 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
 fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
     let args: Vec<String> = args.collect();
     match args.as_slice() {
+        [verb, action] if verb == "vision" && action == "check" => Ok(Command::VisionCheck),
         [verb, action, raw_name] if verb == "vision" && action == "new" => {
             let name = VisionName::parse(raw_name).context("failed to parse vision name")?;
             Ok(Command::VisionNew { name })
@@ -902,6 +907,16 @@ fn run_vision_new(name: &VisionName) -> Result<()> {
     println!("{}", new_vision.dir());
 
     Ok(())
+}
+
+fn run_vision_check(input: &mut dyn Read) -> Result<()> {
+    (|| -> Result<()> {
+        let mut document = String::new();
+        input.read_to_string(&mut document)?;
+        parse_acceptance_criteria(&document)?;
+        Ok(())
+    })()
+    .context("failed to check vision acceptance criteria")
 }
 
 fn run_log(path: &Path, kind: WriteKind, node: NodeId, input: &mut dyn Read) -> Result<()> {
@@ -5393,6 +5408,12 @@ mod tests {
     #[test]
     fn typed_parser_accepts_exact_vision_log_and_status_forms() {
         assert!(matches!(
+            parse_command(["vision", "check"].into_iter().map(str::to_owned))
+                .expect("vision check command should parse"),
+            Command::VisionCheck
+        ));
+
+        assert!(matches!(
             parse_command(
                 ["vision", "new", "Event log"]
                     .into_iter()
@@ -5472,6 +5493,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn vision_check_parser_rejects_arguments_and_unknown_actions_with_usage() {
+        for args in [
+            vec!["vision", "check", "extra"],
+            vec!["vision", "check", "--file", "vision.md"],
+            vec!["vision", "validate"],
+        ] {
+            let error = parse_command(args.into_iter().map(str::to_owned))
+                .expect_err("invalid vision check shape must be rejected");
+            assert_eq!(error.to_string(), super::USAGE);
+        }
+    }
+
+    #[test]
+    fn vision_check_run_reads_stdin_and_adds_stable_refusal_context() {
+        let conforming = r#"# Vision: example
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{"criteria":[{"name":"Runs","input":"Run it.","observation":"It exits zero."}]}
+```
+"#;
+        let mut input = Cursor::new(conforming.as_bytes());
+        run(
+            ["vision", "check"].into_iter().map(str::to_owned),
+            &mut input,
+        )
+        .expect("conforming vision should pass");
+
+        let mut input = Cursor::new("# Vision: missing criteria".as_bytes());
+        let error = run(
+            ["vision", "check"].into_iter().map(str::to_owned),
+            &mut input,
+        )
+        .expect_err("missing acceptance section should fail");
+        assert_eq!(
+            error.to_string(),
+            "failed to check vision acceptance criteria"
+        );
     }
 
     #[test]
