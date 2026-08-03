@@ -6,6 +6,7 @@ pub mod contract_measurement;
 pub mod dispatch;
 pub mod dispatch_meter;
 pub mod event_log;
+pub mod gate_execution;
 pub mod run_state;
 pub mod tracked_contract;
 pub mod vision;
@@ -54,6 +55,13 @@ pub use event_log::{
     UnparsedPayload, UsageAbsenceReason, WorkflowMap, WriteKind, append_event,
     event_record_matches, parse_event_line, serialize_event_line, successor_sequence,
     validate_evidence_policy,
+};
+pub use gate_execution::{
+    AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
+    GateExecutionError, GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig,
+    GateExecutionRef, GateExecutionRejection, GateExecutionResponse, GateObservedResult,
+    GateProcessObservation, GateProcessStimulus, GateStimulus, GateTerminalStatus,
+    parse_gate_stimulus, validate_verdict_references,
 };
 pub use run_state::{
     ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BranchSnapshot, BranchState,
