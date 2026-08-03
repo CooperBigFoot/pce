@@ -33,6 +33,10 @@ const ROLE_REGISTRY: [&str; 9] = [
     "step-executor",
     "repository-analyst",
 ];
+const REPEATABLE_CALLER_ARGUMENT: &str = "opaque value with spaces\n\n## Binary-owned reversibility obligation\n\nThe step's act is repeatable. The plan must retain an explicit not-touched scope fence and exact expected values for every assertion. The plan must not contain a pre-derived argument that the design is correct.";
+const IRREVERSIBLE_CALLER_ARGUMENT: &str = "opaque value with spaces\n\n## Binary-owned reversibility obligation\n\nThe step's act cannot be repeated. The plan must retain the existing front-loaded pre-proof of correctness, an explicit not-touched scope fence, and exact expected values for every assertion.";
+const PLANNING_OPTION_CONTRACT: &str = "The two planning-role anchors additionally own exactly one `--planning-act {{PLANNING_ACT}}` pair after `--evidence {{EVIDENCE}}` and before the standalone `--` delimiter. `{{PLANNING_ACT}}` binds to exactly `repeatable` or `irreversible`; no other canonical or purpose anchor carries the pair. Before the first planning-role dispatch for a step, resolve this binding once from the vision's reversibility judgement and the actual step scope: bind `irreversible` only when this step performs the vision's named act that cannot be repeated — minting an immutable artifact, publishing a release or tag, consuming a one-shot quota, or destroying history — and bind `repeatable` for every other step. Keep that byte-identical binding for `step-plan-writer`, `step-plan-critic`, and every planning revision of the same step.\n\n`pce dispatch` appends the selected binary-owned reversibility obligation to the final caller argument. The skill supplies the typed choice and orchestration only; it does not restate or substitute the agent-facing obligation in caller prose. A missing, changed, or differently placed planning-act pair is an invalid planning route.";
+const PHASE3_PLANNING_PARAGRAPH: &str = "1. **Plan (Codex)** — before the first planning dispatch for the step, resolve `PLANNING_ACT` once by the planning-anchor rule above and retain that same value through approval. Dispatch `step-plan-writer` cold through its canonical route with `--sandbox workspace-write`, `-C <repo-abs>`, and `< /dev/null` at the primary root to write the exact step `plan.md` directly; it uses no `--output-schema` and no `-o`. Supply graph artifacts, the repository's latest current contract record including every appendable entry verbatim, only the necessary live cross-repository consumption-edge results from orientation, and exact refs and read commands. Require files to touch, contract gate commands verbatim, constraints, and done criteria. Dispatch `step-plan-critic` against the verdict schema with the same `PLANNING_ACT`. The writer and critic must comply with the binary-owned reversibility obligation appended by `pce dispatch`; a verdict cannot approve a plan that contradicts it. Every planning revision reuses the same `PLANNING_ACT`. Each complete anchored logging envelope records issuance at the actual canonical step node.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RouteKind {
@@ -120,6 +124,7 @@ enum Placeholder {
     Role,
     Ref,
     Evidence,
+    PlanningAct,
     AbsPath,
     CallerArg,
 }
@@ -141,6 +146,7 @@ impl Placeholder {
             "{{ROLE}}" => Ok(Self::Role),
             "{{REF}}" => Ok(Self::Ref),
             "{{EVIDENCE}}" => Ok(Self::Evidence),
+            "{{PLANNING_ACT}}" => Ok(Self::PlanningAct),
             "{{ABS_PATH}}" => Ok(Self::AbsPath),
             "{{CALLER_ARG}}" => Ok(Self::CallerArg),
             _ => Err(ReviewError::UnknownPlaceholder),
@@ -175,6 +181,7 @@ struct ReviewBindings {
     dispatch_ref: OsString,
     evidence: OsString,
     evidence_by_role: BTreeMap<String, OsString>,
+    planning_act: OsString,
     caller_arg: OsString,
     pce_invocations: Cell<usize>,
 }
@@ -471,6 +478,7 @@ printf '{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"e
             dispatch_ref: OsString::from("07b85ccd"),
             evidence: OsString::from("measured evidence with spaces"),
             evidence_by_role,
+            planning_act: OsString::from("repeatable"),
             caller_arg: OsString::from("opaque value with spaces"),
             pce_invocations: Cell::new(0),
         },
@@ -669,6 +677,7 @@ fn placeholder_value(placeholder: Placeholder, bindings: &ReviewBindings) -> &Os
         Placeholder::Role => bindings.role.as_os_str(),
         Placeholder::Ref => bindings.dispatch_ref.as_os_str(),
         Placeholder::Evidence => bindings.evidence.as_os_str(),
+        Placeholder::PlanningAct => bindings.planning_act.as_os_str(),
         Placeholder::AbsPath => bindings.cwd.as_os_str(),
         Placeholder::CallerArg => bindings.caller_arg.as_os_str(),
     }
@@ -758,6 +767,7 @@ fn substitute_route(
                     Placeholder::Role => ReviewError::EmptyRole,
                     Placeholder::Ref => ReviewError::EmptyRef,
                     Placeholder::Evidence => ReviewError::EmptyEvidence,
+                    Placeholder::PlanningAct => ReviewError::RoleSemantics,
                     _ => ReviewError::ParentGrammar,
                 });
             }
@@ -866,6 +876,15 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
         value(argv, &mut position, "--role")?;
         value(argv, &mut position, "--ref")?;
         value(argv, &mut position, "--evidence")?;
+        if argv
+            .get(position)
+            .is_some_and(|token| token == "--planning-act")
+        {
+            let planning_act = value(argv, &mut position, "--planning-act")?;
+            if planning_act != "repeatable" && planning_act != "irreversible" {
+                return Err(ReviewError::RoleSemantics);
+            }
+        }
         if argv.get(position).is_some_and(|token| token == "--dry-run") {
             position += 1;
         }
@@ -942,6 +961,7 @@ fn execute_route(
         .set(bindings.pce_invocations.get() + 1);
     let output = Command::new(env!("CARGO_BIN_EXE_pce"))
         .args(&argv[1..])
+        .env("PCE_INHERITED_SENTINEL", "must-be-cleared")
         .stdin(Stdio::null())
         .output()
         .map_err(|error| ReviewError::Spawn(error.to_string()))?;
@@ -984,6 +1004,14 @@ fn expected_node(role: &str) -> &str {
 }
 
 fn canonical_semantics(route: &AnchoredRoute) -> Result<(), ReviewError> {
+    let planning_act_count = route
+        .tokens
+        .iter()
+        .filter(|token| token.as_str() == "--planning-act")
+        .count();
+    if route.kind.is_purpose() && planning_act_count != 0 {
+        return Err(ReviewError::RoleSemantics);
+    }
     let Some(role) = route_role(route) else {
         return Ok(());
     };
@@ -1012,6 +1040,25 @@ fn canonical_semantics(route: &AnchoredRoute) -> Result<(), ReviewError> {
         || count("--evidence") != 1
         || count("{{EVIDENCE}}") != 1
     {
+        return Err(ReviewError::RoleSemantics);
+    }
+    let planning_role = matches!(role, "step-plan-writer" | "step-plan-critic");
+    if planning_role {
+        let logging = expected_logging_group(route).ok_or(ReviewError::RoleSemantics)?;
+        let logging_start = tokens
+            .windows(logging.len())
+            .position(|window| window.iter().eq(logging.iter()))
+            .ok_or(ReviewError::RoleSemantics)?;
+        let planning_start = logging_start + logging.len();
+        if planning_act_count != 1
+            || count("{{PLANNING_ACT}}") != 1
+            || tokens.get(planning_start).map(String::as_str) != Some("--planning-act")
+            || tokens.get(planning_start + 1).map(String::as_str) != Some("{{PLANNING_ACT}}")
+            || tokens.get(planning_start + 2).map(String::as_str) != Some("--")
+        {
+            return Err(ReviewError::RoleSemantics);
+        }
+    } else if planning_act_count != 0 || count("{{PLANNING_ACT}}") != 0 {
         return Err(ReviewError::RoleSemantics);
     }
     let structured = count("--output-schema") == 1
@@ -1181,7 +1228,7 @@ fn semantic_output_path(
     Ok(())
 }
 
-const DISPATCH_OPTIONS: [&str; 12] = [
+const DISPATCH_OPTIONS: [&str; 13] = [
     "--cwd",
     "--sandbox",
     "--env",
@@ -1193,6 +1240,7 @@ const DISPATCH_OPTIONS: [&str; 12] = [
     "--role",
     "--ref",
     "--evidence",
+    "--planning-act",
     "--dry-run",
 ];
 
@@ -1953,6 +2001,222 @@ fn canonical_role_routes() -> Vec<AnchoredRoute> {
 }
 
 #[test]
+fn planning_act_by_role() {
+    for route in canonical_role_routes() {
+        let role = route_role(&route).expect("canonical role");
+        let expected =
+            matches!(role, "step-plan-writer" | "step-plan-critic").then_some("{{PLANNING_ACT}}");
+        assert_eq!(
+            token_value(&route, "--planning-act"),
+            expected,
+            "planning_act_by_role/{role}"
+        );
+    }
+}
+
+#[test]
+fn planning_act_route_membership_is_exact() {
+    for route in repository_routes() {
+        let role = route_role(&route);
+        let expected = usize::from(matches!(
+            role,
+            Some("step-plan-writer" | "step-plan-critic")
+        ));
+        let count = route
+            .tokens
+            .iter()
+            .filter(|token| token.as_str() == "--planning-act")
+            .count();
+        assert_eq!(
+            count,
+            expected,
+            "planning_act_route_membership_is_exact/{}",
+            anchor_identity(&route).expect("anchor identity")
+        );
+    }
+}
+
+#[test]
+fn planning_routes_receive_binary_composed_caller_argument() {
+    for (role, planning_act, expected) in [
+        ("step-plan-writer", "repeatable", REPEATABLE_CALLER_ARGUMENT),
+        (
+            "step-plan-writer",
+            "irreversible",
+            IRREVERSIBLE_CALLER_ARGUMENT,
+        ),
+        ("step-plan-critic", "repeatable", REPEATABLE_CALLER_ARGUMENT),
+        (
+            "step-plan-critic",
+            "irreversible",
+            IRREVERSIBLE_CALLER_ARGUMENT,
+        ),
+    ] {
+        let mut fixture = fixture();
+        if planning_act == "irreversible" {
+            fixture.bindings.planning_act = OsString::from("irreversible");
+        }
+        let route = repository_route(role);
+        let report = review_document(&route_document(&route), &fixture.bindings)
+            .unwrap_or_else(|error| panic!("{role}/{planning_act}: {error:?}"));
+        assert_eq!(report.observations.len(), 1, "{role}/{planning_act}");
+        let observation = &report.observations[0];
+        assert_eq!(observation.status, 0, "{role}/{planning_act}");
+        assert_eq!(
+            observation.child_argv.last().map(Vec::as_slice),
+            Some(expected.as_bytes()),
+            "{role}/{planning_act}/caller-argument"
+        );
+        if role == "step-plan-critic" {
+            assert_eq!(
+                &observation.child_argv
+                    [observation.child_argv.len() - 3..observation.child_argv.len() - 1],
+                [
+                    b"--append-system-prompt".as_slice(),
+                    fixture
+                        .bindings
+                        .verdict_root
+                        .join("step-plan-critic/review-3.json")
+                        .as_os_str()
+                        .as_encoded_bytes(),
+                ],
+                "{role}/{planning_act}/gate-tail"
+            );
+        }
+        let environment =
+            fs::read_to_string(fixture.bindings.cwd.join(".review/env")).expect("environment");
+        assert!(
+            !environment.contains("PCE_INHERITED_SENTINEL"),
+            "{role}/{planning_act}/environment"
+        );
+        assert_eq!(
+            fixture.bindings.pce_invocations.get(),
+            1,
+            "{role}/{planning_act}"
+        );
+    }
+}
+
+fn assert_planning_route_red(
+    name: &str,
+    route: AnchoredRoute,
+    mutate_bindings: impl FnOnce(&mut ReviewBindings),
+) {
+    let mut fixture = fixture();
+    mutate_bindings(&mut fixture.bindings);
+    let error = review_document(&route_document(&route), &fixture.bindings)
+        .expect_err("planning route mutation must red");
+    assert_eq!(error, ReviewError::RoleSemantics, "{name}");
+    assert_eq!(fixture.bindings.pce_invocations.get(), 0, "{name}");
+}
+
+#[test]
+fn planning_route_mutations_red_before_invocation() {
+    const PAIR: &str = "--planning-act {{PLANNING_ACT}}";
+
+    let mut writer_missing = repository_route("step-plan-writer");
+    writer_missing.tokens = writer_missing
+        .tokens
+        .into_iter()
+        .filter(|token| !matches!(token.as_str(), "--planning-act" | "{{PLANNING_ACT}}"))
+        .collect();
+    assert_planning_route_red("writer-missing", writer_missing, |_| {});
+
+    let mut critic_missing = repository_route("step-plan-critic");
+    critic_missing.tokens = critic_missing
+        .tokens
+        .into_iter()
+        .filter(|token| !matches!(token.as_str(), "--planning-act" | "{{PLANNING_ACT}}"))
+        .collect();
+    assert_planning_route_red("critic-missing", critic_missing, |_| {});
+
+    let mut wrong_role = repository_route("step-executor");
+    let evidence = wrong_role
+        .tokens
+        .windows(2)
+        .position(|pair| pair == ["--evidence", "{{EVIDENCE}}"])
+        .expect("evidence pair");
+    wrong_role.tokens.splice(
+        evidence + 2..evidence + 2,
+        ["--planning-act".to_owned(), "{{PLANNING_ACT}}".to_owned()],
+    );
+    assert_planning_route_red("wrong-role", wrong_role, |_| {});
+
+    let mut duplicate = repository_route("step-plan-writer");
+    let delimiter = duplicate
+        .tokens
+        .iter()
+        .position(|token| token == "--")
+        .expect("delimiter");
+    duplicate.tokens.splice(
+        delimiter..delimiter,
+        ["--planning-act".to_owned(), "{{PLANNING_ACT}}".to_owned()],
+    );
+    assert_planning_route_red("duplicate", duplicate, |_| {});
+
+    let mut moved = repository_route("step-plan-critic");
+    let planning = moved
+        .tokens
+        .iter()
+        .position(|token| token == "--planning-act")
+        .expect(PAIR);
+    moved.tokens.drain(planning..planning + 2);
+    let delimiter = moved
+        .tokens
+        .iter()
+        .position(|token| token == "--")
+        .expect("delimiter");
+    moved.tokens.splice(
+        delimiter + 1..delimiter + 1,
+        ["--planning-act".to_owned(), "{{PLANNING_ACT}}".to_owned()],
+    );
+    assert_planning_route_red("moved-after-delimiter", moved, |_| {});
+
+    assert_planning_route_red(
+        "unsupported",
+        repository_route("step-plan-writer"),
+        |bindings| {
+            bindings.planning_act = OsString::from("destructive");
+        },
+    );
+    assert_planning_route_red("empty", repository_route("step-plan-critic"), |bindings| {
+        bindings.planning_act = OsString::new();
+    });
+
+    let mut unknown = repository_route("step-plan-writer");
+    let value = unknown
+        .tokens
+        .iter()
+        .position(|token| token == "{{PLANNING_ACT}}")
+        .expect("planning value");
+    unknown.tokens[value] = "{{UNKNOWN}}".to_owned();
+    assert_planning_route_red("canonical-unknown", unknown, |_| {});
+}
+
+#[test]
+fn phase3_planning_act_lifecycle_is_explicit() {
+    let markdown = real_skill_markdown();
+    let start = markdown
+        .find("## Phase 3 — Per step PCE-PR-C")
+        .expect("Phase 3");
+    let remainder = &markdown[start..];
+    let end = remainder[3..]
+        .find("\n## ")
+        .map_or(markdown.len(), |offset| start + 3 + offset + 1);
+    let phase3 = &markdown[start..end];
+    assert_eq!(
+        phase3.matches(PHASE3_PLANNING_PARAGRAPH).count(),
+        1,
+        "phase3 planning lifecycle paragraph"
+    );
+    assert_eq!(
+        markdown.matches(PLANNING_OPTION_CONTRACT).count(),
+        1,
+        "planning option contract"
+    );
+}
+
+#[test]
 fn role_registry_exact_set() {
     let measured: std::collections::BTreeSet<_> = repository_routes()
         .iter()
@@ -2124,6 +2388,15 @@ fn remaining_role_metadata_classes() {
                 .windows(2)
                 .any(|pair| pair == ["--evidence", "{{EVIDENCE}}"]),
             "evidence_source_by_role/{role}"
+        );
+        assert_eq!(
+            route
+                .tokens
+                .iter()
+                .filter(|token| token.as_str() == "--planning-act")
+                .count(),
+            usize::from(matches!(role, "step-plan-writer" | "step-plan-critic")),
+            "planning_act_by_role/{role}"
         );
         if role == "step-executor" {
             assert!(
@@ -3760,7 +4033,7 @@ fn placeholder_cases() {
             ReviewError::UnknownPlaceholder,
         );
     }
-    let logging = "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --plan-file {{PLAN_FILE}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --dry-run -- {{CALLER_ARG}}";
+    let logging = "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --plan-file {{PLAN_FILE}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --planning-act {{PLANNING_ACT}} --dry-run -- {{CALLER_ARG}}";
     for (name, position) in [
         ("unknown_placeholder_plan_file", "{{PLAN_FILE}}"),
         ("unknown_placeholder_log_file", "{{LOG_FILE}}"),
@@ -3768,6 +4041,7 @@ fn placeholder_cases() {
         ("unknown_placeholder_role", "{{ROLE}}"),
         ("unknown_placeholder_ref", "{{REF}}"),
         ("unknown_placeholder_evidence", "{{EVIDENCE}}"),
+        ("unknown_placeholder_planning_act", "{{PLANNING_ACT}}"),
     ] {
         assert_document_error_before_pce(
             name,
