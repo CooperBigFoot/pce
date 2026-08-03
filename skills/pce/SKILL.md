@@ -59,13 +59,14 @@ whitespace-separated tokens.
 
 The marker, opening `\`\`\`sh` fence, every physical command line, and closing `\`\`\`` fence begin at column 0. Only strictly empty physical lines may occur between the marker and opening fence. An anchor with leading spaces or tabs on any of those lines is invalid; numbered-list prose must end before the anchor and resume after it.
 
-The closed placeholder vocabulary is `CWD`, `SCHEMA`, `OUTPUT`, `PLAN_FILE`, `LOG_FILE`, `ENV`,
+The closed placeholder vocabulary is `CWD`, `SCHEMA`, `OUTPUT`, `PLAN_FILE`, `LOG_FILE`, `PATH_ENV`,
+`HOME_ENV`, `USER_ENV`,
 `NODE`, `MILESTONE_NODE`, `STEP_NODE`, `ROLE`, `REF`, `EVIDENCE`, `ABS_PATH`, and `CALLER_ARG`, each surrounded by two opening and
 two closing braces and occupying a complete token. Embedded, malformed, unknown, or aliased names
 are invalid. Codex routes own their working-directory and workspace-write sandbox options. A
 structured Codex route additionally owns its adjacent schema and output options. Gate routes own
 their working-directory and adjacent schema and output options. Optional environment, plan-file,
-and complete logging groups retain the binary's strict order. Every anchored route contains exactly one `--env {{ENV}}` entry. The plan-file and complete logging groups retain the binary's strict order; the plan-file group is optional, while the complete logging group is required for every canonical operating route. Dry-run remains available only after a complete logging group in synthetic review fixtures. Binary-owned child arguments may not be repeated in the caller tail.
+and complete logging groups retain the binary's strict order. Every anchored route contains exactly three environment entries, `--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}}`, each placeholder occurring exactly once and binding the operator's real `PATH`, `HOME`, and `USER`. The binary clears the child environment before applying these entries, so a route supplies every variable its child needs and nothing is inherited: `PATH` resolves the executable, without which the spawn itself fails; `HOME` reaches the operator's tracked git identity, without which a committing child silently authors under a fabricated host identity; and `USER` unlocks keychain OAuth, without which a gate child reports `Not logged in` and writes no verdict. Two entries are as invalid as one, so cardinality is falsified from both sides. The plan-file and complete logging groups retain the binary's strict order; the plan-file group is optional, while the complete logging group is required for every canonical operating route. Dry-run remains available only after a complete logging group in synthetic review fixtures. Binary-owned child arguments may not be repeated in the caller tail.
 
 Outside a valid anchored fence, a prohibited dispatch fragment is one inline code span, one complete fenced code block, or one shell-like physical line that contains both (a) the contiguous route name `pce dispatch codex` or `pce dispatch gate` and (b) at least one whitespace-delimited token that is a dispatch-only parent option, the standalone `--` delimiter, or any caller argument represented by a whitespace-delimited token after that delimiter.
 
@@ -81,47 +82,47 @@ These are the only canonical operating routes. `{{MILESTONE_NODE}}` is the canon
 
 <!-- pce-dispatch-route kind="gate-structured" -->
 ```sh
-pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node m1-s1 --role repository-analyst --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node m1-s1 --role repository-analyst --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="codex-structured" -->
 ```sh
-pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node m1-s1 --role milestone-planner --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node m1-s1 --role milestone-planner --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="gate-structured" -->
 ```sh
-pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node m1-s1 --role milestone-critic --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node m1-s1 --role milestone-critic --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="codex-structured" -->
 ```sh
-pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{MILESTONE_NODE}} --role step-planner --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{MILESTONE_NODE}} --role step-planner --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="gate-structured" -->
 ```sh
-pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{MILESTONE_NODE}} --role step-critic --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{MILESTONE_NODE}} --role step-critic --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="codex-unstructured" -->
 ```sh
-pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-plan-writer --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-plan-writer --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="gate-structured" -->
 ```sh
-pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-plan-critic --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-plan-critic --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="codex-structured" -->
 ```sh
-pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --plan-file {{PLAN_FILE}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-executor --ref {{REF}} --evidence {{EVIDENCE}} -- --add-dir {{ABS_PATH}} {{CALLER_ARG}}
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --plan-file {{PLAN_FILE}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-executor --ref {{REF}} --evidence {{EVIDENCE}} -- --add-dir {{ABS_PATH}} {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="gate-structured" -->
 ```sh
-pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role pr-reviewer --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role pr-reviewer --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
 ```
 
 ### Anchored dispatch purpose routes
@@ -130,12 +131,12 @@ These are the only purpose routes. They bind `{{CWD}}` to the exact worktree, `{
 
 <!-- pce-dispatch-route kind="codex-commit-completion" -->
 ```sh
-pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="codex-diagnostics" -->
 ```sh
-pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
 ```
 
 ## Event log contract

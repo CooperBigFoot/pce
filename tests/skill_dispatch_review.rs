@@ -14,6 +14,12 @@ use tempfile::TempDir;
 const EXPECTED_ANCHORED_ROUTE_COUNT: usize = 11;
 const EXPECTED_ROLE_ANCHOR_COUNT: usize = 9;
 const EXPECTED_PURPOSE_ANCHOR_COUNT: usize = 2;
+/// The child environment is cleared before `--env` entries are applied, so a route must supply
+/// every variable its child needs: `PATH` to resolve the executable, `HOME` to reach the
+/// operator's tracked git identity, and `USER` to unlock keychain OAuth for a gate spawn.
+const REQUIRED_ENVIRONMENT_ENTRIES: usize = 3;
+/// The ordered environment placeholders every anchored route binds, one occurrence each.
+const ENVIRONMENT_PLACEHOLDERS: [&str; 3] = ["{{PATH_ENV}}", "{{HOME_ENV}}", "{{USER_ENV}}"];
 const MARKER_START: &str = "<!-- pce-dispatch-route";
 const CONSOLIDATION_MARKER: &str = "<!-- pce-dispatch-issuance-consolidated -->";
 const ROLE_REGISTRY: [&str; 9] = [
@@ -105,7 +111,9 @@ enum Placeholder {
     Output,
     PlanFile,
     LogFile,
-    Env,
+    PathEnv,
+    HomeEnv,
+    UserEnv,
     Node,
     MilestoneNode,
     StepNode,
@@ -124,7 +132,9 @@ impl Placeholder {
             "{{OUTPUT}}" => Ok(Self::Output),
             "{{PLAN_FILE}}" => Ok(Self::PlanFile),
             "{{LOG_FILE}}" => Ok(Self::LogFile),
-            "{{ENV}}" => Ok(Self::Env),
+            "{{PATH_ENV}}" => Ok(Self::PathEnv),
+            "{{HOME_ENV}}" => Ok(Self::HomeEnv),
+            "{{USER_ENV}}" => Ok(Self::UserEnv),
             "{{NODE}}" => Ok(Self::Node),
             "{{MILESTONE_NODE}}" => Ok(Self::MilestoneNode),
             "{{STEP_NODE}}" => Ok(Self::StepNode),
@@ -153,6 +163,8 @@ struct ReviewBindings {
     plan_file: PathBuf,
     log_file: PathBuf,
     shim_dir: PathBuf,
+    child_home: PathBuf,
+    child_user: OsString,
     graph_schema: PathBuf,
     verdict_schema: PathBuf,
     graph_outputs: BTreeMap<String, PathBuf>,
@@ -227,7 +239,7 @@ enum ReviewError {
     EmptyEvidence,
     ParentGrammar,
     ZeroEnvironmentEntries(usize),
-    MultipleEnvironmentEntries(usize),
+    WrongEnvironmentCardinality(usize),
     MultipleDelimiters,
     CallerTailResuppliesBinaryArgument,
     IndentedMarker,
@@ -300,8 +312,10 @@ fn fixture() -> Fixture {
     let root = tempfile::tempdir_in(std::env::temp_dir()).expect("platform temp fixture");
     let cwd = root.path().join("cwd");
     let shim_dir = root.path().join("shim");
+    let child_home = root.path().join("home");
     fs::create_dir_all(cwd.join(".review")).expect("record directory");
     fs::create_dir_all(&shim_dir).expect("shim directory");
+    fs::create_dir_all(&child_home).expect("child home directory");
     let schema = root.path().join("schema.json");
     let plan_file = root.path().join("plan.bin");
     fs::write(&schema, br#"{"type":"object"}"#).expect("schema");
@@ -442,6 +456,8 @@ printf '{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"e
             plan_file,
             log_file: root.path().join("events.jsonl"),
             shim_dir,
+            child_home,
+            child_user: OsString::from("review-operator"),
             graph_schema,
             verdict_schema,
             graph_outputs,
@@ -474,22 +490,23 @@ fn base_command(kind: RouteKind) -> String {
     match kind {
         RouteKind::CodexUnstructured => concat!(
             "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write ",
-            "--env {{ENV}} -- {{CALLER_ARG}}"
+            "--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} -- {{CALLER_ARG}}"
         )
         .to_owned(),
         RouteKind::CodexStructured => concat!(
             "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write ",
-            "--env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} -- {{CALLER_ARG}}"
+            "--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} -- {{CALLER_ARG}}"
         )
         .to_owned(),
         RouteKind::CodexCommitCompletion | RouteKind::CodexDiagnostics => concat!(
-            "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} ",
+            "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write ",
+            "--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} ",
             "--log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} ",
             "--evidence {{EVIDENCE}} -- {{CALLER_ARG}}"
         )
         .to_owned(),
         RouteKind::GateStructured => concat!(
-            "pce dispatch gate --cwd {{CWD}} --env {{ENV}} ",
+            "pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} ",
             "--output-schema {{SCHEMA}} -o {{OUTPUT}} -- {{CALLER_ARG}}"
         )
         .to_owned(),
@@ -630,6 +647,12 @@ fn route_role(route: &AnchoredRoute) -> Option<&str> {
         .filter(|role| ROLE_REGISTRY.contains(role))
 }
 
+fn environment_entry(name: &str, value: &OsStr) -> OsString {
+    let mut entry = OsString::from(name);
+    entry.push(value);
+    entry
+}
+
 fn placeholder_value(placeholder: Placeholder, bindings: &ReviewBindings) -> &OsStr {
     match placeholder {
         Placeholder::Cwd => bindings.cwd.as_os_str(),
@@ -637,7 +660,9 @@ fn placeholder_value(placeholder: Placeholder, bindings: &ReviewBindings) -> &Os
         Placeholder::Output => bindings.output.as_os_str(),
         Placeholder::PlanFile => bindings.plan_file.as_os_str(),
         Placeholder::LogFile => bindings.log_file.as_os_str(),
-        Placeholder::Env => bindings.shim_dir.as_os_str(),
+        Placeholder::PathEnv => bindings.shim_dir.as_os_str(),
+        Placeholder::HomeEnv => bindings.child_home.as_os_str(),
+        Placeholder::UserEnv => bindings.child_user.as_os_str(),
         Placeholder::Node => OsStr::new("m7-s1"),
         Placeholder::MilestoneNode => OsStr::new("m7-s1"),
         Placeholder::StepNode => OsStr::new("m7-s2"),
@@ -736,12 +761,11 @@ fn substitute_route(
                     _ => ReviewError::ParentGrammar,
                 });
             }
-            if placeholder == Placeholder::Env {
-                let mut entry = OsString::from("PATH=");
-                entry.push(value);
-                Ok(entry)
-            } else {
-                Ok(value.to_owned())
+            match placeholder {
+                Placeholder::PathEnv => Ok(environment_entry("PATH=", value)),
+                Placeholder::HomeEnv => Ok(environment_entry("HOME=", value)),
+                Placeholder::UserEnv => Ok(environment_entry("USER=", value)),
+                _ => Ok(value.to_owned()),
             }
         })
         .collect()
@@ -806,8 +830,8 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
     if env_count == 0 {
         return Err(ReviewError::ZeroEnvironmentEntries(env_count));
     }
-    if env_count > 1 {
-        return Err(ReviewError::MultipleEnvironmentEntries(env_count));
+    if env_count != REQUIRED_ENVIRONMENT_ENTRIES {
+        return Err(ReviewError::WrongEnvironmentCardinality(env_count));
     }
     let has_structured = argv
         .get(position)
@@ -973,7 +997,11 @@ fn canonical_semantics(route: &AnchoredRoute) -> Result<(), ReviewError> {
             .filter(|token| token.as_str() == needle)
             .count()
     };
-    if count("--env") != 1 || count("{{ENV}}") != 1 {
+    if count("--env") != REQUIRED_ENVIRONMENT_ENTRIES
+        || ENVIRONMENT_PLACEHOLDERS
+            .iter()
+            .any(|placeholder| count(placeholder) != 1)
+    {
         return Err(ReviewError::RoleSemantics);
     }
     if !has_complete_logging_group(route) {
@@ -1683,7 +1711,10 @@ fn indented_anchor_closing_fence_reds() {
 fn route_zero_env_reds() {
     let markdown = document(
         "codex-unstructured",
-        &base_command(RouteKind::CodexUnstructured).replace("--env {{ENV}} ", ""),
+        &base_command(RouteKind::CodexUnstructured).replace(
+            "--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} ",
+            "",
+        ),
     );
     assert_document_error_before_pce(
         "route_zero_env_reds",
@@ -1693,25 +1724,59 @@ fn route_zero_env_reds() {
 }
 
 #[test]
-fn route_exactly_one_env_accepts() {
+fn route_exactly_three_env_accepts() {
     let markdown = document(
         "codex-unstructured",
         &base_command(RouteKind::CodexUnstructured),
     );
-    review_document(&markdown, &fixture().bindings).expect("route_exactly_one_env_accepts");
+    review_document(&markdown, &fixture().bindings).expect("route_exactly_three_env_accepts");
+}
+
+#[test]
+fn route_one_env_reds() {
+    let markdown = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured).replace(
+            "--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}}",
+            "--env {{PATH_ENV}}",
+        ),
+    );
+    assert_document_error_before_pce(
+        "route_one_env_reds",
+        &markdown,
+        ReviewError::WrongEnvironmentCardinality(1),
+    );
 }
 
 #[test]
 fn route_two_env_reds() {
     let markdown = document(
         "codex-unstructured",
-        &base_command(RouteKind::CodexUnstructured)
-            .replace("--env {{ENV}}", "--env {{ENV}} --env {{ENV}}"),
+        &base_command(RouteKind::CodexUnstructured).replace(
+            "--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}}",
+            "--env {{PATH_ENV}} --env {{HOME_ENV}}",
+        ),
     );
     assert_document_error_before_pce(
         "route_two_env_reds",
         &markdown,
-        ReviewError::MultipleEnvironmentEntries(2),
+        ReviewError::WrongEnvironmentCardinality(2),
+    );
+}
+
+#[test]
+fn route_four_env_reds() {
+    let markdown = document(
+        "codex-unstructured",
+        &base_command(RouteKind::CodexUnstructured).replace(
+            "--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}}",
+            "--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --env {{PATH_ENV}}",
+        ),
+    );
+    assert_document_error_before_pce(
+        "route_four_env_reds",
+        &markdown,
+        ReviewError::WrongEnvironmentCardinality(4),
     );
 }
 
@@ -1798,7 +1863,7 @@ fn canonical_role_semantics_by_role() {
                 .iter()
                 .filter(|token| *token == "--env")
                 .count(),
-            1,
+            REQUIRED_ENVIRONMENT_ENTRIES,
             "environment_cardinality_by_role/{role}"
         );
         assert!(
@@ -1931,18 +1996,20 @@ fn environment_cardinality_by_role() {
                 .iter()
                 .filter(|token| *token == "--env")
                 .count(),
-            1,
+            REQUIRED_ENVIRONMENT_ENTRIES,
             "environment_cardinality_by_role/{role}"
         );
-        assert_eq!(
-            route
-                .tokens
-                .iter()
-                .filter(|token| *token == "{{ENV}}")
-                .count(),
-            1,
-            "environment_cardinality_by_role/{role}"
-        );
+        for placeholder in ENVIRONMENT_PLACEHOLDERS {
+            assert_eq!(
+                route
+                    .tokens
+                    .iter()
+                    .filter(|token| token.as_str() == placeholder)
+                    .count(),
+                1,
+                "environment_cardinality_by_role/{role}/{placeholder}"
+            );
+        }
     }
 }
 
@@ -3683,7 +3750,7 @@ fn placeholder_cases() {
         ("unknown_placeholder_cwd", "{{CWD}}"),
         ("unknown_placeholder_schema", "{{SCHEMA}}"),
         ("unknown_placeholder_output", "{{OUTPUT}}"),
-        ("unknown_placeholder_env", "{{ENV}}"),
+        ("unknown_placeholder_env", "{{PATH_ENV}}"),
         ("unknown_placeholder_caller_tail", "{{CALLER_ARG}}"),
     ];
     for (name, position) in positions {
@@ -3693,7 +3760,7 @@ fn placeholder_cases() {
             ReviewError::UnknownPlaceholder,
         );
     }
-    let logging = "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --plan-file {{PLAN_FILE}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --dry-run -- {{CALLER_ARG}}";
+    let logging = "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --plan-file {{PLAN_FILE}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --dry-run -- {{CALLER_ARG}}";
     for (name, position) in [
         ("unknown_placeholder_plan_file", "{{PLAN_FILE}}"),
         ("unknown_placeholder_log_file", "{{LOG_FILE}}"),
@@ -3868,8 +3935,8 @@ fn route_shape_tail_and_delimiter_cases() {
         "codex_structured_without_pair_rejected"
     );
 
-    let codex_logged = "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --dry-run -- {{CALLER_ARG}}";
-    let gate_logged = "pce dispatch gate --cwd {{CWD}} --env {{ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --dry-run -- {{CALLER_ARG}}";
+    let codex_logged = "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --dry-run -- {{CALLER_ARG}}";
+    let gate_logged = "pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --dry-run -- {{CALLER_ARG}}";
     for (name, kind, command) in [
         (
             "codex_order_dry_run_before_delimiter",
@@ -4974,7 +5041,14 @@ fn assert_purpose_route_grammar(name: &str, kind: RouteKind) {
         route.kind.required_sandbox(),
         token_value(&route, "--sandbox")
     );
-    assert_eq!(count("--env"), 1, "{name}/environment");
+    assert_eq!(
+        count("--env"),
+        REQUIRED_ENVIRONMENT_ENTRIES,
+        "{name}/environment"
+    );
+    for placeholder in ENVIRONMENT_PLACEHOLDERS {
+        assert_eq!(count(placeholder), 1, "{name}/environment/{placeholder}");
+    }
     let artifact = count("--output-schema") + count("-o");
     assert_eq!(
         artifact, 0,
@@ -5343,7 +5417,7 @@ fn cold_rule_branch_controls() {
 #[test]
 fn fenced_hash_is_not_atx_heading() {
     let document = format!(
-        "{CONSOLIDATION_MARKER}\n\n## Real section\n\n{}\n```sh\npce dispatch codex --cwd {{{{CWD}}}} --sandbox workspace-write --env {{{{ENV}}}} --log-file {{{{LOG_FILE}}}} --node {{{{NODE}}}} --role {{{{ROLE}}}} --ref {{{{REF}}}} --evidence {{{{EVIDENCE}}}} -- {{{{CALLER_ARG}}}}\n```\n\n```sh\n# Only for the tracked-file-present, no-current-record initial case:\npce status\n```\n\npce log --file /tmp/events --kind dispatch --node m7-s4\n\n## Next real section\n",
+        "{CONSOLIDATION_MARKER}\n\n## Real section\n\n{}\n```sh\npce dispatch codex --cwd {{{{CWD}}}} --sandbox workspace-write --env {{{{PATH_ENV}}}} --env {{{{HOME_ENV}}}} --env {{{{USER_ENV}}}} --log-file {{{{LOG_FILE}}}} --node {{{{NODE}}}} --role {{{{ROLE}}}} --ref {{{{REF}}}} --evidence {{{{EVIDENCE}}}} -- {{{{CALLER_ARG}}}}\n```\n\n```sh\n# Only for the tracked-file-present, no-current-record initial case:\npce status\n```\n\npce log --file /tmp/events --kind dispatch --node m7-s4\n\n## Next real section\n",
         marker("codex-commit-completion")
     );
     let headings = atx_heading_lines(&document);
