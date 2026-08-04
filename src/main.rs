@@ -2283,6 +2283,7 @@ fn render_seatbelt_profile(
         "(deny default)\n",
         "(import \"system.sb\")\n",
         "(allow process*)\n",
+        "(allow signal (target children))\n",
         "(allow file-read*)\n"
     )
     .to_owned();
@@ -2295,10 +2296,22 @@ fn render_seatbelt_profile(
     }
     profile.push_str("  ))\n(allow file-write*\n");
     profile.push_str(&format!("  (subpath \"{repository_root}\")\n"));
-    for directory in temporary_directories {
+    for directory in &temporary_directories {
         profile.push_str(&format!("  (subpath \"{directory}\")\n"));
     }
-    profile.push_str(")\n(deny network*)");
+    profile.push_str(")\n(deny network*\n  (require-all\n");
+    profile.push_str(&format!(
+        "    (require-not (subpath \"{repository_root}\"))\n"
+    ));
+    for directory in &temporary_directories {
+        profile.push_str(&format!("    (require-not (subpath \"{directory}\"))\n"));
+    }
+    profile.push_str("  ))\n(allow network-bind network-outbound\n");
+    profile.push_str(&format!("  (subpath \"{repository_root}\")\n"));
+    for directory in &temporary_directories {
+        profile.push_str(&format!("  (subpath \"{directory}\")\n"));
+    }
+    profile.push(')');
     Ok(profile)
 }
 
@@ -4788,6 +4801,7 @@ fn classify_append_error(error: AppendError<std::io::Error>) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::ffi::OsString;
     use std::fs;
     use std::io::{Cursor, Read};
@@ -4819,9 +4833,48 @@ mod tests {
         lexically_normalized_repository_root, measure_tracked_contract_at_root, observe_git,
         observe_terminal_line, parse_command, parse_dispatch_graph, parse_tracked_contract,
         read_at_default_branch_head, read_event_log, readiness_version_policies,
-        repository_contracts, run, run_log_read, seatbelt_execution_capability,
-        select_bootstrap_candidate, validated_snapshot_value,
+        render_seatbelt_profile, repository_contracts, run, run_log_read,
+        seatbelt_execution_capability, select_bootstrap_candidate, validated_snapshot_value,
     };
+
+    #[test]
+    fn seatbelt_profile_allows_only_child_signals_and_path_filtered_unix_sockets() {
+        let temporary_directories = BTreeSet::from([PathBuf::from("/private/tmp")]);
+
+        let profile =
+            render_seatbelt_profile(Path::new("/workspace/repository"), &temporary_directories)
+                .expect("fixed Seatbelt paths should render");
+
+        assert_eq!(
+            profile,
+            concat!(
+                "(version 1)\n",
+                "(deny default)\n",
+                "(import \"system.sb\")\n",
+                "(allow process*)\n",
+                "(allow signal (target children))\n",
+                "(allow file-read*)\n",
+                "(deny file-write*\n",
+                "  (require-all\n",
+                "    (require-not (subpath \"/workspace/repository\"))\n",
+                "    (require-not (subpath \"/private/tmp\"))\n",
+                "  ))\n",
+                "(allow file-write*\n",
+                "  (subpath \"/workspace/repository\")\n",
+                "  (subpath \"/private/tmp\")\n",
+                ")\n",
+                "(deny network*\n",
+                "  (require-all\n",
+                "    (require-not (subpath \"/workspace/repository\"))\n",
+                "    (require-not (subpath \"/private/tmp\"))\n",
+                "  ))\n",
+                "(allow network-bind network-outbound\n",
+                "  (subpath \"/workspace/repository\")\n",
+                "  (subpath \"/private/tmp\")\n",
+                ")"
+            )
+        );
+    }
 
     fn record_nested_seatbelt_skip() {
         let status = ProcessCommand::new("/bin/sh")
