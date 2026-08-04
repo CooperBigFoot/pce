@@ -7,6 +7,7 @@ pub mod dispatch;
 pub mod dispatch_meter;
 pub mod event_log;
 pub mod gate_execution;
+pub mod gate_replay;
 pub mod run_state;
 pub mod tracked_contract;
 pub mod vision;
@@ -61,7 +62,14 @@ pub use gate_execution::{
     GateExecutionError, GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig,
     GateExecutionRef, GateExecutionRejection, GateExecutionResponse, GateObservedResult,
     GateProcessObservation, GateProcessStimulus, GateStimulus, GateTerminalStatus,
-    parse_gate_stimulus, validate_verdict_references,
+    parse_gate_execution_evidence, parse_gate_stimulus, validate_verdict_references,
+};
+pub use gate_replay::{
+    ArtifactConformance, CheckoutFailure, CheckoutStage, ExpectedMatch, ExpectedVerdictOutcome,
+    GateReplayError, NamedReplayRef, OracleFailure, OracleStage, RepairSensitivity,
+    ReplayArtifactObservation, ReplayObservation, ReplayRefOutcome, ReplayRefResult,
+    RepositoryRelativePath, classify_replay_pair, fold_replay_runs, normalize_replay_observation,
+    parse_replay_output_path, parse_replay_schema_path, rebase_gate_stimulus,
 };
 pub use run_state::{
     ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BranchSnapshot, BranchState,

@@ -6,7 +6,7 @@ use std::net::Shutdown;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -20,33 +20,37 @@ use pce_core::{
     AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
     AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath,
-    AuthorityFailure, BranchState, CanonicalNode as DispatchNode, ChildEnvironment,
-    CodexTerminalObservation, CodexTerminalUsage, CreationDate, CurrentArtifactObservation,
-    CurrentArtifactState, DispatchCandidate, DispatchDuration, DispatchEnvelope,
-    DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole,
-    DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef,
-    EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
-    Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode,
-    FileObservation, FindingAdmission, GateExecutionEvidence, GateExecutionRecord,
-    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
-    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
-    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
+    AuthorityFailure, BranchState, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage,
+    ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage, CreationDate,
+    CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchDuration,
+    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef,
+    DispatchRole, DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult,
+    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
+    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable,
+    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, GateExecutionEvidence,
+    GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection,
+    GateExecutionResponse, GateObservedResult, GateProcessObservation, GateProcessStimulus,
+    GateStimulus, GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
-    MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
-    OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath, RepositoryBranchName,
-    RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRoot, RunSnapshot, Sandbox,
-    SeatbeltCapability, Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding,
-    StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName, TagState,
-    TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy,
-    VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
-    append_event, classify_claude_result, classify_codex_terminal_usage,
-    classify_seatbelt_capability, compose_gate_arguments, compute_dispatchability, create_vision,
-    derive_merge_status, derive_milestone_merge_status, derive_run_state,
-    dispatch_completion_payload, dispatch_invocation, dispatch_payload, event_record_matches,
-    measure_contract_snapshot, meter_dispatches, parse_acceptance_criteria, parse_claude_result,
-    parse_event_line, parse_gate_stimulus, parse_tracked_repository_contract,
+    MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, ObservedExitStatus,
+    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PullRequestNumber,
+    PullRequestSelector, RecoveryLogPath, ReplayArtifactObservation, ReplayObservation,
+    ReplayRefResult, RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation,
+    RepositoryName, RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
+    RepositoryRelativePath, RepositoryRoot, RunSnapshot, Sandbox, SeatbeltCapability, Sha256Digest,
+    SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
+    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
+    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
+    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
+    classify_codex_terminal_usage, classify_replay_pair, classify_seatbelt_capability,
+    compose_gate_arguments, compute_dispatchability, create_vision, derive_merge_status,
+    derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
+    dispatch_invocation, dispatch_payload, event_record_matches, fold_replay_runs,
+    measure_contract_snapshot, meter_dispatches, normalize_replay_observation,
+    parse_acceptance_criteria, parse_claude_result, parse_event_line,
+    parse_gate_execution_evidence, parse_gate_stimulus, parse_replay_output_path,
+    parse_replay_schema_path, parse_tracked_repository_contract, rebase_gate_stimulus,
     render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
     serialize_tracked_repository_contract, validate_artifact, validate_verdict_references,
     validate_workflow_coverage,
@@ -68,7 +72,8 @@ const USAGE: &str = concat!(
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
     "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CODEX_ARGUMENT>...\n",
     "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
-    "       pce gate exec"
+    "       pce gate exec\n",
+    "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>"
 );
 const GATE_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const GATE_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -79,6 +84,11 @@ const GATE_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GATE_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(12);
 const GATE_MAX_CONNECTION_WORKERS: usize = 32;
 const GATE_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const REPLAY_GIT_TIMEOUT: Duration = Duration::from_secs(5);
+const REPLAY_RUN_TIMEOUT: Duration = Duration::from_secs(30);
+const REPLAY_OVERALL_TIMEOUT: Duration = Duration::from_secs(150);
+const REPLAY_PAUSE_TIMEOUT: Duration = Duration::from_secs(10);
+const REPLAY_PAUSE_ENV: &str = "PCE_REPLAY_PAUSE_AFTER_RESOLVE";
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const VERDICT_SCHEMA: &str = include_str!("../skills/pce/schemas/verdict.schema.json");
 const ORIGIN: &str = "origin";
@@ -109,6 +119,8 @@ const BUILD_BOOTSTRAP_CANDIDATES: &[&str] = &[
 #[derive(Debug)]
 enum Command {
     GateExec,
+    GateReplay(GateReplayCommand),
+    GateReplayWorker,
     Dispatch {
         envelope: DispatchEnvelope,
         logging: Option<DispatchLoggingMode>,
@@ -161,6 +173,19 @@ enum Command {
         repository: RepositoryName,
         node: NodeId,
     },
+}
+
+#[derive(Debug)]
+struct GateReplayCommand {
+    repository_root: PathBuf,
+    evidence_path: PathBuf,
+    execution_ref: GateExecutionRef,
+    broken_ref: NamedReplayRef,
+    repaired_ref: NamedReplayRef,
+    schema_path: RepositoryRelativePath,
+    output_path: RepositoryRelativePath,
+    expected: ExpectedVerdictOutcome,
+    pause_directory: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -330,6 +355,10 @@ fn main() -> Result<()> {
 fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
     match parse_command(args)? {
         Command::GateExec => run_gate_exec(input),
+        Command::GateReplay(command) => exec_gate_replay_worker(command),
+        Command::GateReplayWorker => {
+            read_gate_replay_worker_request(input).and_then(run_gate_replay)
+        }
         Command::Dispatch { envelope, logging } => match logging.as_ref() {
             Some(DispatchLoggingMode::DryRun { path, metadata }) => {
                 run_dispatch_projection(&envelope, path, metadata)
@@ -398,6 +427,12 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
     let args: Vec<String> = args.collect();
     match args.as_slice() {
         [verb, action] if verb == "gate" && action == "exec" => Ok(Command::GateExec),
+        [verb, action, rest @ ..] if verb == "gate" && action == "replay" => {
+            parse_gate_replay(rest).with_context(|| USAGE)
+        }
+        [verb, action] if verb == "gate" && action == "replay-worker" => {
+            Ok(Command::GateReplayWorker)
+        }
         [verb, action] if verb == "vision" && action == "check" => Ok(Command::VisionCheck),
         [verb, action, raw_name] if verb == "vision" && action == "new" => {
             let name = VisionName::parse(raw_name).context("failed to parse vision name")?;
@@ -415,6 +450,57 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         .with_context(|| USAGE),
         _ => bail!(USAGE),
     }
+}
+
+fn parse_gate_replay(rest: &[String]) -> Result<Command> {
+    let [
+        repo_flag,
+        repo,
+        evidence_flag,
+        evidence,
+        execution_flag,
+        execution_ref,
+        broken_flag,
+        broken_ref,
+        repaired_flag,
+        repaired_ref,
+        schema_flag,
+        schema,
+        output_flag,
+        output,
+        expected_flag,
+        expected,
+    ] = rest
+    else {
+        bail!(USAGE)
+    };
+    if repo_flag != "--repo-root"
+        || evidence_flag != "--evidence"
+        || execution_flag != "--execution-ref"
+        || broken_flag != "--broken-ref"
+        || repaired_flag != "--repaired-ref"
+        || schema_flag != "--schema"
+        || output_flag != "--output"
+        || expected_flag != "--expected"
+    {
+        bail!(USAGE);
+    }
+    let repository_root = PathBuf::from(repo);
+    let evidence_path = PathBuf::from(evidence);
+    if !repository_root.is_absolute() || !evidence_path.is_absolute() {
+        bail!(USAGE);
+    }
+    Ok(Command::GateReplay(GateReplayCommand {
+        repository_root,
+        evidence_path,
+        execution_ref: GateExecutionRef::parse(execution_ref.clone())?,
+        broken_ref: NamedReplayRef::parse(broken_ref.clone())?,
+        repaired_ref: NamedReplayRef::parse(repaired_ref.clone())?,
+        schema_path: parse_replay_schema_path(schema)?,
+        output_path: parse_replay_output_path(output)?,
+        expected: ExpectedVerdictOutcome::parse(expected)?,
+        pause_directory: None,
+    }))
 }
 
 fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
@@ -3508,6 +3594,841 @@ fn run_gate_exec(input: &mut dyn Read) -> Result<()> {
         .context("failed to flush gate execution response")
 }
 
+enum ResolvedReplayRef {
+    Commit(String),
+    Failed(ReplayRefResult),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplaySide {
+    Broken,
+    Repaired,
+}
+
+enum ReplayRefCampaign {
+    Complete(Box<ReplayRefResult>),
+    Running {
+        requested_ref: NamedReplayRef,
+        resolved_commit: String,
+        observations: Vec<ReplayObservation>,
+    },
+}
+
+impl ReplayRefCampaign {
+    fn new(requested_ref: NamedReplayRef, resolved: ResolvedReplayRef) -> Self {
+        match resolved {
+            ResolvedReplayRef::Commit(resolved_commit) => Self::Running {
+                requested_ref,
+                resolved_commit,
+                observations: Vec::with_capacity(2),
+            },
+            ResolvedReplayRef::Failed(failure) => Self::Complete(Box::new(failure)),
+        }
+    }
+
+    fn finish(self, expected: ExpectedVerdictOutcome) -> Result<ReplayRefResult> {
+        match self {
+            Self::Complete(result) => Ok(*result),
+            Self::Running {
+                requested_ref,
+                resolved_commit,
+                mut observations,
+            } => {
+                let second = observations
+                    .pop()
+                    .ok_or_else(|| anyhow!("clean replay run timed out after 30 seconds"))?;
+                let first = observations
+                    .pop()
+                    .ok_or_else(|| anyhow!("clean replay run timed out after 30 seconds"))?;
+                Ok(ReplayRefResult::Completed {
+                    requested_ref,
+                    resolved_commit,
+                    outcome: fold_replay_runs(first, second, expected),
+                })
+            }
+        }
+    }
+}
+
+struct ReplayPauseGuard {
+    resolved_marker: Option<PathBuf>,
+}
+
+struct ReplayParentGuard(PathBuf);
+
+impl Drop for ReplayParentGuard {
+    fn drop(&mut self) {
+        let _result = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl Drop for ReplayPauseGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.resolved_marker.take() {
+            let _result = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn exec_gate_replay_worker(mut command: GateReplayCommand) -> Result<()> {
+    command.pause_directory = parse_replay_pause_seam()?;
+    let expected = match command.expected {
+        ExpectedVerdictOutcome::Conforming => "conforming-verdict",
+        ExpectedVerdictOutcome::Nonconforming => "nonconforming-verdict",
+    };
+    let wire = serde_json::to_vec(&json!({
+        "repository_root": command.repository_root,
+        "evidence_path": command.evidence_path,
+        "execution_ref": command.execution_ref.as_str(),
+        "broken_ref": command.broken_ref.as_str(),
+        "repaired_ref": command.repaired_ref.as_str(),
+        "schema_path": command.schema_path.as_path(),
+        "output_path": command.output_path.as_path(),
+        "expected": expected,
+        "pause_directory": command.pause_directory,
+    }))
+    .context("failed to encode private gate replay request")?;
+
+    let parent = ReplayParentGuard(create_replay_parent()?);
+    let request_path = parent.0.join("request");
+    let mut request = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&request_path)
+        .context("failed to create private gate replay request")?;
+    request
+        .write_all(&wire)
+        .context("failed to write private gate replay request")?;
+    request
+        .seek(SeekFrom::Start(0))
+        .context("failed to rewind private gate replay request")?;
+    std::fs::remove_file(&request_path).context("failed to unlink private gate replay request")?;
+    std::fs::remove_dir(&parent.0).context("failed to remove private gate replay request root")?;
+    std::mem::forget(parent);
+
+    let executable = std::env::current_exe().context("failed to locate gate replay worker")?;
+    let error = std::process::Command::new(executable)
+        .args(["gate", "replay-worker"])
+        .env_remove(REPLAY_PAUSE_ENV)
+        .stdin(Stdio::from(request))
+        .exec();
+    Err(Error::new(error).context("failed to replace gate replay launcher"))
+}
+
+fn read_gate_replay_worker_request(input: &mut dyn Read) -> Result<GateReplayCommand> {
+    let mut wire = Vec::new();
+    input
+        .take(1024 * 1024)
+        .read_to_end(&mut wire)
+        .context("failed to read private gate replay request")?;
+    let value: Value =
+        serde_json::from_slice(&wire).context("failed to parse private gate replay request")?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("failed to parse private gate replay request"))?;
+    require_exact_keys(
+        object,
+        &[
+            "repository_root",
+            "evidence_path",
+            "execution_ref",
+            "broken_ref",
+            "repaired_ref",
+            "schema_path",
+            "output_path",
+            "expected",
+            "pause_directory",
+        ],
+    )
+    .context("failed to parse private gate replay request")?;
+    let string = |key: &str| -> Result<&str> {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("failed to parse private gate replay request"))
+    };
+    let pause_directory = match object.get("pause_directory") {
+        Some(Value::Null) => None,
+        Some(value) => {
+            Some(PathBuf::from(value.as_str().ok_or_else(|| {
+                anyhow!("failed to parse private gate replay request")
+            })?))
+        }
+        None => return Err(anyhow!("failed to parse private gate replay request")),
+    };
+    Ok(GateReplayCommand {
+        repository_root: PathBuf::from(string("repository_root")?),
+        evidence_path: PathBuf::from(string("evidence_path")?),
+        execution_ref: GateExecutionRef::parse(string("execution_ref")?.to_owned())?,
+        broken_ref: NamedReplayRef::parse(string("broken_ref")?.to_owned())?,
+        repaired_ref: NamedReplayRef::parse(string("repaired_ref")?.to_owned())?,
+        schema_path: parse_replay_schema_path(string("schema_path")?)?,
+        output_path: parse_replay_output_path(string("output_path")?)?,
+        expected: ExpectedVerdictOutcome::parse(string("expected")?)?,
+        pause_directory,
+    })
+}
+
+fn run_gate_replay(command: GateReplayCommand) -> Result<()> {
+    let started = Instant::now();
+    let overall_deadline = started + REPLAY_OVERALL_TIMEOUT;
+    let repository_root = std::fs::canonicalize(&command.repository_root)
+        .context("failed to canonicalize replay repository root")?;
+    let evidence_bytes =
+        std::fs::read(&command.evidence_path).context("failed to read gate execution evidence")?;
+    let evidence = parse_gate_execution_evidence(&evidence_bytes)?;
+    let record = evidence.record(&command.execution_ref)?;
+    rebase_gate_stimulus(&record.stimulus, &repository_root, &repository_root)?;
+    let broken_resolved =
+        resolve_replay_ref(&repository_root, &command.broken_ref, overall_deadline)?;
+    let repaired_resolved =
+        resolve_replay_ref(&repository_root, &command.repaired_ref, overall_deadline)?;
+    let _pause_guard = if matches!(broken_resolved, ResolvedReplayRef::Commit(_))
+        && matches!(repaired_resolved, ResolvedReplayRef::Commit(_))
+    {
+        run_replay_pause_seam(command.pause_directory.as_deref(), overall_deadline)?
+    } else {
+        ReplayPauseGuard {
+            resolved_marker: None,
+        }
+    };
+
+    let stimulus = record.stimulus.clone();
+    let mut broken = ReplayRefCampaign::new(command.broken_ref, broken_resolved);
+    let mut repaired = ReplayRefCampaign::new(command.repaired_ref, repaired_resolved);
+    for side in create_replay_schedule()? {
+        let campaign = match side {
+            ReplaySide::Broken => &mut broken,
+            ReplaySide::Repaired => &mut repaired,
+        };
+        evaluate_replay_ref_run(
+            campaign,
+            &repository_root,
+            &stimulus,
+            &command.schema_path,
+            &command.output_path,
+            overall_deadline,
+        )?;
+    }
+    reconcile_identical_commit_observations(&mut broken, &mut repaired);
+    let broken = broken.finish(command.expected)?;
+    let repaired = repaired.finish(command.expected)?;
+    require_replay_overall_deadline(overall_deadline)?;
+    let classification = classify_replay_pair(&broken, &repaired);
+    let report =
+        serialize_replay_report(&command.execution_ref, &broken, &repaired, classification)?;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(&report)
+        .context("failed to terminate gate replay report")?;
+    stdout.flush().context("failed to flush gate replay report")
+}
+
+fn serialize_replay_report(
+    execution_ref: &GateExecutionRef,
+    broken: &ReplayRefResult,
+    repaired: &ReplayRefResult,
+    classification: pce_core::RepairSensitivity,
+) -> Result<Vec<u8>> {
+    let mut report = Vec::new();
+    report.extend_from_slice(
+        br#"{"schema_id":"pce.gate-replay-report","schema_version":1,"execution_ref":"#,
+    );
+    serde_json::to_writer(&mut report, execution_ref)?;
+    report.extend_from_slice(b",\"broken\":");
+    serde_json::to_writer(&mut report, broken)?;
+    report.extend_from_slice(b",\"repaired\":");
+    serde_json::to_writer(&mut report, repaired)?;
+    report.extend_from_slice(b",\"classification\":");
+    serde_json::to_writer(&mut report, &classification)?;
+    report.extend_from_slice(b"}\n");
+    Ok(report)
+}
+
+fn parse_replay_pause_seam() -> Result<Option<PathBuf>> {
+    let Some(value) = std::env::var_os(REPLAY_PAUSE_ENV) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    let valid = path.is_absolute()
+        && path.is_dir()
+        && !path.join("resolved").exists()
+        && !path.join("continue").exists();
+    if !valid {
+        bail!(
+            "replay pause-after-resolve seam requires an existing absolute directory with no `resolved` or `continue` entry"
+        );
+    }
+    Ok(Some(path))
+}
+
+fn run_replay_pause_seam(
+    directory: Option<&Path>,
+    overall_deadline: Instant,
+) -> Result<ReplayPauseGuard> {
+    let Some(directory) = directory else {
+        return Ok(ReplayPauseGuard {
+            resolved_marker: None,
+        });
+    };
+    let resolved = directory.join("resolved");
+    OpenOptions::new().write(true).create_new(true).open(&resolved)
+        .context("replay pause-after-resolve seam requires an existing absolute directory with no `resolved` or `continue` entry")?;
+    let guard = ReplayPauseGuard {
+        resolved_marker: Some(resolved),
+    };
+    let deadline = Instant::now() + REPLAY_PAUSE_TIMEOUT;
+    loop {
+        if Instant::now() >= overall_deadline {
+            bail!("gate replay exceeded its 150 second overall deadline");
+        }
+        if Instant::now() >= deadline {
+            bail!("replay pause-after-resolve seam timed out after 10 seconds");
+        }
+        let continuation = directory.join("continue");
+        match std::fs::metadata(&continuation) {
+            Ok(metadata) if metadata.is_file() && metadata.len() == 0 => return Ok(guard),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::debug!(error = ?error, "failed to inspect replay seam continuation")
+            }
+        }
+        std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL);
+    }
+}
+
+fn create_replay_parent() -> Result<PathBuf> {
+    for _attempt in 0..1000 {
+        let mut opaque = [0_u8; 16];
+        File::open("/dev/urandom")
+            .context("failed to open operating-system randomness for gate replay")?
+            .read_exact(&mut opaque)
+            .context("failed to read operating-system randomness for gate replay")?;
+        let identifier = opaque
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let path = std::env::temp_dir().join(format!("pce-gate-replay-{identifier}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => {
+                return std::fs::canonicalize(&path).map_err(|error| {
+                    Error::new(error)
+                        .context("failed to canonicalize gate replay temporary directory")
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(
+                    Error::new(error).context("failed to create gate replay temporary directory")
+                );
+            }
+        }
+    }
+    bail!("failed to create gate replay temporary directory")
+}
+
+fn create_replay_schedule() -> Result<[ReplaySide; 4]> {
+    let mut random = File::open("/dev/urandom")
+        .context("failed to open operating-system randomness for gate replay")?;
+    create_replay_schedule_from(&mut random)
+}
+
+fn create_replay_schedule_from(random: &mut impl Read) -> Result<[ReplaySide; 4]> {
+    let mut schedule = [
+        ReplaySide::Broken,
+        ReplaySide::Broken,
+        ReplaySide::Repaired,
+        ReplaySide::Repaired,
+    ];
+    for index in (1..schedule.len()).rev() {
+        let selected = replay_random_index(random, index + 1)?;
+        schedule.swap(index, selected);
+    }
+    Ok(schedule)
+}
+
+fn replay_random_index(random: &mut impl Read, upper_bound: usize) -> Result<usize> {
+    let acceptance_limit = 256 - (256 % upper_bound);
+    loop {
+        let mut byte = [0_u8; 1];
+        random
+            .read_exact(&mut byte)
+            .context("failed to read operating-system randomness for gate replay")?;
+        if usize::from(byte[0]) < acceptance_limit {
+            return Ok(usize::from(byte[0]) % upper_bound);
+        }
+    }
+}
+
+fn reconcile_identical_commit_observations(
+    broken: &mut ReplayRefCampaign,
+    repaired: &mut ReplayRefCampaign,
+) {
+    let (
+        ReplayRefCampaign::Running {
+            resolved_commit: broken_commit,
+            observations: broken_observations,
+            ..
+        },
+        ReplayRefCampaign::Running {
+            resolved_commit: repaired_commit,
+            observations: repaired_observations,
+            ..
+        },
+    ) = (broken, repaired)
+    else {
+        return;
+    };
+    if broken_commit != repaired_commit {
+        return;
+    }
+    let Some(first) = broken_observations.first().cloned() else {
+        return;
+    };
+    let different = broken_observations
+        .iter()
+        .chain(repaired_observations.iter())
+        .find(|observation| **observation != first)
+        .cloned();
+    if let Some(different) = different {
+        *broken_observations = vec![first.clone(), different.clone()];
+        *repaired_observations = vec![first, different];
+    }
+}
+
+fn resolve_replay_ref(
+    repository_root: &Path,
+    requested: &NamedReplayRef,
+    overall_deadline: Instant,
+) -> Result<ResolvedReplayRef> {
+    require_replay_overall_deadline(overall_deadline)?;
+    let revision = format!("{}^{{commit}}", requested.as_str());
+    let output = run_replay_git(
+        repository_root,
+        &["rev-parse", "--verify", "--end-of-options", &revision],
+        overall_deadline,
+    );
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::debug!(requested_ref = requested.as_str(), error = ?error, "replay ref resolution failed");
+            return Ok(ResolvedReplayRef::Failed(ReplayRefResult::CheckoutFailed {
+                requested_ref: requested.clone(),
+                checkout_failed: CheckoutFailure {
+                    stage: CheckoutStage::ResolveRef,
+                    diagnostic: format!(
+                        "failed to resolve replay ref `{}` to a commit",
+                        requested.as_str()
+                    ),
+                },
+            }));
+        }
+    };
+    if !output.status.success() {
+        tracing::debug!(requested_ref = requested.as_str(), stderr = %String::from_utf8_lossy(&output.stderr), "replay ref resolution failed");
+        return Ok(ResolvedReplayRef::Failed(ReplayRefResult::CheckoutFailed {
+            requested_ref: requested.clone(),
+            checkout_failed: CheckoutFailure {
+                stage: CheckoutStage::ResolveRef,
+                diagnostic: format!(
+                    "failed to resolve replay ref `{}` to a commit",
+                    requested.as_str()
+                ),
+            },
+        }));
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if commit.len() != 40
+        || !commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Ok(ResolvedReplayRef::Failed(ReplayRefResult::CheckoutFailed {
+            requested_ref: requested.clone(),
+            checkout_failed: CheckoutFailure {
+                stage: CheckoutStage::ResolveRef,
+                diagnostic: format!(
+                    "failed to resolve replay ref `{}` to a commit",
+                    requested.as_str()
+                ),
+            },
+        }));
+    }
+    Ok(ResolvedReplayRef::Commit(commit))
+}
+
+fn evaluate_replay_ref_run(
+    campaign: &mut ReplayRefCampaign,
+    repository_root: &Path,
+    stimulus: &GateStimulus,
+    schema_path: &RepositoryRelativePath,
+    output_path: &RepositoryRelativePath,
+    overall_deadline: Instant,
+) -> Result<()> {
+    let ReplayRefCampaign::Running {
+        requested_ref,
+        resolved_commit,
+        observations,
+    } = campaign
+    else {
+        return Ok(());
+    };
+    let parent = ReplayParentGuard(create_replay_parent()?);
+    let checkout = parent.0.join("checkout");
+    if let Err(error) = create_isolated_replay_checkout(
+        repository_root,
+        &checkout,
+        resolved_commit,
+        overall_deadline,
+    ) {
+        tracing::debug!(requested_ref = requested_ref.as_str(), error = ?error, "isolated replay checkout creation failed");
+        let diagnostic = format!(
+            "failed to create clean replay checkout for ref `{}`",
+            requested_ref.as_str()
+        );
+        cleanup_replay_parent(&parent.0)?;
+        std::mem::forget(parent);
+        *campaign = ReplayRefCampaign::Complete(Box::new(ReplayRefResult::CheckoutFailed {
+            requested_ref: requested_ref.clone(),
+            checkout_failed: CheckoutFailure {
+                stage: CheckoutStage::CreateWorktree,
+                diagnostic,
+            },
+        }));
+        return Ok(());
+    }
+    let run_result = run_clean_replay(
+        repository_root,
+        &checkout,
+        &parent.0,
+        requested_ref,
+        stimulus,
+        schema_path,
+        output_path,
+    );
+    validate_replay_cleanup_target(&parent.0, &checkout)?;
+    cleanup_replay_parent(&parent.0)?;
+    std::mem::forget(parent);
+    match run_result? {
+        CleanReplayResult::Observed(observation) => observations.push(observation),
+        CleanReplayResult::OracleFailed(failure) => {
+            *campaign = ReplayRefCampaign::Complete(Box::new(ReplayRefResult::OracleFailed {
+                requested_ref: requested_ref.clone(),
+                resolved_commit: resolved_commit.clone(),
+                oracle_failed: failure,
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn create_isolated_replay_checkout(
+    repository_root: &Path,
+    checkout: &Path,
+    resolved_commit: &str,
+    overall_deadline: Instant,
+) -> Result<()> {
+    let replay_parent = checkout
+        .parent()
+        .ok_or_else(|| anyhow!("replay checkout must have a parent"))?;
+    let private_repository = replay_parent.join("repository.git");
+    let checkout_spelling = checkout
+        .to_str()
+        .ok_or_else(|| anyhow!("replay checkout path must be UTF-8"))?;
+    let private_repository_spelling = private_repository
+        .to_str()
+        .ok_or_else(|| anyhow!("private replay repository path must be UTF-8"))?;
+    let source_spelling = repository_root
+        .to_str()
+        .ok_or_else(|| anyhow!("replay repository path must be UTF-8"))?;
+    for (cwd, arguments) in [
+        (
+            replay_parent,
+            vec!["init", "--quiet", "--bare", private_repository_spelling],
+        ),
+        (
+            replay_parent,
+            vec![
+                &format!("--git-dir={private_repository_spelling}"),
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                source_spelling,
+                resolved_commit,
+            ],
+        ),
+    ] {
+        let output = run_replay_git(cwd, &arguments, overall_deadline)?;
+        if !output.status.success() {
+            tracing::debug!(stderr = ?output.stderr, "isolated replay checkout git command failed");
+            bail!("isolated replay checkout git command failed");
+        }
+    }
+    std::fs::create_dir(checkout).context("failed to create replay checkout directory")?;
+    let git_dir_argument = format!("--git-dir={private_repository_spelling}");
+    let work_tree_argument = format!("--work-tree={checkout_spelling}");
+    let arguments = [
+        git_dir_argument.as_str(),
+        work_tree_argument.as_str(),
+        "checkout",
+        "--quiet",
+        "--force",
+        resolved_commit,
+        "--",
+        ".",
+    ];
+    let output = run_replay_git(replay_parent, &arguments, overall_deadline)?;
+    if !output.status.success() {
+        tracing::debug!(stderr = ?output.stderr, "isolated replay tree materialization failed");
+        bail!("isolated replay checkout git command failed");
+    }
+    std::fs::remove_dir_all(&private_repository)
+        .context("failed to remove private replay repository after tree materialization")?;
+    Ok(())
+}
+
+fn validate_replay_cleanup_target(parent: &Path, checkout: &Path) -> Result<()> {
+    let valid = checkout.parent() == Some(parent)
+        && checkout.file_name().is_some_and(|name| name == "checkout");
+    if !valid {
+        bail!("gate replay cleanup failed");
+    }
+    Ok(())
+}
+
+enum CleanReplayResult {
+    Observed(ReplayObservation),
+    OracleFailed(OracleFailure),
+}
+
+fn run_clean_replay(
+    repository_root: &Path,
+    checkout: &Path,
+    replay_parent: &Path,
+    requested_ref: &NamedReplayRef,
+    stimulus: &GateStimulus,
+    schema_relative: &RepositoryRelativePath,
+    output_relative: &RepositoryRelativePath,
+) -> Result<CleanReplayResult> {
+    let run_deadline = Instant::now() + REPLAY_RUN_TIMEOUT;
+    let output_path = checkout.join(output_relative.as_path());
+    if std::fs::symlink_metadata(&output_path).is_ok() {
+        return Ok(CleanReplayResult::OracleFailed(OracleFailure {
+            stage: OracleStage::PrepareOutput,
+            diagnostic: format!(
+                "replay oracle output already exists at ref `{}`",
+                requested_ref.as_str()
+            ),
+        }));
+    }
+    let schema_path = checkout.join(schema_relative.as_path());
+    let schema_bytes = match std::fs::read(&schema_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::debug!(error = ?error, requested_ref = requested_ref.as_str(), "replay oracle schema read failed");
+            return Ok(CleanReplayResult::OracleFailed(OracleFailure {
+                stage: OracleStage::ReadSchema,
+                diagnostic: format!(
+                    "replay oracle schema is unavailable at ref `{}`",
+                    requested_ref.as_str()
+                ),
+            }));
+        }
+    };
+    if !replay_schema_compiles(&schema_path, &schema_bytes, &output_path)? {
+        return Ok(CleanReplayResult::OracleFailed(OracleFailure {
+            stage: OracleStage::ReadSchema,
+            diagnostic: format!(
+                "replay oracle schema is unavailable at ref `{}`",
+                requested_ref.as_str()
+            ),
+        }));
+    }
+    if Instant::now() >= run_deadline {
+        bail!("clean replay run timed out after 30 seconds");
+    }
+    let rebased = rebase_gate_stimulus(stimulus, repository_root, checkout)?;
+    let execution = execute_gate_stimulus_until(&rebased, Some(run_deadline));
+    let process = execution.observed_result.ok_or_else(|| {
+        anyhow!(
+            execution
+                .diagnostic
+                .unwrap_or_else(|| "clean replay run timed out after 30 seconds".to_owned())
+        )
+    })?;
+    if Instant::now() >= run_deadline {
+        bail!("clean replay run timed out after 30 seconds");
+    }
+    let artifact = observe_replay_artifact(&schema_path, &schema_bytes, &output_path)?;
+    let normalized = normalize_replay_observation(
+        ReplayObservation { process, artifact },
+        repository_root,
+        checkout,
+        replay_parent,
+    )?;
+    Ok(CleanReplayResult::Observed(normalized))
+}
+
+fn replay_schema_compiles(schema_path: &Path, schema: &[u8], output_path: &Path) -> Result<bool> {
+    let schema_path = AbsoluteSchemaPath::parse(schema_path.to_path_buf())?;
+    let output_path = AbsoluteOutputPath::parse(output_path.to_path_buf())?;
+    match validate_artifact(StructuredArtifactObservation::new(
+        &schema_path,
+        FileObservation::Readable { bytes: schema },
+        &output_path,
+        FileObservation::Readable { bytes: b"{}" },
+    )) {
+        Ok(_) => Ok(true),
+        Err(error) => Ok(error.outcome() != ArtifactOutcome::SchemaInvalid),
+    }
+}
+
+fn observe_replay_artifact(
+    schema_path: &Path,
+    schema: &[u8],
+    output_path: &Path,
+) -> Result<ReplayArtifactObservation> {
+    let bytes = match std::fs::read(output_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ReplayArtifactObservation::Missing);
+        }
+        Err(error) => {
+            tracing::debug!(error = ?error, "replay artifact read failed");
+            return Ok(ReplayArtifactObservation::Missing);
+        }
+    };
+    if serde_json::from_slice::<Value>(&bytes).is_err() {
+        return Ok(ReplayArtifactObservation::InvalidJson { bytes });
+    }
+    let typed_schema = AbsoluteSchemaPath::parse(schema_path.to_path_buf())?;
+    let typed_output = AbsoluteOutputPath::parse(output_path.to_path_buf())?;
+    match validate_artifact(StructuredArtifactObservation::new(
+        &typed_schema,
+        FileObservation::Readable { bytes: schema },
+        &typed_output,
+        FileObservation::Readable { bytes: &bytes },
+    )) {
+        Ok(_) => Ok(ReplayArtifactObservation::Conforming { bytes }),
+        Err(error) if error.outcome() == ArtifactOutcome::SchemaViolating => {
+            Ok(ReplayArtifactObservation::SchemaViolating { bytes })
+        }
+        Err(error) if error.outcome() == ArtifactOutcome::Truncated => {
+            Ok(ReplayArtifactObservation::InvalidJson { bytes })
+        }
+        Err(error) => Err(Error::new(error).context("replay oracle schema became unusable")),
+    }
+}
+
+fn cleanup_replay_parent(parent: &Path) -> Result<()> {
+    std::fs::remove_dir_all(parent).map_err(|error| {
+        tracing::debug!(error = ?error, path = %parent.display(), "isolated replay cleanup failed");
+        anyhow!("gate replay cleanup failed")
+    })
+}
+
+fn require_replay_overall_deadline(deadline: Instant) -> Result<()> {
+    if Instant::now() >= deadline {
+        bail!("gate replay exceeded its 150 second overall deadline");
+    }
+    Ok(())
+}
+
+fn run_replay_git(cwd: &Path, arguments: &[&str], overall_deadline: Instant) -> Result<Output> {
+    require_replay_overall_deadline(overall_deadline)?;
+    run_replay_git_bounded(cwd, arguments, Some(overall_deadline))
+}
+
+fn run_replay_git_bounded(
+    cwd: &Path,
+    arguments: &[&str],
+    overall_deadline: Option<Instant>,
+) -> Result<Output> {
+    let mut command = std::process::Command::new("git");
+    command
+        .args(arguments)
+        .current_dir(cwd)
+        .env_remove(REPLAY_PAUSE_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .context("failed to spawn clean replay git command")?;
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture clean replay git stdout"))?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture clean replay git stderr"))?;
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stdout_capture = Arc::clone(&stdout);
+    let stderr_capture = Arc::clone(&stderr);
+    let stdout_worker = std::thread::spawn(move || {
+        drain_gate_pipe(&mut stdout_pipe, &stdout_capture, "clean replay git stdout")
+    });
+    let stderr_worker = std::thread::spawn(move || {
+        drain_gate_pipe(&mut stderr_pipe, &stderr_capture, "clean replay git stderr")
+    });
+    let process_deadline = Instant::now() + REPLAY_GIT_TIMEOUT;
+    let deadline = overall_deadline
+        .map(|overall| process_deadline.min(overall))
+        .unwrap_or(process_deadline);
+    let status = loop {
+        match child
+            .try_wait()
+            .context("failed to wait for clean replay git command")?
+        {
+            Some(status) => break status,
+            None if Instant::now() < deadline => std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL),
+            None => {
+                let _kill = child.kill();
+                let _reap = child.wait();
+                drop(stdout_worker);
+                drop(stderr_worker);
+                if overall_deadline.is_some_and(|overall| Instant::now() >= overall) {
+                    bail!("gate replay exceeded its 150 second overall deadline");
+                }
+                bail!("clean replay git command timed out after 5 seconds");
+            }
+        }
+    };
+    while (!stdout_worker.is_finished() || !stderr_worker.is_finished())
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL);
+    }
+    if !stdout_worker.is_finished() || !stderr_worker.is_finished() {
+        drop(stdout_worker);
+        drop(stderr_worker);
+        if overall_deadline.is_some_and(|overall| Instant::now() >= overall) {
+            bail!("gate replay exceeded its 150 second overall deadline");
+        }
+        bail!("clean replay git command timed out after 5 seconds");
+    }
+    let stdout_diagnostic = stdout_worker
+        .join()
+        .map_err(|_| anyhow!("clean replay git stdout worker panicked"))?;
+    let stderr_diagnostic = stderr_worker
+        .join()
+        .map_err(|_| anyhow!("clean replay git stderr worker panicked"))?;
+    if let Some(diagnostic) = stdout_diagnostic.or(stderr_diagnostic) {
+        bail!(diagnostic);
+    }
+    Ok(Output {
+        status,
+        stdout: with_gate_buffer(&stdout, |bytes| bytes.clone()),
+        stderr: with_gate_buffer(&stderr, |bytes| bytes.clone()),
+    })
+}
+
 fn exit_gate_exec_rejection(diagnostic: &str) -> ! {
     let mut stderr = std::io::stderr().lock();
     let _result = writeln!(stderr, "{diagnostic}").and_then(|()| stderr.flush());
@@ -3867,9 +4788,23 @@ fn serve_gate_execution(
 }
 
 fn execute_gate_stimulus(stimulus: &GateStimulus) -> GateStimulusExecution {
+    execute_gate_stimulus_until(stimulus, None)
+}
+
+fn execute_gate_stimulus_until(
+    stimulus: &GateStimulus,
+    overall_deadline: Option<Instant>,
+) -> GateStimulusExecution {
     let mut setup = Vec::with_capacity(stimulus.setup().len());
     for action in stimulus.setup() {
-        let execution = execute_gate_process(stimulus.working_directory(), action);
+        if overall_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return GateStimulusExecution {
+                observed_result: None,
+                diagnostic: Some("clean replay run timed out after 30 seconds".to_owned()),
+            };
+        }
+        let execution =
+            execute_gate_process_until(stimulus.working_directory(), action, overall_deadline);
         let Some(observation) = execution.observation else {
             return GateStimulusExecution {
                 observed_result: None,
@@ -3888,7 +4823,17 @@ fn execute_gate_stimulus(stimulus: &GateStimulus) -> GateStimulusExecution {
             };
         }
     }
-    let execution = execute_gate_process(stimulus.working_directory(), stimulus.command());
+    if overall_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return GateStimulusExecution {
+            observed_result: None,
+            diagnostic: Some("clean replay run timed out after 30 seconds".to_owned()),
+        };
+    }
+    let execution = execute_gate_process_until(
+        stimulus.working_directory(),
+        stimulus.command(),
+        overall_deadline,
+    );
     GateStimulusExecution {
         observed_result: execution.observation.map(|command| GateObservedResult {
             setup,
@@ -3898,9 +4843,10 @@ fn execute_gate_stimulus(stimulus: &GateStimulus) -> GateStimulusExecution {
     }
 }
 
-fn execute_gate_process(
+fn execute_gate_process_until(
     working_directory: &Path,
     stimulus: &GateProcessStimulus,
+    overall_deadline: Option<Instant>,
 ) -> GateProcessExecution {
     let mut command = std::process::Command::new(stimulus.program());
     command.args(stimulus.arguments());
@@ -3951,7 +4897,9 @@ fn execute_gate_process(
         std::thread::spawn(move || drain_gate_pipe(&mut child_stdout, &stdout_capture, "stdout"));
     let stderr_worker =
         std::thread::spawn(move || drain_gate_pipe(&mut child_stderr, &stderr_capture, "stderr"));
-    let execution_deadline = Instant::now() + GATE_EXECUTION_TIMEOUT;
+    let execution_deadline = overall_deadline
+        .map(|deadline| deadline.min(Instant::now() + GATE_EXECUTION_TIMEOUT))
+        .unwrap_or_else(|| Instant::now() + GATE_EXECUTION_TIMEOUT);
     let mut terminal_status = None;
     let mut diagnostic = None;
     while Instant::now() < execution_deadline {
@@ -7558,7 +8506,136 @@ mod tests {
         let error = parse_command(["gate", "exec", "extra"].into_iter().map(str::to_owned))
             .expect_err("extra helper argument");
         assert_eq!(error.to_string(), super::USAGE);
-        assert!(super::USAGE.ends_with("       pce gate exec"));
+        assert!(super::USAGE.contains("\n       pce gate exec\n"));
+        assert!(super::USAGE.ends_with("--expected <conforming-verdict|nonconforming-verdict>"));
+    }
+
+    #[test]
+    fn gate_replay_parser_is_exact_ordered_and_typed() {
+        let arguments = [
+            "gate",
+            "replay",
+            "--repo-root",
+            "/tmp/repository",
+            "--evidence",
+            "/tmp/evidence.json",
+            "--execution-ref",
+            "execution-000001",
+            "--broken-ref",
+            "broken",
+            "--repaired-ref",
+            "repaired",
+            "--schema",
+            "schemas/verdict.json",
+            "--output",
+            "verdict.json",
+            "--expected",
+            "conforming-verdict",
+        ];
+        assert!(matches!(
+            parse_command(arguments.into_iter().map(str::to_owned)).expect("replay command"),
+            super::Command::GateReplay(_)
+        ));
+        let mut reordered = arguments;
+        reordered.swap(2, 4);
+        assert!(parse_command(reordered.into_iter().map(str::to_owned)).is_err());
+        let mut extra = arguments.to_vec();
+        extra.push("extra");
+        assert!(parse_command(extra.into_iter().map(str::to_owned)).is_err());
+    }
+
+    #[test]
+    fn gate_replay_bounds_diagnostics_and_cleanup_targets_are_stable() {
+        assert_eq!(super::REPLAY_GIT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(super::REPLAY_RUN_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(super::REPLAY_OVERALL_TIMEOUT, Duration::from_secs(150));
+        assert_eq!(super::REPLAY_PAUSE_TIMEOUT, Duration::from_secs(10));
+        let parent = Path::new("/private/tmp/pce-gate-replay-test");
+        assert!(super::validate_replay_cleanup_target(parent, &parent.join("checkout")).is_ok());
+        for rejected in [
+            parent.to_path_buf(),
+            parent.join("unknown"),
+            parent.join("nested/checkout"),
+            PathBuf::from("/private/tmp/other/checkout"),
+        ] {
+            assert_eq!(
+                super::validate_replay_cleanup_target(parent, &rejected)
+                    .expect_err("broad cleanup target")
+                    .to_string(),
+                "gate replay cleanup failed"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_schedule_covers_every_assignment_and_balances_each_position() {
+        let mut distinct = std::collections::BTreeSet::new();
+        let mut broken_by_position = [0_usize; 4];
+        for fourth in 0_u8..4 {
+            for third in 0_u8..3 {
+                for second in 0_u8..2 {
+                    let mut random = std::io::Cursor::new([fourth, third, second]);
+                    let schedule = super::create_replay_schedule_from(&mut random)
+                        .expect("deterministic schedule");
+                    let spelling = schedule
+                        .iter()
+                        .map(|side| match side {
+                            super::ReplaySide::Broken => 'B',
+                            super::ReplaySide::Repaired => 'R',
+                        })
+                        .collect::<String>();
+                    distinct.insert(spelling);
+                    for (position, side) in schedule.iter().enumerate() {
+                        if *side == super::ReplaySide::Broken {
+                            broken_by_position[position] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(distinct.len(), 6);
+        assert_eq!(broken_by_position, [12, 12, 12, 12]);
+    }
+
+    #[test]
+    fn production_replay_schedule_uses_operating_system_randomness() {
+        let first = super::create_replay_schedule().expect("production replay schedule");
+        assert!((0..63).any(|_| {
+            super::create_replay_schedule().expect("production replay schedule") != first
+        }));
+    }
+
+    #[test]
+    fn gate_replay_report_has_closed_order_and_omits_parent_inputs() {
+        let requested = pce_core::NamedReplayRef::parse("broken-secret").expect("replay ref");
+        let broken = pce_core::ReplayRefResult::CheckoutFailed {
+            requested_ref: requested.clone(),
+            checkout_failed: pce_core::CheckoutFailure {
+                stage: pce_core::CheckoutStage::ResolveRef,
+                diagnostic: "failed to resolve replay ref `broken-secret` to a commit".to_owned(),
+            },
+        };
+        let repaired = broken.clone();
+        let reference = pce_core::GateExecutionRef::parse("execution-000001").expect("reference");
+        let report = super::serialize_replay_report(
+            &reference,
+            &broken,
+            &repaired,
+            pce_core::RepairSensitivity::CheckoutFailed,
+        )
+        .expect("report");
+        let text = String::from_utf8(report).expect("report UTF-8");
+        assert!(text.starts_with("{\"schema_id\":\"pce.gate-replay-report\",\"schema_version\":1,\"execution_ref\":\"execution-000001\",\"broken\":"));
+        assert!(text.ends_with("\"classification\":\"checkout-failed\"}\n"));
+        for absent in [
+            "conforming-verdict",
+            "schemas/verdict.json",
+            "verdict.json",
+            "PCE_REPLAY_PAUSE_AFTER_RESOLVE",
+            "/private/tmp/pce-gate-replay-",
+        ] {
+            assert!(!text.contains(absent), "report leaked {absent}");
+        }
     }
 
     #[test]
