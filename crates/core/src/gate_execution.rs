@@ -201,6 +201,19 @@ pub struct GateProcessStimulus {
 }
 
 impl GateProcessStimulus {
+    pub(crate) fn reconstruct(
+        program: String,
+        arguments: Vec<String>,
+        input: Vec<u8>,
+        environment: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            program,
+            arguments,
+            input,
+            environment,
+        }
+    }
     /// Borrow the program spelling.
     pub fn program(&self) -> &str {
         &self.program
@@ -229,6 +242,17 @@ pub struct GateStimulus {
 }
 
 impl GateStimulus {
+    pub(crate) fn reconstruct(
+        working_directory: PathBuf,
+        setup: Vec<GateProcessStimulus>,
+        command: GateProcessStimulus,
+    ) -> Self {
+        Self {
+            working_directory,
+            setup,
+            command,
+        }
+    }
     /// Borrow the absolute working directory.
     pub fn working_directory(&self) -> &Path {
         &self.working_directory
@@ -311,7 +335,7 @@ pub struct GateExecutionRecord {
 /// The complete immutable evidence-sidecar document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateExecutionEvidence {
-    schema_id: &'static str,
+    schema_id: String,
     schema_version: u32,
     executions: Vec<GateExecutionRecord>,
 }
@@ -320,7 +344,7 @@ impl GateExecutionEvidence {
     /// Construct the canonical document from every retained execution.
     pub fn new(executions: Vec<GateExecutionRecord>) -> Self {
         Self {
-            schema_id: "pce.gate-execution-evidence",
+            schema_id: "pce.gate-execution-evidence".to_owned(),
             schema_version: 1,
             executions,
         }
@@ -330,6 +354,58 @@ impl GateExecutionEvidence {
     pub fn executions(&self) -> &[GateExecutionRecord] {
         &self.executions
     }
+
+    /// Look up one retained record by canonical execution reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GateExecutionError::MissingEvidenceReference`] when the reference is absent.
+    pub fn record(
+        &self,
+        execution_ref: &GateExecutionRef,
+    ) -> Result<&GateExecutionRecord, GateExecutionError> {
+        self.executions
+            .iter()
+            .find(|record| &record.execution_ref == execution_ref)
+            .ok_or_else(|| GateExecutionError::MissingEvidenceReference {
+                reference: execution_ref.as_str().to_owned(),
+            })
+    }
+}
+
+/// Parse and validate one complete immutable evidence document.
+///
+/// # Errors
+///
+/// Returns a stable schema/reference diagnostic or the JSON parser error.
+pub fn parse_gate_execution_evidence(
+    bytes: &[u8],
+) -> Result<GateExecutionEvidence, GateExecutionError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let evidence = GateExecutionEvidence::deserialize(&mut deserializer)
+        .map_err(|source| GateExecutionError::InvalidEvidenceJson { source })?;
+    deserializer
+        .end()
+        .map_err(|source| GateExecutionError::InvalidEvidenceJson { source })?;
+    if evidence.schema_id != "pce.gate-execution-evidence" {
+        return Err(GateExecutionError::InvalidEvidenceSchemaId {
+            found: evidence.schema_id,
+        });
+    }
+    if evidence.schema_version != 1 {
+        return Err(GateExecutionError::InvalidEvidenceSchemaVersion {
+            found: evidence.schema_version,
+        });
+    }
+    let mut references = BTreeSet::new();
+    for record in &evidence.executions {
+        if !references.insert(record.execution_ref.as_str()) {
+            return Err(GateExecutionError::DuplicateEvidenceReference {
+                reference: record.execution_ref.as_str().to_owned(),
+            });
+        }
+    }
+    Ok(evidence)
 }
 
 /// Successful parent-to-client response.
@@ -439,6 +515,26 @@ pub fn validate_verdict_references(
 /// Pure gate-execution parsing or reference-validation failure.
 #[derive(Debug, Error)]
 pub enum GateExecutionError {
+    /// Evidence JSON was malformed, trailing, or structurally invalid.
+    #[error("failed to parse gate execution evidence")]
+    InvalidEvidenceJson {
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Evidence carried another schema identity.
+    #[error(
+        "gate execution evidence schema id must be `pce.gate-execution-evidence`; found `{found}`"
+    )]
+    InvalidEvidenceSchemaId { found: String },
+    /// Evidence carried another schema version.
+    #[error("gate execution evidence schema version must be `1`; found `{found}`")]
+    InvalidEvidenceSchemaVersion { found: u32 },
+    /// Evidence repeated a canonical execution reference.
+    #[error("gate execution evidence contains duplicate reference `{reference}`")]
+    DuplicateEvidenceReference { reference: String },
+    /// Evidence omitted the requested canonical execution reference.
+    #[error("gate execution evidence does not contain reference `{reference}`")]
+    MissingEvidenceReference { reference: String },
     /// A helper executable path was not absolute.
     #[error("pce gate-exec client path must be absolute; rejected {path:?}")]
     RelativeClientPath { path: PathBuf },
@@ -500,7 +596,7 @@ mod tests {
     use super::{
         AbsoluteGateExecutionSocketPath, GateExecutionEvidence, GateExecutionRecord,
         GateExecutionRef, GateObservedResult, GateProcessObservation, GateTerminalStatus,
-        parse_gate_stimulus, validate_verdict_references,
+        parse_gate_execution_evidence, parse_gate_stimulus, validate_verdict_references,
     };
 
     const EXAMPLE: &str = r#"{"working_directory":"/fixture/worktree","setup":[{"program":"/fixture/bin/setup","arguments":["--prepare","value with spaces"],"input":[115,101,116,117,112],"environment":{"LANG":"C","TOKEN":"setup"}}],"command":{"program":"/fixture/bin/probe","arguments":["--check","value with spaces"],"input":[0,255,10],"environment":{"LANG":"C","TOKEN":"probe"}}}"#;
@@ -539,6 +635,66 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&GateExecutionEvidence::new(Vec::new())).expect("empty evidence"),
             r#"{"schema_id":"pce.gate-execution-evidence","schema_version":1,"executions":[]}"#
+        );
+    }
+
+    #[test]
+    fn evidence_read_boundary_rejects_schema_and_reference_failures() {
+        let wire = serde_json::to_vec(&GateExecutionEvidence::new(vec![example_record()]))
+            .expect("evidence JSON");
+        let parsed = parse_gate_execution_evidence(&wire).expect("evidence should parse");
+        assert_eq!(
+            parsed
+                .record(&GateExecutionRef::from_sequence(1).expect("reference"))
+                .expect("record")
+                .execution_ref
+                .as_str(),
+            "execution-000001"
+        );
+        assert_eq!(
+            parsed
+                .record(&GateExecutionRef::from_sequence(2).expect("reference"))
+                .expect_err("missing record")
+                .to_string(),
+            "gate execution evidence does not contain reference `execution-000002`"
+        );
+        let duplicate = serde_json::to_vec(&GateExecutionEvidence::new(vec![
+            example_record(),
+            example_record(),
+        ]))
+        .expect("duplicate evidence JSON");
+        assert_eq!(
+            parse_gate_execution_evidence(&duplicate)
+                .expect_err("duplicate reference")
+                .to_string(),
+            "gate execution evidence contains duplicate reference `execution-000001`"
+        );
+
+        let mut value: serde_json::Value = serde_json::from_slice(&wire).expect("evidence value");
+        value["schema_id"] = serde_json::json!("wrong");
+        assert_eq!(
+            parse_gate_execution_evidence(
+                &serde_json::to_vec(&value).expect("wrong schema id JSON")
+            )
+            .expect_err("wrong schema id")
+            .to_string(),
+            "gate execution evidence schema id must be `pce.gate-execution-evidence`; found `wrong`"
+        );
+        value["schema_id"] = serde_json::json!("pce.gate-execution-evidence");
+        value["schema_version"] = serde_json::json!(2);
+        assert_eq!(
+            parse_gate_execution_evidence(
+                &serde_json::to_vec(&value).expect("wrong schema version JSON")
+            )
+            .expect_err("wrong schema version")
+            .to_string(),
+            "gate execution evidence schema version must be `1`; found `2`"
+        );
+        assert_eq!(
+            parse_gate_execution_evidence(b"{")
+                .expect_err("malformed evidence")
+                .to_string(),
+            "failed to parse gate execution evidence"
         );
     }
 
