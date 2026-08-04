@@ -2,16 +2,22 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::net::Shutdown;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
-use std::time::{Instant, SystemTime};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::GateCommand;
 use pce_core::tracked_contract::parse_gate_command;
 use pce_core::{
+    AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
     AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
     AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath,
     AuthorityFailure, BranchState, CanonicalNode as DispatchNode, ChildEnvironment,
@@ -21,7 +27,10 @@ use pce_core::{
     DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef,
     EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
     Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode,
-    FileObservation, FindingAdmission, GitAuthorityObservation, GitHubAuthorityObservation,
+    FileObservation, FindingAdmission, GateExecutionEvidence, GateExecutionRecord,
+    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
+    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
+    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NodeId, ObservedExitStatus, ObservedWorkflowName,
@@ -37,9 +46,10 @@ use pce_core::{
     derive_merge_status, derive_milestone_merge_status, derive_run_state,
     dispatch_completion_payload, dispatch_invocation, dispatch_payload, event_record_matches,
     measure_contract_snapshot, meter_dispatches, parse_acceptance_criteria, parse_claude_result,
-    parse_event_line, parse_tracked_repository_contract, render_dispatch_projection,
-    render_human_snapshot, seatbelt_capability_probe, serialize_tracked_repository_contract,
-    validate_artifact, validate_workflow_coverage,
+    parse_event_line, parse_gate_stimulus, parse_tracked_repository_contract,
+    render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
+    serialize_tracked_repository_contract, validate_artifact, validate_verdict_references,
+    validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -57,9 +67,20 @@ const USAGE: &str = concat!(
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
     "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CODEX_ARGUMENT>...\n",
-    "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CLAUDE_ARGUMENT>..."
+    "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
+    "       pce gate exec"
 );
+const GATE_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const GATE_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+const GATE_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
+const GATE_PROCESS_TERMINATION_TIMEOUT: Duration = Duration::from_secs(1);
+const GATE_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const GATE_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const GATE_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(12);
+const GATE_MAX_CONNECTION_WORKERS: usize = 32;
+const GATE_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
+const VERDICT_SCHEMA: &str = include_str!("../skills/pce/schemas/verdict.schema.json");
 const ORIGIN: &str = "origin";
 const RELEASE_TAG: &str = "v0.1.16";
 const TRACKED_REPOSITORY_CONTRACT_PATH: &str = ".pce/repository-contract.json";
@@ -87,6 +108,7 @@ const BUILD_BOOTSTRAP_CANDIDATES: &[&str] = &[
 
 #[derive(Debug)]
 enum Command {
+    GateExec,
     Dispatch {
         envelope: DispatchEnvelope,
         logging: Option<DispatchLoggingMode>,
@@ -307,6 +329,7 @@ fn main() -> Result<()> {
 
 fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
     match parse_command(args)? {
+        Command::GateExec => run_gate_exec(input),
         Command::Dispatch { envelope, logging } => match logging.as_ref() {
             Some(DispatchLoggingMode::DryRun { path, metadata }) => {
                 run_dispatch_projection(&envelope, path, metadata)
@@ -374,6 +397,7 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
 fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
     let args: Vec<String> = args.collect();
     match args.as_slice() {
+        [verb, action] if verb == "gate" && action == "exec" => Ok(Command::GateExec),
         [verb, action] if verb == "vision" && action == "check" => Ok(Command::VisionCheck),
         [verb, action, raw_name] if verb == "vision" && action == "new" => {
             let name = VisionName::parse(raw_name).context("failed to parse vision name")?;
@@ -618,9 +642,45 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
         None => StdinBinding::Null,
     };
     let role = logging_raw.map(|(_, _, role, _, _)| DispatchRole::new(role));
+    let recorder = if role
+        .as_ref()
+        .is_some_and(|role| role.as_str() == "falsification-critic")
+    {
+        if environment.contains_key("PCE_GATE_EXEC_CLIENT") {
+            bail!(
+                "falsification-critic environment must not supply binary-owned `PCE_GATE_EXEC_CLIENT`"
+            );
+        }
+        if environment.contains_key("PCE_GATE_EXEC_SOCKET") {
+            bail!(
+                "falsification-critic environment must not supply binary-owned `PCE_GATE_EXEC_SOCKET`"
+            );
+        }
+        let client = AbsoluteGateExecClientPath::parse(
+            std::env::current_exe().context("failed to resolve current pce executable")?,
+        )?;
+        let evidence = AbsoluteGateExecutionEvidencePath::from_verdict_path(output_path.as_path());
+        let issuance = u64::try_from(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .context("system clock before epoch")?
+                .as_nanos()
+                % 1_000_000_000_000,
+        )
+        .context("gate execution issuance exceeds u64")?;
+        let socket = AbsoluteGateExecutionSocketPath::construct(
+            &std::env::temp_dir(),
+            std::process::id(),
+            issuance,
+        )?;
+        Some(GateExecutionRecorderConfig::new(client, evidence, socket))
+    } else {
+        None
+    };
     let arguments = compose_gate_arguments(
         role.as_ref(),
         &output_path,
+        recorder.as_ref().map(GateExecutionRecorderConfig::client),
         ArgumentVector::new(caller_arguments),
     )
     .context("failed to compose gate caller arguments")?;
@@ -629,6 +689,10 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
         .with_environment(ChildEnvironment::new(environment))
         .with_schema_path(schema_path)
         .with_output_path(output_path);
+    let envelope = match recorder {
+        Some(recorder) => envelope.with_gate_execution_recorder(recorder)?,
+        None => envelope,
+    };
     let logging = logging_raw
         .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
             let path = PathBuf::from(path);
@@ -3384,7 +3448,840 @@ fn run_dispatch_projection(
         .context("failed to flush dispatch projection")
 }
 
+fn run_gate_exec(input: &mut dyn Read) -> Result<()> {
+    let mut request_bytes = Vec::new();
+    input
+        .read_to_end(&mut request_bytes)
+        .context("failed to read gate execution request from stdin")?;
+    let stimulus = match parse_gate_stimulus(&request_bytes) {
+        Ok(stimulus) => stimulus,
+        Err(error) => exit_gate_exec_rejection(&error.to_string()),
+    };
+    let socket = match std::env::var_os("PCE_GATE_EXEC_SOCKET") {
+        Some(value) => PathBuf::from(value),
+        None => exit_gate_exec_rejection("PCE_GATE_EXEC_SOCKET is required for `pce gate exec`"),
+    };
+    let wire =
+        serde_json::to_vec(&stimulus).context("failed to serialize gate execution request")?;
+    let mut stream = UnixStream::connect(&socket).with_context(|| {
+        format!(
+            "failed to connect to gate execution socket {}",
+            socket.display()
+        )
+    })?;
+    stream
+        .write_all(&wire)
+        .context("failed to write gate execution request")?;
+    stream
+        .shutdown(Shutdown::Write)
+        .context("failed to finish gate execution request")?;
+    let mut response_bytes = Vec::new();
+    stream
+        .read_to_end(&mut response_bytes)
+        .context("failed to read gate execution response")?;
+    if let Ok(rejection) = serde_json::from_slice::<GateExecutionRejection>(&response_bytes) {
+        exit_gate_exec_rejection(&rejection.error);
+    }
+    let response: GateExecutionResponse = serde_json::from_slice(&response_bytes)
+        .context("failed to decode gate execution response")?;
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &response)
+        .context("failed to write gate execution response to stdout")?;
+    stdout
+        .write_all(b"\n")
+        .context("failed to terminate gate execution response")?;
+    stdout
+        .flush()
+        .context("failed to flush gate execution response")
+}
+
+fn exit_gate_exec_rejection(diagnostic: &str) -> ! {
+    let mut stderr = std::io::stderr().lock();
+    let _result = writeln!(stderr, "{diagnostic}").and_then(|()| stderr.flush());
+    std::process::exit(2)
+}
+
+struct GateRecorderRuntime {
+    stop: Arc<AtomicBool>,
+    state: Arc<Mutex<GateRecorderState>>,
+    server: Option<std::thread::JoinHandle<()>>,
+    socket_path: PathBuf,
+}
+
+#[derive(Default)]
+struct GateRecorderState {
+    records: Vec<(u32, GateExecutionRecord)>,
+    fatal_diagnostics: Vec<String>,
+    live_workers: usize,
+    next_sequence: u32,
+}
+
+struct GateRecorderStop {
+    records: Vec<GateExecutionRecord>,
+    error: Option<Error>,
+}
+
+enum GateConnectionOutcome {
+    Recorded,
+    Rejected { diagnostic: String, fatal: bool },
+}
+
+struct GateStimulusExecution {
+    observed_result: Option<GateObservedResult>,
+    diagnostic: Option<String>,
+}
+
+struct GateProcessExecution {
+    observation: Option<GateProcessObservation>,
+    diagnostic: Option<String>,
+}
+
+impl GateRecorderRuntime {
+    fn start(config: &GateExecutionRecorderConfig) -> Result<Self> {
+        if config.evidence().as_path().exists() {
+            bail!("gate execution evidence path already exists");
+        }
+        let socket_path = config.socket().as_path();
+        match std::fs::symlink_metadata(socket_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(
+                    Error::new(error).context("failed to inspect gate execution socket path")
+                );
+            }
+            Ok(metadata) => {
+                use std::os::unix::fs::FileTypeExt;
+
+                if !metadata.file_type().is_socket() {
+                    bail!("gate execution socket path already exists");
+                }
+                let stale = match UnixStream::connect(socket_path) {
+                    Ok(mut probe) => {
+                        let mut byte = [0_u8; 1];
+                        matches!(
+                            probe
+                                .set_read_timeout(Some(GATE_ACCEPT_POLL_INTERVAL))
+                                .and_then(|()| probe.read(&mut byte)),
+                            Ok(0)
+                        )
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => true,
+                    Err(error) => {
+                        return Err(
+                            Error::new(error).context("failed to probe gate execution socket path")
+                        );
+                    }
+                };
+                if !stale {
+                    bail!("gate execution socket path already exists");
+                }
+                std::fs::remove_file(socket_path).with_context(|| {
+                    format!(
+                        "failed to remove stale gate execution socket {}",
+                        socket_path.display()
+                    )
+                })?;
+            }
+        }
+        let listener = UnixListener::bind(config.socket().as_path()).with_context(|| {
+            format!(
+                "failed to bind gate execution socket {}",
+                config.socket().as_path().display()
+            )
+        })?;
+        listener
+            .set_nonblocking(true)
+            .context("failed to make gate execution socket nonblocking")?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(GateRecorderState {
+            next_sequence: 1,
+            ..GateRecorderState::default()
+        }));
+        let server_stop = Arc::clone(&stop);
+        let server_state = Arc::clone(&state);
+        let server = std::thread::spawn(move || {
+            let mut workers = Vec::new();
+            while !server_stop.load(AtomicOrdering::Acquire) {
+                match listener.accept() {
+                    Ok((stream, _address)) => {
+                        let admitted = with_gate_state(&server_state, |state| {
+                            if state.live_workers < GATE_MAX_CONNECTION_WORKERS {
+                                state.live_workers += 1;
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        if admitted {
+                            let worker_state = Arc::clone(&server_state);
+                            let worker_stop = Arc::clone(&server_stop);
+                            let accepted_at = Instant::now();
+                            workers.push(std::thread::spawn(move || {
+                                let outcome = std::panic::catch_unwind(|| {
+                                    serve_gate_execution(
+                                        stream,
+                                        &worker_state,
+                                        &worker_stop,
+                                        accepted_at,
+                                    )
+                                })
+                                .unwrap_or_else(|_| GateConnectionOutcome::Rejected {
+                                    diagnostic: "gate execution connection worker panicked"
+                                        .to_owned(),
+                                    fatal: true,
+                                });
+                                consume_gate_connection_outcome(&worker_state, outcome);
+                                with_gate_state(&worker_state, |state| {
+                                    state.live_workers = state.live_workers.saturating_sub(1);
+                                });
+                            }));
+                        } else {
+                            let outcome =
+                                reject_gate_connection(stream, gate_connection_limit_diagnostic());
+                            consume_gate_connection_outcome(&server_state, outcome);
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL);
+                    }
+                    Err(error) => {
+                        retain_gate_fatal(
+                            &server_state,
+                            format!("failed to accept gate execution request: {error}"),
+                        );
+                        break;
+                    }
+                }
+            }
+            let shutdown_deadline = Instant::now() + GATE_SERVER_SHUTDOWN_TIMEOUT;
+            for worker in workers {
+                while !worker.is_finished() && Instant::now() < shutdown_deadline {
+                    std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL);
+                }
+                if worker.is_finished() {
+                    if worker.join().is_err() {
+                        retain_gate_fatal(
+                            &server_state,
+                            "gate execution connection worker panicked".to_owned(),
+                        );
+                    }
+                } else {
+                    retain_gate_fatal(&server_state, gate_worker_shutdown_diagnostic());
+                    drop(worker);
+                }
+            }
+        });
+        Ok(Self {
+            stop,
+            state,
+            server: Some(server),
+            socket_path: config.socket().as_path().to_path_buf(),
+        })
+    }
+
+    fn stop(mut self) -> GateRecorderStop {
+        self.stop.store(true, AtomicOrdering::Release);
+        let mut error = self.stop_server_bounded();
+        let (mut records, fatal_diagnostics) = with_gate_state(&self.state, |state| {
+            (state.records.clone(), state.fatal_diagnostics.clone())
+        });
+        records.sort_by_key(|(sequence, _record)| *sequence);
+        let records = records
+            .into_iter()
+            .map(|(_sequence, record)| record)
+            .collect();
+        if error.is_none() && !fatal_diagnostics.is_empty() {
+            error = Some(anyhow!(fatal_diagnostics.join("; ")));
+        }
+        let remove_result = std::fs::remove_file(&self.socket_path).with_context(|| {
+            format!(
+                "failed to remove gate execution socket {}",
+                self.socket_path.display()
+            )
+        });
+        if let Err(remove_error) = remove_result
+            && error.is_none()
+        {
+            error = Some(remove_error);
+        }
+        GateRecorderStop { records, error }
+    }
+
+    fn stop_server_bounded(&mut self) -> Option<Error> {
+        self.stop.store(true, AtomicOrdering::Release);
+        let deadline = Instant::now() + GATE_SERVER_SHUTDOWN_TIMEOUT;
+        while self
+            .server
+            .as_ref()
+            .is_some_and(|server| !server.is_finished())
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL);
+        }
+        let server = self.server.take()?;
+        if !server.is_finished() {
+            drop(server);
+            return Some(anyhow!(gate_worker_shutdown_diagnostic()));
+        }
+        match server.join() {
+            Ok(()) => None,
+            Err(_) => Some(anyhow!("gate execution server thread panicked")),
+        }
+    }
+}
+
+impl Drop for GateRecorderRuntime {
+    fn drop(&mut self) {
+        let _server_error = self.stop_server_bounded();
+        if self.socket_path.exists() {
+            let _remove_result = std::fs::remove_file(&self.socket_path);
+        }
+    }
+}
+
+fn serve_gate_execution(
+    mut stream: UnixStream,
+    state: &Arc<Mutex<GateRecorderState>>,
+    stop: &Arc<AtomicBool>,
+    accepted_at: Instant,
+) -> GateConnectionOutcome {
+    if let Err(error) = stream.set_nonblocking(false) {
+        return reject_gate_connection(
+            stream,
+            format!("failed to make gate execution connection blocking: {error}"),
+        );
+    }
+    if let Err(error) = stream.set_write_timeout(Some(GATE_RESPONSE_WRITE_TIMEOUT)) {
+        if error.kind() != std::io::ErrorKind::InvalidInput {
+            return GateConnectionOutcome::Rejected {
+                diagnostic: format!("failed to bound gate execution response write: {error}"),
+                fatal: true,
+            };
+        }
+        tracing::debug!(error = ?error, "gate execution peer closed before response bound was set");
+    }
+    let read_deadline = accepted_at + GATE_REQUEST_READ_TIMEOUT;
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let remaining = read_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return deliver_gate_rejection(&mut stream, gate_request_timeout_diagnostic());
+        }
+        if let Err(error) = stream.set_read_timeout(Some(remaining)) {
+            if error.kind() != std::io::ErrorKind::InvalidInput {
+                return deliver_gate_rejection(
+                    &mut stream,
+                    format!("failed to bound gate execution request read: {error}"),
+                );
+            }
+            tracing::debug!(error = ?error, "gate execution peer closed before request bound was set");
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => {
+                bytes.extend_from_slice(&chunk[..count]);
+                if bytes.len() > GATE_MAX_REQUEST_BYTES {
+                    return deliver_gate_rejection(
+                        &mut stream,
+                        gate_request_too_large_diagnostic(),
+                    );
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return deliver_gate_rejection(&mut stream, gate_request_timeout_diagnostic());
+            }
+            Err(error) => {
+                return deliver_gate_rejection(
+                    &mut stream,
+                    format!("failed to read gate execution request: {error}"),
+                );
+            }
+        }
+    }
+    if stop.load(AtomicOrdering::Acquire) {
+        return deliver_gate_rejection(&mut stream, gate_recorder_stopping_diagnostic());
+    }
+    let stimulus = match parse_gate_stimulus(&bytes) {
+        Ok(stimulus) => stimulus,
+        Err(error) => {
+            return deliver_gate_rejection(&mut stream, error.to_string());
+        }
+    };
+    let (sequence, execution_ref) = match allocate_gate_execution_ref(state) {
+        Ok(allocated) => allocated,
+        Err(diagnostic) => return deliver_gate_rejection(&mut stream, diagnostic),
+    };
+    let execution = execute_gate_stimulus(&stimulus);
+    let Some(observed_result) = execution.observed_result else {
+        let diagnostic = execution
+            .diagnostic
+            .unwrap_or_else(|| "gate execution ended without an observation".to_owned());
+        retain_gate_fatal(state, diagnostic.clone());
+        return deliver_gate_rejection(&mut stream, diagnostic);
+    };
+    let record = GateExecutionRecord {
+        execution_ref: execution_ref.clone(),
+        stimulus,
+        observed_result: observed_result.clone(),
+    };
+    with_gate_state(state, |state| state.records.push((sequence, record)));
+    if let Some(diagnostic) = execution.diagnostic {
+        retain_gate_fatal(state, diagnostic.clone());
+        return deliver_gate_rejection(&mut stream, diagnostic);
+    }
+    let response = GateExecutionResponse {
+        execution_ref,
+        observed_result,
+    };
+    let wire = match serde_json::to_vec(&response) {
+        Ok(wire) => wire,
+        Err(error) => {
+            let diagnostic = format!("failed to serialize gate execution response: {error}");
+            retain_gate_fatal(state, diagnostic);
+            return GateConnectionOutcome::Recorded;
+        }
+    };
+    if let Err(error) = stream.write_all(&wire) {
+        tracing::warn!(error = ?error, "failed to deliver retained gate execution response");
+    }
+    GateConnectionOutcome::Recorded
+}
+
+fn execute_gate_stimulus(stimulus: &GateStimulus) -> GateStimulusExecution {
+    let mut setup = Vec::with_capacity(stimulus.setup().len());
+    for action in stimulus.setup() {
+        let execution = execute_gate_process(stimulus.working_directory(), action);
+        let Some(observation) = execution.observation else {
+            return GateStimulusExecution {
+                observed_result: None,
+                diagnostic: execution.diagnostic,
+            };
+        };
+        let succeeded = matches!(observation.status, GateTerminalStatus::Exited { code: 0 });
+        setup.push(observation);
+        if !succeeded || execution.diagnostic.is_some() {
+            return GateStimulusExecution {
+                observed_result: Some(GateObservedResult {
+                    setup,
+                    command: None,
+                }),
+                diagnostic: execution.diagnostic,
+            };
+        }
+    }
+    let execution = execute_gate_process(stimulus.working_directory(), stimulus.command());
+    GateStimulusExecution {
+        observed_result: execution.observation.map(|command| GateObservedResult {
+            setup,
+            command: Some(command),
+        }),
+        diagnostic: execution.diagnostic,
+    }
+}
+
+fn execute_gate_process(
+    working_directory: &Path,
+    stimulus: &GateProcessStimulus,
+) -> GateProcessExecution {
+    let mut command = std::process::Command::new(stimulus.program());
+    command.args(stimulus.arguments());
+    command.current_dir(working_directory);
+    command.env_clear();
+    command.envs(stimulus.environment());
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return GateProcessExecution {
+                observation: Some(GateProcessObservation {
+                    status: GateTerminalStatus::SpawnFailed {
+                        detail: error.to_string(),
+                    },
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                diagnostic: None,
+            };
+        }
+    };
+    let Some(mut child_stdin) = child.stdin.take() else {
+        terminate_unobserved_gate_child(&mut child);
+        return failed_gate_process("gate execution child stdin was not piped");
+    };
+    let Some(mut child_stdout) = child.stdout.take() else {
+        terminate_unobserved_gate_child(&mut child);
+        return failed_gate_process("gate execution child stdout was not piped");
+    };
+    let Some(mut child_stderr) = child.stderr.take() else {
+        terminate_unobserved_gate_child(&mut child);
+        return failed_gate_process("gate execution child stderr was not piped");
+    };
+    let input = stimulus.input().to_vec();
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stdout_capture = Arc::clone(&stdout);
+    let stderr_capture = Arc::clone(&stderr);
+    let stdin_worker = std::thread::spawn(move || match child_stdin.write_all(&input) {
+        Ok(()) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => None,
+        Err(error) => Some(format!("gate execution stdin write failed: {error}")),
+    });
+    let stdout_worker =
+        std::thread::spawn(move || drain_gate_pipe(&mut child_stdout, &stdout_capture, "stdout"));
+    let stderr_worker =
+        std::thread::spawn(move || drain_gate_pipe(&mut child_stderr, &stderr_capture, "stderr"));
+    let execution_deadline = Instant::now() + GATE_EXECUTION_TIMEOUT;
+    let mut terminal_status = None;
+    let mut diagnostic = None;
+    while Instant::now() < execution_deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                terminal_status = Some(status);
+                break;
+            }
+            Ok(None) => std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL),
+            Err(error) => {
+                diagnostic = Some(format!("gate execution process wait failed: {error}"));
+                break;
+            }
+        }
+    }
+    if terminal_status.is_none() && diagnostic.is_none() {
+        if let Err(error) = child.kill() {
+            diagnostic = Some(format!("gate execution process kill failed: {error}"));
+        } else {
+            let termination_deadline = Instant::now() + GATE_PROCESS_TERMINATION_TIMEOUT;
+            while Instant::now() < termination_deadline {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        terminal_status = Some(status);
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL),
+                    Err(error) => {
+                        diagnostic = Some(format!("gate execution process wait failed: {error}"));
+                        break;
+                    }
+                }
+            }
+            if terminal_status.is_none() && diagnostic.is_none() {
+                diagnostic = Some(gate_process_termination_diagnostic());
+            }
+        }
+    }
+    if terminal_status.is_none() {
+        drop(stdin_worker);
+        drop(stdout_worker);
+        drop(stderr_worker);
+        return GateProcessExecution {
+            observation: None,
+            diagnostic,
+        };
+    }
+    let drain_deadline = Instant::now() + GATE_OUTPUT_DRAIN_TIMEOUT;
+    while (!stdout_worker.is_finished()
+        || !stderr_worker.is_finished()
+        || !stdin_worker.is_finished())
+        && Instant::now() < drain_deadline
+    {
+        std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL);
+    }
+    if (!stdout_worker.is_finished() || !stderr_worker.is_finished()) && diagnostic.is_none() {
+        diagnostic = Some(gate_output_drain_diagnostic());
+    }
+    let stdin_diagnostic = join_gate_worker(
+        stdin_worker,
+        "gate execution stdin writer panicked",
+        drain_deadline,
+    );
+    let stdout_diagnostic = join_gate_worker(
+        stdout_worker,
+        "gate execution stdout drainer panicked",
+        drain_deadline,
+    );
+    let stderr_diagnostic = join_gate_worker(
+        stderr_worker,
+        "gate execution stderr drainer panicked",
+        drain_deadline,
+    );
+    diagnostic = diagnostic
+        .or(stdin_diagnostic)
+        .or(stdout_diagnostic)
+        .or(stderr_diagnostic);
+    let Some(status) = terminal_status else {
+        return GateProcessExecution {
+            observation: None,
+            diagnostic: Some("gate execution process had no exit code or signal".to_owned()),
+        };
+    };
+    let status = match (status.code(), status.signal()) {
+        (Some(code), _) => GateTerminalStatus::Exited { code },
+        (None, Some(signal)) => GateTerminalStatus::Signaled { signal },
+        (None, None) => {
+            return GateProcessExecution {
+                observation: None,
+                diagnostic: Some("gate execution process had no exit code or signal".to_owned()),
+            };
+        }
+    };
+    GateProcessExecution {
+        observation: Some(GateProcessObservation {
+            status,
+            stdout: with_gate_buffer(&stdout, |bytes| bytes.clone()),
+            stderr: with_gate_buffer(&stderr, |bytes| bytes.clone()),
+        }),
+        diagnostic,
+    }
+}
+
+fn failed_gate_process(diagnostic: &str) -> GateProcessExecution {
+    GateProcessExecution {
+        observation: None,
+        diagnostic: Some(diagnostic.to_owned()),
+    }
+}
+
+fn terminate_unobserved_gate_child(child: &mut std::process::Child) {
+    let _kill_result = child.kill();
+    let deadline = Instant::now() + GATE_PROCESS_TERMINATION_TIMEOUT;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) => std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL),
+        }
+    }
+}
+
+fn drain_gate_pipe(
+    pipe: &mut dyn Read,
+    capture: &Arc<Mutex<Vec<u8>>>,
+    name: &str,
+) -> Option<String> {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => return None,
+            Ok(count) => with_gate_buffer(capture, |bytes| {
+                bytes.extend_from_slice(&buffer[..count]);
+            }),
+            Err(error) => {
+                return Some(format!("gate execution {name} read failed: {error}"));
+            }
+        }
+    }
+}
+
+fn join_gate_worker(
+    worker: std::thread::JoinHandle<Option<String>>,
+    panic_diagnostic: &str,
+    deadline: Instant,
+) -> Option<String> {
+    if !worker.is_finished() || Instant::now() > deadline {
+        drop(worker);
+        return None;
+    }
+    match worker.join() {
+        Ok(diagnostic) => diagnostic,
+        Err(_) => Some(panic_diagnostic.to_owned()),
+    }
+}
+
+fn allocate_gate_execution_ref(
+    state: &Arc<Mutex<GateRecorderState>>,
+) -> std::result::Result<(u32, GateExecutionRef), String> {
+    with_gate_state(state, |state| {
+        let sequence = state.next_sequence;
+        let reference =
+            GateExecutionRef::from_sequence(sequence).map_err(|error| error.to_string())?;
+        state.next_sequence = state
+            .next_sequence
+            .checked_add(1)
+            .ok_or_else(|| "gate execution sequence exceeds u32".to_owned())?;
+        Ok((sequence, reference))
+    })
+}
+
+fn reject_gate_connection(mut stream: UnixStream, diagnostic: String) -> GateConnectionOutcome {
+    if let Err(error) = stream.set_nonblocking(false) {
+        return GateConnectionOutcome::Rejected {
+            diagnostic: format!("failed to make gate execution connection blocking: {error}"),
+            fatal: true,
+        };
+    }
+    if let Err(error) = stream.set_write_timeout(Some(GATE_RESPONSE_WRITE_TIMEOUT)) {
+        return GateConnectionOutcome::Rejected {
+            diagnostic: format!("failed to bound gate execution response write: {error}"),
+            fatal: true,
+        };
+    }
+    deliver_gate_rejection(&mut stream, diagnostic)
+}
+
+fn deliver_gate_rejection(stream: &mut UnixStream, diagnostic: String) -> GateConnectionOutcome {
+    let rejection = GateExecutionRejection {
+        error: diagnostic.clone(),
+    };
+    let wire = match serde_json::to_vec(&rejection) {
+        Ok(wire) => wire,
+        Err(error) => {
+            return GateConnectionOutcome::Rejected {
+                diagnostic: format!("failed to serialize gate execution rejection: {error}"),
+                fatal: true,
+            };
+        }
+    };
+    match stream.write_all(&wire) {
+        Ok(()) => GateConnectionOutcome::Rejected {
+            diagnostic,
+            fatal: false,
+        },
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::NotConnected
+            ) =>
+        {
+            tracing::warn!(error = ?error, diagnostic, "gate execution client departed before rejection delivery");
+            GateConnectionOutcome::Rejected {
+                diagnostic,
+                fatal: false,
+            }
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            GateConnectionOutcome::Rejected {
+                diagnostic: gate_response_timeout_diagnostic(),
+                fatal: true,
+            }
+        }
+        Err(error) => GateConnectionOutcome::Rejected {
+            diagnostic: format!("failed to write gate execution response: {error}"),
+            fatal: true,
+        },
+    }
+}
+
+fn consume_gate_connection_outcome(
+    state: &Arc<Mutex<GateRecorderState>>,
+    outcome: GateConnectionOutcome,
+) {
+    if let GateConnectionOutcome::Rejected {
+        diagnostic,
+        fatal: true,
+    } = outcome
+    {
+        retain_gate_fatal(state, diagnostic);
+    }
+}
+
+fn retain_gate_fatal(state: &Arc<Mutex<GateRecorderState>>, diagnostic: String) {
+    with_gate_state(state, |state| state.fatal_diagnostics.push(diagnostic));
+}
+
+fn with_gate_state<T>(
+    state: &Arc<Mutex<GateRecorderState>>,
+    operation: impl FnOnce(&mut GateRecorderState) -> T,
+) -> T {
+    match state.lock() {
+        Ok(mut state) => operation(&mut state),
+        Err(poisoned) => operation(&mut poisoned.into_inner()),
+    }
+}
+
+fn with_gate_buffer<T>(
+    buffer: &Arc<Mutex<Vec<u8>>>,
+    operation: impl FnOnce(&mut Vec<u8>) -> T,
+) -> T {
+    match buffer.lock() {
+        Ok(mut buffer) => operation(&mut buffer),
+        Err(poisoned) => operation(&mut poisoned.into_inner()),
+    }
+}
+
+fn gate_request_timeout_diagnostic() -> String {
+    "gate execution request read timed out after 2 seconds".to_owned()
+}
+
+fn gate_request_too_large_diagnostic() -> String {
+    "gate execution request exceeds 16777216 bytes".to_owned()
+}
+
+fn gate_response_timeout_diagnostic() -> String {
+    "gate execution response write timed out after 1 second".to_owned()
+}
+
+fn gate_process_termination_diagnostic() -> String {
+    "gate execution process did not terminate within 1 second after kill".to_owned()
+}
+
+fn gate_output_drain_diagnostic() -> String {
+    "gate execution output drain timed out after 1 second".to_owned()
+}
+
+fn gate_recorder_stopping_diagnostic() -> String {
+    "gate execution recorder is stopping".to_owned()
+}
+
+fn gate_worker_shutdown_diagnostic() -> String {
+    "gate execution worker exceeded 12 second shutdown deadline".to_owned()
+}
+
+fn gate_connection_limit_diagnostic() -> String {
+    "gate execution recorder connection limit reached".to_owned()
+}
+
+fn persist_gate_execution_evidence(
+    path: &AbsoluteGateExecutionEvidencePath,
+    records: Vec<GateExecutionRecord>,
+) -> Result<()> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path.as_path())
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow!("gate execution evidence path already exists")
+            } else {
+                Error::new(error).context(format!(
+                    "failed to create gate execution evidence {}",
+                    path.as_path().display()
+                ))
+            }
+        })?;
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer(&mut writer, &GateExecutionEvidence::new(records))
+        .context("failed to serialize gate execution evidence")?;
+    writer
+        .write_all(b"\n")
+        .context("failed to terminate gate execution evidence")?;
+    writer
+        .flush()
+        .context("failed to flush gate execution evidence")?;
+    drop(writer);
+    std::fs::set_permissions(path.as_path(), std::fs::Permissions::from_mode(0o444))
+        .context("failed to make gate execution evidence read-only")
+}
+
 fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'_>>) -> Result<()> {
+    let recorder = envelope
+        .gate_execution_recorder()
+        .map(GateRecorderRuntime::start)
+        .transpose()?;
     let issuance = logging
         .as_ref()
         .map(|logging| {
@@ -3498,55 +4395,107 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for `{executable}`"))?;
-    let duration_ms = u64::try_from(started.elapsed().as_millis())
-        .context("dispatch duration in milliseconds exceeds u64")?;
-    let exit_status = dispatch_exit_status(status)?;
-    let classification = match invocation.target() {
-        DispatchTarget::Codex => classify_codex_terminal_usage(&observations, exit_status),
-        DispatchTarget::Gate => {
-            classify_claude_result(&parse_claude_result(&claude_stdout), exit_status)
+    let recorder_stop = recorder.map(GateRecorderRuntime::stop);
+    let gate_execution_records = recorder_stop
+        .as_ref()
+        .map_or_else(Vec::new, |stopped| stopped.records.clone());
+    let recorder_error = recorder_stop.and_then(|stopped| stopped.error);
+    let post_stop_result = (|| -> Result<_> {
+        let duration_ms = u64::try_from(started.elapsed().as_millis())
+            .context("dispatch duration in milliseconds exceeds u64")?;
+        let exit_status = dispatch_exit_status(status)?;
+        let classification = match invocation.target() {
+            DispatchTarget::Codex => classify_codex_terminal_usage(&observations, exit_status),
+            DispatchTarget::Gate => {
+                classify_claude_result(&parse_claude_result(&claude_stdout), exit_status)
+            }
+            DispatchTarget::Seatbelt => {
+                bail!("Seatbelt envelopes must use the contract-measurement process adapter")
+            }
+        };
+        let artifact_validation: Result<ArtifactOutcome, pce_core::ArtifactValidationError> =
+            match (envelope.schema_path(), envelope.output_path()) {
+                (Some(schema_path), Some(output_path)) => {
+                    let schema = read_file_observation(schema_path.as_path());
+                    let artifact = read_file_observation(output_path.as_path());
+                    let schema_observation = if envelope.gate_execution_recorder().is_some() {
+                        FileObservation::Readable {
+                            bytes: VERDICT_SCHEMA.as_bytes(),
+                        }
+                    } else {
+                        schema.as_observation()
+                    };
+                    validate_artifact(StructuredArtifactObservation::new(
+                        schema_path,
+                        schema_observation,
+                        output_path,
+                        artifact.as_observation(),
+                    ))
+                }
+                _ => Ok(ArtifactOutcome::NotValidated),
+            };
+        let reference_validation =
+            if matches!(artifact_validation.as_ref(), Ok(ArtifactOutcome::Validated))
+                && envelope.gate_execution_recorder().is_some()
+            {
+                let output_path = envelope.output_path().ok_or_else(|| {
+                    anyhow!("falsification recorder requires a verdict output path")
+                })?;
+                match std::fs::read(output_path.as_path()) {
+                    Ok(bytes) => validate_verdict_references(&bytes, &gate_execution_records)
+                        .map_err(Error::new),
+                    Err(error) => Err(Error::new(error)
+                        .context("failed to reread validated falsification verdict")),
+                }
+            } else {
+                Ok(())
+            };
+        let artifact_outcome = if reference_validation.is_err() {
+            ArtifactOutcome::SchemaViolating
+        } else {
+            artifact_validation
+                .as_ref()
+                .copied()
+                .unwrap_or_else(|error| error.outcome())
+        };
+        if let (Some(logging), Some(issuance)) = (logging, issuance) {
+            let usage = classification
+                .clone()
+                .unwrap_or_else(|reason| DispatchTokenUsage::Absent { reason });
+            let completion = dispatch_completion_payload(
+                issuance.sequence(),
+                DispatchDuration::new(duration_ms),
+                usage,
+                exit_status,
+                artifact_outcome,
+            );
+            append_one(
+                logging.path,
+                WriteKind::DispatchCompletion,
+                logging.metadata.node.clone(),
+                serde_json::to_string(&completion)
+                    .context("failed to serialize dispatch completion")?,
+            )
+            .context("failed to append dispatch completion after child exit")?;
         }
-        DispatchTarget::Seatbelt => {
-            bail!("Seatbelt envelopes must use the contract-measurement process adapter")
+        Ok((classification, artifact_validation, reference_validation))
+    })();
+    let evidence_persistence = match envelope.gate_execution_recorder() {
+        Some(config) => persist_gate_execution_evidence(config.evidence(), gate_execution_records),
+        None => Ok(()),
+    };
+    let (classification, artifact_validation, reference_validation) = match post_stop_result {
+        Ok(results) => results,
+        Err(error) => {
+            if let Err(persistence_error) = evidence_persistence {
+                tracing::error!(error = ?persistence_error, "failed to persist gate execution evidence after dispatch finalization failure");
+            }
+            return Err(error);
         }
     };
-    let artifact_validation: Result<ArtifactOutcome, pce_core::ArtifactValidationError> =
-        match (envelope.schema_path(), envelope.output_path()) {
-            (Some(schema_path), Some(output_path)) => {
-                let schema = read_file_observation(schema_path.as_path());
-                let artifact = read_file_observation(output_path.as_path());
-                validate_artifact(StructuredArtifactObservation::new(
-                    schema_path,
-                    schema.as_observation(),
-                    output_path,
-                    artifact.as_observation(),
-                ))
-            }
-            _ => Ok(ArtifactOutcome::NotValidated),
-        };
-    let artifact_outcome = artifact_validation
-        .as_ref()
-        .copied()
-        .unwrap_or_else(|error| error.outcome());
-    if let (Some(logging), Some(issuance)) = (logging, issuance) {
-        let usage = classification
-            .clone()
-            .unwrap_or_else(|reason| DispatchTokenUsage::Absent { reason });
-        let completion = dispatch_completion_payload(
-            issuance.sequence(),
-            DispatchDuration::new(duration_ms),
-            usage,
-            exit_status,
-            artifact_outcome,
-        );
-        append_one(
-            logging.path,
-            WriteKind::DispatchCompletion,
-            logging.metadata.node.clone(),
-            serde_json::to_string(&completion)
-                .context("failed to serialize dispatch completion")?,
-        )
-        .context("failed to append dispatch completion after child exit")?;
+    evidence_persistence?;
+    if let Some(error) = recorder_error {
+        return Err(error);
     }
     if let Err(reason) = classification {
         match invocation.target() {
@@ -3568,6 +4517,7 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
         bail!("`{executable}` child exited with status {status}");
     }
     artifact_validation.map_err(Error::new)?;
+    reference_validation?;
     Ok(())
 }
 
@@ -3844,7 +4794,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command as ProcessCommand;
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
     use pce_core::{
         AppendableFinding, ArtifactPath, BranchState, CachedInputTokens, CodexTerminalObservation,
@@ -6543,5 +7493,91 @@ mod tests {
                 CodexTerminalObservation::NonTerminal
             );
         }
+    }
+
+    #[test]
+    fn gate_exec_parser_accepts_only_the_exact_helper_command() {
+        assert!(matches!(
+            parse_command(["gate", "exec"].into_iter().map(str::to_owned))
+                .expect("exact helper command"),
+            super::Command::GateExec
+        ));
+        let error = parse_command(["gate", "exec", "extra"].into_iter().map(str::to_owned))
+            .expect_err("extra helper argument");
+        assert_eq!(error.to_string(), super::USAGE);
+        assert!(super::USAGE.ends_with("       pce gate exec"));
+    }
+
+    #[test]
+    fn gate_execution_deadline_diagnostics_are_exact() {
+        assert_eq!(super::GATE_REQUEST_READ_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(super::GATE_RESPONSE_WRITE_TIMEOUT, Duration::from_secs(1));
+        assert_eq!(super::GATE_EXECUTION_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(
+            super::GATE_PROCESS_TERMINATION_TIMEOUT,
+            Duration::from_secs(1)
+        );
+        assert_eq!(super::GATE_OUTPUT_DRAIN_TIMEOUT, Duration::from_secs(1));
+        assert_eq!(super::GATE_ACCEPT_POLL_INTERVAL, Duration::from_millis(10));
+        assert_eq!(super::GATE_SERVER_SHUTDOWN_TIMEOUT, Duration::from_secs(12));
+        assert_eq!(super::GATE_MAX_CONNECTION_WORKERS, 32);
+        assert_eq!(super::GATE_MAX_REQUEST_BYTES, 16 * 1024 * 1024);
+        assert_eq!(
+            super::gate_request_timeout_diagnostic(),
+            "gate execution request read timed out after 2 seconds"
+        );
+        assert_eq!(
+            super::gate_request_too_large_diagnostic(),
+            "gate execution request exceeds 16777216 bytes"
+        );
+        assert_eq!(
+            super::gate_response_timeout_diagnostic(),
+            "gate execution response write timed out after 1 second"
+        );
+        assert_eq!(
+            super::gate_process_termination_diagnostic(),
+            "gate execution process did not terminate within 1 second after kill"
+        );
+        assert_eq!(
+            super::gate_output_drain_diagnostic(),
+            "gate execution output drain timed out after 1 second"
+        );
+        assert_eq!(
+            super::gate_recorder_stopping_diagnostic(),
+            "gate execution recorder is stopping"
+        );
+        assert_eq!(
+            super::gate_worker_shutdown_diagnostic(),
+            "gate execution worker exceeded 12 second shutdown deadline"
+        );
+    }
+
+    #[test]
+    fn gate_execution_recorder_reclaims_stale_socket_endpoint() {
+        let directory = tempdir().expect("temporary directory should create");
+        let verdict = directory.path().join("verdict.json");
+        let evidence = pce_core::AbsoluteGateExecutionEvidencePath::from_verdict_path(&verdict);
+        let socket = pce_core::AbsoluteGateExecutionSocketPath::construct(
+            directory.path(),
+            std::process::id(),
+            1,
+        )
+        .expect("socket path should construct");
+        let stale_listener = std::os::unix::net::UnixListener::bind(socket.as_path())
+            .expect("stale socket should bind");
+        drop(stale_listener);
+        assert!(socket.as_path().exists());
+        let client = pce_core::AbsoluteGateExecClientPath::parse(
+            std::env::current_exe().expect("current executable should resolve"),
+        )
+        .expect("client path should parse");
+        let config = pce_core::GateExecutionRecorderConfig::new(client, evidence, socket.clone());
+
+        let runtime = super::GateRecorderRuntime::start(&config)
+            .expect("stale socket endpoint should be reclaimed");
+        assert!(socket.as_path().exists());
+        let stopped = runtime.stop();
+        assert!(stopped.error.is_none());
+        assert!(!socket.as_path().exists());
     }
 }

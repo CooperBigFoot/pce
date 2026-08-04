@@ -19,6 +19,7 @@
           "problem": { "type": "string" },
           "input": { "type": "string", "minLength": 1 },
           "observation": { "type": "string", "minLength": 1 },
+          "execution_ref": { "type": "string", "pattern": "^execution-[0-9]{6}$" },
           "required_change": { "type": "string", "minLength": 1 },
           "replacement_execution": {
             "type": "object",
@@ -26,7 +27,8 @@
             "required": ["input", "observation"],
             "properties": {
               "input": { "type": "string", "minLength": 1 },
-              "observation": { "type": "string", "minLength": 1 }
+              "observation": { "type": "string", "minLength": 1 },
+              "execution_ref": { "type": "string", "pattern": "^execution-[0-9]{6}$" }
             }
           }
         }

@@ -2802,7 +2802,8 @@ fn verdict_schema_invalid_reds() {
 
 #[test]
 fn verdict_schema_requires_executed_break_and_replacement_evidence() {
-    const BLOCKING: &str = r#"{"verdict":"REVISE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"dispatch route","problem":"the executed route cannot authenticate","input":"pce dispatch gate through the candidate route","observation":"exit 1; Not logged in; verdict artifact absent","required_change":"supply PATH, HOME, and USER to the cleared child environment","replacement_execution":{"input":"pce dispatch gate through the replacement route with PATH, HOME, and USER","observation":"exit 0; authenticated; conforming verdict artifact written"}}],"non_blocking_notes":[],"summary":"one demonstrated break"}"#;
+    const BLOCKING: &str = r#"{"verdict":"REVISE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"dispatch route","problem":"the executed route cannot authenticate","input":"pce dispatch gate through the candidate route","observation":"exit 1; Not logged in; verdict artifact absent","execution_ref":"execution-000001","required_change":"supply PATH, HOME, and USER to the cleared child environment","replacement_execution":{"input":"pce dispatch gate through the replacement route with PATH, HOME, and USER","observation":"exit 0; authenticated; conforming verdict artifact written","execution_ref":"execution-000002"}}],"non_blocking_notes":[],"summary":"one demonstrated break"}"#;
+    const LEGACY_BLOCKING: &str = r#"{"verdict":"REVISE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"dispatch route","problem":"the executed route cannot authenticate","input":"pce dispatch gate through the candidate route","observation":"exit 1; Not logged in; verdict artifact absent","required_change":"supply PATH, HOME, and USER to the cleared child environment","replacement_execution":{"input":"pce dispatch gate through the replacement route with PATH, HOME, and USER","observation":"exit 0; authenticated; conforming verdict artifact written"}}],"non_blocking_notes":[],"summary":"one demonstrated break"}"#;
     const APPROVE: &str = r#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"no demonstrated break"}"#;
     const OPINION: &str = r#"{"verdict":"REVISE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"dispatch route","problem":"looks wrong","required_change":"change it"}],"non_blocking_notes":[],"summary":"opinion only"}"#;
 
@@ -2811,8 +2812,11 @@ fn verdict_schema_requires_executed_break_and_replacement_evidence() {
             .expect("schema JSON");
     let validator = jsonschema::validator_for(&schema).expect("verdict validator");
     let blocking: serde_json::Value = serde_json::from_str(BLOCKING).expect("blocking fixture");
+    let legacy_blocking: serde_json::Value =
+        serde_json::from_str(LEGACY_BLOCKING).expect("legacy blocking fixture");
     let approve: serde_json::Value = serde_json::from_str(APPROVE).expect("approval fixture");
     assert_eq!(validator.iter_errors(&blocking).count(), 0);
+    assert_eq!(validator.iter_errors(&legacy_blocking).count(), 0);
     assert_eq!(validator.iter_errors(&approve).count(), 0);
 
     let opinion: serde_json::Value = serde_json::from_str(OPINION).expect("opinion fixture");
@@ -2859,6 +2863,21 @@ fn verdict_schema_requires_executed_break_and_replacement_evidence() {
             error.instance_path().to_string() == pointer
                 && error.to_string().contains("shorter than 1 character")
         }));
+    }
+    for pointer in [
+        "/blocking_issues/0/execution_ref",
+        "/blocking_issues/0/replacement_execution/execution_ref",
+    ] {
+        for malformed in ["", "execution-1", "execution-000001x"] {
+            let mut instance: serde_json::Value = serde_json::from_str(BLOCKING).expect("fixture");
+            *instance.pointer_mut(pointer).expect("reference pointer") =
+                serde_json::json!(malformed);
+            assert!(
+                validator
+                    .iter_errors(&instance)
+                    .any(|error| { error.instance_path().to_string() == pointer })
+            );
+        }
     }
     let mut extra: serde_json::Value = serde_json::from_str(BLOCKING).expect("fixture");
     extra["blocking_issues"][0]["replacement_execution"]["command"] =
@@ -3088,9 +3107,22 @@ fn falsification_route_has_one_binary_owned_frame_and_recoverable_path() {
         .iter()
         .map(|argument| String::from_utf8(argument.clone()).expect("UTF-8 argv"))
         .collect();
+    let pce = env!("CARGO_BIN_EXE_pce");
+    let permission = format!("Bash({pce} gate exec:*)");
     assert_eq!(
-        &child[..4],
-        ["-p", "--output-format", "json", "--append-system-prompt"]
+        &child[..10],
+        [
+            "-p",
+            "--output-format",
+            "json",
+            "--allowedTools",
+            permission.as_str(),
+            "Read",
+            "Glob",
+            "Grep",
+            "Write",
+            "--append-system-prompt",
+        ]
     );
     assert_eq!(
         child
@@ -3099,9 +3131,19 @@ fn falsification_route_has_one_binary_owned_frame_and_recoverable_path() {
             .count(),
         1
     );
-    let mandate = &child[4];
+    let mandate = &child[10];
+    assert_eq!(child[11], f.bindings.caller_arg.to_string_lossy());
     assert_eq!(mandate.matches("<output-path>").count(), 1);
     assert_eq!(mandate.matches("</output-path>").count(), 1);
+    assert_eq!(mandate.matches("<gate-exec-command>").count(), 1);
+    assert_eq!(mandate.matches("</gate-exec-command>").count(), 1);
+    let recovered_command = mandate
+        .split_once("<gate-exec-command>")
+        .and_then(|(_, tail)| tail.split_once("</gate-exec-command>"))
+        .map(|(command, _)| command)
+        .expect("gate exec command");
+    assert_eq!(recovered_command, format!("{pce} gate exec"));
+    assert!(!recovered_command.contains("target/debug/deps/"));
     let recovered_from_mandate = mandate
         .split_once("<output-path>")
         .and_then(|(_, tail)| tail.split_once("</output-path>"))
@@ -3120,6 +3162,28 @@ fn falsification_route_has_one_binary_owned_frame_and_recoverable_path() {
         &f.bindings.verdict_schema,
         "falsification artifact",
     );
+    let evidence = PathBuf::from(format!("{}.executions.json", parent.display()));
+    assert_eq!(
+        fs::read(&evidence).expect("empty gate execution evidence"),
+        b"{\"schema_id\":\"pce.gate-execution-evidence\",\"schema_version\":1,\"executions\":[]}\n"
+    );
+    assert_eq!(
+        fs::metadata(&evidence)
+            .expect("evidence metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o444
+    );
+    let env = fs::read_to_string(f.bindings.cwd.join(".review/env")).expect("environment");
+    let socket = env
+        .lines()
+        .find_map(|line| line.strip_prefix("PCE_GATE_EXEC_SOCKET="))
+        .map(PathBuf::from)
+        .expect("gate execution socket environment");
+    assert!(socket.is_absolute());
+    assert!(socket.as_os_str().as_encoded_bytes().len() <= 103);
+    assert!(!socket.exists());
 }
 
 #[test]
