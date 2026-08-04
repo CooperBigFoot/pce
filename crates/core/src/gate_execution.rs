@@ -482,6 +482,7 @@ pub fn validate_verdict_references(
         .iter()
         .map(|record| record.execution_ref.as_str())
         .collect::<BTreeSet<_>>();
+    let mut primary_owners = BTreeMap::new();
     for issue in verdict.blocking_issues {
         let primary_raw =
             issue
@@ -493,6 +494,15 @@ pub fn validate_verdict_references(
         if !known.contains(primary.as_str()) {
             return Err(GateExecutionError::UnknownPrimaryReference {
                 issue_id: issue.id.clone(),
+                reference: primary.as_str().to_owned(),
+            });
+        }
+        if let Some(first_issue_id) =
+            primary_owners.insert(primary.as_str().to_owned(), issue.id.clone())
+        {
+            return Err(GateExecutionError::SharedPrimaryReference {
+                first_issue_id,
+                second_issue_id: issue.id.clone(),
                 reference: primary.as_str().to_owned(),
             });
         }
@@ -585,6 +595,15 @@ pub enum GateExecutionError {
         "blocking issue `{issue_id}` replacement references unknown gate execution `{reference}`"
     )]
     UnknownReplacementReference { issue_id: String, reference: String },
+    /// Two blocking claims cited the same retained primary execution.
+    #[error(
+        "blocking issues `{first_issue_id}` and `{second_issue_id}` share gate execution reference `{reference}`"
+    )]
+    SharedPrimaryReference {
+        first_issue_id: String,
+        second_issue_id: String,
+        reference: String,
+    },
 }
 
 #[cfg(test)]
@@ -801,5 +820,22 @@ mod tests {
                 .to_string(),
             "blocking issue `F-2` references unknown gate execution `execution-000003`"
         );
+
+        let records = vec![
+            example_record(),
+            GateExecutionRecord {
+                execution_ref: GateExecutionRef::from_sequence(2).expect("reference"),
+                ..example_record()
+            },
+        ];
+        let shared = br#"{"verdict":"BLOCK","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"x","problem":"x","input":"x","observation":"x","execution_ref":"execution-000001","required_change":"x","replacement_execution":{"input":"x","observation":"x","execution_ref":"execution-000001"}},{"id":"F-2","severity":"major","location":"y","problem":"y","input":"y","observation":"y","execution_ref":"execution-000001","required_change":"y","replacement_execution":{"input":"y","observation":"y","execution_ref":"execution-000002"}}],"non_blocking_notes":[],"summary":"x"}"#;
+        assert_eq!(
+            validate_verdict_references(shared, &records)
+                .expect_err("shared primary reference")
+                .to_string(),
+            "blocking issues `F-1` and `F-2` share gate execution reference `execution-000001`"
+        );
+        let distinct = br#"{"verdict":"BLOCK","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"x","problem":"x","input":"x","observation":"x","execution_ref":"execution-000001","required_change":"x","replacement_execution":{"input":"x","observation":"x","execution_ref":"execution-000001"}},{"id":"F-2","severity":"major","location":"y","problem":"y","input":"y","observation":"y","execution_ref":"execution-000002","required_change":"y","replacement_execution":{"input":"y","observation":"y","execution_ref":"execution-000002"}}],"non_blocking_notes":[],"summary":"x"}"#;
+        validate_verdict_references(distinct, &records).expect("distinct primary references");
     }
 }
