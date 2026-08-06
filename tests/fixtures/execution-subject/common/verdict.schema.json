@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "self_sufficiency",
+    "root_cause",
+    "blocking_issues",
+    "non_blocking_notes",
+    "summary"
+  ],
+  "properties": {
+    "verdict": { "enum": ["APPROVE", "REVISE", "BLOCK"] },
+    "self_sufficiency": { "enum": ["PASS", "FAIL", "NOT_APPLICABLE"] },
+    "root_cause": { "enum": ["execution", "step_plan", "milestone_plan", "vision"] },
+    "blocking_issues": { "type": "array" },
+    "non_blocking_notes": { "type": "array", "items": { "type": "string" } },
+    "summary": { "type": "string" }
+  }
+}

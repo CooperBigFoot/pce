@@ -1,0 +1,27 @@
+{
+  "verdict": "BLOCK",
+  "self_sufficiency": "FAIL",
+  "root_cause": "execution",
+  "blocking_issues": [
+    {
+      "id": "artifact-output-typo-fails-gate",
+      "severity": "critical",
+      "location": "artifact (final printf line) vs gate (expected-value assertion)",
+      "problem": "The delivered artifact emits the misspelled token 'ordinary-ouptut', while the delivered gate asserts the output equals 'ordinary-output'. The gate therefore fails against the artifact it was delivered with, and the execution-subject probe that runs ./gate exits non-zero and never writes its --output verdict file. The delivered pair cannot verify itself.",
+      "input": "Harness request: working_directory = the checkout root; setup = []; command.program = \"target/pce-execution-subject-probe/pce\"; command.arguments = [\"gate\",\"execution-subject-probe\",\"--output\",\".pce-execution-subject-verdict.json\"]; command.input = empty; command.environment = exactly PATH, HOME, USER taken from my own explicit child environment.",
+      "observation": "observed_result.command.status = {\"kind\":\"exited\",\"code\":1}, with empty stdout and empty stderr; no verdict file was produced. Corroborating harness runs on the same delivered state: execution-000003 ran ./artifact ordinary-input and returned exit 0 with stdout bytes decoding to \"ordinary-ouptut\\n\"; execution-000004 ran ./gate directly and returned exit 1 with empty stdout and stderr.",
+      "execution_ref": "execution-000001",
+      "required_change": "Correct the artifact's emitted token from 'ordinary-ouptut' to 'ordinary-output' so it matches the value the gate asserts, i.e. apply `sed -i '' 's/ordinary-ouptut/ordinary-output/' artifact` to the delivered artifact (equivalently, edit its final printf line to print 'ordinary-output').",
+      "replacement_execution": {
+        "input": "Harness request: working_directory = the checkout root; setup = [ { program \"/usr/bin/sed\", arguments [\"-i\",\"\",\"s/ordinary-ouptut/ordinary-output/\",\"artifact\"], empty input, environment exactly PATH, HOME, USER } ]; command identical to the primary execution: program \"target/pce-execution-subject-probe/pce\", arguments [\"gate\",\"execution-subject-probe\",\"--output\",\".pce-execution-subject-verdict.json\"], empty input, environment exactly PATH, HOME, USER.",
+        "observation": "observed_result.setup[0].status = {\"kind\":\"exited\",\"code\":0} and observed_result.command.status = {\"kind\":\"exited\",\"code\":0}, with empty stdout and stderr; the probe completed and wrote its verdict file. The single-token correction turns the failing probe into a passing one, isolating the typo as the cause.",
+        "execution_ref": "execution-000002"
+      }
+    }
+  ],
+  "non_blocking_notes": [
+    "The delivered state was restored after the replacement run: the sed fix executed in-place in the checkout, so `git checkout -- artifact` was applied and the probe-produced .pce-execution-subject-verdict.json removed, leaving the subject exactly as delivered (re-confirmed by execution-000004 still failing on the restored tree).",
+    "Nothing else in the delivered pair was falsified: the artifact's argument contract (exactly one argument equal to 'ordinary-input') and the probe's argument/path validation both behaved as written under execution."
+  ],
+  "summary": "Executed the mandated execution-subject probe through the harness (execution-000001): it exited 1 with no output and produced no verdict file, because the delivered artifact prints 'ordinary-ouptut' (execution-000003 stdout bytes) while the delivered gate asserts 'ordinary-output' (execution-000004: ./gate exits 1). Correcting only that token and re-running the identical probe passed with exit 0 (execution-000002), demonstrating the break and its fix. The delivered gate does not pass on the delivered artifact, so this is BLOCK with root cause in execution."
+}

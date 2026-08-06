@@ -8,6 +8,7 @@ pub mod dispatch_meter;
 pub mod event_log;
 pub mod gate_execution;
 pub mod gate_replay;
+pub mod paired_execution_proof;
 pub mod run_state;
 pub mod tracked_contract;
 pub mod vision;
@@ -23,6 +24,13 @@ pub use artifact_validation::{
 pub use contract_measurement::{
     ContractMeasurementError, GateMeasurement, GateMeasurements, MeasuredContractSnapshot,
     ObservedExitStatus, measure_contract_snapshot,
+};
+pub use paired_execution_proof::{
+    CampaignSide, FalsificationVerdictToken, PairedBlockingIssue, PairedCampaign,
+    PairedExecutionProofError, PairedExecutionProofResult, PairedFalsificationVerdict,
+    PairedProofDecision, PairedRefusalReason, PairedReplayClassification, PairedStimulusIdentity,
+    ReferenceValidation, ReplayClassifications, fold_paired_execution_proof,
+    paired_stimulus_identity, parse_paired_falsification_verdict,
 };
 
 /// Exact diagnostic emitted when a nested Seatbelt capability probe is denied.

@@ -4,8 +4,9 @@ mod support;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -81,6 +82,15 @@ impl Drop for DirectoryGuard {
 struct PermissionGuard {
     path: PathBuf,
     mode: u32,
+}
+
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 impl Drop for PermissionGuard {
@@ -666,6 +676,43 @@ fn seatbelt_profile_permits_repository_write_and_denies_external_probe() {
     let fixture = seatbelt_fixture();
     let output = run_seatbelt_fixture(&fixture);
     assert_uv_status_and_invocation(&fixture, output);
+}
+
+#[test]
+fn seatbelt_profile_denies_signalling_an_unrelated_process_group() {
+    if skip_without_nested_seatbelt() {
+        return;
+    }
+    let mut unrelated_command = Command::new("/bin/sleep");
+    unrelated_command.arg("30").process_group(0);
+    let mut unrelated = ChildGuard(
+        unrelated_command
+            .spawn()
+            .expect("unrelated process should spawn"),
+    );
+    let fixture = seatbelt_fixture();
+    fs::write(
+        &fixture.contract_path,
+        gate_contract(&format!("/bin/kill -KILL {}", unrelated.0.id())),
+    )
+    .expect("signal-denial contract should write");
+
+    let output = run_seatbelt_fixture(&fixture);
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("exited with status 1"),
+        "unrelated signal denial should be reported as gate status 1; stderr was: {stderr}"
+    );
+    assert!(
+        unrelated
+            .0
+            .try_wait()
+            .expect("unrelated process status should read")
+            .is_none(),
+        "sandboxed gate signalled an unrelated process in a separate process group"
+    );
 }
 
 #[test]

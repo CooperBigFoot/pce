@@ -1114,7 +1114,7 @@ fn pause_seam_timeout_is_exact_and_precedes_worktree_creation() {
 }
 
 #[test]
-fn slow_drip_commands_are_bounded_and_cleaned() {
+fn slow_drip_commands_complete_without_inactivity_timeout_and_are_cleaned() {
     let fixture = Fixture::new();
     std::fs::write(
         fixture.root.join("slow.sh"),
@@ -1134,23 +1134,23 @@ fn slow_drip_commands_are_bounded_and_cleaned() {
     let started = Instant::now();
     let (_, report) = fixture.run("slow-drip", "slow-drip");
     let elapsed = started.elapsed();
-    assert!(elapsed >= Duration::from_secs(20), "elapsed {elapsed:?}");
+    assert!(elapsed >= Duration::from_secs(35), "elapsed {elapsed:?}");
     assert!(elapsed < Duration::from_secs(60), "elapsed {elapsed:?}");
     for side in ["broken", "repaired"] {
         let outcome = &report[side]["outcome"];
         match outcome["kind"].as_str().expect("slow outcome kind") {
             "reproducible" => assert_eq!(
                 outcome["observation"]["process"]["command"]["status"]["kind"],
-                "signaled"
+                "exited"
             ),
             "non-reproducible" => {
                 assert_eq!(
                     outcome["first"]["process"]["command"]["status"]["kind"],
-                    "signaled"
+                    "exited"
                 );
                 assert_eq!(
                     outcome["second"]["process"]["command"]["status"]["kind"],
-                    "signaled"
+                    "exited"
                 );
             }
             other => panic!("unexpected slow outcome {other}"),
