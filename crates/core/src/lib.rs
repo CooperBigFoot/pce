@@ -37,12 +37,13 @@ pub use paired_execution_proof::{
 pub const NESTED_SEATBELT_SKIP_MARKER: &str =
     "PCE_TEST_SKIP: nested Seatbelt unavailable; permissive capability probe was denied";
 pub use dispatch::{
-    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
-    ChildEnvironment, ClaudeResultEnvelope, ClaudeResultUsage, CodexTerminalObservation,
-    CodexTerminalUsage, Deferred, DispatchEnvelope, DispatchError, DispatchInvocation,
-    DispatchInvocationStdin, DispatchLogging, DispatchProjectionError, DispatchProjectionInput,
-    DispatchTarget, Executable, Sandbox, SeatbeltCapability, StdinBinding, classify_claude_result,
-    classify_codex_terminal_usage, classify_seatbelt_capability, compose_gate_arguments,
+    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ActReversibility,
+    ArgumentVector, ChildEnvironment, ClaudeResultEnvelope, ClaudeResultUsage,
+    CodexTerminalObservation, CodexTerminalUsage, Deferred, DispatchEnvelope, DispatchError,
+    DispatchInvocation, DispatchInvocationStdin, DispatchLogging, DispatchProjectionError,
+    DispatchProjectionInput, DispatchTarget, Executable, PlanningFrameError, Sandbox,
+    SeatbeltCapability, StdinBinding, classify_claude_result, classify_codex_terminal_usage,
+    classify_seatbelt_capability, compose_gate_arguments, compose_planning_role_frame,
     dispatch_completion_payload, dispatch_invocation, dispatch_payload, parse_claude_result,
     render_dispatch_projection, seatbelt_capability_probe,
 };

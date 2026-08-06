@@ -1,4 +1,4 @@
-//! dispatch_invocation : DispatchTarget × DispatchEnvelope → Executable × Argv; compose_gate_arguments : Option<DispatchRole> × AbsoluteOutputPath × Option<AbsoluteGateExecClientPath> × ArgumentVector → Result<ArgumentVector, DispatchError>; dispatch_projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; codex_terminal_usage : CodexTerminalObservation* × DispatchExitStatus → DispatchTokenUsage; claude_result_usage : ClaudeResultEnvelope × DispatchExitStatus → DispatchTokenUsage; SeatbeltCapability = classify(permissive_profile_probe_status)   (pure, deterministic)
+//! dispatch_invocation : DispatchTarget × DispatchEnvelope → Executable × Argv; compose_gate_arguments : Option<DispatchRole> × AbsoluteOutputPath × Option<AbsoluteGateExecClientPath> × ArgumentVector → Result<ArgumentVector, DispatchError>; dispatch_projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; codex_terminal_usage : CodexTerminalObservation* × DispatchExitStatus → DispatchTokenUsage; claude_result_usage : ClaudeResultEnvelope × DispatchExitStatus → DispatchTokenUsage; SeatbeltCapability = classify(permissive_profile_probe_status); planning_role_frame : DispatchRole × ActReversibility × ArgumentVector → ArgumentVector ∪ PlanningFrameError   (pure, deterministic)
 //! This module describes complete shell-free child invocations; the binary adapter performs all I/O and process work.
 
 use std::collections::BTreeMap;
@@ -21,6 +21,91 @@ use crate::gate_execution::{AbsoluteGateExecClientPath, GateExecutionRecorderCon
 
 const SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 const PERMISSIVE_SEATBELT_PROFILE: &str = "(version 1)(allow default)";
+const PLANNING_FRAME_SEPARATOR: &str = "\n\n## Binary-owned reversibility obligation\n\n";
+const REPEATABLE_PLANNING_OBLIGATION: &str = "The step's act is repeatable. The plan must retain an explicit not-touched scope fence and exact expected values for every assertion. The plan must not contain a pre-derived argument that the design is correct.";
+const IRREVERSIBLE_PLANNING_OBLIGATION: &str = "The step's act cannot be repeated. The plan must retain the existing front-loaded pre-proof of correctness, an explicit not-touched scope fence, and exact expected values for every assertion.";
+
+/// Whether the planning act can be performed again after this dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActReversibility {
+    /// The act can be repeated, so the plan relies on exact assertions and later falsification.
+    Repeatable,
+    /// The act cannot be repeated, so the plan retains a front-loaded correctness proof.
+    Irreversible,
+}
+
+impl ActReversibility {
+    /// Parse the only two CLI spellings accepted for planning acts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlanningFrameError::UnsupportedPlanningAct`] for any other spelling.
+    pub fn parse(raw: impl Into<String>) -> Result<Self, PlanningFrameError> {
+        let act = raw.into();
+        match act.as_str() {
+            "repeatable" => Ok(Self::Repeatable),
+            "irreversible" => Ok(Self::Irreversible),
+            _ => Err(PlanningFrameError::UnsupportedPlanningAct { act }),
+        }
+    }
+
+    const fn obligation(self) -> &'static str {
+        match self {
+            Self::Repeatable => REPEATABLE_PLANNING_OBLIGATION,
+            Self::Irreversible => IRREVERSIBLE_PLANNING_OBLIGATION,
+        }
+    }
+}
+
+/// A binary-owned planning-role frame could not be composed.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PlanningFrameError {
+    /// The CLI supplied a planning-act spelling outside the closed enum.
+    #[error("unsupported planning act `{act}`; expected `repeatable` or `irreversible`")]
+    UnsupportedPlanningAct { act: String },
+    /// The CLI supplied a planning act without the complete logging authority group.
+    #[error("`--planning-act` requires complete dispatch logging metadata")]
+    MissingLoggingMetadata,
+    /// The logging role is not one of the two planning roles that own this frame.
+    #[error(
+        "planning act is supported only for roles `step-plan-writer` and `step-plan-critic`; rejected role `{role}`"
+    )]
+    UnsupportedRole { role: String },
+    /// The planning role has no non-empty final caller argument to carry the frame.
+    #[error(
+        "planning role `{role}` requires a non-empty final caller argument to carry its binary-owned frame"
+    )]
+    MissingFinalCallerArgument { role: String },
+}
+
+/// Append the binary-owned reversibility obligation to the final caller argument only.
+///
+/// # Errors
+///
+/// Returns [`PlanningFrameError::UnsupportedRole`] for a non-planning role and
+/// [`PlanningFrameError::MissingFinalCallerArgument`] when the final argument is absent or empty.
+pub fn compose_planning_role_frame(
+    role: &DispatchRole,
+    reversibility: ActReversibility,
+    mut arguments: ArgumentVector,
+) -> Result<ArgumentVector, PlanningFrameError> {
+    let role_name = role.as_str();
+    if !matches!(role_name, "step-plan-writer" | "step-plan-critic") {
+        return Err(PlanningFrameError::UnsupportedRole {
+            role: role_name.to_owned(),
+        });
+    }
+    let final_argument = arguments
+        .0
+        .last_mut()
+        .filter(|argument| !argument.is_empty())
+        .ok_or_else(|| PlanningFrameError::MissingFinalCallerArgument {
+            role: role_name.to_owned(),
+        })?;
+    final_argument.push_str(PLANNING_FRAME_SEPARATOR);
+    final_argument.push_str(reversibility.obligation());
+    Ok(arguments)
+}
 
 /// Typed log metadata carried beside, rather than inside, a child envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1015,12 +1100,13 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
-        ChildEnvironment, ClaudeResultEnvelope, CodexTerminalObservation, CodexTerminalUsage,
-        DispatchEnvelope, DispatchError, DispatchTarget, Executable, Sandbox, SeatbeltCapability,
-        StdinBinding, classify_claude_result, classify_codex_terminal_usage,
-        classify_seatbelt_capability, compose_gate_arguments, dispatch_completion_payload,
-        parse_claude_result, seatbelt_capability_probe,
+        AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ActReversibility,
+        ArgumentVector, ChildEnvironment, ClaudeResultEnvelope, CodexTerminalObservation,
+        CodexTerminalUsage, DispatchEnvelope, DispatchError, DispatchTarget, Executable,
+        PlanningFrameError, Sandbox, SeatbeltCapability, StdinBinding, classify_claude_result,
+        classify_codex_terminal_usage, classify_seatbelt_capability, compose_gate_arguments,
+        compose_planning_role_frame, dispatch_completion_payload, parse_claude_result,
+        seatbelt_capability_probe,
     };
     use crate::contract_measurement::ObservedExitStatus;
     use crate::event_log::{
@@ -1028,6 +1114,68 @@ mod tests {
         ExitCode, Sequence, SignalNumber, UsageAbsenceReason,
     };
     use crate::gate_execution::AbsoluteGateExecClientPath;
+
+    const REPEATABLE_FIXTURE: &str = "Plan the step.\n\n## Binary-owned reversibility obligation\n\nThe step's act is repeatable. The plan must retain an explicit not-touched scope fence and exact expected values for every assertion. The plan must not contain a pre-derived argument that the design is correct.";
+    const IRREVERSIBLE_FIXTURE: &str = "Plan the step.\n\n## Binary-owned reversibility obligation\n\nThe step's act cannot be repeated. The plan must retain the existing front-loaded pre-proof of correctness, an explicit not-touched scope fence, and exact expected values for every assertion.";
+
+    #[test]
+    fn planning_role_frame_complete_role_reversibility_matrix_is_byte_exact() {
+        for role in ["step-plan-writer", "step-plan-critic"] {
+            for (act, expected) in [
+                (ActReversibility::Repeatable, REPEATABLE_FIXTURE),
+                (ActReversibility::Irreversible, IRREVERSIBLE_FIXTURE),
+            ] {
+                let arguments = ArgumentVector::new(vec![
+                    "--append-system-prompt".to_owned(),
+                    "/tmp/review.json".to_owned(),
+                    "Plan the step.".to_owned(),
+                ]);
+                let composed =
+                    compose_planning_role_frame(&DispatchRole::new(role), act, arguments)
+                        .expect("accepted planning frame");
+                assert_eq!(
+                    composed.as_slice(),
+                    ["--append-system-prompt", "/tmp/review.json", expected]
+                );
+                assert!(!composed.as_slice()[2].ends_with('\n'));
+            }
+        }
+    }
+
+    #[test]
+    fn planning_role_frame_rejects_unsupported_roles_and_prompt_carriers() {
+        assert_eq!(
+            compose_planning_role_frame(
+                &DispatchRole::new("step-executor"),
+                ActReversibility::Repeatable,
+                ArgumentVector::new(vec!["Plan the step.".to_owned()]),
+            ),
+            Err(PlanningFrameError::UnsupportedRole {
+                role: "step-executor".to_owned()
+            })
+        );
+        for arguments in [
+            ArgumentVector::default(),
+            ArgumentVector::new(vec![String::new()]),
+        ] {
+            let error = compose_planning_role_frame(
+                &DispatchRole::new("step-plan-writer"),
+                ActReversibility::Repeatable,
+                arguments,
+            )
+            .expect_err("prompt carrier must be non-empty");
+            assert_eq!(
+                error.to_string(),
+                "planning role `step-plan-writer` requires a non-empty final caller argument to carry its binary-owned frame"
+            );
+        }
+        assert_eq!(
+            ActReversibility::parse("destructive")
+                .expect_err("unsupported planning act")
+                .to_string(),
+            "unsupported planning act `destructive`; expected `repeatable` or `irreversible`"
+        );
+    }
 
     fn exited(code: u64) -> DispatchExitStatus {
         DispatchExitStatus::Exited {

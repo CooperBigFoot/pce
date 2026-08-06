@@ -18,10 +18,10 @@ use pce_core::GateCommand;
 use pce_core::tracked_contract::parse_gate_command;
 use pce_core::{
     AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
-    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AppendError,
-    AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath,
-    AuthorityFailure, BranchState, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage,
-    ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage, CreationDate,
+    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ActReversibility,
+    AppendError, AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome,
+    ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode, CheckoutFailure,
+    CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage, CreationDate,
     CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchDuration,
     DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef,
     DispatchRole, DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult,
@@ -46,11 +46,11 @@ use pce_core::{
     VersionPolicy, VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
     admit_recurrent_finding, append_event, classify_claude_result, classify_codex_terminal_usage,
     classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
-    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
-    derive_run_state, dispatch_completion_payload, dispatch_invocation, dispatch_payload,
-    event_record_matches, fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot,
-    meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
-    parse_acceptance_criteria, parse_claude_result, parse_event_line,
+    compose_planning_role_frame, compute_dispatchability, create_vision, derive_merge_status,
+    derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
+    dispatch_invocation, dispatch_payload, event_record_matches, fold_paired_execution_proof,
+    fold_replay_runs, measure_contract_snapshot, meter_dispatches, normalize_replay_observation,
+    paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result, parse_event_line,
     parse_gate_execution_evidence, parse_gate_stimulus, parse_paired_falsification_verdict,
     parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
     rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
@@ -72,8 +72,8 @@ const USAGE: &str = concat!(
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
-    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CODEX_ARGUMENT>...\n",
-    "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
+    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CODEX_ARGUMENT>...\n",
+    "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
     "       pce gate exec\n",
     "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>\n",
     "       pce gate execution-subject-probe --output <REPOSITORY_RELATIVE_OUTPUT_PATH>\n",
@@ -1766,6 +1766,11 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
             Ok(values) => Some(values),
             Err(_) => bail!(LOGGING_DIAGNOSTIC),
         }
+    } else if rest
+        .get(position)
+        .is_some_and(|value| value == "--planning-act")
+    {
+        return Err(pce_core::PlanningFrameError::MissingLoggingMetadata.into());
     } else if rest.get(position).is_some_and(|value| {
         matches!(
             value.as_str(),
@@ -1773,6 +1778,20 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         )
     }) {
         bail!(LOGGING_DIAGNOSTIC)
+    } else {
+        None
+    };
+
+    let planning_act = if logging_raw.is_some()
+        && rest
+            .get(position)
+            .is_some_and(|value| value == "--planning-act")
+    {
+        Some(ActReversibility::parse(required_option(
+            rest,
+            &mut position,
+            "--planning-act",
+        )?)?)
     } else {
         None
     };
@@ -1788,7 +1807,29 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         bail!("dispatch arguments require the `--` delimiter");
     }
     position += 1;
-    let caller_arguments = rest[position..].to_vec();
+    let caller_arguments = ArgumentVector::new(rest[position..].to_vec());
+
+    let logging = logging_raw
+        .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
+            Ok((
+                PathBuf::from(path),
+                DispatchLogging {
+                    node: NodeId::parse(node).context("failed to parse dispatch logging node")?,
+                    role: DispatchRole::new(role),
+                    dispatch_ref: DispatchRef::new(dispatch_ref),
+                    evidence: Evidence::parse(evidence)
+                        .context("failed to parse dispatch logging evidence")?,
+                },
+            ))
+        })
+        .transpose()?;
+    let caller_arguments = match (planning_act, logging.as_ref()) {
+        (Some(act), Some((_, metadata))) => {
+            compose_planning_role_frame(&metadata.role, act, caller_arguments)?
+        }
+        (None, _) => caller_arguments,
+        (Some(_), None) => return Err(pce_core::PlanningFrameError::MissingLoggingMetadata.into()),
+    };
 
     let working_directory = AbsoluteWorkingDirectory::parse(PathBuf::from(raw_cwd))
         .context("failed to parse dispatch working directory")?;
@@ -1799,7 +1840,7 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         None => StdinBinding::Null,
     };
     let mut envelope = DispatchEnvelope::new(DispatchTarget::Codex, working_directory, stdin)
-        .with_arguments(ArgumentVector::new(caller_arguments))
+        .with_arguments(caller_arguments)
         .with_environment(ChildEnvironment::new(environment))
         .with_sandbox(Sandbox::WorkspaceWrite);
     if let Some((schema, output)) = structured {
@@ -1813,23 +1854,13 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
                     .context("failed to parse dispatch output path")?,
             );
     }
-    let logging = logging_raw
-        .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
-            let path = PathBuf::from(path);
-            let metadata = DispatchLogging {
-                node: NodeId::parse(node).context("failed to parse dispatch logging node")?,
-                role: DispatchRole::new(role),
-                dispatch_ref: DispatchRef::new(dispatch_ref),
-                evidence: Evidence::parse(evidence)
-                    .context("failed to parse dispatch logging evidence")?,
-            };
-            Ok(if dry_run {
-                DispatchLoggingMode::DryRun { path, metadata }
-            } else {
-                DispatchLoggingMode::Live { path, metadata }
-            })
-        })
-        .transpose()?;
+    let logging = logging.map(|(path, metadata)| {
+        if dry_run {
+            DispatchLoggingMode::DryRun { path, metadata }
+        } else {
+            DispatchLoggingMode::Live { path, metadata }
+        }
+    });
     Ok(Command::Dispatch { envelope, logging })
 }
 
@@ -1883,6 +1914,11 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
             Ok(values) => Some(values),
             Err(_) => bail!(LOGGING_DIAGNOSTIC),
         }
+    } else if rest
+        .get(position)
+        .is_some_and(|value| value == "--planning-act")
+    {
+        return Err(pce_core::PlanningFrameError::MissingLoggingMetadata.into());
     } else if rest.get(position).is_some_and(|value| {
         matches!(
             value.as_str(),
@@ -1890,6 +1926,19 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
         )
     }) {
         bail!(LOGGING_DIAGNOSTIC)
+    } else {
+        None
+    };
+    let planning_act = if logging_raw.is_some()
+        && rest
+            .get(position)
+            .is_some_and(|value| value == "--planning-act")
+    {
+        Some(ActReversibility::parse(required_option(
+            rest,
+            &mut position,
+            "--planning-act",
+        )?)?)
     } else {
         None
     };
@@ -1911,6 +1960,28 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
     {
         bail!("gate caller arguments must not contain `--output-format`");
     }
+    let logging = logging_raw
+        .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
+            Ok((
+                PathBuf::from(path),
+                DispatchLogging {
+                    node: NodeId::parse(node).context("failed to parse dispatch logging node")?,
+                    role: DispatchRole::new(role),
+                    dispatch_ref: DispatchRef::new(dispatch_ref),
+                    evidence: Evidence::parse(evidence)
+                        .context("failed to parse dispatch logging evidence")?,
+                },
+            ))
+        })
+        .transpose()?;
+    let arguments = ArgumentVector::new(caller_arguments);
+    let arguments = match (planning_act, logging.as_ref()) {
+        (Some(act), Some((_, metadata))) => {
+            compose_planning_role_frame(&metadata.role, act, arguments)?
+        }
+        (None, _) => arguments,
+        (Some(_), None) => return Err(pce_core::PlanningFrameError::MissingLoggingMetadata.into()),
+    };
     let working_directory = AbsoluteWorkingDirectory::parse(PathBuf::from(raw_cwd))
         .context("failed to parse dispatch working directory")?;
     let schema_path = AbsoluteSchemaPath::parse(PathBuf::from(schema))
@@ -1923,7 +1994,7 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
         ),
         None => StdinBinding::Null,
     };
-    let role = logging_raw.map(|(_, _, role, _, _)| DispatchRole::new(role));
+    let role = logging.as_ref().map(|(_, metadata)| metadata.role.clone());
     let recorder = if role
         .as_ref()
         .is_some_and(|role| role.as_str() == "falsification-critic")
@@ -1975,7 +2046,7 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
         role.as_ref(),
         &output_path,
         recorder.as_ref().map(GateExecutionRecorderConfig::client),
-        ArgumentVector::new(caller_arguments),
+        arguments,
     )
     .context("failed to compose gate caller arguments")?;
     let envelope = DispatchEnvelope::new(DispatchTarget::Gate, working_directory, stdin)
@@ -1987,23 +2058,13 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
         Some(recorder) => envelope.with_gate_execution_recorder(recorder)?,
         None => envelope,
     };
-    let logging = logging_raw
-        .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
-            let path = PathBuf::from(path);
-            let metadata = DispatchLogging {
-                node: NodeId::parse(node).context("failed to parse dispatch logging node")?,
-                role: DispatchRole::new(role),
-                dispatch_ref: DispatchRef::new(dispatch_ref),
-                evidence: Evidence::parse(evidence)
-                    .context("failed to parse dispatch logging evidence")?,
-            };
-            Ok(if dry_run {
-                DispatchLoggingMode::DryRun { path, metadata }
-            } else {
-                DispatchLoggingMode::Live { path, metadata }
-            })
-        })
-        .transpose()?;
+    let logging = logging.map(|(path, metadata)| {
+        if dry_run {
+            DispatchLoggingMode::DryRun { path, metadata }
+        } else {
+            DispatchLoggingMode::Live { path, metadata }
+        }
+    });
     Ok(Command::Dispatch { envelope, logging })
 }
 
@@ -9921,6 +9982,152 @@ mod tests {
         assert!(
             format!("{error:#}").contains("dispatch logging options must be supplied together")
         );
+    }
+
+    #[test]
+    fn planning_act_parser_accepts_both_values_for_both_planning_roles() {
+        for target in ["codex", "gate"] {
+            for (role, act) in [
+                ("step-plan-writer", "repeatable"),
+                ("step-plan-critic", "irreversible"),
+            ] {
+                let mut args = vec!["dispatch", target, "--cwd", "/tmp"];
+                if target == "codex" {
+                    args.extend(["--sandbox", "workspace-write"]);
+                } else {
+                    args.extend([
+                        "--output-schema",
+                        "/tmp/schema.json",
+                        "-o",
+                        "/tmp/output.json",
+                    ]);
+                }
+                args.extend([
+                    "--log-file",
+                    "/tmp/events.jsonl",
+                    "--node",
+                    "m5-s1",
+                    "--role",
+                    role,
+                    "--ref",
+                    "abc",
+                    "--evidence",
+                    "fixture",
+                    "--planning-act",
+                    act,
+                    "--",
+                    "PROMPT",
+                ]);
+                parse_command(args.into_iter().map(str::to_owned))
+                    .expect("planning act should parse");
+            }
+        }
+    }
+
+    #[test]
+    fn planning_act_parser_rejects_exact_invalid_shapes_and_preserves_absence() {
+        let prefix = [
+            "dispatch",
+            "codex",
+            "--cwd",
+            "/tmp",
+            "--sandbox",
+            "workspace-write",
+        ];
+        let logging = [
+            "--log-file",
+            "/tmp/events.jsonl",
+            "--node",
+            "m5-s1",
+            "--role",
+            "step-plan-writer",
+            "--ref",
+            "abc",
+            "--evidence",
+            "fixture",
+        ];
+        for (suffix, diagnostic) in [
+            (
+                logging
+                    .into_iter()
+                    .chain(["--planning-act", "destructive", "--", "Plan the step."])
+                    .collect::<Vec<_>>(),
+                "unsupported planning act `destructive`; expected `repeatable` or `irreversible`",
+            ),
+            (
+                vec!["--planning-act", "repeatable", "--", "Plan the step."],
+                "`--planning-act` requires complete dispatch logging metadata",
+            ),
+            (
+                logging
+                    .into_iter()
+                    .map(|value| {
+                        if value == "step-plan-writer" {
+                            "step-executor"
+                        } else {
+                            value
+                        }
+                    })
+                    .chain(["--planning-act", "repeatable", "--", "Plan the step."])
+                    .collect(),
+                "planning act is supported only for roles `step-plan-writer` and `step-plan-critic`; rejected role `step-executor`",
+            ),
+            (
+                logging
+                    .into_iter()
+                    .chain(["--planning-act", "repeatable", "--"])
+                    .collect(),
+                "planning role `step-plan-writer` requires a non-empty final caller argument to carry its binary-owned frame",
+            ),
+            (
+                logging
+                    .into_iter()
+                    .chain([
+                        "--dry-run",
+                        "--planning-act",
+                        "repeatable",
+                        "--",
+                        "Plan the step.",
+                    ])
+                    .collect(),
+                "dispatch arguments require the `--` delimiter",
+            ),
+            (
+                vec![
+                    "--log-file",
+                    "/tmp/events.jsonl",
+                    "--node",
+                    "m5-s1",
+                    "--role",
+                    "step-plan-writer",
+                    "--ref",
+                    "abc",
+                    "--planning-act",
+                    "repeatable",
+                    "--evidence",
+                    "fixture",
+                    "--",
+                    "Plan the step.",
+                ],
+                "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence",
+            ),
+        ] {
+            let error = parse_command(prefix.into_iter().chain(suffix).map(str::to_owned))
+                .expect_err("planning act shape must fail");
+            assert!(format!("{error:#}").contains(diagnostic));
+        }
+
+        let Command::Dispatch { envelope, .. } = parse_command(
+            prefix
+                .into_iter()
+                .chain(logging)
+                .chain(["--", "Plan the step."])
+                .map(str::to_owned),
+        )
+        .expect("absence preserves dispatch") else {
+            panic!("parsed another command")
+        };
+        assert_eq!(envelope.arguments().as_slice(), ["Plan the step."]);
     }
 
     #[test]

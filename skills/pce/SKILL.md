@@ -59,14 +59,16 @@ whitespace-separated tokens.
 
 The marker, opening `\`\`\`sh` fence, every physical command line, and closing `\`\`\`` fence begin at column 0. Only strictly empty physical lines may occur between the marker and opening fence. An anchor with leading spaces or tabs on any of those lines is invalid; numbered-list prose must end before the anchor and resume after it.
 
-The closed placeholder vocabulary is `CWD`, `SCHEMA`, `OUTPUT`, `PLAN_FILE`, `LOG_FILE`, `PATH_ENV`,
-`HOME_ENV`, `USER_ENV`,
-`NODE`, `MILESTONE_NODE`, `STEP_NODE`, `ROLE`, `REF`, `EVIDENCE`, `ABS_PATH`, and `CALLER_ARG`, each surrounded by two opening and
-two closing braces and occupying a complete token. Embedded, malformed, unknown, or aliased names
+The closed placeholder vocabulary is `CWD`, `SCHEMA`, `OUTPUT`, `PLAN_FILE`, `LOG_FILE`, `PATH_ENV`, `HOME_ENV`, `USER_ENV`, `NODE`, `MILESTONE_NODE`, `STEP_NODE`, `ROLE`, `REF`, `EVIDENCE`, `PLANNING_ACT`, `ABS_PATH`, and `CALLER_ARG`, each surrounded by two opening and two closing braces and occupying a complete token.
+Embedded, malformed, unknown, or aliased names
 are invalid. Codex routes own their working-directory and workspace-write sandbox options. A
 structured Codex route additionally owns its adjacent schema and output options. Gate routes own
 their working-directory and adjacent schema and output options. Optional environment, plan-file,
 and complete logging groups retain the binary's strict order. Every anchored route contains exactly three environment entries, `--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}}`, each placeholder occurring exactly once and binding the operator's real `PATH`, `HOME`, and `USER`. The binary clears the child environment before applying these entries, so a route supplies every variable its child needs and nothing is inherited: `PATH` resolves the executable, without which the spawn itself fails; `HOME` reaches the operator's tracked git identity, without which a committing child silently authors under a fabricated host identity; and `USER` unlocks keychain OAuth, without which a gate child reports `Not logged in` and writes no verdict. Two entries are as invalid as one, so cardinality is falsified from both sides. The plan-file and complete logging groups retain the binary's strict order; the plan-file group is optional, while the complete logging group is required for every canonical operating route. Dry-run remains available only after a complete logging group in synthetic review fixtures. Binary-owned child arguments may not be repeated in the caller tail.
+
+The two planning-role anchors additionally own exactly one `--planning-act {{PLANNING_ACT}}` pair after `--evidence {{EVIDENCE}}` and before the standalone `--` delimiter. `{{PLANNING_ACT}}` binds to exactly `repeatable` or `irreversible`; no other canonical or purpose anchor carries the pair. Before the first planning-role dispatch for a step, resolve this binding once from the vision's reversibility judgement and the actual step scope: bind `irreversible` only when this step performs the vision's named act that cannot be repeated — minting an immutable artifact, publishing a release or tag, consuming a one-shot quota, or destroying history — and bind `repeatable` for every other step. Keep that byte-identical binding for `step-plan-writer`, `step-plan-critic`, and every planning revision of the same step.
+
+`pce dispatch` appends the selected binary-owned reversibility obligation to the final caller argument. The skill supplies the typed choice and orchestration only; it does not restate or substitute the agent-facing obligation in caller prose. A missing, changed, or differently placed planning-act pair is an invalid planning route.
 
 Outside a valid anchored fence, a prohibited dispatch fragment is one inline code span, one complete fenced code block, or one shell-like physical line that contains both (a) the contiguous route name `pce dispatch codex` or `pce dispatch gate` and (b) at least one whitespace-delimited token that is a dispatch-only parent option, the standalone `--` delimiter, or any caller argument represented by a whitespace-delimited token after that delimiter.
 
@@ -107,12 +109,12 @@ pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{US
 
 <!-- pce-dispatch-route kind="codex-unstructured" -->
 ```sh
-pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-plan-writer --ref {{REF}} --evidence {{EVIDENCE}} -- {{CALLER_ARG}}
+pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-plan-writer --ref {{REF}} --evidence {{EVIDENCE}} --planning-act {{PLANNING_ACT}} -- {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="gate-structured" -->
 ```sh
-pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-plan-critic --ref {{REF}} --evidence {{EVIDENCE}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
+pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{STEP_NODE}} --role step-plan-critic --ref {{REF}} --evidence {{EVIDENCE}} --planning-act {{PLANNING_ACT}} -- --append-system-prompt {{OUTPUT}} {{CALLER_ARG}}
 ```
 
 <!-- pce-dispatch-route kind="codex-structured" -->
@@ -389,7 +391,7 @@ Supply no policy argument: `pce ready` resolves each candidate repository's vers
 
 Use the verb at both altitudes: the approved milestone graph controls step-planner dispatches, and each approved step graph controls step execution-cycle dispatches. When asking about a specific altitude, always pass `--graph` with that approved artifact's exact recorded path; do not rely on newest-first default selection once multiple graphs may be approved. The orchestrator consumes classifications; it does not fold dependencies, merge observations, dispatch history, or contract policies into its own readiness judgement.
 
-1. **Plan (Codex)** — dispatch `step-plan-writer` cold with `--sandbox workspace-write`, `-C <repo-abs>`, and `< /dev/null` at the primary root to write the exact step `plan.md` directly; it uses no `--output-schema` and no `-o`. Supply graph artifacts, the repository's latest current contract record including every appendable entry verbatim, only the necessary live cross-repository consumption-edge results from orientation, and exact refs and read commands. Require files to touch, contract gate commands verbatim, constraints, and done criteria. Dispatch `step-plan-critic` against the verdict schema. Each complete anchored logging envelope records issuance at the actual canonical step node.
+1. **Plan (Codex)** — before the first planning dispatch for the step, resolve `PLANNING_ACT` once by the planning-anchor rule above and retain that same value through approval. Dispatch `step-plan-writer` cold through its canonical route with `--sandbox workspace-write`, `-C <repo-abs>`, and `< /dev/null` at the primary root to write the exact step `plan.md` directly; it uses no `--output-schema` and no `-o`. Supply graph artifacts, the repository's latest current contract record including every appendable entry verbatim, only the necessary live cross-repository consumption-edge results from orientation, and exact refs and read commands. Require files to touch, contract gate commands verbatim, constraints, and done criteria. Dispatch `step-plan-critic` against the verdict schema with the same `PLANNING_ACT`. The writer and critic must comply with the binary-owned reversibility obligation appended by `pce dispatch`; a verdict cannot approve a plan that contradicts it. Every planning revision reuses the same `PLANNING_ACT`. Each complete anchored logging envelope records issuance at the actual canonical step node.
 
    Iterate fresh invocations to `APPROVE`, cap 3 with review-artifact stuck detection. At approval, digest the approved bytes and append:
 

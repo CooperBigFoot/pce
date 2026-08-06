@@ -44,11 +44,259 @@ const VALID_ARTIFACT_SCHEMA: &[u8] = br#"{
 const CONFORMING_ARTIFACT: &[u8] = br#"{"verdict":"pass","summary":"ok"}"#;
 const SUCCESSFUL_STRUCTURED_TRANSCRIPT: &[u8] = b"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"verdict\\\":\\\"SUCCESS\\\",\\\"summary\\\":\\\"transcript says success\\\"}\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":101,\"cached_input_tokens\":23,\"output_tokens\":17,\"reasoning_output_tokens\":5}}\n";
 static DISPATCH_TEST_LOCK: Mutex<()> = Mutex::new(());
+const REPEATABLE_PLANNING_FRAME: &str = "Plan the step.\n\n## Binary-owned reversibility obligation\n\nThe step's act is repeatable. The plan must retain an explicit not-touched scope fence and exact expected values for every assertion. The plan must not contain a pre-derived argument that the design is correct.";
+const IRREVERSIBLE_PLANNING_FRAME: &str = "Critique the plan.\n\n## Binary-owned reversibility obligation\n\nThe step's act cannot be repeated. The plan must retain the existing front-loaded pre-proof of correctness, an explicit not-touched scope fence, and exact expected values for every assertion.";
 
 fn dispatch_test_guard() -> MutexGuard<'static, ()> {
     DISPATCH_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[test]
+fn codex_planning_frame_is_exact_in_dry_run_and_live_child() {
+    let _guard = dispatch_test_guard();
+    let harness = CliHarness::new().expect("create Codex planning harness");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
+    let record_root = harness.path().join("planning-records");
+    fs::create_dir(&record_root).expect("create records");
+    let stdout_path = harness.path().join("planning.stdout");
+    let stderr_path = harness.path().join("planning.stderr");
+    fs::write(&stdout_path, SUCCESSFUL_STRUCTURED_TRANSCRIPT).expect("write stdout");
+    fs::write(&stderr_path, []).expect("write stderr");
+    let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+    let log_path = harness.path().join("planning.jsonl");
+    let caller = vec!["--caller-option".to_owned(), "Plan the step.".to_owned()];
+    let mut dry = dispatch_argv(&cwd, &environment, None, None, caller.as_slice());
+    let delimiter = dry
+        .iter()
+        .position(|value| value == "--")
+        .expect("delimiter");
+    dry.splice(
+        delimiter..delimiter,
+        [
+            "--log-file",
+            log_path.to_str().expect("log path"),
+            "--node",
+            "m5-s1",
+            "--role",
+            "step-plan-writer",
+            "--ref",
+            "fixture-ref",
+            "--evidence",
+            "fixture-evidence",
+            "--planning-act",
+            "repeatable",
+            "--dry-run",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    let projected = harness.run(&dry, b"").expect("project planning dispatch");
+    assert!(
+        projected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&projected.stderr)
+    );
+    let projection: Value = serde_json::from_slice(&projected.stdout).expect("projection JSON");
+    assert_eq!(
+        projection["envelope"]["argv"]
+            .as_array()
+            .expect("argv")
+            .last(),
+        Some(&json!(REPEATABLE_PLANNING_FRAME))
+    );
+    assert_eq!(
+        projection["envelope"]["stdin"],
+        json!({"binding":"null","bytes":null})
+    );
+    assert_eq!(
+        projection["issuance"]["payload"],
+        json!({"role":"step-plan-writer","ref":"fixture-ref","evidence":"fixture-evidence"})
+    );
+    assert!(!log_path.exists());
+    assert!(
+        harness
+            .codex_invocations(&record_root)
+            .expect("dry invocations")
+            .is_empty()
+    );
+
+    let mut live = dry.clone();
+    live.retain(|value| value != "--dry-run");
+    let output = harness.run(&live, b"").expect("run planning dispatch");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let invocation = harness
+        .codex_invocations(&record_root)
+        .expect("live invocation")
+        .remove(0);
+    let captured = invocation
+        .argv
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(projection["envelope"]["argv"], json!(captured));
+    assert_eq!(
+        captured.last().map(String::as_str),
+        Some(REPEATABLE_PLANNING_FRAME)
+    );
+    assert_eq!(invocation.stdin, b"");
+}
+
+#[test]
+fn planning_roles_without_planning_act_preserve_caller_arguments_exactly() {
+    let _guard = dispatch_test_guard();
+    for role in ["step-plan-writer", "step-plan-critic"] {
+        let harness = CliHarness::new().expect("create preservation harness");
+        let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
+        let record_root = harness.path().join(format!("{role}-records"));
+        fs::create_dir(&record_root).expect("create records");
+        let stdout_path = harness.path().join(format!("{role}.stdout"));
+        let stderr_path = harness.path().join(format!("{role}.stderr"));
+        fs::write(&stdout_path, SUCCESSFUL_STRUCTURED_TRANSCRIPT).expect("write stdout");
+        fs::write(&stderr_path, []).expect("write stderr");
+        let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+        let log_path = harness.path().join(format!("{role}.jsonl"));
+        let caller = vec!["--caller-option".to_owned(), "Plan the step.".to_owned()];
+        let mut argv = dispatch_argv(&cwd, &environment, None, None, caller.as_slice());
+        let delimiter = argv
+            .iter()
+            .position(|value| value == "--")
+            .expect("delimiter");
+        argv.splice(
+            delimiter..delimiter,
+            [
+                "--log-file",
+                log_path.to_str().expect("log path"),
+                "--node",
+                "m5-s1",
+                "--role",
+                role,
+                "--ref",
+                "fixture-ref",
+                "--evidence",
+                "fixture-evidence",
+                "--dry-run",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        let projected = harness.run(&argv, b"").expect("project unframed dispatch");
+        assert!(projected.status.success(), "{role}");
+        let projection: Value = serde_json::from_slice(&projected.stdout).expect("projection JSON");
+        let projected_argv = projection["envelope"]["argv"]
+            .as_array()
+            .expect("argv")
+            .clone();
+        assert_eq!(
+            &projected_argv[projected_argv.len() - 2..],
+            [json!("--caller-option"), json!("Plan the step.")],
+            "{role}"
+        );
+    }
+}
+
+#[test]
+fn planning_frame_rejections_have_no_dispatch_side_effects() {
+    let _guard = dispatch_test_guard();
+    for (name, role, act, caller, with_logging, expected) in [
+        (
+            "act",
+            "step-plan-writer",
+            "destructive",
+            Some("Plan the step."),
+            true,
+            "unsupported planning act `destructive`; expected `repeatable` or `irreversible`",
+        ),
+        (
+            "logging",
+            "step-plan-writer",
+            "repeatable",
+            Some("Plan the step."),
+            false,
+            "`--planning-act` requires complete dispatch logging metadata",
+        ),
+        (
+            "role",
+            "step-executor",
+            "repeatable",
+            Some("Plan the step."),
+            true,
+            "planning act is supported only for roles `step-plan-writer` and `step-plan-critic`; rejected role `step-executor`",
+        ),
+        (
+            "missing",
+            "step-plan-writer",
+            "repeatable",
+            None,
+            true,
+            "planning role `step-plan-writer` requires a non-empty final caller argument to carry its binary-owned frame",
+        ),
+        (
+            "empty",
+            "step-plan-writer",
+            "repeatable",
+            Some(""),
+            true,
+            "planning role `step-plan-writer` requires a non-empty final caller argument to carry its binary-owned frame",
+        ),
+    ] {
+        let harness = CliHarness::new().expect("create rejection harness");
+        let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
+        let record_root = harness.path().join(format!("{name}-records"));
+        fs::create_dir(&record_root).expect("create records");
+        let stdout_path = harness.path().join(format!("{name}.stdout"));
+        let stderr_path = harness.path().join(format!("{name}.stderr"));
+        fs::write(&stdout_path, SUCCESSFUL_STRUCTURED_TRANSCRIPT).expect("write stdout");
+        fs::write(&stderr_path, []).expect("write stderr");
+        let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+        let log_path = harness.path().join(format!("{name}.jsonl"));
+        let mut argv = dispatch_argv(&cwd, &environment, None, None, &[] as &[String]);
+        let delimiter = argv
+            .iter()
+            .position(|value| value == "--")
+            .expect("delimiter");
+        let mut options = Vec::new();
+        if with_logging {
+            options.extend([
+                "--log-file".to_owned(),
+                log_path.display().to_string(),
+                "--node".to_owned(),
+                "m5-s1".to_owned(),
+                "--role".to_owned(),
+                role.to_owned(),
+                "--ref".to_owned(),
+                "fixture-ref".to_owned(),
+                "--evidence".to_owned(),
+                "fixture-evidence".to_owned(),
+            ]);
+        }
+        options.extend(["--planning-act".to_owned(), act.to_owned()]);
+        argv.splice(delimiter..delimiter, options);
+        if let Some(caller) = caller {
+            argv.push(caller.to_owned());
+        }
+        let output = harness.run(&argv, b"").expect("run rejection");
+        assert!(!output.status.success(), "{name}");
+        assert!(output.stdout.is_empty(), "{name}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(&log_path).unwrap_or_default(), b"", "{name}");
+        assert!(
+            harness
+                .codex_invocations(&record_root)
+                .expect("invocations")
+                .is_empty(),
+            "{name}"
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -2085,6 +2333,117 @@ impl GateFixture {
         assert_eq!(invocations.len(), 1);
         invocations.remove(0)
     }
+}
+
+#[test]
+fn gate_planning_frame_is_exact_in_dry_run_and_live_child() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("planning-frame", CLAUDE_SUCCESS);
+    let environment = fixture.environment(0);
+    let log_path = fixture.harness.path().join("planning-frame.jsonl");
+    let mut dry = fixture.argv(
+        &environment,
+        &[
+            "--append-system-prompt",
+            "/tmp/review.json",
+            "Critique the plan.",
+        ],
+    );
+    let delimiter = dry
+        .iter()
+        .position(|value| value == "--")
+        .expect("delimiter");
+    dry.splice(
+        delimiter..delimiter,
+        [
+            "--log-file",
+            log_path.to_str().expect("log path"),
+            "--node",
+            "m5-s1",
+            "--role",
+            "step-plan-critic",
+            "--ref",
+            "fixture-ref",
+            "--evidence",
+            "fixture-evidence",
+            "--planning-act",
+            "irreversible",
+            "--dry-run",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    let projected = fixture
+        .harness
+        .run(&dry, b"")
+        .expect("project gate planning dispatch");
+    assert!(
+        projected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&projected.stderr)
+    );
+    let projection: Value = serde_json::from_slice(&projected.stdout).expect("projection JSON");
+    let projected_argv = projection["envelope"]["argv"].as_array().expect("argv");
+    assert_eq!(
+        &projected_argv[projected_argv.len() - 3..],
+        [
+            json!("--append-system-prompt"),
+            json!("/tmp/review.json"),
+            json!(IRREVERSIBLE_PLANNING_FRAME)
+        ]
+    );
+    assert_eq!(
+        projection["envelope"]["stdin"],
+        json!({"binding":"null","bytes":null})
+    );
+    assert_eq!(
+        projection["envelope"]["schema_path"],
+        fixture.schema_path.display().to_string()
+    );
+    assert_eq!(
+        projection["envelope"]["output_path"],
+        fixture.output_path.display().to_string()
+    );
+    assert_eq!(
+        projection["issuance"]["payload"],
+        json!({"role":"step-plan-critic","ref":"fixture-ref","evidence":"fixture-evidence"})
+    );
+    assert!(!log_path.exists());
+    assert!(
+        fixture
+            .harness
+            .claude_invocations(&fixture.record_root)
+            .expect("dry invocations")
+            .is_empty()
+    );
+
+    let mut live = dry.clone();
+    live.retain(|value| value != "--dry-run");
+    let output = fixture
+        .harness
+        .run(&live, b"")
+        .expect("run gate planning dispatch");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let invocation = fixture.invocation();
+    let captured = invocation
+        .argv
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(projection["envelope"]["argv"], json!(captured));
+    assert_eq!(
+        &captured[captured.len() - 3..],
+        [
+            "--append-system-prompt",
+            "/tmp/review.json",
+            IRREVERSIBLE_PLANNING_FRAME
+        ]
+    );
+    assert_eq!(invocation.stdin, b"");
 }
 
 fn insert_gate_logging(argv: &mut Vec<String>, log_path: &Path, dry_run: bool) {
