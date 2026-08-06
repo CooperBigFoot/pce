@@ -1,0 +1,17 @@
+{
+  "verdict": "APPROVE",
+  "self_sufficiency": "PASS",
+  "root_cause": "execution",
+  "blocking_issues": [],
+  "non_blocking_notes": [
+    "Mandated probe (execution-000001): program target/pce-execution-subject-probe/pce with arguments [gate, execution-subject-probe, --output, .pce-execution-subject-verdict.json], empty input, empty setup, working_directory = checkout, environment = exactly PATH/HOME/USER. Observed exited code 0, empty stdout/stderr; it ran ./gate and wrote .pce-execution-subject-verdict.json.",
+    "execution-000002: ./gate with no setup exited 0 - the gate passes against the delivered artifact as built.",
+    "execution-000003: ./artifact with argument wrong-input exited 1 - the artifact enforces its single declared input rather than accepting anything.",
+    "execution-000005: setup replaced ./artifact with a script emitting wrong-output; ./gate then exited 1. The gate is genuinely coupled to the built artifact's behavior and fails when that behavior changes.",
+    "execution-000004: setup installed a syntactically damaged ./artifact; ./gate exited 127 with a shell error on stderr, i.e. it does not mask an artifact that cannot run.",
+    "Harness executions mutate the real checkout rather than a copy; artifact was restored to its committed content after each mutation stimulus, and ./gate passes in the final state.",
+    "Residue from the mandated probe: untracked .pce-execution-subject-verdict.json in the checkout root. This is the probe's declared output, not a defect.",
+    "Coverage observation only, not a demonstrated break: ./gate exercises only the happy path (./artifact ordinary-input) and would still pass against a hypothetical artifact that ignored argument validation. No such artifact was delivered, so no blocking issue is raised."
+  ],
+  "summary": "Every stimulus was executed through the harness. The mandated probe exited 0, the gate passes against the delivered artifact, the artifact rejects a wrong argument, and the gate demonstrably fails (exit 1) when the artifact's output is mutated and errors (exit 127) when the artifact is unrunnable. No probe produced a break in the delivered behavior of artifact and gate, so no blocking issue is admissible and the work is approved."
+}

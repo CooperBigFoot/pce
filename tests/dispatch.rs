@@ -3020,7 +3020,7 @@ fn gate_execution_drains_three_pipes_concurrently() {
 }
 
 #[test]
-fn gate_execution_kills_never_reading_process_and_records_signal() {
+fn gate_execution_records_a_never_reading_process_that_signals_itself() {
     let _guard = dispatch_test_guard();
     let fixture = GateFixture::new("never reading process", CLAUDE_SUCCESS);
     let (child, socket, block, _log) =
@@ -3028,13 +3028,13 @@ fn gate_execution_kills_never_reading_process_and_records_signal() {
     let request = json!({
         "working_directory": fixture.cwd,
         "setup": [],
-        "command": {"program":"/bin/sleep","arguments":["600"],"input":vec![65_u8; 200_000],"environment":{}}
+        "command": {"program":"/bin/sh","arguments":["-c", "kill -KILL $$"],"input":vec![65_u8; 200_000],"environment":{}}
     });
     let started = Instant::now();
     let response = raw_gate_response(&socket, &request);
     let elapsed = started.elapsed();
     assert!(
-        elapsed >= Duration::from_secs(5) && elapsed < Duration::from_secs(8),
+        elapsed < Duration::from_secs(3),
         "unexpected execution duration {elapsed:?}"
     );
     assert_eq!(response["execution_ref"], "execution-000001");
@@ -3643,6 +3643,40 @@ fn falsification_reference_admission_uses_binary_owned_verdict_schema() {
     assert_eq!(
         evidence["executions"][0]["execution_ref"],
         "execution-000001"
+    );
+}
+
+#[test]
+fn falsification_reference_admission_does_not_read_the_installed_verdict_schema() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("missing installed verdict schema", CLAUDE_SUCCESS);
+    fs::remove_file(&fixture.schema_path).expect("remove installed verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"binary-owned schema"}"#,
+    )
+    .expect("write binary-schema verdict");
+    let log = fixture
+        .harness
+        .path()
+        .join("missing-schema-reference-admission.jsonl");
+    let environment = fixture.environment(0);
+    let mut argv = fixture.argv(&environment, &["probe"]);
+    insert_gate_logging(&mut argv, &log, false);
+    select_falsification_critic(&mut argv);
+
+    let output = fixture
+        .harness
+        .run(&argv, b"")
+        .expect("run without installed verdict schema");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_completion(&log).artifact_outcome,
+        ArtifactOutcome::Validated
     );
 }
 

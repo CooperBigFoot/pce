@@ -9,7 +9,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -34,26 +34,28 @@ use pce_core::{
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, ObservedExitStatus,
-    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PullRequestNumber,
-    PullRequestSelector, RecoveryLogPath, ReplayArtifactObservation, ReplayObservation,
-    ReplayRefResult, RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation,
-    RepositoryName, RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
-    RepositoryRelativePath, RepositoryRoot, RunSnapshot, Sandbox, SeatbeltCapability, Sha256Digest,
-    SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
-    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
-    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
-    classify_codex_terminal_usage, classify_replay_pair, classify_seatbelt_capability,
-    compose_gate_arguments, compute_dispatchability, create_vision, derive_merge_status,
-    derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
-    dispatch_invocation, dispatch_payload, event_record_matches, fold_replay_runs,
-    measure_contract_snapshot, meter_dispatches, normalize_replay_observation,
+    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PairedCampaign,
+    PairedExecutionProofError, PairedReplayClassification, PullRequestNumber, PullRequestSelector,
+    RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation, ReplayClassifications,
+    ReplayObservation, ReplayRefResult, RepositoryBranchName, RepositoryContractPayload,
+    RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
+    RunSnapshot, Sandbox, SeatbeltCapability, Sha256Digest, SignalNumber, SquashCommitOid,
+    StdinBinding, StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName,
+    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason,
+    VersionPolicy, VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
+    admit_recurrent_finding, append_event, classify_claude_result, classify_codex_terminal_usage,
+    classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
+    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
+    derive_run_state, dispatch_completion_payload, dispatch_invocation, dispatch_payload,
+    event_record_matches, fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot,
+    meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
     parse_acceptance_criteria, parse_claude_result, parse_event_line,
-    parse_gate_execution_evidence, parse_gate_stimulus, parse_replay_output_path,
-    parse_replay_schema_path, parse_tracked_repository_contract, rebase_gate_stimulus,
-    render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
-    serialize_tracked_repository_contract, validate_artifact, validate_verdict_references,
-    validate_workflow_coverage,
+    parse_gate_execution_evidence, parse_gate_stimulus, parse_paired_falsification_verdict,
+    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
+    rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
+    seatbelt_capability_probe, serialize_tracked_repository_contract, validate_artifact,
+    validate_verdict_references, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -73,24 +75,68 @@ const USAGE: &str = concat!(
     "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CODEX_ARGUMENT>...\n",
     "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
     "       pce gate exec\n",
-    "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>"
+    "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>\n",
+    "       pce gate execution-subject-probe --output <REPOSITORY_RELATIVE_OUTPUT_PATH>\n",
+    "       pce gate paired-execution-proof --repo-root <ABSOLUTE_REPOSITORY_ROOT> --artifacts <ABSOLUTE_EMPTY_DIRECTORY> --env <NAME=VALUE> --env <NAME=VALUE> --env <NAME=VALUE>"
 );
 const GATE_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const GATE_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
-const GATE_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
+// A silent child may make no observable progress for this long before it is terminated.
+const GATE_EXECUTION_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+// A child is never allowed to occupy a recorder worker longer than this, even while producing I/O.
+const GATE_EXECUTION_OVERALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const GATE_PROCESS_TERMINATION_TIMEOUT: Duration = Duration::from_secs(1);
-const GATE_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+// After child exit, open output pipes may remain idle this long before their drainers are abandoned.
+const GATE_OUTPUT_DRAIN_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
+// Output drainers may run for at most this long after child exit, even while bytes keep arriving.
+const GATE_OUTPUT_DRAIN_OVERALL_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const GATE_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GATE_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(12);
 const GATE_MAX_CONNECTION_WORKERS: usize = 32;
 const GATE_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+// Replay only asks git to resolve or locally materialize an already-present commit. These bounded,
+// metadata-local operations are expected to be fast and do not inherit a stimulus-sized timeout.
 const REPLAY_GIT_TIMEOUT: Duration = Duration::from_secs(5);
-const REPLAY_RUN_TIMEOUT: Duration = Duration::from_secs(30);
-const REPLAY_OVERALL_TIMEOUT: Duration = Duration::from_secs(150);
+// A quiet production stimulus may legitimately spend minutes in a nested agent before producing
+// output; only five minutes without stdout/stderr progress makes that execution inactive.
+const REPLAY_RUN_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+// Even a continuously active replay process must finish, so one setup action or command gets a
+// generous cap equal to the recorder's production execution cap.
+const REPLAY_RUN_OVERALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+// One replay performs four clean runs plus materialization. This cap bounds the whole worker while
+// leaving room for production stimuli instead of assuming unit-test runtimes.
+const REPLAY_OVERALL_TIMEOUT: Duration = Duration::from_secs(40 * 60);
+// This wait exists only when the test-only pause seam is explicitly enabled; production replay
+// never waits here, so a short synchronization timeout is intentional.
 const REPLAY_PAUSE_TIMEOUT: Duration = Duration::from_secs(10);
 const REPLAY_PAUSE_ENV: &str = "PCE_REPLAY_PAUSE_AFTER_RESOLVE";
 const RUN_SNAPSHOT_SCHEMA: &str = include_str!("../skills/pce/schemas/run-snapshot.schema.json");
 const VERDICT_SCHEMA: &str = include_str!("../skills/pce/schemas/verdict.schema.json");
+const PAIRED_BROKEN_REF: &str = "a8a87cb44f84988fa61904bfba48614401482851";
+const PAIRED_BROKEN_OID: &str = "a8a87cb44f84988fa61904bfba48614401482851";
+const PAIRED_REPAIRED_REF: &str = "cbe499ef94864d223518ad328db2a396551fa85b";
+const PAIRED_REPAIRED_OID: &str = "cbe499ef94864d223518ad328db2a396551fa85b";
+const PAIRED_DELIVERY_BASE_OID: &str = "6afc64eb9171350dde36d0def74bdb2ced0e5293";
+const PAIRED_SUBJECT_ARTIFACT: &str = "artifact";
+const PAIRED_SUBJECT_GATE: &str = "gate";
+const PAIRED_SUBJECT_FIXTURE: &str = "tests/fixtures/execution-subject";
+const PAIRED_REPLAY_SCHEMA: &str = "verdict.schema.json";
+const PAIRED_REPLAY_OUTPUT: &str = ".pce-execution-subject-verdict.json";
+const PAIRED_REPLAY_EXPECTED: &str = "conforming-verdict";
+const PAIRED_PROGRAM_RELATIVE: &str = "target/pce-execution-subject-probe/pce";
+const PAIRED_REPLAY_PROGRAM_ENV: &str = "PCE_PAIRED_REPLAY_PROGRAM";
+const PAIRED_RECORDED_ROOT_ENV: &str = "PCE_PAIRED_RECORDED_ROOT";
+const PAIRED_GATE_EXEC_CLIENT_ENV: &str = "PCE_PAIRED_GATE_EXEC_CLIENT";
+const PAIRED_CRITIC_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const PAIRED_CAMPAIGN_TIMEOUT: Duration = Duration::from_secs(40 * 60);
+const PAIRED_PROVENANCE_LIMITATION: &str = "Live authentication and free-running gate provenance cannot be reproduced from retained bytes alone; the immutable execution records and replay classifications are reproducible, while the claim that these bytes came from the recorded live campaign depends on the retained binary digest and invocation manifest.";
+const PAIRED_CRITIC_TASK: &str = "Falsify the delivered behavior in exactly artifact and gate. Judge it by executions, not review alone. You must submit this ordinary probe through the harness before deciding: program is exactly \"target/pce-execution-subject-probe/pce\"; arguments are [\"gate\",\"execution-subject-probe\",\"--output\",\".pce-execution-subject-verdict.json\"]; input is empty; setup is empty; working_directory is this checkout; environment contains exactly PATH, HOME, and USER from your own explicit child environment. You may submit additional stimuli. A blocking issue must cite its own demonstrated primary execution and its executed replacement. Write the verdict required by your binary-owned role frame.";
+
+fn paired_critic_task() -> String {
+    format!(
+        "{PAIRED_CRITIC_TASK} The verdict output must conform exactly to this compiled JSON Schema, quoted verbatim:\n<verdict-schema>\n{VERDICT_SCHEMA}</verdict-schema>"
+    )
+}
 const ORIGIN: &str = "origin";
 const RELEASE_TAG: &str = "v0.1.16";
 const TRACKED_REPOSITORY_CONTRACT_PATH: &str = ".pce/repository-contract.json";
@@ -121,6 +167,10 @@ enum Command {
     GateExec,
     GateReplay(GateReplayCommand),
     GateReplayWorker,
+    ExecutionSubjectProbe {
+        output: PathBuf,
+    },
+    PairedExecutionProof(PairedExecutionProofCommand),
     Dispatch {
         envelope: DispatchEnvelope,
         logging: Option<DispatchLoggingMode>,
@@ -176,8 +226,16 @@ enum Command {
 }
 
 #[derive(Debug)]
+struct PairedExecutionProofCommand {
+    repository_root: PathBuf,
+    artifact_directory: PathBuf,
+    environment: ChildEnvironment,
+}
+
+#[derive(Debug)]
 struct GateReplayCommand {
     repository_root: PathBuf,
+    recorded_root: Option<PathBuf>,
     evidence_path: PathBuf,
     execution_ref: GateExecutionRef,
     broken_ref: NamedReplayRef,
@@ -359,6 +417,8 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::GateReplayWorker => {
             read_gate_replay_worker_request(input).and_then(run_gate_replay)
         }
+        Command::ExecutionSubjectProbe { output } => run_execution_subject_probe(&output),
+        Command::PairedExecutionProof(command) => run_paired_execution_proof(command),
         Command::Dispatch { envelope, logging } => match logging.as_ref() {
             Some(DispatchLoggingMode::DryRun { path, metadata }) => {
                 run_dispatch_projection(&envelope, path, metadata)
@@ -433,6 +493,18 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action] if verb == "gate" && action == "replay-worker" => {
             Ok(Command::GateReplayWorker)
         }
+        [verb, action, output_flag, output]
+            if verb == "gate"
+                && action == "execution-subject-probe"
+                && output_flag == "--output" =>
+        {
+            Ok(Command::ExecutionSubjectProbe {
+                output: parse_paired_probe_output(output)?,
+            })
+        }
+        [verb, action, rest @ ..] if verb == "gate" && action == "paired-execution-proof" => {
+            parse_paired_execution_proof(rest)
+        }
         [verb, action] if verb == "vision" && action == "check" => Ok(Command::VisionCheck),
         [verb, action, raw_name] if verb == "vision" && action == "new" => {
             let name = VisionName::parse(raw_name).context("failed to parse vision name")?;
@@ -492,6 +564,7 @@ fn parse_gate_replay(rest: &[String]) -> Result<Command> {
     }
     Ok(Command::GateReplay(GateReplayCommand {
         repository_root,
+        recorded_root: std::env::var_os(PAIRED_RECORDED_ROOT_ENV).map(PathBuf::from),
         evidence_path,
         execution_ref: GateExecutionRef::parse(execution_ref.clone())?,
         broken_ref: NamedReplayRef::parse(broken_ref.clone())?,
@@ -501,6 +574,1129 @@ fn parse_gate_replay(rest: &[String]) -> Result<Command> {
         expected: ExpectedVerdictOutcome::parse(expected)?,
         pause_directory: None,
     }))
+}
+
+fn parse_paired_probe_output(raw: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(raw);
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || !path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        bail!("execution subject probe output must be a repository-relative ordinary path");
+    }
+    Ok(path)
+}
+
+fn parse_paired_execution_proof(rest: &[String]) -> Result<Command> {
+    if rest.len() != 10
+        || rest[0] != "--repo-root"
+        || rest[2] != "--artifacts"
+        || rest[4] != "--env"
+        || rest[6] != "--env"
+        || rest[8] != "--env"
+    {
+        bail!(USAGE);
+    }
+    let mut environment = BTreeMap::new();
+    for raw in [&rest[5], &rest[7], &rest[9]] {
+        let Some((name, value)) = raw.split_once('=') else {
+            bail!("paired execution proof requires exactly PATH, HOME, and USER");
+        };
+        if environment
+            .insert(name.to_owned(), value.to_owned())
+            .is_some()
+        {
+            bail!("paired execution proof requires exactly PATH, HOME, and USER");
+        }
+    }
+    if environment
+        .keys()
+        .map(String::as_str)
+        .ne(["HOME", "PATH", "USER"])
+    {
+        bail!("paired execution proof requires exactly PATH, HOME, and USER");
+    }
+    let repository_root = PathBuf::from(&rest[1]);
+    if !repository_root.is_absolute() {
+        bail!(USAGE);
+    }
+    let artifact_directory = PathBuf::from(&rest[3]);
+    if !artifact_directory.is_absolute()
+        || !artifact_directory.is_dir()
+        || std::fs::read_dir(&artifact_directory)
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(true)
+    {
+        bail!("paired execution artifact directory must be absolute, existing, and empty");
+    }
+    Ok(Command::PairedExecutionProof(PairedExecutionProofCommand {
+        repository_root,
+        artifact_directory,
+        environment: ChildEnvironment::new(environment),
+    }))
+}
+
+fn ordinary_file(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect execution subject {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("execution subject probe requires ordinary artifact and gate files");
+    }
+    Ok(())
+}
+
+fn remove_probe_file(path: &Path, cwd: &Path) -> Result<()> {
+    if !path.starts_with(cwd) {
+        bail!("execution subject probe output must be a repository-relative ordinary path");
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => std::fs::remove_file(path)
+            .with_context(|| format!("failed to remove execution subject file {}", path.display())),
+        Ok(_) => {
+            bail!("execution subject probe output must be a repository-relative ordinary path")
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::new(error).context(format!(
+            "failed to inspect execution subject file {}",
+            path.display()
+        ))),
+    }
+}
+
+fn run_execution_subject_probe(relative_output: &Path) -> Result<()> {
+    let cwd = std::env::current_dir()
+        .context("failed to read execution subject current directory")?
+        .canonicalize()
+        .context("failed to canonicalize execution subject current directory")?;
+    let artifact = cwd.join(PAIRED_SUBJECT_ARTIFACT);
+    let gate = cwd.join(PAIRED_SUBJECT_GATE);
+    ordinary_file(&artifact)?;
+    ordinary_file(&gate)?;
+    let output = cwd.join(relative_output);
+    remove_probe_file(&output, &cwd)?;
+    let path_value = std::env::var("PATH").context("execution subject probe requires PATH")?;
+    let home_value = std::env::var("HOME").context("execution subject probe requires HOME")?;
+    let user_value = std::env::var("USER").context("execution subject probe requires USER")?;
+    let status = std::process::Command::new(gate)
+        .current_dir(&cwd)
+        .env_clear()
+        .env("PATH", path_value)
+        .env("HOME", home_value)
+        .env("USER", user_value)
+        .stdin(Stdio::null())
+        .status()
+        .context("failed to execute the execution subject gate")?;
+    if !status.success() {
+        bail!("execution subject gate exited with status {status}");
+    }
+    std::fs::write(
+        output,
+        b"{\"verdict\":\"APPROVE\",\"self_sufficiency\":\"NOT_APPLICABLE\",\"root_cause\":\"execution\",\"blocking_issues\":[],\"non_blocking_notes\":[],\"summary\":\"ordinary gate passed\"}\n",
+    )
+    .context("failed to write execution subject probe output")?;
+    Ok(())
+}
+
+fn resolve_paired_ref(repository_root: &Path, name: &str, expected: &str) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(repository_root)
+        .args(["rev-parse", &format!("{name}^{{commit}}")])
+        .output()
+        .context("failed to resolve execution subject ref")?;
+    let resolved = String::from_utf8(output.stdout)
+        .context("execution subject ref was not UTF-8")?
+        .trim()
+        .to_owned();
+    if !output.status.success() || resolved != expected {
+        bail!(
+            "execution subject ref `{name}` resolved to unexpected commit `{resolved}` (expected `{expected}`)"
+        );
+    }
+    Ok(resolved)
+}
+
+fn run_subject_git(repository: &Path, arguments: &[&str], commit_date: Option<&str>) -> Result<()> {
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(repository)
+        .args(["-c", "core.autocrlf=false", "-c", "commit.gpgSign=false"])
+        .args(arguments);
+    if let Some(date) = commit_date {
+        command
+            .env("GIT_AUTHOR_NAME", "PCE Fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@invalid")
+            .env("GIT_COMMITTER_NAME", "PCE Fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@invalid")
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date);
+    }
+    let output = command
+        .output()
+        .context("failed to construct paired execution subject repository")?;
+    if !output.status.success() {
+        bail!(
+            "failed to construct paired execution subject repository with `git {}`: stdout: {}; stderr: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        );
+    }
+    Ok(())
+}
+
+fn copy_subject_file(source: &Path, destination: &Path) -> Result<()> {
+    ordinary_file(source)?;
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_file() => std::fs::remove_file(destination)
+            .context("failed to replace execution subject fixture file")?,
+        Ok(_) => bail!("execution subject fixture destination must be an ordinary file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(Error::new(error).context("failed to inspect execution subject fixture"));
+        }
+    }
+    std::fs::copy(source, destination).with_context(|| {
+        format!(
+            "failed to materialize execution subject fixture {}",
+            source.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn materialize_subject_repository(source_root: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir(destination)
+        .context("failed to create paired execution subject repository")?;
+    run_subject_git(
+        destination,
+        &["init", "--quiet", "--initial-branch=subject"],
+        None,
+    )?;
+    let fixture = source_root.join(PAIRED_SUBJECT_FIXTURE);
+    for (source, target) in [
+        (fixture.join("common/.gitignore"), ".gitignore"),
+        (fixture.join("common/gate"), PAIRED_SUBJECT_GATE),
+        (
+            fixture.join("common/verdict.schema.json"),
+            PAIRED_REPLAY_SCHEMA,
+        ),
+        (fixture.join("broken/artifact"), PAIRED_SUBJECT_ARTIFACT),
+    ] {
+        copy_subject_file(&source, &destination.join(target))?;
+    }
+    run_subject_git(
+        destination,
+        &[
+            "add",
+            ".gitignore",
+            "artifact",
+            "gate",
+            "verdict.schema.json",
+        ],
+        None,
+    )?;
+    run_subject_git(
+        destination,
+        &["commit", "--quiet", "-m", "execution subject snapshot"],
+        Some("2000-01-01T00:00:00Z"),
+    )?;
+    resolve_paired_ref(destination, PAIRED_BROKEN_REF, PAIRED_BROKEN_OID)?;
+    run_subject_git(
+        destination,
+        &["checkout", "--quiet", "--orphan", "replacement"],
+        None,
+    )?;
+    copy_subject_file(
+        &fixture.join("repaired/artifact"),
+        &destination.join(PAIRED_SUBJECT_ARTIFACT),
+    )?;
+    run_subject_git(
+        destination,
+        &[
+            "add",
+            ".gitignore",
+            "artifact",
+            "gate",
+            "verdict.schema.json",
+        ],
+        None,
+    )?;
+    run_subject_git(
+        destination,
+        &["commit", "--quiet", "-m", "execution subject snapshot"],
+        Some("2000-01-01T00:00:00Z"),
+    )?;
+    resolve_paired_ref(destination, PAIRED_REPAIRED_REF, PAIRED_REPAIRED_OID)?;
+    run_subject_git(destination, &["branch", "-D", "subject"], None)?;
+    run_subject_git(destination, &["branch", "-m", "subject"], None)?;
+    Ok(())
+}
+
+fn materialize_subject_side_repository(
+    source_root: &Path,
+    destination: &Path,
+    artifact_fixture: &str,
+    expected_oid: &str,
+) -> Result<()> {
+    std::fs::create_dir(destination)
+        .context("failed to create side-blind execution subject repository")?;
+    run_subject_git(
+        destination,
+        &["init", "--quiet", "--initial-branch=subject"],
+        None,
+    )?;
+    let fixture = source_root.join(PAIRED_SUBJECT_FIXTURE);
+    for (source, target) in [
+        (fixture.join("common/.gitignore"), ".gitignore"),
+        (fixture.join("common/gate"), PAIRED_SUBJECT_GATE),
+        (
+            fixture.join("common/verdict.schema.json"),
+            PAIRED_REPLAY_SCHEMA,
+        ),
+        (fixture.join(artifact_fixture), PAIRED_SUBJECT_ARTIFACT),
+    ] {
+        copy_subject_file(&source, &destination.join(target))?;
+    }
+    run_subject_git(
+        destination,
+        &[
+            "add",
+            ".gitignore",
+            "artifact",
+            "gate",
+            "verdict.schema.json",
+        ],
+        None,
+    )?;
+    run_subject_git(
+        destination,
+        &["commit", "--quiet", "-m", "execution subject snapshot"],
+        Some("2000-01-01T00:00:00Z"),
+    )?;
+    resolve_paired_ref(destination, "HEAD", expected_oid)?;
+    Ok(())
+}
+
+struct PairedWorktrees {
+    source_root: PathBuf,
+    repository_root: PathBuf,
+    parent: PathBuf,
+    paths: Vec<PathBuf>,
+    checkout_parents: Vec<PathBuf>,
+}
+
+impl PairedWorktrees {
+    fn create(source_root: &Path) -> Result<Self> {
+        let parent = allocate_opaque_temporary_path()?;
+        let repository_root = parent.join("subject-repository");
+        Ok(Self {
+            source_root: source_root.to_path_buf(),
+            repository_root,
+            parent,
+            paths: Vec::new(),
+            checkout_parents: Vec::new(),
+        })
+    }
+
+    fn materialize_replay_repository(&self) -> Result<()> {
+        std::fs::create_dir(&self.parent)
+            .context("failed to create paired replay repository parent")?;
+        materialize_subject_repository(&self.source_root, &self.repository_root)
+    }
+
+    fn add(&mut self, artifact_fixture: &str, oid: &str) -> Result<PathBuf> {
+        let checkout_parent = create_paired_checkout_parent()?;
+        let path = checkout_parent.join("checkout");
+        if let Err(error) =
+            materialize_subject_side_repository(&self.source_root, &path, artifact_fixture, oid)
+        {
+            let _cleanup = std::fs::remove_dir_all(&checkout_parent);
+            return Err(error);
+        }
+        let path = path
+            .canonicalize()
+            .context("failed to canonicalize isolated subject checkout")?;
+        self.checkout_parents.push(checkout_parent);
+        self.paths.push(path.clone());
+        Ok(path)
+    }
+
+    fn remove(&mut self, path: &Path) -> Result<()> {
+        let index = self
+            .paths
+            .iter()
+            .position(|tracked| tracked == path)
+            .ok_or_else(|| anyhow!("paired campaign cleanup target was not tracked"))?;
+        self.paths.remove(index);
+        let parent = self.checkout_parents.remove(index);
+        std::fs::remove_dir_all(parent).context("paired campaign cleanup failed")
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        let mut failure = None;
+        self.paths.clear();
+        for parent in self.checkout_parents.drain(..).rev() {
+            if let Err(error) = std::fs::remove_dir_all(parent) {
+                failure = Some(Error::new(error).context("paired campaign cleanup failed"));
+            }
+        }
+        if self.repository_root.exists()
+            && let Err(error) = std::fs::remove_dir_all(&self.repository_root)
+        {
+            failure = Some(Error::new(error).context("paired campaign cleanup failed"));
+        }
+        if self.parent.exists()
+            && let Err(error) = std::fs::remove_dir(&self.parent)
+        {
+            failure = Some(Error::new(error).context("paired campaign cleanup failed"));
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
+
+fn create_paired_checkout_parent() -> Result<PathBuf> {
+    create_opaque_temporary_directory()
+}
+
+fn create_opaque_temporary_directory() -> Result<PathBuf> {
+    let path = allocate_opaque_temporary_path()?;
+    std::fs::create_dir(&path).context("failed to create isolated subject parent")?;
+    Ok(path)
+}
+
+fn allocate_opaque_temporary_path() -> Result<PathBuf> {
+    for _attempt in 0..1000 {
+        let mut opaque = [0_u8; 16];
+        File::open("/dev/urandom")
+            .context("failed to open operating-system randomness for paired checkout")?
+            .read_exact(&mut opaque)
+            .context("failed to read operating-system randomness for paired checkout")?;
+        let identifier = opaque
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let path = std::env::temp_dir().join(identifier);
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+    bail!("failed to allocate isolated subject parent")
+}
+
+struct PairedCriticCapture {
+    verdict: Vec<u8>,
+    evidence: Vec<u8>,
+}
+
+fn opaque_dispatch_paths(checkout: &Path) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let path = allocate_opaque_temporary_path()?;
+    let identifier = path
+        .file_name()
+        .ok_or_else(|| anyhow!("opaque dispatch directory has no name"))?
+        .to_owned();
+    let base = checkout.join(identifier);
+    Ok((
+        base.with_extension("schema"),
+        base.with_extension("json"),
+        base.with_extension("jsonl"),
+    ))
+}
+
+fn materialize_paired_gate_exec_client(checkout: &Path) -> Result<PathBuf> {
+    let path = allocate_opaque_temporary_path()?;
+    let identifier = path
+        .file_name()
+        .ok_or_else(|| anyhow!("opaque recorder client has no name"))?;
+    let client = checkout.join(identifier);
+    std::fs::write(
+        &client,
+        b"#!/bin/sh\nset -eu\n[ \"$#\" -eq 2 ]\n[ \"$1\" = gate ]\n[ \"$2\" = exec ]\nexec /usr/bin/nc -U \"$PCE_GATE_EXEC_SOCKET\"\n",
+    )
+    .context("failed to materialize isolated recorder client")?;
+    std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o500))
+        .context("failed to make isolated recorder client executable")?;
+    client
+        .canonicalize()
+        .context("failed to canonicalize isolated recorder client")
+}
+
+fn capture_paired_critic(verdict: &Path) -> Result<PairedCriticCapture> {
+    let evidence = AbsoluteGateExecutionEvidencePath::from_verdict_path(verdict);
+    Ok(PairedCriticCapture {
+        verdict: std::fs::read(verdict).context("failed to capture paired critic verdict")?,
+        evidence: std::fs::read(evidence.as_path())
+            .context("failed to capture paired critic execution evidence")?,
+    })
+}
+
+fn retain_paired_critic_capture(capture: &PairedCriticCapture, destination: &Path) -> Result<()> {
+    std::fs::write(destination, &capture.verdict)
+        .context("failed to retain paired critic verdict")?;
+    let evidence = AbsoluteGateExecutionEvidencePath::from_verdict_path(destination);
+    std::fs::write(evidence.as_path(), &capture.evidence)
+        .context("failed to retain paired critic execution evidence")
+}
+
+impl Drop for PairedWorktrees {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            tracing::error!(error = ?error, "paired campaign drop cleanup failed");
+        }
+    }
+}
+
+fn run_paired_child(
+    command: &mut std::process::Command,
+    deadline: Instant,
+    timeout: Duration,
+    timeout_diagnostic: &'static str,
+) -> Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.process_group(0);
+    let mut child = command
+        .spawn()
+        .context("failed to spawn paired campaign child")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture paired campaign child stdout"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture paired campaign child stderr"))?;
+    let stdout_worker = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_worker = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let child_deadline = deadline.min(Instant::now() + timeout);
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to wait for paired campaign child")?
+        {
+            break status;
+        }
+        if Instant::now() >= child_deadline {
+            let _group_kill = std::process::Command::new("/bin/kill")
+                .args(["-KILL", &format!("-{}", child.id())])
+                .status();
+            let _child_kill = child.kill();
+            let _reap = child.wait();
+            let _stdout = stdout_worker.join();
+            let _stderr = stderr_worker.join();
+            if Instant::now() >= deadline {
+                bail!("paired execution proof exceeded its 40 minute overall deadline");
+            }
+            bail!(timeout_diagnostic);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = stdout_worker
+        .join()
+        .map_err(|_| anyhow!("paired campaign stdout worker panicked"))??;
+    let stderr = stderr_worker
+        .join()
+        .map_err(|_| anyhow!("paired campaign stderr worker panicked"))??;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn run_paired_critic(
+    executable: &Path,
+    checkout: &Path,
+    schema: &Path,
+    verdict: &Path,
+    log: &Path,
+    environment: &ChildEnvironment,
+    deadline: Instant,
+) -> Result<()> {
+    let task = paired_critic_task();
+    let gate_exec_client = materialize_paired_gate_exec_client(checkout)?;
+    let mut command = std::process::Command::new(executable);
+    command.env(PAIRED_GATE_EXEC_CLIENT_ENV, &gate_exec_client);
+    command.args(["dispatch", "gate", "--cwd"]).arg(checkout);
+    for (name, value) in environment.iter() {
+        command.args(["--env", &format!("{name}={value}")]);
+    }
+    command
+        .args(["--output-schema"])
+        .arg(schema)
+        .arg("-o")
+        .arg(verdict)
+        .args(["--log-file"])
+        .arg(log)
+        .args([
+            "--node",
+            "m1-s1",
+            "--role",
+            "falsification-critic",
+            "--ref",
+            "campaign-subject",
+            "--evidence",
+            "campaign-review",
+            "--",
+            &task,
+        ]);
+    let output = run_paired_child(
+        &mut command,
+        deadline,
+        PAIRED_CRITIC_TIMEOUT,
+        "paired execution critic timed out after 15 minutes",
+    )?;
+    if !output.status.success() {
+        bail!(
+            "paired execution critic failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn materialize_paired_probe(checkout: &Path) -> Result<PathBuf> {
+    let executable = checkout.join(PAIRED_PROGRAM_RELATIVE);
+    let parent = executable
+        .parent()
+        .ok_or_else(|| anyhow!("paired campaign executable path has no parent"))?;
+    std::fs::create_dir_all(parent).context("failed to create paired campaign executable root")?;
+    std::fs::write(
+        &executable,
+        b"#!/bin/sh\nset -eu\n[ \"$#\" -eq 4 ]\n[ \"$1\" = gate ]\n[ \"$2\" = execution-subject-probe ]\n[ \"$3\" = --output ]\ncase \"$4\" in /*|*../*|../*) exit 2;; esac\n./gate\nprintf '%s\\n' '{\"verdict\":\"APPROVE\",\"self_sufficiency\":\"NOT_APPLICABLE\",\"root_cause\":\"execution\",\"blocking_issues\":[],\"non_blocking_notes\":[],\"summary\":\"ordinary gate passed\"}' > \"$4\"\n",
+    )
+    .context("failed to materialize paired probe program")?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+        .context("failed to make paired probe executable")?;
+    Ok(executable)
+}
+
+fn replay_classification(report: &[u8]) -> Result<PairedReplayClassification> {
+    let value: Value =
+        serde_json::from_slice(report).context("failed to parse paired replay report")?;
+    match value.get("classification").and_then(Value::as_str) {
+        Some("repair-sensitive") => Ok(PairedReplayClassification::RepairSensitive),
+        Some("no-repair-signal") => Ok(PairedReplayClassification::NoRepairSignal),
+        Some("opposite-direction") => Ok(PairedReplayClassification::OppositeDirection),
+        Some("non-reproducible") => Ok(PairedReplayClassification::NonReproducible),
+        Some("checkout-failed") => Ok(PairedReplayClassification::CheckoutFailed),
+        Some("oracle-failed") => Ok(PairedReplayClassification::OracleFailed),
+        _ => bail!("paired replay report has an unknown classification"),
+    }
+}
+
+fn run_paired_replay(
+    executable: &Path,
+    replay_repository: &Path,
+    recorded_root: &Path,
+    evidence: &Path,
+    execution_ref: &GateExecutionRef,
+    report_path: &Path,
+    deadline: Instant,
+) -> Result<PairedReplayClassification> {
+    let mut command = std::process::Command::new(executable);
+    command.args(paired_replay_arguments(
+        replay_repository,
+        evidence,
+        execution_ref,
+    ));
+    command.env(PAIRED_REPLAY_PROGRAM_ENV, PAIRED_PROGRAM_RELATIVE);
+    command.env(PAIRED_RECORDED_ROOT_ENV, recorded_root);
+    let output = run_paired_child(
+        &mut command,
+        deadline,
+        REPLAY_OVERALL_TIMEOUT + Duration::from_secs(5),
+        "paired replay did not complete",
+    )?;
+    if !output.status.success() {
+        bail!(
+            "paired replay failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    std::fs::write(report_path, &output.stdout).context("failed to retain paired replay report")?;
+    replay_classification(&output.stdout)
+}
+
+fn write_paired_unreplayable_report(
+    report_path: &Path,
+    execution_ref: &GateExecutionRef,
+    reason: &str,
+) -> Result<()> {
+    let mut bytes = serde_json::to_vec(&json!({
+        "schema_id": "pce.paired-replayability",
+        "schema_version": 1,
+        "execution_ref": execution_ref.as_str(),
+        "replayability": "unreplayable",
+        "reason": reason,
+    }))
+    .context("failed to serialize paired unreplayable report")?;
+    bytes.push(b'\n');
+    std::fs::write(report_path, bytes).context("failed to retain paired unreplayable report")
+}
+
+fn paired_record_is_replayable(
+    record: &GateExecutionRecord,
+    root: &Path,
+    report_path: &Path,
+) -> Result<bool> {
+    match paired_stimulus_identity(&record.stimulus, root) {
+        Ok(_) => Ok(true),
+        Err(PairedExecutionProofError::StimulusOutsideCampaignRoot) => {
+            write_paired_unreplayable_report(
+                report_path,
+                &record.execution_ref,
+                "working-directory-outside-repository-root",
+            )?;
+            Ok(false)
+        }
+        Err(PairedExecutionProofError::StimulusNamesFixedAbsolutePath) => {
+            write_paired_unreplayable_report(
+                report_path,
+                &record.execution_ref,
+                "fixed-absolute-path-outside-repository-root",
+            )?;
+            Ok(false)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn paired_replay_arguments(
+    checkout: &Path,
+    evidence: &Path,
+    execution_ref: &GateExecutionRef,
+) -> Vec<OsString> {
+    [
+        OsString::from("gate"),
+        OsString::from("replay"),
+        OsString::from("--repo-root"),
+        checkout.as_os_str().to_owned(),
+        OsString::from("--evidence"),
+        evidence.as_os_str().to_owned(),
+        OsString::from("--execution-ref"),
+        OsString::from(execution_ref.as_str()),
+        OsString::from("--broken-ref"),
+        OsString::from(PAIRED_BROKEN_REF),
+        OsString::from("--repaired-ref"),
+        OsString::from(PAIRED_REPAIRED_REF),
+        OsString::from("--schema"),
+        OsString::from(PAIRED_REPLAY_SCHEMA),
+        OsString::from("--output"),
+        OsString::from(PAIRED_REPLAY_OUTPUT),
+        OsString::from("--expected"),
+        OsString::from(PAIRED_REPLAY_EXPECTED),
+    ]
+    .into()
+}
+
+struct PairedProofReport {
+    schema_id: &'static str,
+    schema_version: u32,
+    broken_ref: &'static str,
+    repaired_ref: &'static str,
+    broken_verdict: &'static str,
+    broken_blocking_issue_count: usize,
+    broken_witnesses: Vec<String>,
+    repaired_verdict: &'static str,
+    repaired_blocking_issue_count: usize,
+    repaired_probes: Vec<String>,
+    decision: &'static str,
+}
+
+fn serialize_paired_proof_report(report: &PairedProofReport) -> Result<Vec<u8>> {
+    let broken_witnesses = serde_json::to_string(&report.broken_witnesses)
+        .context("failed to serialize broken paired witnesses")?;
+    let repaired_probes = serde_json::to_string(&report.repaired_probes)
+        .context("failed to serialize repaired paired probes")?;
+    Ok(format!(
+        "{{\"schema_id\":\"{}\",\"schema_version\":{},\"broken_ref\":\"{}\",\"repaired_ref\":\"{}\",\"broken_verdict\":\"{}\",\"broken_blocking_issue_count\":{},\"broken_witnesses\":{},\"repaired_verdict\":\"{}\",\"repaired_blocking_issue_count\":{},\"repaired_probes\":{},\"decision\":\"{}\"}}\n",
+        report.schema_id,
+        report.schema_version,
+        report.broken_ref,
+        report.repaired_ref,
+        report.broken_verdict,
+        report.broken_blocking_issue_count,
+        broken_witnesses,
+        report.repaired_verdict,
+        report.repaired_blocking_issue_count,
+        repaired_probes,
+        report.decision,
+    )
+    .into_bytes())
+}
+
+fn paired_utc_now() -> Result<String> {
+    let output = std::process::Command::new("/bin/date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .context("failed to read paired campaign UTC time")?;
+    if !output.status.success() {
+        bail!("failed to read paired campaign UTC time");
+    }
+    String::from_utf8(output.stdout)
+        .context("paired campaign UTC time was not UTF-8")
+        .map(|value| value.trim().to_owned())
+}
+
+fn paired_head_commit(repository_root: &Path) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(repository_root)
+        .args(["rev-parse", "HEAD^{commit}"])
+        .output()
+        .context("failed to resolve paired campaign head commit")?;
+    if !output.status.success() {
+        bail!("failed to resolve paired campaign head commit");
+    }
+    String::from_utf8(output.stdout)
+        .context("paired campaign head commit was not UTF-8")
+        .map(|value| value.trim().to_owned())
+}
+
+fn paired_sha256(path: &Path) -> Result<(u64, String)> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to hash paired artifact {}", path.display()))?;
+    let byte_count =
+        u64::try_from(bytes.len()).context("paired artifact byte count exceeds u64")?;
+    Ok((byte_count, format!("{:x}", Sha256::digest(&bytes))))
+}
+
+fn paired_retained_artifact_paths(artifact_directory: &Path) -> Result<Vec<PathBuf>> {
+    fn visit(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(directory).with_context(|| {
+            format!(
+                "failed to enumerate paired artifacts in {}",
+                directory.display()
+            )
+        })? {
+            let entry = entry.context("failed to enumerate paired artifact")?;
+            let file_type = entry
+                .file_type()
+                .context("failed to inspect paired artifact type")?;
+            if file_type.is_dir() {
+                visit(root, &entry.path(), paths)?;
+            } else if file_type.is_file() {
+                let relative = entry
+                    .path()
+                    .strip_prefix(root)
+                    .context("paired artifact escaped its artifact directory")?
+                    .to_path_buf();
+                if relative != Path::new("provenance-manifest.json") {
+                    paths.push(relative);
+                }
+            } else {
+                bail!("paired artifact must be an ordinary file");
+            }
+        }
+        Ok(())
+    }
+
+    let mut paths = Vec::new();
+    visit(artifact_directory, artifact_directory, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn write_paired_provenance_manifest(
+    repository_root: &Path,
+    executable: &Path,
+    artifact_directory: &Path,
+    started_at_utc: String,
+) -> Result<()> {
+    let artifact_paths = paired_retained_artifact_paths(artifact_directory)?;
+    let mut artifacts = Vec::with_capacity(artifact_paths.len());
+    for path in artifact_paths {
+        let (byte_count, sha256) = paired_sha256(&artifact_directory.join(&path))?;
+        artifacts.push(json!({
+            "path": path
+                .to_str()
+                .context("paired artifact path was not UTF-8")?,
+            "byte_count": byte_count,
+            "sha256": sha256,
+        }));
+    }
+    let (_, campaign_binary_sha256) = paired_sha256(executable)?;
+    let manifest = json!({
+        "schema_id": "pce.paired-execution-proof-provenance",
+        "schema_version": 1,
+        "campaign_binary_sha256": campaign_binary_sha256,
+        "base_commit": PAIRED_DELIVERY_BASE_OID,
+        "head_commit": paired_head_commit(repository_root)?,
+        "started_at_utc": started_at_utc,
+        "ended_at_utc": paired_utc_now()?,
+        "direct_argv": [
+            "<CAMPAIGN_BINARY>",
+            "gate",
+            "paired-execution-proof",
+            "--repo-root",
+            "<REPOSITORY_ROOT>",
+            "--artifacts",
+            "<ARTIFACT_DIRECTORY>",
+            "--env",
+            "PATH=<redacted>",
+            "--env",
+            "HOME=<redacted>",
+            "--env",
+            "USER=<redacted>",
+        ],
+        "broken_ref": PAIRED_BROKEN_OID,
+        "repaired_ref": PAIRED_REPAIRED_OID,
+        "artifacts": artifacts,
+        "limitation": PAIRED_PROVENANCE_LIMITATION,
+    });
+    let mut bytes =
+        serde_json::to_vec(&manifest).context("failed to serialize paired provenance manifest")?;
+    bytes.push(b'\n');
+    std::fs::write(artifact_directory.join("provenance-manifest.json"), bytes)
+        .context("failed to write paired provenance manifest")
+}
+
+fn run_paired_execution_proof(command: PairedExecutionProofCommand) -> Result<()> {
+    let started_at_utc = paired_utc_now()?;
+    let overall_deadline = Instant::now() + PAIRED_CAMPAIGN_TIMEOUT;
+    let repository_root = command
+        .repository_root
+        .canonicalize()
+        .context("failed to canonicalize paired execution repository root")?;
+    let artifact_directory = command
+        .artifact_directory
+        .canonicalize()
+        .context("failed to canonicalize paired execution artifact directory")?;
+    let executable = std::env::current_exe()
+        .context("failed to locate paired campaign executable")?
+        .canonicalize()
+        .context("failed to canonicalize paired campaign executable")?;
+    let mut worktrees = PairedWorktrees::create(&repository_root)?;
+    let campaign_result = (|| -> Result<bool> {
+        let broken_root = worktrees.add("broken/artifact", PAIRED_BROKEN_OID)?;
+        materialize_paired_probe(&broken_root)?;
+        let (first_schema, first_verdict, first_log) = opaque_dispatch_paths(&broken_root)?;
+        std::fs::write(&first_schema, VERDICT_SCHEMA)
+            .context("failed to materialize embedded paired verdict schema")?;
+        run_paired_critic(
+            &executable,
+            &broken_root,
+            &first_schema,
+            &first_verdict,
+            &first_log,
+            &command.environment,
+            overall_deadline,
+        )?;
+        let first_capture = capture_paired_critic(&first_verdict)?;
+        worktrees.remove(&broken_root)?;
+        let repaired_root = worktrees.add("repaired/artifact", PAIRED_REPAIRED_OID)?;
+        materialize_paired_probe(&repaired_root)?;
+        let (second_schema, second_verdict, second_log) = opaque_dispatch_paths(&repaired_root)?;
+        std::fs::write(&second_schema, VERDICT_SCHEMA)
+            .context("failed to materialize embedded paired verdict schema")?;
+        run_paired_critic(
+            &executable,
+            &repaired_root,
+            &second_schema,
+            &second_verdict,
+            &second_log,
+            &command.environment,
+            overall_deadline,
+        )?;
+        let second_capture = capture_paired_critic(&second_verdict)?;
+        worktrees.remove(&repaired_root)?;
+        worktrees.materialize_replay_repository()?;
+        resolve_paired_ref(
+            &worktrees.repository_root,
+            PAIRED_BROKEN_REF,
+            PAIRED_BROKEN_OID,
+        )?;
+        resolve_paired_ref(
+            &worktrees.repository_root,
+            PAIRED_REPAIRED_REF,
+            PAIRED_REPAIRED_OID,
+        )?;
+        let broken_verdict_path = artifact_directory.join("broken-verdict.json");
+        let repaired_verdict_path = artifact_directory.join("repaired-verdict.json");
+        retain_paired_critic_capture(&first_capture, &broken_verdict_path)?;
+        retain_paired_critic_capture(&second_capture, &repaired_verdict_path)?;
+        let broken_bytes =
+            std::fs::read(&broken_verdict_path).context("failed to read broken paired verdict")?;
+        let repaired_bytes = std::fs::read(&repaired_verdict_path)
+            .context("failed to read repaired paired verdict")?;
+        let broken_evidence_path =
+            AbsoluteGateExecutionEvidencePath::from_verdict_path(&broken_verdict_path);
+        let repaired_evidence_path =
+            AbsoluteGateExecutionEvidencePath::from_verdict_path(&repaired_verdict_path);
+        let broken_evidence_bytes = std::fs::read(broken_evidence_path.as_path())
+            .context("failed to read broken paired evidence")?;
+        let repaired_evidence_bytes = std::fs::read(repaired_evidence_path.as_path())
+            .context("failed to read repaired paired evidence")?;
+        let broken_evidence = parse_gate_execution_evidence(&broken_evidence_bytes)?;
+        let repaired_evidence = parse_gate_execution_evidence(&repaired_evidence_bytes)?;
+        validate_verdict_references(&broken_bytes, broken_evidence.executions())?;
+        validate_verdict_references(&repaired_bytes, repaired_evidence.executions())?;
+        let broken_verdict = parse_paired_falsification_verdict(&broken_bytes)?;
+        let repaired_verdict = parse_paired_falsification_verdict(&repaired_bytes)?;
+        let replay_directory = artifact_directory.join("replays");
+        std::fs::create_dir(&replay_directory)
+            .context("failed to create paired replay directory")?;
+        let mut broken_replays = BTreeMap::new();
+        let mut broken_replay_paths = BTreeMap::new();
+        let broken_primary_references = broken_verdict
+            .blocking_issues()
+            .iter()
+            .filter_map(|issue| issue.primary().cloned())
+            .collect::<Vec<_>>();
+        for record in broken_evidence
+            .executions()
+            .iter()
+            .filter(|record| broken_primary_references.contains(&record.execution_ref))
+        {
+            let reference = &record.execution_ref;
+            let report = replay_directory.join(format!("broken-{}.json", reference.as_str()));
+            if !paired_record_is_replayable(record, &broken_root, &report)? {
+                continue;
+            }
+            let classification = run_paired_replay(
+                &executable,
+                &worktrees.repository_root,
+                &broken_root,
+                broken_evidence_path.as_path(),
+                reference,
+                &report,
+                overall_deadline,
+            )?;
+            broken_replays.insert(reference.clone(), classification);
+            broken_replay_paths.insert(reference.clone(), report);
+        }
+        let mut repaired_replays = BTreeMap::new();
+        let mut repaired_replay_paths = BTreeMap::new();
+        for record in repaired_evidence.executions() {
+            let report =
+                replay_directory.join(format!("repaired-{}.json", record.execution_ref.as_str()));
+            if !paired_record_is_replayable(record, &repaired_root, &report)? {
+                continue;
+            }
+            let classification = run_paired_replay(
+                &executable,
+                &worktrees.repository_root,
+                &repaired_root,
+                repaired_evidence_path.as_path(),
+                &record.execution_ref,
+                &report,
+                overall_deadline,
+            )?;
+            repaired_replays.insert(record.execution_ref.clone(), classification);
+            repaired_replay_paths.insert(record.execution_ref.clone(), report);
+        }
+        let folded = fold_paired_execution_proof(
+            PairedCampaign {
+                side: pce_core::CampaignSide::Broken,
+                root: &broken_root,
+                verdict: &broken_verdict,
+                evidence: &broken_evidence,
+                reference_validation: ReferenceValidation::Passed,
+                replays: &ReplayClassifications::new(broken_replays),
+            },
+            PairedCampaign {
+                side: pce_core::CampaignSide::Repaired,
+                root: &repaired_root,
+                verdict: &repaired_verdict,
+                evidence: &repaired_evidence,
+                reference_validation: ReferenceValidation::Passed,
+                replays: &ReplayClassifications::new(repaired_replays),
+            },
+        );
+        let approved = folded.decision == pce_core::PairedProofDecision::Approve;
+        if approved {
+            let broken_reference = folded
+                .broken_witnesses
+                .first()
+                .ok_or_else(|| anyhow!("approved paired proof has no broken witness"))?;
+            let repaired_reference = folded
+                .repaired_probes
+                .first()
+                .ok_or_else(|| anyhow!("approved paired proof has no repaired probe"))?;
+            let broken_report = broken_replay_paths
+                .get(broken_reference)
+                .ok_or_else(|| anyhow!("approved paired broken witness has no replay report"))?;
+            let repaired_report = repaired_replay_paths
+                .get(repaired_reference)
+                .ok_or_else(|| anyhow!("approved paired repaired probe has no replay report"))?;
+            std::fs::copy(broken_report, replay_directory.join("broken-witness.json"))
+                .context("failed to retain fixed broken witness replay")?;
+            std::fs::copy(
+                repaired_report,
+                replay_directory.join("repaired-probe.json"),
+            )
+            .context("failed to retain fixed repaired probe replay")?;
+        }
+        let report = PairedProofReport {
+            schema_id: "pce.paired-execution-proof",
+            schema_version: 1,
+            broken_ref: PAIRED_BROKEN_OID,
+            repaired_ref: PAIRED_REPAIRED_OID,
+            broken_verdict: match broken_verdict.token() {
+                pce_core::FalsificationVerdictToken::Approve => "APPROVE",
+                pce_core::FalsificationVerdictToken::Revise => "REVISE",
+                pce_core::FalsificationVerdictToken::Block => "BLOCK",
+            },
+            broken_blocking_issue_count: broken_verdict.blocking_issues().len(),
+            broken_witnesses: folded
+                .broken_witnesses
+                .iter()
+                .map(|reference| reference.as_str().to_owned())
+                .collect(),
+            repaired_verdict: match repaired_verdict.token() {
+                pce_core::FalsificationVerdictToken::Approve => "APPROVE",
+                pce_core::FalsificationVerdictToken::Revise => "REVISE",
+                pce_core::FalsificationVerdictToken::Block => "BLOCK",
+            },
+            repaired_blocking_issue_count: repaired_verdict.blocking_issues().len(),
+            repaired_probes: folded
+                .repaired_probes
+                .iter()
+                .map(|reference| reference.as_str().to_owned())
+                .collect(),
+            decision: if approved { "APPROVE" } else { "REFUSE" },
+        };
+        let bytes = serialize_paired_proof_report(&report)?;
+        std::fs::write(
+            artifact_directory.join("paired-execution-proof.json"),
+            &bytes,
+        )
+        .context("failed to write paired proof report")?;
+        write_paired_provenance_manifest(
+            &repository_root,
+            &executable,
+            &artifact_directory,
+            started_at_utc.clone(),
+        )?;
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
+        output
+            .write_all(&bytes)
+            .context("failed to write paired proof stdout")?;
+        output
+            .flush()
+            .context("failed to flush paired proof stdout")?;
+        Ok(approved)
+    })();
+    let cleanup_result = worktrees.cleanup();
+    let approved = campaign_result?;
+    cleanup_result?;
+    if !approved {
+        bail!("paired execution proof refused");
+    }
+    Ok(())
 }
 
 fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
@@ -742,9 +1938,21 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
                 "falsification-critic environment must not supply binary-owned `PCE_GATE_EXEC_SOCKET`"
             );
         }
-        let client = AbsoluteGateExecClientPath::parse(
-            std::env::current_exe().context("failed to resolve current pce executable")?,
-        )?;
+        let client_path = match std::env::var_os(PAIRED_GATE_EXEC_CLIENT_ENV) {
+            Some(path) => {
+                let path = PathBuf::from(path)
+                    .canonicalize()
+                    .context("failed to resolve isolated recorder client")?;
+                if !path.starts_with(working_directory.as_path()) || !path.is_file() {
+                    bail!(
+                        "isolated recorder client must be an ordinary file in the subject checkout"
+                    );
+                }
+                path
+            }
+            None => std::env::current_exe().context("failed to resolve current pce executable")?,
+        };
+        let client = AbsoluteGateExecClientPath::parse(client_path)?;
         let evidence = AbsoluteGateExecutionEvidencePath::from_verdict_path(output_path.as_path());
         let issuance = u64::try_from(
             SystemTime::now()
@@ -2370,6 +3578,7 @@ fn render_seatbelt_profile(
         "(import \"system.sb\")\n",
         "(allow process*)\n",
         "(allow signal (target children))\n",
+        "(allow signal (target same-sandbox))\n",
         "(allow file-read*)\n"
     )
     .to_owned();
@@ -3634,12 +4843,12 @@ impl ReplayRefCampaign {
                 resolved_commit,
                 mut observations,
             } => {
-                let second = observations
-                    .pop()
-                    .ok_or_else(|| anyhow!("clean replay run timed out after 30 seconds"))?;
+                let second = observations.pop().ok_or_else(|| {
+                    anyhow!("clean replay did not produce its second observation")
+                })?;
                 let first = observations
                     .pop()
-                    .ok_or_else(|| anyhow!("clean replay run timed out after 30 seconds"))?;
+                    .ok_or_else(|| anyhow!("clean replay did not produce its first observation"))?;
                 Ok(ReplayRefResult::Completed {
                     requested_ref,
                     resolved_commit,
@@ -3678,6 +4887,7 @@ fn exec_gate_replay_worker(mut command: GateReplayCommand) -> Result<()> {
     };
     let wire = serde_json::to_vec(&json!({
         "repository_root": command.repository_root,
+        "recorded_root": command.recorded_root,
         "evidence_path": command.evidence_path,
         "execution_ref": command.execution_ref.as_str(),
         "broken_ref": command.broken_ref.as_str(),
@@ -3732,6 +4942,7 @@ fn read_gate_replay_worker_request(input: &mut dyn Read) -> Result<GateReplayCom
         object,
         &[
             "repository_root",
+            "recorded_root",
             "evidence_path",
             "execution_ref",
             "broken_ref",
@@ -3758,8 +4969,18 @@ fn read_gate_replay_worker_request(input: &mut dyn Read) -> Result<GateReplayCom
         }
         None => return Err(anyhow!("failed to parse private gate replay request")),
     };
+    let recorded_root = match object.get("recorded_root") {
+        Some(Value::Null) => None,
+        Some(value) => {
+            Some(PathBuf::from(value.as_str().ok_or_else(|| {
+                anyhow!("failed to parse private gate replay request")
+            })?))
+        }
+        None => return Err(anyhow!("failed to parse private gate replay request")),
+    };
     Ok(GateReplayCommand {
         repository_root: PathBuf::from(string("repository_root")?),
+        recorded_root,
         evidence_path: PathBuf::from(string("evidence_path")?),
         execution_ref: GateExecutionRef::parse(string("execution_ref")?.to_owned())?,
         broken_ref: NamedReplayRef::parse(string("broken_ref")?.to_owned())?,
@@ -3776,11 +4997,17 @@ fn run_gate_replay(command: GateReplayCommand) -> Result<()> {
     let overall_deadline = started + REPLAY_OVERALL_TIMEOUT;
     let repository_root = std::fs::canonicalize(&command.repository_root)
         .context("failed to canonicalize replay repository root")?;
+    let recorded_root = command
+        .recorded_root
+        .unwrap_or_else(|| repository_root.clone());
+    if !recorded_root.is_absolute() {
+        bail!("recorded replay root must be absolute");
+    }
     let evidence_bytes =
         std::fs::read(&command.evidence_path).context("failed to read gate execution evidence")?;
     let evidence = parse_gate_execution_evidence(&evidence_bytes)?;
     let record = evidence.record(&command.execution_ref)?;
-    rebase_gate_stimulus(&record.stimulus, &repository_root, &repository_root)?;
+    rebase_gate_stimulus(&record.stimulus, &recorded_root, &repository_root)?;
     let broken_resolved =
         resolve_replay_ref(&repository_root, &command.broken_ref, overall_deadline)?;
     let repaired_resolved =
@@ -3806,6 +5033,7 @@ fn run_gate_replay(command: GateReplayCommand) -> Result<()> {
         evaluate_replay_ref_run(
             campaign,
             &repository_root,
+            &recorded_root,
             &stimulus,
             &command.schema_path,
             &command.output_path,
@@ -3882,7 +5110,7 @@ fn run_replay_pause_seam(
     let deadline = Instant::now() + REPLAY_PAUSE_TIMEOUT;
     loop {
         if Instant::now() >= overall_deadline {
-            bail!("gate replay exceeded its 150 second overall deadline");
+            bail!("gate replay exceeded its 40 minute overall deadline");
         }
         if Instant::now() >= deadline {
             bail!("replay pause-after-resolve seam timed out after 10 seconds");
@@ -4063,6 +5291,7 @@ fn resolve_replay_ref(
 fn evaluate_replay_ref_run(
     campaign: &mut ReplayRefCampaign,
     repository_root: &Path,
+    recorded_root: &Path,
     stimulus: &GateStimulus,
     schema_path: &RepositoryRelativePath,
     output_path: &RepositoryRelativePath,
@@ -4101,13 +5330,13 @@ fn evaluate_replay_ref_run(
         return Ok(());
     }
     let run_result = run_clean_replay(
-        repository_root,
+        recorded_root,
         &checkout,
-        &parent.0,
         requested_ref,
         stimulus,
         schema_path,
         output_path,
+        overall_deadline,
     );
     validate_replay_cleanup_target(&parent.0, &checkout)?;
     cleanup_replay_parent(&parent.0)?;
@@ -4206,15 +5435,17 @@ enum CleanReplayResult {
 }
 
 fn run_clean_replay(
-    repository_root: &Path,
+    recorded_root: &Path,
     checkout: &Path,
-    replay_parent: &Path,
     requested_ref: &NamedReplayRef,
     stimulus: &GateStimulus,
     schema_relative: &RepositoryRelativePath,
     output_relative: &RepositoryRelativePath,
+    overall_deadline: Instant,
 ) -> Result<CleanReplayResult> {
-    let run_deadline = Instant::now() + REPLAY_RUN_TIMEOUT;
+    let replay_parent = checkout
+        .parent()
+        .ok_or_else(|| anyhow!("replay checkout must have a parent"))?;
     let output_path = checkout.join(output_relative.as_path());
     if std::fs::symlink_metadata(&output_path).is_ok() {
         return Ok(CleanReplayResult::OracleFailed(OracleFailure {
@@ -4248,29 +5479,49 @@ fn run_clean_replay(
             ),
         }));
     }
-    if Instant::now() >= run_deadline {
-        bail!("clean replay run timed out after 30 seconds");
-    }
-    let rebased = rebase_gate_stimulus(stimulus, repository_root, checkout)?;
-    let execution = execute_gate_stimulus_until(&rebased, Some(run_deadline));
+    require_replay_overall_deadline(overall_deadline)?;
+    let rebased = rebase_gate_stimulus(stimulus, recorded_root, checkout)?;
+    materialize_paired_replay_program(checkout, &rebased)?;
+    let execution = execute_replay_stimulus_until(&rebased, overall_deadline);
     let process = execution.observed_result.ok_or_else(|| {
         anyhow!(
             execution
                 .diagnostic
-                .unwrap_or_else(|| "clean replay run timed out after 30 seconds".to_owned())
+                .unwrap_or_else(|| "clean replay did not produce an observation".to_owned())
         )
     })?;
-    if Instant::now() >= run_deadline {
-        bail!("clean replay run timed out after 30 seconds");
-    }
+    require_replay_overall_deadline(overall_deadline)?;
     let artifact = observe_replay_artifact(&schema_path, &schema_bytes, &output_path)?;
     let normalized = normalize_replay_observation(
         ReplayObservation { process, artifact },
-        repository_root,
+        recorded_root,
         checkout,
         replay_parent,
     )?;
     Ok(CleanReplayResult::Observed(normalized))
+}
+
+fn materialize_paired_replay_program(checkout: &Path, stimulus: &GateStimulus) -> Result<()> {
+    let Some(relative) = std::env::var_os(PAIRED_REPLAY_PROGRAM_ENV) else {
+        return Ok(());
+    };
+    let relative = parse_replay_output_path(
+        relative
+            .to_str()
+            .ok_or_else(|| anyhow!("paired replay program path must be UTF-8"))?,
+    )?;
+    let destination = checkout.join(relative.as_path());
+    let recorded_program = Path::new(stimulus.command().program());
+    if recorded_program != relative.as_path() && recorded_program != destination {
+        return Ok(());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("paired replay program path has no parent"))?;
+    std::fs::create_dir_all(parent).context("failed to create paired replay program root")?;
+    let source = std::env::current_exe().context("failed to locate paired replay executable")?;
+    std::fs::copy(source, destination).context("failed to materialize paired replay executable")?;
+    Ok(())
 }
 
 fn replay_schema_compiles(schema_path: &Path, schema: &[u8], output_path: &Path) -> Result<bool> {
@@ -4333,7 +5584,7 @@ fn cleanup_replay_parent(parent: &Path) -> Result<()> {
 
 fn require_replay_overall_deadline(deadline: Instant) -> Result<()> {
     if Instant::now() >= deadline {
-        bail!("gate replay exceeded its 150 second overall deadline");
+        bail!("gate replay exceeded its 40 minute overall deadline");
     }
     Ok(())
 }
@@ -4394,7 +5645,7 @@ fn run_replay_git_bounded(
                 drop(stdout_worker);
                 drop(stderr_worker);
                 if overall_deadline.is_some_and(|overall| Instant::now() >= overall) {
-                    bail!("gate replay exceeded its 150 second overall deadline");
+                    bail!("gate replay exceeded its 40 minute overall deadline");
                 }
                 bail!("clean replay git command timed out after 5 seconds");
             }
@@ -4409,7 +5660,7 @@ fn run_replay_git_bounded(
         drop(stdout_worker);
         drop(stderr_worker);
         if overall_deadline.is_some_and(|overall| Instant::now() >= overall) {
-            bail!("gate replay exceeded its 150 second overall deadline");
+            bail!("gate replay exceeded its 40 minute overall deadline");
         }
         bail!("clean replay git command timed out after 5 seconds");
     }
@@ -4448,6 +5699,8 @@ struct GateRecorderState {
     fatal_diagnostics: Vec<String>,
     live_workers: usize,
     next_sequence: u32,
+    #[cfg(test)]
+    process_bounds: Option<GateProcessBounds>,
 }
 
 struct GateRecorderStop {
@@ -4468,6 +5721,60 @@ struct GateStimulusExecution {
 struct GateProcessExecution {
     observation: Option<GateProcessObservation>,
     diagnostic: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct GateProcessBounds {
+    execution_inactivity: Duration,
+    execution_overall: Duration,
+    output_drain_inactivity: Duration,
+    output_drain_overall: Duration,
+}
+
+impl GateProcessBounds {
+    const PRODUCTION: Self = Self {
+        execution_inactivity: GATE_EXECUTION_INACTIVITY_TIMEOUT,
+        execution_overall: GATE_EXECUTION_OVERALL_TIMEOUT,
+        output_drain_inactivity: GATE_OUTPUT_DRAIN_INACTIVITY_TIMEOUT,
+        output_drain_overall: GATE_OUTPUT_DRAIN_OVERALL_TIMEOUT,
+    };
+
+    const REPLAY: Self = Self {
+        execution_inactivity: REPLAY_RUN_INACTIVITY_TIMEOUT,
+        execution_overall: REPLAY_RUN_OVERALL_TIMEOUT,
+        output_drain_inactivity: GATE_OUTPUT_DRAIN_INACTIVITY_TIMEOUT,
+        output_drain_overall: GATE_OUTPUT_DRAIN_OVERALL_TIMEOUT,
+    };
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static GATE_PROCESS_TEST_BOUNDS: std::cell::Cell<Option<GateProcessBounds>> =
+        const { std::cell::Cell::new(None) };
+    static REPLAY_PROCESS_TEST_BOUNDS: std::cell::Cell<Option<GateProcessBounds>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn gate_process_bounds() -> GateProcessBounds {
+    #[cfg(test)]
+    if let Some(bounds) = GATE_PROCESS_TEST_BOUNDS.with(std::cell::Cell::get) {
+        return bounds;
+    }
+    GateProcessBounds::PRODUCTION
+}
+
+fn replay_process_bounds() -> GateProcessBounds {
+    #[cfg(test)]
+    if let Some(bounds) = REPLAY_PROCESS_TEST_BOUNDS.with(std::cell::Cell::get) {
+        return bounds;
+    }
+    GateProcessBounds::REPLAY
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GateOutputDrainTimeout {
+    Inactivity,
+    Overall,
 }
 
 impl GateRecorderRuntime {
@@ -4613,6 +5920,16 @@ impl GateRecorderRuntime {
         })
     }
 
+    #[cfg(test)]
+    fn start_with_bounds(
+        config: &GateExecutionRecorderConfig,
+        bounds: GateProcessBounds,
+    ) -> Result<Self> {
+        let runtime = Self::start(config)?;
+        with_gate_state(&runtime.state, |state| state.process_bounds = Some(bounds));
+        Ok(runtime)
+    }
+
     fn stop(mut self) -> GateRecorderStop {
         self.stop.store(true, AtomicOrdering::Release);
         let mut error = self.stop_server_bounded();
@@ -4751,7 +6068,13 @@ fn serve_gate_execution(
         Ok(allocated) => allocated,
         Err(diagnostic) => return deliver_gate_rejection(&mut stream, diagnostic),
     };
-    let execution = execute_gate_stimulus(&stimulus);
+    #[cfg(test)]
+    let execution = with_gate_state(state, |state| state.process_bounds).map_or_else(
+        || execute_gate_stimulus(&stimulus, stop),
+        |bounds| execute_gate_stimulus_with_bounds(&stimulus, None, bounds, Some(stop)),
+    );
+    #[cfg(not(test))]
+    let execution = execute_gate_stimulus(&stimulus, stop);
     let Some(observed_result) = execution.observed_result else {
         let diagnostic = execution
             .diagnostic
@@ -4787,24 +6110,43 @@ fn serve_gate_execution(
     GateConnectionOutcome::Recorded
 }
 
-fn execute_gate_stimulus(stimulus: &GateStimulus) -> GateStimulusExecution {
-    execute_gate_stimulus_until(stimulus, None)
+fn execute_gate_stimulus(stimulus: &GateStimulus, stop: &Arc<AtomicBool>) -> GateStimulusExecution {
+    execute_gate_stimulus_with_bounds(stimulus, None, gate_process_bounds(), Some(stop))
 }
 
-fn execute_gate_stimulus_until(
+fn execute_replay_stimulus_until(
+    stimulus: &GateStimulus,
+    overall_deadline: Instant,
+) -> GateStimulusExecution {
+    execute_gate_stimulus_with_bounds(
+        stimulus,
+        Some(overall_deadline),
+        replay_process_bounds(),
+        None,
+    )
+}
+
+fn execute_gate_stimulus_with_bounds(
     stimulus: &GateStimulus,
     overall_deadline: Option<Instant>,
+    bounds: GateProcessBounds,
+    stop: Option<&AtomicBool>,
 ) -> GateStimulusExecution {
     let mut setup = Vec::with_capacity(stimulus.setup().len());
     for action in stimulus.setup() {
         if overall_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return GateStimulusExecution {
                 observed_result: None,
-                diagnostic: Some("clean replay run timed out after 30 seconds".to_owned()),
+                diagnostic: Some("gate replay exceeded its 40 minute overall deadline".to_owned()),
             };
         }
-        let execution =
-            execute_gate_process_until(stimulus.working_directory(), action, overall_deadline);
+        let execution = execute_gate_process_with_bounds(
+            stimulus.working_directory(),
+            action,
+            overall_deadline,
+            bounds,
+            stop,
+        );
         let Some(observation) = execution.observation else {
             return GateStimulusExecution {
                 observed_result: None,
@@ -4826,13 +6168,15 @@ fn execute_gate_stimulus_until(
     if overall_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         return GateStimulusExecution {
             observed_result: None,
-            diagnostic: Some("clean replay run timed out after 30 seconds".to_owned()),
+            diagnostic: Some("gate replay exceeded its 40 minute overall deadline".to_owned()),
         };
     }
-    let execution = execute_gate_process_until(
+    let execution = execute_gate_process_with_bounds(
         stimulus.working_directory(),
         stimulus.command(),
         overall_deadline,
+        bounds,
+        stop,
     );
     GateStimulusExecution {
         observed_result: execution.observation.map(|command| GateObservedResult {
@@ -4843,10 +6187,27 @@ fn execute_gate_stimulus_until(
     }
 }
 
+#[cfg(test)]
 fn execute_gate_process_until(
     working_directory: &Path,
     stimulus: &GateProcessStimulus,
     overall_deadline: Option<Instant>,
+) -> GateProcessExecution {
+    execute_gate_process_with_bounds(
+        working_directory,
+        stimulus,
+        overall_deadline,
+        gate_process_bounds(),
+        None,
+    )
+}
+
+fn execute_gate_process_with_bounds(
+    working_directory: &Path,
+    stimulus: &GateProcessStimulus,
+    overall_deadline: Option<Instant>,
+    bounds: GateProcessBounds,
+    stop: Option<&AtomicBool>,
 ) -> GateProcessExecution {
     let mut command = std::process::Command::new(stimulus.program());
     command.args(stimulus.arguments());
@@ -4856,6 +6217,7 @@ fn execute_gate_process_until(
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    command.process_group(0);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -4886,23 +6248,44 @@ fn execute_gate_process_until(
     let input = stimulus.input().to_vec();
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
+    let output_progress = Arc::new(AtomicU64::new(0));
     let stdout_capture = Arc::clone(&stdout);
     let stderr_capture = Arc::clone(&stderr);
+    let stdout_progress = Arc::clone(&output_progress);
+    let stderr_progress = Arc::clone(&output_progress);
     let stdin_worker = std::thread::spawn(move || match child_stdin.write_all(&input) {
         Ok(()) => None,
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => None,
         Err(error) => Some(format!("gate execution stdin write failed: {error}")),
     });
-    let stdout_worker =
-        std::thread::spawn(move || drain_gate_pipe(&mut child_stdout, &stdout_capture, "stdout"));
-    let stderr_worker =
-        std::thread::spawn(move || drain_gate_pipe(&mut child_stderr, &stderr_capture, "stderr"));
-    let execution_deadline = overall_deadline
-        .map(|deadline| deadline.min(Instant::now() + GATE_EXECUTION_TIMEOUT))
-        .unwrap_or_else(|| Instant::now() + GATE_EXECUTION_TIMEOUT);
+    let stdout_worker = std::thread::spawn(move || {
+        drain_gate_pipe_with_progress(
+            &mut child_stdout,
+            &stdout_capture,
+            "stdout",
+            &stdout_progress,
+        )
+    });
+    let stderr_worker = std::thread::spawn(move || {
+        drain_gate_pipe_with_progress(
+            &mut child_stderr,
+            &stderr_capture,
+            "stderr",
+            &stderr_progress,
+        )
+    });
+    let execution_started = Instant::now();
+    let execution_overall_deadline = overall_deadline
+        .map(|deadline| deadline.min(execution_started + bounds.execution_overall))
+        .unwrap_or_else(|| execution_started + bounds.execution_overall);
+    let mut execution_inactivity_deadline = execution_started + bounds.execution_inactivity;
+    let mut observed_progress = output_progress.load(AtomicOrdering::Acquire);
     let mut terminal_status = None;
     let mut diagnostic = None;
-    while Instant::now() < execution_deadline {
+    while Instant::now() < execution_overall_deadline
+        && Instant::now() < execution_inactivity_deadline
+        && !stop.is_some_and(|flag| flag.load(AtomicOrdering::Acquire))
+    {
         match child.try_wait() {
             Ok(Some(status)) => {
                 terminal_status = Some(status);
@@ -4914,9 +6297,15 @@ fn execute_gate_process_until(
                 break;
             }
         }
+        let current_progress = output_progress.load(AtomicOrdering::Acquire);
+        if current_progress != observed_progress {
+            observed_progress = current_progress;
+            execution_inactivity_deadline =
+                (Instant::now() + bounds.execution_inactivity).min(execution_overall_deadline);
+        }
     }
     if terminal_status.is_none() && diagnostic.is_none() {
-        if let Err(error) = child.kill() {
+        if let Err(error) = kill_gate_process_group(&mut child) {
             diagnostic = Some(format!("gate execution process kill failed: {error}"));
         } else {
             let termination_deadline = Instant::now() + GATE_PROCESS_TERMINATION_TIMEOUT;
@@ -4947,17 +6336,42 @@ fn execute_gate_process_until(
             diagnostic,
         };
     }
-    let drain_deadline = Instant::now() + GATE_OUTPUT_DRAIN_TIMEOUT;
-    while (!stdout_worker.is_finished()
+    let drain_started = Instant::now();
+    let drain_overall_deadline = drain_started + bounds.output_drain_overall;
+    let mut drain_inactivity_deadline = drain_started + bounds.output_drain_inactivity;
+    observed_progress = output_progress.load(AtomicOrdering::Acquire);
+    let mut drain_timeout = None;
+    while !stdout_worker.is_finished()
         || !stderr_worker.is_finished()
-        || !stdin_worker.is_finished())
-        && Instant::now() < drain_deadline
+        || !stdin_worker.is_finished()
     {
+        let now = Instant::now();
+        if now >= drain_overall_deadline {
+            drain_timeout = Some(GateOutputDrainTimeout::Overall);
+            break;
+        }
+        let current_progress = output_progress.load(AtomicOrdering::Acquire);
+        if current_progress != observed_progress {
+            observed_progress = current_progress;
+            drain_inactivity_deadline =
+                (now + bounds.output_drain_inactivity).min(drain_overall_deadline);
+        } else if now >= drain_inactivity_deadline {
+            drain_timeout = Some(GateOutputDrainTimeout::Inactivity);
+            break;
+        }
         std::thread::sleep(GATE_ACCEPT_POLL_INTERVAL);
     }
     if (!stdout_worker.is_finished() || !stderr_worker.is_finished()) && diagnostic.is_none() {
-        diagnostic = Some(gate_output_drain_diagnostic());
+        let _group_kill = kill_gate_process_group(&mut child);
+        diagnostic = Some(gate_output_drain_diagnostic(
+            drain_timeout.unwrap_or(GateOutputDrainTimeout::Inactivity),
+        ));
     }
+    let drain_deadline = if drain_timeout.is_some() {
+        Instant::now() + GATE_PROCESS_TERMINATION_TIMEOUT
+    } else {
+        drain_overall_deadline.min(drain_inactivity_deadline)
+    };
     let stdin_diagnostic = join_gate_worker(
         stdin_worker,
         "gate execution stdin writer panicked",
@@ -5011,7 +6425,7 @@ fn failed_gate_process(diagnostic: &str) -> GateProcessExecution {
 }
 
 fn terminate_unobserved_gate_child(child: &mut std::process::Child) {
-    let _kill_result = child.kill();
+    let _kill_result = kill_gate_process_group(child);
     let deadline = Instant::now() + GATE_PROCESS_TERMINATION_TIMEOUT;
     while Instant::now() < deadline {
         match child.try_wait() {
@@ -5021,10 +6435,34 @@ fn terminate_unobserved_gate_child(child: &mut std::process::Child) {
     }
 }
 
+fn kill_gate_process_group(child: &mut std::process::Child) -> std::io::Result<()> {
+    let group = format!("-{}", child.id());
+    let status = std::process::Command::new("/bin/kill")
+        .args(["-KILL", &group])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        child.kill()
+    }
+}
+
 fn drain_gate_pipe(
     pipe: &mut dyn Read,
     capture: &Arc<Mutex<Vec<u8>>>,
     name: &str,
+) -> Option<String> {
+    let progress = AtomicU64::new(0);
+    drain_gate_pipe_with_progress(pipe, capture, name, &progress)
+}
+
+fn drain_gate_pipe_with_progress(
+    pipe: &mut dyn Read,
+    capture: &Arc<Mutex<Vec<u8>>>,
+    name: &str,
+    progress: &AtomicU64,
 ) -> Option<String> {
     let mut buffer = [0_u8; 8192];
     loop {
@@ -5032,6 +6470,7 @@ fn drain_gate_pipe(
             Ok(0) => return None,
             Ok(count) => with_gate_buffer(capture, |bytes| {
                 bytes.extend_from_slice(&buffer[..count]);
+                progress.fetch_add(1, AtomicOrdering::Release);
             }),
             Err(error) => {
                 return Some(format!("gate execution {name} read failed: {error}"));
@@ -5189,8 +6628,15 @@ fn gate_process_termination_diagnostic() -> String {
     "gate execution process did not terminate within 1 second after kill".to_owned()
 }
 
-fn gate_output_drain_diagnostic() -> String {
-    "gate execution output drain timed out after 1 second".to_owned()
+fn gate_output_drain_diagnostic(timeout: GateOutputDrainTimeout) -> String {
+    match timeout {
+        GateOutputDrainTimeout::Inactivity => {
+            "gate execution output drain inactive for 30 seconds".to_owned()
+        }
+        GateOutputDrainTimeout::Overall => {
+            "gate execution output drain exceeded 2 minute overall cap".to_owned()
+        }
+    }
 }
 
 fn gate_recorder_stopping_diagnostic() -> String {
@@ -5377,14 +6823,19 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
         let artifact_validation: Result<ArtifactOutcome, pce_core::ArtifactValidationError> =
             match (envelope.schema_path(), envelope.output_path()) {
                 (Some(schema_path), Some(output_path)) => {
-                    let schema = read_file_observation(schema_path.as_path());
                     let artifact = read_file_observation(output_path.as_path());
-                    let schema_observation = if envelope.gate_execution_recorder().is_some() {
-                        FileObservation::Readable {
-                            bytes: VERDICT_SCHEMA.as_bytes(),
-                        }
+                    // The falsification role frame and its reference validator are compiled into
+                    // this binary, so its verdict schema must come from the same build as well.
+                    let filesystem_schema = if envelope.gate_execution_recorder().is_some() {
+                        None
                     } else {
-                        schema.as_observation()
+                        Some(read_file_observation(schema_path.as_path()))
+                    };
+                    let schema_observation = match filesystem_schema.as_ref() {
+                        Some(schema) => schema.as_observation(),
+                        None => FileObservation::Readable {
+                            bytes: VERDICT_SCHEMA.as_bytes(),
+                        },
                     };
                     validate_artifact(StructuredArtifactObservation::new(
                         schema_path,
@@ -5786,7 +7237,7 @@ mod tests {
     };
 
     #[test]
-    fn seatbelt_profile_allows_only_child_signals_and_path_filtered_unix_sockets() {
+    fn seatbelt_profile_allows_only_sandbox_tree_signals_and_path_filtered_unix_sockets() {
         let temporary_directories = BTreeSet::from([PathBuf::from("/private/tmp")]);
 
         let profile =
@@ -5801,6 +7252,7 @@ mod tests {
                 "(import \"system.sb\")\n",
                 "(allow process*)\n",
                 "(allow signal (target children))\n",
+                "(allow signal (target same-sandbox))\n",
                 "(allow file-read*)\n",
                 "(deny file-write*\n",
                 "  (require-all\n",
@@ -8507,7 +9959,12 @@ mod tests {
             .expect_err("extra helper argument");
         assert_eq!(error.to_string(), super::USAGE);
         assert!(super::USAGE.contains("\n       pce gate exec\n"));
-        assert!(super::USAGE.ends_with("--expected <conforming-verdict|nonconforming-verdict>"));
+        assert!(super::USAGE.ends_with(concat!(
+            "       pce gate exec\n",
+            "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>\n",
+            "       pce gate execution-subject-probe --output <REPOSITORY_RELATIVE_OUTPUT_PATH>\n",
+            "       pce gate paired-execution-proof --repo-root <ABSOLUTE_REPOSITORY_ROOT> --artifacts <ABSOLUTE_EMPTY_DIRECTORY> --env <NAME=VALUE> --env <NAME=VALUE> --env <NAME=VALUE>"
+        )));
     }
 
     #[test]
@@ -8545,10 +10002,31 @@ mod tests {
     }
 
     #[test]
+    fn paired_replay_classification_keeps_no_repair_signal_out_of_repair_sensitive() {
+        assert_eq!(
+            super::replay_classification(br#"{"classification":"no-repair-signal"}"#)
+                .expect("known replay classification"),
+            pce_core::PairedReplayClassification::NoRepairSignal
+        );
+        assert_eq!(
+            super::replay_classification(br#"{"classification":"repair-sensitive"}"#)
+                .expect("known replay classification"),
+            pce_core::PairedReplayClassification::RepairSensitive
+        );
+    }
+
+    #[test]
     fn gate_replay_bounds_diagnostics_and_cleanup_targets_are_stable() {
         assert_eq!(super::REPLAY_GIT_TIMEOUT, Duration::from_secs(5));
-        assert_eq!(super::REPLAY_RUN_TIMEOUT, Duration::from_secs(30));
-        assert_eq!(super::REPLAY_OVERALL_TIMEOUT, Duration::from_secs(150));
+        assert_eq!(
+            super::REPLAY_RUN_INACTIVITY_TIMEOUT,
+            Duration::from_secs(5 * 60)
+        );
+        assert_eq!(
+            super::REPLAY_RUN_OVERALL_TIMEOUT,
+            Duration::from_secs(15 * 60)
+        );
+        assert_eq!(super::REPLAY_OVERALL_TIMEOUT, Duration::from_secs(40 * 60));
         assert_eq!(super::REPLAY_PAUSE_TIMEOUT, Duration::from_secs(10));
         let parent = Path::new("/private/tmp/pce-gate-replay-test");
         assert!(super::validate_replay_cleanup_target(parent, &parent.join("checkout")).is_ok());
@@ -8642,12 +10120,26 @@ mod tests {
     fn gate_execution_deadline_diagnostics_are_exact() {
         assert_eq!(super::GATE_REQUEST_READ_TIMEOUT, Duration::from_secs(2));
         assert_eq!(super::GATE_RESPONSE_WRITE_TIMEOUT, Duration::from_secs(1));
-        assert_eq!(super::GATE_EXECUTION_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(
+            super::GATE_EXECUTION_INACTIVITY_TIMEOUT,
+            Duration::from_secs(5 * 60)
+        );
+        assert_eq!(
+            super::GATE_EXECUTION_OVERALL_TIMEOUT,
+            Duration::from_secs(15 * 60)
+        );
         assert_eq!(
             super::GATE_PROCESS_TERMINATION_TIMEOUT,
             Duration::from_secs(1)
         );
-        assert_eq!(super::GATE_OUTPUT_DRAIN_TIMEOUT, Duration::from_secs(1));
+        assert_eq!(
+            super::GATE_OUTPUT_DRAIN_INACTIVITY_TIMEOUT,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            super::GATE_OUTPUT_DRAIN_OVERALL_TIMEOUT,
+            Duration::from_secs(2 * 60)
+        );
         assert_eq!(super::GATE_ACCEPT_POLL_INTERVAL, Duration::from_millis(10));
         assert_eq!(super::GATE_SERVER_SHUTDOWN_TIMEOUT, Duration::from_secs(12));
         assert_eq!(super::GATE_MAX_CONNECTION_WORKERS, 32);
@@ -8669,8 +10161,12 @@ mod tests {
             "gate execution process did not terminate within 1 second after kill"
         );
         assert_eq!(
-            super::gate_output_drain_diagnostic(),
-            "gate execution output drain timed out after 1 second"
+            super::gate_output_drain_diagnostic(super::GateOutputDrainTimeout::Inactivity),
+            "gate execution output drain inactive for 30 seconds"
+        );
+        assert_eq!(
+            super::gate_output_drain_diagnostic(super::GateOutputDrainTimeout::Overall),
+            "gate execution output drain exceeded 2 minute overall cap"
         );
         assert_eq!(
             super::gate_recorder_stopping_diagnostic(),
@@ -8679,6 +10175,308 @@ mod tests {
         assert_eq!(
             super::gate_worker_shutdown_diagnostic(),
             "gate execution worker exceeded 12 second shutdown deadline"
+        );
+    }
+
+    fn gate_process_fixture(program: &str, arguments: &[&str]) -> pce_core::GateProcessStimulus {
+        let request = serde_json::to_vec(&json!({
+            "working_directory": "/tmp",
+            "setup": [],
+            "command": {
+                "program": program,
+                "arguments": arguments,
+                "input": [],
+                "environment": {}
+            }
+        }))
+        .expect("gate process fixture should serialize");
+        pce_core::parse_gate_stimulus(&request)
+            .expect("gate process fixture should parse")
+            .command()
+            .clone()
+    }
+
+    fn gate_stimulus_fixture(program: &str, arguments: &[&str]) -> pce_core::GateStimulus {
+        let request = serde_json::to_vec(&json!({
+            "working_directory": "/tmp",
+            "setup": [],
+            "command": {
+                "program": program,
+                "arguments": arguments,
+                "input": [],
+                "environment": {}
+            }
+        }))
+        .expect("gate stimulus fixture should serialize");
+        pce_core::parse_gate_stimulus(&request).expect("gate stimulus fixture should parse")
+    }
+
+    fn short_gate_process_bounds() -> super::GateProcessBounds {
+        super::GateProcessBounds {
+            execution_inactivity: Duration::from_millis(60),
+            execution_overall: Duration::from_millis(180),
+            output_drain_inactivity: Duration::from_millis(60),
+            output_drain_overall: Duration::from_millis(180),
+        }
+    }
+
+    fn execute_gate_process_with_test_bounds(
+        stimulus: &pce_core::GateProcessStimulus,
+        bounds: super::GateProcessBounds,
+    ) -> super::GateProcessExecution {
+        super::GATE_PROCESS_TEST_BOUNDS.with(|configured| {
+            let previous = configured.replace(Some(bounds));
+            let execution = super::execute_gate_process_until(Path::new("/tmp"), stimulus, None);
+            configured.set(previous);
+            execution
+        })
+    }
+
+    #[test]
+    fn production_process_entry_terminates_an_inactive_execution() {
+        let stimulus = gate_process_fixture("/bin/sleep", &["0.30"]);
+        let started = std::time::Instant::now();
+        let execution =
+            execute_gate_process_with_test_bounds(&stimulus, short_gate_process_bounds());
+        assert!(started.elapsed() < Duration::from_millis(180));
+        assert_eq!(
+            execution.observation.map(|observation| observation.status),
+            Some(pce_core::GateTerminalStatus::Signaled { signal: 9 })
+        );
+    }
+
+    #[test]
+    fn production_process_entry_caps_a_continuously_active_execution() {
+        let stimulus = gate_process_fixture(
+            "/bin/sh",
+            &[
+                "-c",
+                "i=0; while [ $i -lt 50 ]; do echo x; /bin/sleep 0.01; i=$((i+1)); done",
+            ],
+        );
+        let mut bounds = short_gate_process_bounds();
+        bounds.execution_inactivity = Duration::from_millis(100);
+        let execution = execute_gate_process_with_test_bounds(&stimulus, bounds);
+        let observation = execution.observation.expect("execution observation");
+        assert!(matches!(
+            observation.status,
+            pce_core::GateTerminalStatus::Signaled { .. }
+        ));
+        assert!(!observation.stdout.is_empty());
+    }
+
+    #[test]
+    fn production_replay_entry_terminates_an_inactive_execution() {
+        let stimulus = gate_stimulus_fixture("/bin/sleep", &["0.30"]);
+        let started = std::time::Instant::now();
+        let execution = super::REPLAY_PROCESS_TEST_BOUNDS.with(|configured| {
+            let previous = configured.replace(Some(short_gate_process_bounds()));
+            let execution = super::execute_replay_stimulus_until(
+                &stimulus,
+                std::time::Instant::now() + Duration::from_secs(1),
+            );
+            configured.set(previous);
+            execution
+        });
+        assert!(started.elapsed() < Duration::from_millis(180));
+        assert!(matches!(
+            execution
+                .observed_result
+                .and_then(|result| result.command)
+                .map(|observation| observation.status),
+            Some(pce_core::GateTerminalStatus::Signaled { .. })
+        ));
+    }
+
+    #[test]
+    fn production_replay_entry_caps_a_continuously_active_execution() {
+        let stimulus = gate_stimulus_fixture(
+            "/bin/sh",
+            &[
+                "-c",
+                "i=0; while [ $i -lt 50 ]; do echo x; /bin/sleep 0.01; i=$((i+1)); done",
+            ],
+        );
+        let mut bounds = short_gate_process_bounds();
+        bounds.execution_inactivity = Duration::from_millis(100);
+        let execution = super::REPLAY_PROCESS_TEST_BOUNDS.with(|configured| {
+            let previous = configured.replace(Some(bounds));
+            let execution = super::execute_replay_stimulus_until(
+                &stimulus,
+                std::time::Instant::now() + Duration::from_secs(1),
+            );
+            configured.set(previous);
+            execution
+        });
+        let observation = execution
+            .observed_result
+            .and_then(|result| result.command)
+            .expect("replay execution observation");
+        assert!(matches!(
+            observation.status,
+            pce_core::GateTerminalStatus::Signaled { .. }
+        ));
+        assert!(!observation.stdout.is_empty());
+    }
+
+    #[test]
+    fn production_process_entry_detects_inactive_output_drain() {
+        let stimulus = gate_process_fixture("/bin/sh", &["-c", "/bin/sleep 0.30 &"]);
+        let mut bounds = short_gate_process_bounds();
+        bounds.execution_inactivity = Duration::from_millis(500);
+        bounds.execution_overall = Duration::from_millis(500);
+        let execution = execute_gate_process_with_test_bounds(&stimulus, bounds);
+        assert_eq!(
+            execution.diagnostic.as_deref(),
+            Some("gate execution output drain inactive for 30 seconds")
+        );
+    }
+
+    fn process_is_gone(pid: &str) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            let status = std::process::Command::new("/bin/kill")
+                .args(["-0", pid])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("process liveness probe should run");
+            if !status.success() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[test]
+    fn production_process_entry_reaps_the_inactive_process_group() {
+        let stimulus =
+            gate_process_fixture("/bin/sh", &["-c", "sleep 30 & child=$!; echo $child; wait"]);
+        let execution =
+            execute_gate_process_with_test_bounds(&stimulus, short_gate_process_bounds());
+        let observation = execution
+            .observation
+            .expect("inactive execution observation");
+        assert_eq!(
+            observation.status,
+            pce_core::GateTerminalStatus::Signaled { signal: 9 }
+        );
+        let pid = String::from_utf8(observation.stdout)
+            .expect("child pid should be UTF-8")
+            .trim()
+            .to_owned();
+        assert!(process_is_gone(&pid), "inactive descendant {pid} survived");
+    }
+
+    #[test]
+    fn production_process_entry_reaps_the_inactive_output_drain_group() {
+        let stimulus = gate_process_fixture("/bin/sh", &["-c", "sleep 30 & child=$!; echo $child"]);
+        let mut bounds = short_gate_process_bounds();
+        bounds.execution_inactivity = Duration::from_millis(500);
+        bounds.execution_overall = Duration::from_millis(500);
+        let execution = execute_gate_process_with_test_bounds(&stimulus, bounds);
+        assert_eq!(
+            execution.diagnostic.as_deref(),
+            Some("gate execution output drain inactive for 30 seconds")
+        );
+        let observation = execution.observation.expect("drain execution observation");
+        assert_eq!(
+            observation.status,
+            pce_core::GateTerminalStatus::Exited { code: 0 }
+        );
+        let pid = String::from_utf8(observation.stdout)
+            .expect("child pid should be UTF-8")
+            .trim()
+            .to_owned();
+        assert!(process_is_gone(&pid), "drain descendant {pid} survived");
+    }
+
+    #[test]
+    fn recorder_kills_and_records_an_inactive_process_group_then_cleans_up() {
+        let directory = tempdir().expect("temporary recorder directory should create");
+        let verdict = directory.path().join("verdict.json");
+        let evidence = pce_core::AbsoluteGateExecutionEvidencePath::from_verdict_path(&verdict);
+        let socket = pce_core::AbsoluteGateExecutionSocketPath::construct(
+            directory.path(),
+            std::process::id(),
+            2,
+        )
+        .expect("socket path should construct");
+        let client = pce_core::AbsoluteGateExecClientPath::parse(
+            std::env::current_exe().expect("current executable should resolve"),
+        )
+        .expect("client path should parse");
+        let config = pce_core::GateExecutionRecorderConfig::new(client, evidence, socket.clone());
+        let runtime =
+            super::GateRecorderRuntime::start_with_bounds(&config, short_gate_process_bounds())
+                .expect("bounded recorder should start");
+        let request = serde_json::to_vec(&json!({
+            "working_directory": directory.path(),
+            "setup": [],
+            "command": {
+                "program": "/bin/sh",
+                "arguments": ["-c", "/bin/sleep 30 & child=$!; echo $child; wait"],
+                "input": [],
+                "environment": {}
+            }
+        }))
+        .expect("bounded recorder request should serialize");
+        let mut stream = std::os::unix::net::UnixStream::connect(socket.as_path())
+            .expect("bounded recorder client should connect");
+        std::io::Write::write_all(&mut stream, &request)
+            .expect("bounded recorder request should write");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("bounded recorder request should finish");
+        let mut response = Vec::new();
+        std::io::Read::read_to_end(&mut stream, &mut response)
+            .expect("bounded recorder response should read");
+        let response: serde_json::Value =
+            serde_json::from_slice(&response).expect("bounded recorder response should parse");
+        assert_eq!(
+            response["observed_result"]["command"]["status"],
+            json!({"kind":"signaled","signal":9})
+        );
+        let pid = response["observed_result"]["command"]["stdout"]
+            .as_array()
+            .expect("recorded stdout should be bytes")
+            .iter()
+            .map(|byte| byte.as_u64().expect("stdout byte") as u8)
+            .collect::<Vec<_>>();
+        let pid = String::from_utf8(pid)
+            .expect("recorded child pid should be UTF-8")
+            .trim()
+            .to_owned();
+        let stopped = runtime.stop();
+        assert!(stopped.error.is_none());
+        assert_eq!(stopped.records.len(), 1);
+        assert!(!socket.as_path().exists());
+        assert!(process_is_gone(&pid), "recorded descendant {pid} survived");
+    }
+
+    #[test]
+    fn production_process_entry_caps_continuously_active_output_drain() {
+        let stimulus = gate_process_fixture(
+            "/bin/sh",
+            &[
+                "-c",
+                "(i=0; while [ $i -lt 50 ]; do echo x; /bin/sleep 0.01; i=$((i+1)); done) &",
+            ],
+        );
+        let mut bounds = short_gate_process_bounds();
+        bounds.execution_inactivity = Duration::from_millis(500);
+        bounds.execution_overall = Duration::from_millis(500);
+        bounds.output_drain_inactivity = Duration::from_millis(100);
+        let execution = execute_gate_process_with_test_bounds(&stimulus, bounds);
+        assert_eq!(
+            execution.diagnostic.as_deref(),
+            Some("gate execution output drain exceeded 2 minute overall cap")
+        );
+        assert!(
+            execution
+                .observation
+                .is_some_and(|observation| !observation.stdout.is_empty())
         );
     }
 
@@ -8709,5 +10507,211 @@ mod tests {
         let stopped = runtime.stop();
         assert!(stopped.error.is_none());
         assert!(!socket.as_path().exists());
+    }
+
+    #[test]
+    fn paired_dispatch_parser_is_strict_and_requires_exact_environment() {
+        let directory = tempdir().expect("temporary directory should create");
+        let root = directory.path().display().to_string();
+        let valid = [
+            "gate",
+            "paired-execution-proof",
+            "--repo-root",
+            "/repository",
+            "--artifacts",
+            &root,
+            "--env",
+            "PATH=/bin",
+            "--env",
+            "HOME=/home/operator",
+            "--env",
+            "USER=operator",
+        ];
+        assert!(super::parse_command(valid.into_iter().map(str::to_owned)).is_ok());
+        for invalid in [
+            ["PATH=/bin", "HOME=/home/operator", "HOME=duplicate"],
+            ["PATH=/bin", "HOME=/home/operator", "SHELL=/bin/sh"],
+        ] {
+            let args = [
+                "gate",
+                "paired-execution-proof",
+                "--repo-root",
+                "/repository",
+                "--artifacts",
+                &root,
+                "--env",
+                invalid[0],
+                "--env",
+                invalid[1],
+                "--env",
+                invalid[2],
+            ];
+            let error = super::parse_command(args.into_iter().map(str::to_owned))
+                .expect_err("invalid paired environment must fail");
+            assert_eq!(
+                error.to_string(),
+                "paired execution proof requires exactly PATH, HOME, and USER"
+            );
+        }
+    }
+
+    #[test]
+    fn paired_constants_and_direct_replay_argv_are_exact() {
+        assert_eq!(
+            super::PAIRED_BROKEN_REF,
+            "a8a87cb44f84988fa61904bfba48614401482851"
+        );
+        assert_eq!(
+            super::PAIRED_BROKEN_OID,
+            "a8a87cb44f84988fa61904bfba48614401482851"
+        );
+        assert_eq!(
+            super::PAIRED_REPAIRED_REF,
+            "cbe499ef94864d223518ad328db2a396551fa85b"
+        );
+        assert_eq!(
+            super::PAIRED_REPAIRED_OID,
+            "cbe499ef94864d223518ad328db2a396551fa85b"
+        );
+        assert!(
+            super::PAIRED_CRITIC_TASK
+                .contains("arguments are [\"gate\",\"execution-subject-probe\"")
+        );
+        let critic_task = super::paired_critic_task();
+        assert!(critic_task.contains(&format!(
+            "<verdict-schema>\n{}</verdict-schema>",
+            super::VERDICT_SCHEMA
+        )));
+        for hidden_or_side_specific in [
+            super::PAIRED_BROKEN_REF,
+            super::PAIRED_REPAIRED_REF,
+            super::PAIRED_REPLAY_EXPECTED,
+            "repair-sensitive",
+            "approval",
+            "broken",
+            "repaired",
+        ] {
+            assert!(!critic_task.contains(hidden_or_side_specific));
+        }
+        let reference =
+            pce_core::GateExecutionRef::parse("execution-000001").expect("reference should parse");
+        let argv = super::paired_replay_arguments(
+            Path::new("/checkout"),
+            Path::new("/artifacts/evidence.json"),
+            &reference,
+        );
+        assert_eq!(argv[0], "gate");
+        assert_eq!(argv[1], "replay");
+        assert!(
+            !argv
+                .iter()
+                .any(|argument| argument == "sh" || argument == "-c")
+        );
+        assert_eq!(argv.last(), Some(&OsString::from("conforming-verdict")));
+    }
+
+    #[test]
+    fn paired_report_key_order_is_stable_and_redacted() {
+        let report = super::PairedProofReport {
+            schema_id: "pce.paired-execution-proof",
+            schema_version: 1,
+            broken_ref: super::PAIRED_BROKEN_OID,
+            repaired_ref: super::PAIRED_REPAIRED_OID,
+            broken_verdict: "BLOCK",
+            broken_blocking_issue_count: 1,
+            broken_witnesses: vec!["execution-000001".to_owned()],
+            repaired_verdict: "APPROVE",
+            repaired_blocking_issue_count: 0,
+            repaired_probes: vec!["execution-000001".to_owned()],
+            decision: "APPROVE",
+        };
+        let bytes = super::serialize_paired_proof_report(&report)
+            .expect("report serialization should succeed");
+        let text = String::from_utf8(bytes).expect("report should be UTF-8");
+        assert!(text.starts_with(
+            "{\"schema_id\":\"pce.paired-execution-proof\",\"schema_version\":1,\"broken_ref\":"
+        ));
+        assert!(text.ends_with("\"decision\":\"APPROVE\"}\n"));
+        for secret in [
+            "HOME=",
+            "USER=",
+            "PATH=",
+            "/private/tmp",
+            "conforming-verdict",
+        ] {
+            assert!(!text.contains(secret));
+        }
+    }
+
+    #[test]
+    fn paired_probe_cleanup_rejects_nonordinary_targets() {
+        let directory = tempdir().expect("temporary directory should create");
+        let child = directory.path().join("child");
+        std::fs::create_dir(&child).expect("child directory should create");
+        let error = super::remove_probe_file(&child, directory.path())
+            .expect_err("directory target must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "execution subject probe output must be a repository-relative ordinary path"
+        );
+    }
+
+    #[test]
+    fn paired_critics_receive_sequential_single_commit_repositories_and_probe_only_programs() {
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut campaign = super::PairedWorktrees::create(source_root)
+            .expect("paired repository should materialize");
+        assert!(!campaign.parent.exists());
+        assert!(!campaign.repository_root.exists());
+        let broken = campaign
+            .add("broken/artifact", super::PAIRED_BROKEN_OID)
+            .expect("broken side should materialize");
+        super::materialize_paired_probe(&broken).expect("probe should materialize");
+        let rev_list = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&broken)
+            .args(["rev-list", "--all", "--count"])
+            .output()
+            .expect("single-side rev-list should run");
+        assert!(rev_list.status.success());
+        assert_eq!(rev_list.stdout, b"1\n");
+        let parent = broken.parent().expect("checkout has an isolated parent");
+        assert_eq!(
+            std::fs::read_dir(parent)
+                .expect("isolated parent should be readable")
+                .count(),
+            1
+        );
+        let probe = std::fs::read(broken.join(super::PAIRED_PROGRAM_RELATIVE))
+            .expect("probe bytes should be readable");
+        let probe = String::from_utf8(probe).expect("probe should be UTF-8");
+        for campaign_secret in [
+            super::PAIRED_BROKEN_OID,
+            super::PAIRED_REPAIRED_OID,
+            "repair-sensitive",
+            "conforming-verdict",
+            "paired-execution-proof",
+            super::PAIRED_CRITIC_TASK,
+        ] {
+            assert!(!probe.contains(campaign_secret));
+        }
+        campaign
+            .remove(&broken)
+            .expect("broken checkout should be removed before repaired dispatch");
+        assert!(!broken.exists());
+        let repaired = campaign
+            .add("repaired/artifact", super::PAIRED_REPAIRED_OID)
+            .expect("repaired side should materialize");
+        assert!(!broken.exists());
+        assert!(!campaign.parent.exists());
+        assert!(!campaign.repository_root.exists());
+        campaign
+            .remove(&repaired)
+            .expect("repaired checkout should be removed after dispatch");
+        campaign
+            .materialize_replay_repository()
+            .expect("two-ref replay repository should materialize after both critics exit");
+        assert!(campaign.repository_root.exists());
+        campaign.cleanup().expect("campaign should clean up");
     }
 }
