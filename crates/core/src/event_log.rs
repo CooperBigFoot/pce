@@ -1,4 +1,4 @@
-//! decode : EventLogLine → KnownEvent ∪ UnknownEvent; append : AppendInput → AppendIntent; select : EventRecord × EventRecordFilter → Bool; persist_contract : RepositoryName × RepositoryRoot × TrackedRepositoryContract × GateMeasurements × Evidence → RepositoryContractPayload.
+//! decode : EventLogLine → KnownEvent ∪ UnknownEvent; append : AppendInput → AppendIntent; criterion_execution : AcceptanceCriterion × FinishedResult × Outcome × Evidence → CriterionExecutionPayload; criterion_added : AcceptanceCriterion × ChangeOfCourse → KnownEvent; select : EventRecord × EventRecordFilter → Bool; persist_contract : RepositoryName × RepositoryRoot × TrackedRepositoryContract × GateMeasurements × Evidence → RepositoryContractPayload.
 //! This module is pure domain logic and performs no I/O.
 
 use std::collections::BTreeMap;
@@ -11,6 +11,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tracing::instrument;
 
+use crate::AcceptanceCriterion;
 use crate::contract_measurement::GateMeasurements;
 pub use crate::contract_measurement::ObservedExitStatus;
 use crate::run_state::VersionPolicy;
@@ -243,6 +244,45 @@ impl Evidence {
     }
 }
 
+/// A non-empty plain-language explanation for an accepted change of course.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ChangeOfCourse(String);
+
+impl ChangeOfCourse {
+    /// Parse and trim a change-of-course explanation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventLogError::BlankChangeOfCourse`] when `raw` is blank.
+    pub fn parse(raw: &str) -> Result<Self, EventLogError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(EventLogError::BlankChangeOfCourse);
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    /// Return the trimmed explanation.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ChangeOfCourse {
+    type Error = EventLogError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<ChangeOfCourse> for String {
+    fn from(value: ChangeOfCourse) -> Self {
+        value.0
+    }
+}
+
 impl TryFrom<String> for Evidence {
     type Error = EventLogError;
 
@@ -287,6 +327,69 @@ string_domain_type!(RepositoryRoot, "The measured repository root.");
 string_domain_type!(
     ArtifactPath,
     "The approved planning artifact's identity path."
+);
+
+macro_rules! non_blank_event_string {
+    ($name:ident, $error:ident, $description:literal) => {
+        #[doc = $description]
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Parse and trim a required domain string.
+            ///
+            /// # Errors
+            ///
+            #[doc = concat!("Returns [`EventLogError::", stringify!($error), "`] when `value` is blank.")]
+            pub fn parse(value: &str) -> Result<Self, EventLogError> {
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err(EventLogError::$error);
+                }
+                Ok(Self(value.to_owned()))
+            }
+
+            /// Return the trimmed value.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::parse(&value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+non_blank_event_string!(
+    FinishedResult,
+    BlankFinishedResult,
+    "The exact supplied finished result exercised by a criterion."
+);
+non_blank_event_string!(
+    ObservedCriterionResult,
+    BlankObservedCriterionResult,
+    "The exact result observed while executing a criterion."
+);
+non_blank_event_string!(
+    UnpaidCriterionReason,
+    BlankUnpaidCriterionReason,
+    "The measured reason a criterion cannot execute inside the run."
 );
 
 /// A lowercase hexadecimal SHA-256 digest.
@@ -355,6 +458,10 @@ pub enum WriteKind {
     RepositoryContract,
     /// The identity of an approved planning artifact.
     PlanningArtifactApproved,
+    /// One criterion's observed outcome against a supplied finished result.
+    CriterionExecution,
+    /// A blocking criterion accepted as a visible change of course.
+    CriterionAdded,
 }
 
 impl WriteKind {
@@ -374,6 +481,8 @@ impl WriteKind {
             "key-finding" => Ok(Self::KeyFinding),
             "repository-contract" => Ok(Self::RepositoryContract),
             "planning-artifact-approved" => Ok(Self::PlanningArtifactApproved),
+            "criterion-execution" => Ok(Self::CriterionExecution),
+            "criterion-added" => Ok(Self::CriterionAdded),
             _ => Err(EventLogError::UnknownWriteKind {
                 kind: raw.to_owned(),
             }),
@@ -391,6 +500,8 @@ impl WriteKind {
             Self::KeyFinding => "key-finding",
             Self::RepositoryContract => "repository-contract",
             Self::PlanningArtifactApproved => "planning-artifact-approved",
+            Self::CriterionExecution => "criterion-execution",
+            Self::CriterionAdded => "criterion-added",
         }
     }
 
@@ -400,11 +511,13 @@ impl WriteKind {
             Self::Dispatch
             | Self::KeyFinding
             | Self::RepositoryContract
-            | Self::PlanningArtifactApproved => EvidencePolicy::Required,
+            | Self::PlanningArtifactApproved
+            | Self::CriterionExecution => EvidencePolicy::Required,
             Self::DispatchCompletion
             | Self::Delta
             | Self::EscalationOpen
-            | Self::EscalationClose => EvidencePolicy::Absent,
+            | Self::EscalationClose
+            | Self::CriterionAdded => EvidencePolicy::Absent,
         }
     }
 }
@@ -860,6 +973,51 @@ pub struct PlanningArtifactApprovedPayload {
     pub evidence: Evidence,
 }
 
+/// The closed outcome partition for one criterion execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum CriterionExecutionOutcome {
+    /// The observed result satisfied the expected observation.
+    Passed {
+        /// The exact result observed from the finished result.
+        observed_result: ObservedCriterionResult,
+    },
+    /// The observed result did not satisfy the expected observation.
+    Failed {
+        /// The exact result observed from the finished result.
+        observed_result: ObservedCriterionResult,
+    },
+    /// The criterion cannot execute within this run.
+    Unpaid {
+        /// The measured boundary preventing an in-run observation.
+        reason: UnpaidCriterionReason,
+    },
+}
+
+/// The complete payload for `criterion-execution`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionExecutionPayload {
+    /// The exact criterion input and expected observation.
+    pub criterion: AcceptanceCriterion,
+    /// The exact supplied finished result.
+    pub finished_result: FinishedResult,
+    /// The distinct passed, failed, or unpaid outcome.
+    pub outcome: CriterionExecutionOutcome,
+    /// The invocation measuring the result or execution boundary.
+    pub evidence: Evidence,
+}
+
+/// The complete payload for `criterion-added`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionAddedPayload {
+    /// The newly accepted blocking criterion.
+    pub criterion: AcceptanceCriterion,
+    /// Why reality required this change of course.
+    pub change_of_course: ChangeOfCourse,
+}
+
 /// A typed known payload whose variant determines its write kind.
 // Keeping the schema variants direct preserves the settled public construction API.
 #[allow(clippy::large_enum_variant)]
@@ -883,6 +1041,10 @@ pub enum KnownPayload {
     LegacyRepositoryContract(LegacyRepositoryContractPayload),
     /// A `planning-artifact-approved` payload.
     PlanningArtifactApproved(PlanningArtifactApprovedPayload),
+    /// A `criterion-execution` payload.
+    CriterionExecution(CriterionExecutionPayload),
+    /// A `criterion-added` payload.
+    CriterionAdded(CriterionAddedPayload),
 }
 
 impl KnownPayload {
@@ -898,6 +1060,8 @@ impl KnownPayload {
             Self::RepositoryContract(_) => WriteKind::RepositoryContract,
             Self::LegacyRepositoryContract(_) => WriteKind::RepositoryContract,
             Self::PlanningArtifactApproved(_) => WriteKind::PlanningArtifactApproved,
+            Self::CriterionExecution(_) => WriteKind::CriterionExecution,
+            Self::CriterionAdded(_) => WriteKind::CriterionAdded,
         }
     }
 }
@@ -918,6 +1082,8 @@ impl Serialize for KnownPayload {
             Self::RepositoryContract(payload) => payload.serialize(serializer),
             Self::LegacyRepositoryContract(payload) => payload.serialize(serializer),
             Self::PlanningArtifactApproved(payload) => payload.serialize(serializer),
+            Self::CriterionExecution(payload) => payload.serialize(serializer),
+            Self::CriterionAdded(payload) => payload.serialize(serializer),
         }
     }
 }
@@ -1322,6 +1488,12 @@ fn decode_known_payload(
         WriteKind::PlanningArtifactApproved => {
             serde_json::from_value(payload).map(KnownPayload::PlanningArtifactApproved)
         }
+        WriteKind::CriterionExecution => {
+            serde_json::from_value(payload).map(KnownPayload::CriterionExecution)
+        }
+        WriteKind::CriterionAdded => {
+            serde_json::from_value(payload).map(KnownPayload::CriterionAdded)
+        }
     };
     decoded.map_err(|source| EventLogError::InvalidKnownPayload {
         kind,
@@ -1332,7 +1504,7 @@ fn decode_known_payload(
 /// Errors produced by event-log domain parsing and validation.
 #[derive(Debug, Error)]
 pub enum EventLogError {
-    /// Returned when a write-kind spelling is not one of the eight registered values.
+    /// Returned when a write-kind spelling is not one of the nine registered values.
     #[error("unregistered event kind cannot be written: {kind:?}")]
     UnknownWriteKind {
         /// The rejected kind spelling.
@@ -1359,6 +1531,22 @@ pub enum EventLogError {
         /// The rejected zero-byte-length invocation.
         value: String,
     },
+
+    /// Returned when a finished result is empty after trimming.
+    #[error("finished result cannot be blank")]
+    BlankFinishedResult,
+
+    /// Returned when an observed criterion result is empty after trimming.
+    #[error("observed criterion result cannot be blank")]
+    BlankObservedCriterionResult,
+
+    /// Returned when an unpaid criterion reason is empty after trimming.
+    #[error("unpaid criterion reason cannot be blank")]
+    BlankUnpaidCriterionReason,
+
+    /// Returned when a criterion addition's change-of-course explanation is blank.
+    #[error("criterion addition change of course cannot be blank")]
+    BlankChangeOfCourse,
 
     /// Returned when an event timestamp is not valid RFC 3339.
     #[error("invalid RFC 3339 event timestamp: {input:?}")]
@@ -1467,11 +1655,12 @@ mod tests {
     use crate::contract_measurement::{ObservedExitStatus, measure_contract_snapshot};
     use crate::event_log::{
         AppendError, ArtifactOutcome, CacheCreationInputTokens, CacheReadInputTokens,
-        DispatchTokenUsage, EventBodyRef, EventKindName, EventLogError, EventLogTail,
-        EventLogTailError, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
-        Evidence, EvidencePresence, InputTokens, KnownPayload, NodeId, OutputTokens, ReadKind,
-        ReadPayload, RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence,
-        Sha256Digest, UnparsedPayload, WriteKind, append_event, event_record_matches,
+        ChangeOfCourse, DispatchTokenUsage, EventBodyRef, EventKindName, EventLogError,
+        EventLogTail, EventLogTailError, EventLogTailLine, EventRecord, EventRecordFilter,
+        EventTimestamp, Evidence, EvidencePresence, FinishedResult, InputTokens, KnownPayload,
+        NodeId, ObservedCriterionResult, OutputTokens, ReadKind, ReadPayload,
+        RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence, Sha256Digest,
+        UnpaidCriterionReason, UnparsedPayload, WriteKind, append_event, event_record_matches,
         parse_event_line, serialize_event_line, successor_sequence, validate_evidence_policy,
     };
     use crate::run_state::VersionPolicy;
@@ -1522,7 +1711,7 @@ mod tests {
         ));
     }
 
-    const KNOWN_LINES: [&str; 7] = [
+    const KNOWN_LINES: [&str; 9] = [
         r#"{"sequence":1,"timestamp":"2026-07-27T12:34:56.000Z","kind":"dispatch","node":"m1-s1","payload":{"role":"step-executor","ref":"ca9788ded3daec9b9e9fd7679caa24e7c64a8193","evidence":"git rev-parse HEAD"}}"#,
         r#"{"sequence":2,"timestamp":"2026-07-27T12:34:57.000Z","kind":"delta","node":"m1-s1","payload":{"message":"Require exact UTC timestamp spelling in the event envelope."}}"#,
         r#"{"sequence":3,"timestamp":"2026-07-27T12:34:58.000Z","kind":"escalation-open","node":"m1-s1","payload":{"key":"timestamp-precision","question":"Which RFC 3339 sub-second precision is canonical?"}}"#,
@@ -1530,9 +1719,11 @@ mod tests {
         r##"{"sequence":5,"timestamp":"2026-07-27T12:35:00.000Z","kind":"key-finding","node":"m1-s1","payload":{"finding":"The repository has exactly five tests at the ground-truth ref.","evidence":"git grep -n '#[test]' ca9788ded3daec9b9e9fd7679caa24e7c64a8193 -- crates/core/src/vision.rs"}}"##,
         r#"{"sequence":6,"timestamp":"2026-07-27T12:35:01.000Z","kind":"repository-contract","node":"m1-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stack":"Rust 2024-edition Cargo workspace (rustc/cargo 1.93.1)","format":"cargo fmt --all --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --workspace","preflight":"cargo check --workspace --all-targets","gates_rule":"From the repo root, all four gates must exit zero before committing.","install":"None required for gates.","evidence":"rustc --version\ncargo --version\ngit rev-parse --show-toplevel"}}"#,
         r#"{"sequence":7,"timestamp":"2026-07-27T12:35:02.000Z","kind":"planning-artifact-approved","node":"m1-s1","payload":{"path":"planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","evidence":"shasum -a 256 planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json"}}"#,
+        r#"{"sequence":8,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}}"#,
+        r#"{"sequence":9,"timestamp":"2026-07-27T12:35:04.000Z","kind":"criterion-added","node":"m2-s1","payload":{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}}"#,
     ];
-    const UNKNOWN_LINE: &str = r#"{"sequence":8,"timestamp":"2026-07-27T12:35:03.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
-    const CURRENT_REPOSITORY_CONTRACT_LINE: &str = r#"{"sequence":9,"timestamp":"2026-07-27T12:35:04.000Z","kind":"repository-contract","node":"m2-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stated":{"format":"cargo fmt --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --release","version_policy":"NONE","branch_convention":"pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>","pull_request_convention":"step head targets the matching milestone integration branch"},"observations":{"format":0,"lint":0,"typecheck":0,"test":0,"build":0},"workflow_map":{"ci.yml":"cargo test --workspace","docs.yml":null},"appendable":{"environment_hazards":["stdin is reserved for event payload input"],"gate_orderings":["format before lint before typecheck before test before build"],"lockfile_rules":["Cargo.lock must remain synchronized with Cargo.toml"]},"evidence":"cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release"}}"#;
+    const UNKNOWN_LINE: &str = r#"{"sequence":9,"timestamp":"2026-07-27T12:35:04.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
+    const CURRENT_REPOSITORY_CONTRACT_LINE: &str = r#"{"sequence":10,"timestamp":"2026-07-27T12:35:05.000Z","kind":"repository-contract","node":"m2-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stated":{"format":"cargo fmt --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --release","version_policy":"NONE","branch_convention":"pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>","pull_request_convention":"step head targets the matching milestone integration branch"},"observations":{"format":0,"lint":0,"typecheck":0,"test":0,"build":0},"workflow_map":{"ci.yml":"cargo test --workspace","docs.yml":null},"appendable":{"environment_hazards":["stdin is reserved for event payload input"],"gate_orderings":["format before lint before typecheck before test before build"],"lockfile_rules":["Cargo.lock must remain synchronized with Cargo.toml"]},"evidence":"cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release"}}"#;
     const TRACKED_CONTRACT: &[u8] = br#"{
   "stated": {
     "gates": {
@@ -1991,6 +2182,8 @@ mod tests {
             WriteKind::KeyFinding,
             WriteKind::RepositoryContract,
             WriteKind::PlanningArtifactApproved,
+            WriteKind::CriterionExecution,
+            WriteKind::CriterionAdded,
         ];
 
         for (index, (line, expected_kind)) in
@@ -2013,6 +2206,8 @@ mod tests {
                         6,
                         ReadPayload::Known(KnownPayload::PlanningArtifactApproved(_))
                     )
+                    | (7, ReadPayload::Known(KnownPayload::CriterionExecution(_)))
+                    | (8, ReadPayload::Known(KnownPayload::CriterionAdded(_)))
             );
             assert!(expected_payload);
             assert_eq!(serialize_event_line(&record)?, line);
@@ -2040,6 +2235,8 @@ mod tests {
                         6,
                         EventBodyRef::Known(KnownPayload::PlanningArtifactApproved(_))
                     )
+                    | (7, EventBodyRef::Known(KnownPayload::CriterionExecution(_)))
+                    | (8, EventBodyRef::Known(KnownPayload::CriterionAdded(_)))
             );
             assert!(expected_payload);
         }
@@ -2107,12 +2304,14 @@ mod tests {
             WriteKind::KeyFinding,
             WriteKind::RepositoryContract,
             WriteKind::PlanningArtifactApproved,
+            WriteKind::CriterionExecution,
         ];
         let absent = [
             WriteKind::DispatchCompletion,
             WriteKind::Delta,
             WriteKind::EscalationOpen,
             WriteKind::EscalationClose,
+            WriteKind::CriterionAdded,
         ];
 
         for kind in required {
@@ -2320,12 +2519,97 @@ mod tests {
             WriteKind::DispatchCompletion.as_str(),
             "dispatch-completion"
         );
+        assert!(matches!(
+            WriteKind::parse("criterion-added"),
+            Ok(WriteKind::CriterionAdded)
+        ));
+        assert_eq!(WriteKind::CriterionAdded.as_str(), "criterion-added");
+        for raw in [
+            "criterion-removed",
+            "criterion-updated",
+            "criterion-weakened",
+        ] {
+            assert!(matches!(
+                WriteKind::parse(raw),
+                Err(EventLogError::UnknownWriteKind { kind }) if kind == raw
+            ));
+        }
         for raw in ["future-kind", "dispatch-cost", "Dispatch", "DISPATCH", ""] {
             assert!(matches!(
                 WriteKind::parse(raw),
                 Err(EventLogError::UnknownWriteKind { .. })
             ));
         }
+    }
+
+    #[test]
+    fn criterion_added_payload_is_strict_and_appends_exactly_once() -> Result<(), EventLogError> {
+        const PAYLOAD: &str = r#"{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}"#;
+        assert_eq!(
+            ChangeOfCourse::parse("  Reality exposed an uncovered failure.  ")?.as_str(),
+            "Reality exposed an uncovered failure."
+        );
+        for blank in ["", "   "] {
+            assert!(matches!(
+                ChangeOfCourse::parse(blank),
+                Err(EventLogError::BlankChangeOfCourse)
+            ));
+        }
+
+        let invalid = [
+            r#"{"change_of_course":"change"}"#,
+            r#"{"criterion":{"name":"Name","input":"Run.","observation":"Done."}}"#,
+            r#"{"criterion":{"name":"Name","input":"Run.","observation":"Done."},"change_of_course":"change","extra":true}"#,
+            r#"{"criterion":{"name":"Name","input":"Run.","observation":"Done.","extra":true},"change_of_course":"change"}"#,
+            r#"{"criterion":{"name":" ","input":"Run.","observation":"Done."},"change_of_course":"change"}"#,
+            r#"{"criterion":{"name":"Name","input":" ","observation":"Done."},"change_of_course":"change"}"#,
+            r#"{"criterion":{"name":"Name","input":"Run.","observation":" "},"change_of_course":"change"}"#,
+            r#"{"criterion":{"name":"Name","input":"Run.","observation":"Done."},"change_of_course":" "}"#,
+        ];
+        for payload in invalid {
+            let calls = Cell::new(0);
+            let error = append_event(
+                WriteKind::CriterionAdded,
+                UnparsedPayload::new(payload),
+                EventLogTail::Empty,
+                NodeId::parse("m2-s1")?,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_785_155_703),
+                |_| {
+                    calls.set(calls.get() + 1);
+                    Ok::<(), io::Error>(())
+                },
+            )
+            .expect_err("invalid criterion addition");
+            assert!(matches!(
+                error,
+                AppendError::InvalidSubmittedPayload {
+                    source: EventLogError::InvalidKnownPayload {
+                        kind: WriteKind::CriterionAdded,
+                        ..
+                    }
+                }
+            ));
+            assert_eq!(calls.get(), 0);
+        }
+
+        let intent = append_event(
+            WriteKind::CriterionAdded,
+            UnparsedPayload::new(PAYLOAD),
+            EventLogTail::Empty,
+            NodeId::parse("m2-s1")?,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_785_155_703),
+            |_| Ok::<(), io::Error>(()),
+        )
+        .map_err(append_test_error)?;
+        assert_eq!(
+            intent.as_bytes(),
+            concat!(
+                r#"{"sequence":1,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-added","node":"m2-s1","payload":{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}}"#,
+                "\n"
+            )
+            .as_bytes()
+        );
+        Ok(())
     }
 
     #[test]
@@ -2336,7 +2620,7 @@ mod tests {
             assert!(!encoded.contains('\n'));
             serialized.push(encoded);
         }
-        assert_eq!(serialized.join("\n").lines().count(), 7);
+        assert_eq!(serialized.join("\n").lines().count(), 9);
         Ok(())
     }
 
@@ -2502,5 +2786,236 @@ mod tests {
                 outcome
             );
         }
+    }
+
+    #[test]
+    fn criterion_execution_wire_shapes_are_strict_and_exact() -> Result<(), EventLogError> {
+        let lines = [
+            KNOWN_LINES[7],
+            r#"{"sequence":2,"timestamp":"2026-07-27T12:35:04.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"failed","observed_result":"The command exited 7."},"evidence":"git rev-parse HEAD\n./broken-command"}}"#,
+            r#"{"sequence":3,"timestamp":"2026-07-27T12:35:05.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":"The run cannot activate the human-installed hook."},"evidence":"test -L ~/.claude/hooks/pre-tool-use.sh"}}"#,
+        ];
+        for line in lines {
+            let record = parse_event_line(line)?;
+            assert!(matches!(
+                record.payload(),
+                ReadPayload::Known(KnownPayload::CriterionExecution(_))
+            ));
+            assert_eq!(serialize_event_line(&record)?, line);
+        }
+        assert!(matches!(
+            WriteKind::parse("criterion-execution"),
+            Ok(WriteKind::CriterionExecution)
+        ));
+        assert_eq!(
+            WriteKind::CriterionExecution.as_str(),
+            "criterion-execution"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn criterion_execution_domain_strings_trim_and_reject_blanks() -> Result<(), EventLogError> {
+        assert_eq!(
+            FinishedResult::parse("  main@0123456789abcdef  ")?.as_str(),
+            "main@0123456789abcdef"
+        );
+        assert_eq!(
+            ObservedCriterionResult::parse("  The command exited 0.  ")?.as_str(),
+            "The command exited 0."
+        );
+        assert_eq!(
+            UnpaidCriterionReason::parse("  The run cannot activate the human-installed hook.  ")?
+                .as_str(),
+            "The run cannot activate the human-installed hook."
+        );
+        for value in ["", "   "] {
+            assert!(matches!(
+                FinishedResult::parse(value),
+                Err(EventLogError::BlankFinishedResult)
+            ));
+            assert!(matches!(
+                ObservedCriterionResult::parse(value),
+                Err(EventLogError::BlankObservedCriterionResult)
+            ));
+            assert!(matches!(
+                UnpaidCriterionReason::parse(value),
+                Err(EventLogError::BlankUnpaidCriterionReason)
+            ));
+        }
+        Ok(())
+    }
+
+    fn assert_invalid_criterion_execution_payload(payload: &str) -> Result<(), EventLogError> {
+        let calls = Cell::new(0);
+        let result = append_event(
+            WriteKind::CriterionExecution,
+            UnparsedPayload::new(payload),
+            EventLogTail::Empty,
+            NodeId::parse("m3-s2")?,
+            append_time(),
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok::<(), io::Error>(())
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppendError::InvalidSubmittedPayload {
+                source: EventLogError::InvalidKnownPayload {
+                    kind: WriteKind::CriterionExecution,
+                    ..
+                }
+            })
+        ));
+        assert_eq!(calls.get(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn criterion_execution_rejects_every_malformed_payload_before_append()
+    -> Result<(), EventLogError> {
+        assert_invalid_criterion_execution_payload(
+            r#"{"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+
+        let calls = Cell::new(0);
+        let missing_evidence = append_event(
+            WriteKind::CriterionExecution,
+            UnparsedPayload::new(
+                r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."}}"#,
+            ),
+            EventLogTail::Empty,
+            NodeId::parse("m3-s2")?,
+            append_time(),
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok::<(), io::Error>(())
+            },
+        );
+        assert!(matches!(
+            missing_evidence,
+            Err(AppendError::InvalidSubmittedPayload {
+                source: EventLogError::MissingRequiredEvidence {
+                    kind: WriteKind::CriterionExecution
+                }
+            })
+        ));
+        assert_eq!(calls.get(), 0);
+
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command","extra":true}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"green","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed"},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0.","reason":"not allowed"},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"failed"},"evidence":"git rev-parse HEAD\n./broken-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"failed","observed_result":"The command exited 7.","reason":"not allowed"},"evidence":"git rev-parse HEAD\n./broken-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid"},"evidence":"test -L ~/.claude/hooks/pre-tool-use.sh"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":"The run cannot activate the human-installed hook.","observed_result":"not allowed"},"evidence":"test -L ~/.claude/hooks/pre-tool-use.sh"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0.","extra":true},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0.","extra":true},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"   ","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"   ","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":""},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"   "},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"   ","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":""},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"   "},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":""},"evidence":"test -L ~/.claude/hooks/pre-tool-use.sh"}"#,
+        )?;
+        assert_invalid_criterion_execution_payload(
+            r#"{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":"   "},"evidence":"test -L ~/.claude/hooks/pre-tool-use.sh"}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn appends_exact_criterion_execution_bytes_at_fixed_timestamp() -> Result<(), EventLogError> {
+        let payload = r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#;
+        let expected = concat!(
+            r#"{"sequence":1,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}}"#,
+            "\n"
+        );
+        let calls = Cell::new(0);
+        let recorded = RefCell::new(Vec::new());
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(APPEND_TIME_SECONDS + 7);
+
+        let intent = append_event(
+            WriteKind::CriterionExecution,
+            UnparsedPayload::new(payload),
+            EventLogTail::Empty,
+            NodeId::parse("m3-s2")?,
+            timestamp,
+            |bytes| {
+                calls.set(calls.get() + 1);
+                recorded.borrow_mut().extend_from_slice(bytes);
+                Ok::<(), io::Error>(())
+            },
+        )
+        .map_err(append_test_error)?;
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(recorded.borrow().as_slice(), expected.as_bytes());
+        assert_eq!(intent.as_bytes(), expected.as_bytes());
+        assert_eq!(
+            intent
+                .as_bytes()
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count(),
+            1
+        );
+        Ok(())
     }
 }

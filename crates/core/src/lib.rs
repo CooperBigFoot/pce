@@ -2,6 +2,7 @@
 
 pub mod acceptance_criteria;
 pub mod artifact_validation;
+pub mod completion_gate;
 pub mod contract_measurement;
 pub mod dispatch;
 pub mod dispatch_meter;
@@ -20,6 +21,10 @@ pub use acceptance_criteria::{
 };
 pub use artifact_validation::{
     ArtifactValidationError, FileObservation, StructuredArtifactObservation, validate_artifact,
+};
+pub use completion_gate::{
+    CompletionCriterionReport, CompletionCriterionStatus, CompletionDecision, CompletionGateResult,
+    evaluate_completion,
 };
 pub use contract_measurement::{
     ContractMeasurementError, GateMeasurement, GateMeasurements, MeasuredContractSnapshot,
@@ -53,18 +58,19 @@ pub use dispatch_meter::{
 };
 pub use event_log::{
     AppendError, AppendIntent, AppendableRepositoryContract, ArtifactOutcome, ArtifactPath,
-    CacheCreationInputTokens, CacheReadInputTokens, CachedInputTokens, DeltaPayload,
+    CacheCreationInputTokens, CacheReadInputTokens, CachedInputTokens, ChangeOfCourse,
+    CriterionAddedPayload, CriterionExecutionOutcome, CriterionExecutionPayload, DeltaPayload,
     DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef,
     DispatchRole, DispatchTokenUsage, EscalationClosePayload, EscalationKey, EscalationOpenPayload,
     EventBodyRef, EventKindName, EventLogError, EventLogTail, EventLogTailError, EventLogTailLine,
     EventRecord, EventRecordFilter, EventTimestamp, Evidence, EvidencePolicy, EvidencePresence,
-    ExitCode, GateObservations, InputTokens, KeyFindingPayload, KnownPayload,
-    LegacyRepositoryContractPayload, NodeId, OutputTokens, PlanningArtifactApprovedPayload,
-    ReadKind, ReadPayload, ReasoningOutputTokens, RepositoryContractPayload, RepositoryName,
-    RepositoryRoot, Sequence, Sha256Digest, SignalNumber, StatedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, WorkflowMap, WriteKind, append_event,
-    event_record_matches, parse_event_line, serialize_event_line, successor_sequence,
-    validate_evidence_policy,
+    ExitCode, FinishedResult, GateObservations, InputTokens, KeyFindingPayload, KnownPayload,
+    LegacyRepositoryContractPayload, NodeId, ObservedCriterionResult, OutputTokens,
+    PlanningArtifactApprovedPayload, ReadKind, ReadPayload, ReasoningOutputTokens,
+    RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence, Sha256Digest,
+    SignalNumber, StatedRepositoryContract, UnpaidCriterionReason, UnparsedPayload,
+    UsageAbsenceReason, WorkflowMap, WriteKind, append_event, event_record_matches,
+    parse_event_line, serialize_event_line, successor_sequence, validate_evidence_policy,
 };
 pub use gate_execution::{
     AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
@@ -81,8 +87,9 @@ pub use gate_replay::{
     parse_replay_output_path, parse_replay_schema_path, rebase_gate_stimulus,
 };
 pub use run_state::{
-    ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BranchSnapshot, BranchState,
-    CanonicalNode, CurrentArtifactObservation, CurrentArtifactState, CyclePosition,
+    ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BlockingCriterion,
+    BlockingCriterionOrigin, BranchSnapshot, BranchState, CanonicalNode,
+    CriterionExecutionObservation, CurrentArtifactObservation, CurrentArtifactState, CyclePosition,
     CyclePositionSnapshot, DerivedRunState, DispatchCandidate, DispatchLifecycleObservation,
     DispatchObservation, DispatchRoleClass, DispatchSnapshot, DispatchabilityResult,
     ExactMatchCardinality, ExactPullRequestIdentity, ExactPullRequestState,

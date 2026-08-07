@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::OpenOptionsExt;
@@ -18,20 +18,21 @@ use pce_core::GateCommand;
 use pce_core::tracked_contract::parse_gate_command;
 use pce_core::{
     AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
-    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ActReversibility,
-    AppendError, AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome,
-    ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode, CheckoutFailure,
-    CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage, CreationDate,
-    CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchDuration,
-    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef,
-    DispatchRole, DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult,
-    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
-    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable,
-    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, GateExecutionEvidence,
-    GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection,
-    GateExecutionResponse, GateObservedResult, GateProcessObservation, GateProcessStimulus,
-    GateStimulus, GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
+    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AcceptanceCriteria,
+    ActReversibility, AppendError, AppendableCategory, AppendableFinding, ArgumentVector,
+    ArtifactOutcome, ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode,
+    CheckoutFailure, CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage,
+    CompletionCriterionStatus, CompletionDecision, CreationDate, CurrentArtifactObservation,
+    CurrentArtifactState, DispatchCandidate, DispatchDuration, DispatchEnvelope,
+    DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole,
+    DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef,
+    EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
+    Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode,
+    ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
+    GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef,
+    GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
+    GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
+    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, ObservedExitStatus,
     ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PairedCampaign,
@@ -48,14 +49,14 @@ use pce_core::{
     classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
     compose_planning_role_frame, compute_dispatchability, create_vision, derive_merge_status,
     derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
-    dispatch_invocation, dispatch_payload, event_record_matches, fold_paired_execution_proof,
-    fold_replay_runs, measure_contract_snapshot, meter_dispatches, normalize_replay_observation,
-    paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result, parse_event_line,
-    parse_gate_execution_evidence, parse_gate_stimulus, parse_paired_falsification_verdict,
-    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
-    rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
-    seatbelt_capability_probe, serialize_tracked_repository_contract, validate_artifact,
-    validate_verdict_references, validate_workflow_coverage,
+    dispatch_invocation, dispatch_payload, evaluate_completion, event_record_matches,
+    fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot, meter_dispatches,
+    normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
+    parse_claude_result, parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
+    parse_paired_falsification_verdict, parse_replay_output_path, parse_replay_schema_path,
+    parse_tracked_repository_contract, rebase_gate_stimulus, render_dispatch_projection,
+    render_human_snapshot, seatbelt_capability_probe, serialize_tracked_repository_contract,
+    validate_artifact, validate_verdict_references, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -68,6 +69,7 @@ const USAGE: &str = concat!(
     "       pce log meter\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>]\n",
+    "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>\n",
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
@@ -200,6 +202,12 @@ enum Command {
         recovery_log_path: RecoveryLogPath,
         vision_dir: PathBuf,
         graph_path: Option<ArtifactPath>,
+    },
+    CompletionCheck {
+        log_path: PathBuf,
+        recovery_log_path: RecoveryLogPath,
+        vision_dir: PathBuf,
+        finished_result: FinishedResult,
     },
     ContractCheck {
         contract_path: PathBuf,
@@ -458,6 +466,12 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             &vision_dir,
             graph_path.as_ref(),
         ),
+        Command::CompletionCheck {
+            log_path,
+            recovery_log_path,
+            vision_dir,
+            finished_result,
+        } => run_completion_check(&log_path, &recovery_log_path, &vision_dir, &finished_result),
         Command::ContractCheck {
             contract_path,
             repository_root,
@@ -513,6 +527,7 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "log" => parse_log_command(action, rest),
         [verb, action, rest @ ..] if verb == "status" => parse_status_command(action, rest),
         [verb, rest @ ..] if verb == "ready" => parse_ready_command(rest),
+        [verb, action, rest @ ..] if verb == "completion" => parse_completion_command(action, rest),
         [verb, action, rest @ ..] if verb == "contract" => parse_contract_command(action, rest),
         [verb, target, rest @ ..] if verb == "dispatch" => match target.as_str() {
             "codex" => parse_codex_dispatch(target, rest),
@@ -2323,6 +2338,38 @@ fn parse_ready_command(args: &[String]) -> Result<Command> {
     })
 }
 
+fn parse_completion_command(action: &str, rest: &[String]) -> Result<Command> {
+    let [
+        file_flag,
+        raw_path,
+        vision_flag,
+        raw_vision_dir,
+        finished_flag,
+        raw_finished_result,
+    ] = rest
+    else {
+        bail!(USAGE);
+    };
+    if action != "check"
+        || file_flag != "--file"
+        || vision_flag != "--vision-dir"
+        || finished_flag != "--finished-result"
+        || !is_value(raw_path)
+        || !is_value(raw_vision_dir)
+        || !is_value(raw_finished_result)
+    {
+        bail!(USAGE);
+    }
+    let finished_result =
+        FinishedResult::parse(raw_finished_result).context("failed to parse finished result")?;
+    Ok(Command::CompletionCheck {
+        log_path: PathBuf::from(raw_path),
+        recovery_log_path: RecoveryLogPath::new(raw_path),
+        vision_dir: PathBuf::from(raw_vision_dir),
+        finished_result,
+    })
+}
+
 fn is_value(raw: &str) -> bool {
     !raw.starts_with("--")
 }
@@ -2414,6 +2461,7 @@ fn run_status(
     let contracts = repository_contracts(&records)?;
     let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
     let vision = vision_slug(vision_dir)?;
+    let ratified_criteria = read_ratified_acceptance_criteria(vision_dir)?;
     let (artifacts, _) = current_artifacts(&records, Path::new(contracts[primary_index].root()))?;
     let canonical_nodes = canonical_nodes(&records, &vision)?;
     let selected_index = canonical_nodes
@@ -2443,6 +2491,7 @@ fn run_status(
     let authorities = observe_authorities(&canonical_nodes, primary)?;
     let state = derive_run_state(
         &records,
+        &ratified_criteria,
         &vision,
         recovery_log_path,
         &artifacts,
@@ -2460,6 +2509,70 @@ fn run_status(
             write_human_stdout(&rendered)
         }
     }
+}
+
+fn run_completion_check(
+    log_path: &Path,
+    recovery_log_path: &RecoveryLogPath,
+    vision_dir: &Path,
+    finished_result: &FinishedResult,
+) -> Result<()> {
+    let parsed_lines = read_event_log(log_path)?;
+    let records = parsed_lines
+        .iter()
+        .map(|line| line.record.clone())
+        .collect::<Vec<_>>();
+    let contracts = repository_contracts(&records)?;
+    let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
+    let vision = vision_slug(vision_dir)?;
+    let ratified_criteria = read_ratified_acceptance_criteria(vision_dir)?;
+    let (artifacts, _) = current_artifacts(&records, Path::new(contracts[primary_index].root()))?;
+    let state = derive_run_state(
+        &records,
+        &ratified_criteria,
+        &vision,
+        recovery_log_path,
+        &artifacts,
+        &[],
+        &[],
+    )
+    .context("failed to derive completion state")?;
+    let result = evaluate_completion(
+        finished_result,
+        state.blocking_criteria(),
+        state.criterion_executions(),
+    );
+    let missing = result
+        .criteria
+        .iter()
+        .filter(|report| matches!(report.status, CompletionCriterionStatus::Missing))
+        .count();
+    let failed = result
+        .criteria
+        .iter()
+        .filter(|report| matches!(report.status, CompletionCriterionStatus::Failed { .. }))
+        .count();
+    let refused = result.decision == CompletionDecision::Refuse;
+
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    serde_json::to_writer(&mut output, &result).context("failed to serialize completion result")?;
+    output
+        .write_all(b"\n")
+        .context("failed to write completion result newline")?;
+    output
+        .flush()
+        .context("failed to flush completion result")?;
+
+    if refused {
+        bail!(
+            "completion refused: {} blocking criteria ({} missing, {} failed)",
+            missing + failed,
+            missing,
+            failed
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -2489,6 +2602,7 @@ fn run_ready(
     let contracts = repository_contracts(&records)?;
     let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
     let vision = vision_slug(vision_dir)?;
+    let ratified_criteria = read_ratified_acceptance_criteria(vision_dir)?;
 
     let mut approvals = records
         .iter()
@@ -2505,8 +2619,16 @@ fn run_ready(
 
     let (artifacts, artifact_bytes) =
         current_artifacts(&records, Path::new(contracts[primary_index].root()))?;
-    let state = derive_run_state(&records, &vision, recovery_log_path, &artifacts, &[], &[])
-        .context("failed to derive readiness provenance and dispatch history")?;
+    let state = derive_run_state(
+        &records,
+        &ratified_criteria,
+        &vision,
+        recovery_log_path,
+        &artifacts,
+        &[],
+        &[],
+    )
+    .context("failed to derive readiness provenance and dispatch history")?;
     let (approval_sequence, artifact_path, parsed_graph) = if let Some(requested_path) = graph_path
     {
         let (approval_sequence, artifact_path) = approvals
@@ -4090,6 +4212,22 @@ fn vision_slug(vision_dir: &Path) -> Result<VisionSlug> {
         .to_str()
         .context("vision directory basename must be valid Unicode")?;
     VisionSlug::parse(basename).context("failed to parse vision directory basename")
+}
+
+fn read_ratified_acceptance_criteria(vision_dir: &Path) -> Result<AcceptanceCriteria> {
+    let path = vision_dir.join("vision.md");
+    let document = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "failed to read ratified acceptance criteria from {}",
+            path.display()
+        )
+    })?;
+    parse_acceptance_criteria(&document).with_context(|| {
+        format!(
+            "failed to parse ratified acceptance criteria from {}",
+            path.display()
+        )
+    })
 }
 
 fn current_artifacts(
@@ -7271,17 +7409,18 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use pce_core::{
-        AppendableFinding, ArtifactPath, BranchState, CachedInputTokens, CodexTerminalObservation,
-        CurrentArtifactObservation, CurrentArtifactState, DispatchExitStatus, DispatchTokenUsage,
-        EventKindName, EventRecord, EventRecordFilter, ExitCode, GitAuthorityObservation,
-        GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, InputTokens,
-        KnownPayload, MilestoneMergeSubject, MilestoneNode, NESTED_SEATBELT_SKIP_MARKER, NodeId,
+        AcceptanceCriteria, AppendableFinding, ArtifactPath, BranchState, CachedInputTokens,
+        CodexTerminalObservation, CurrentArtifactObservation, CurrentArtifactState,
+        DispatchExitStatus, DispatchTokenUsage, EventKindName, EventRecord, EventRecordFilter,
+        ExitCode, GitAuthorityObservation, GitHubAuthorityObservation,
+        GitHubPullRequestObservation, GitMergeObservation, InputTokens, KnownPayload,
+        MilestoneMergeSubject, MilestoneNode, NESTED_SEATBELT_SKIP_MARKER, NodeId,
         ObservedExitStatus, OutputTokens, ReadKind, ReadPayload, ReasoningOutputTokens,
         RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation, RepositoryName,
         RepositoryObservation, RepositoryObservationFailure, RunSnapshot, SeatbeltCapability,
         Sha256Digest, StepAuthorityObservation, StepNode, TagName, TagState, VersionPolicy,
         VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, classify_codex_terminal_usage,
-        derive_run_state, parse_event_line, render_human_snapshot,
+        derive_run_state, parse_acceptance_criteria, parse_event_line, render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -7292,10 +7431,92 @@ mod tests {
         StatusFormat, USAGE, already_dispatched, github_pull_request_list_args,
         lexically_normalized_repository_root, measure_tracked_contract_at_root, observe_git,
         observe_terminal_line, parse_command, parse_dispatch_graph, parse_tracked_contract,
-        read_at_default_branch_head, read_event_log, readiness_version_policies,
-        render_seatbelt_profile, repository_contracts, run, run_log_read,
-        seatbelt_execution_capability, select_bootstrap_candidate, validated_snapshot_value,
+        read_at_default_branch_head, read_event_log, read_ratified_acceptance_criteria,
+        readiness_version_policies, render_seatbelt_profile, repository_contracts, run,
+        run_log_read, seatbelt_execution_capability, select_bootstrap_candidate,
+        validated_snapshot_value,
     };
+
+    fn ratified_floor() -> AcceptanceCriteria {
+        parse_acceptance_criteria(
+            r#"# Vision: fixture
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{"criteria":[{"name":"Ratified floor","input":"Run the finished thing.","observation":"It reports success."}]}
+```
+
+## Decomposition hints
+
+None.
+"#,
+        )
+        .expect("ratified floor fixture")
+    }
+
+    #[test]
+    fn composition_root_loads_ratified_acceptance_criteria_with_exact_context() {
+        let directory = tempdir().expect("temporary directory");
+        let vision_dir = directory.path().join("planning/2026-08-03-fixture");
+        fs::create_dir_all(&vision_dir).expect("vision directory");
+        fs::write(
+            vision_dir.join("vision.md"),
+            r#"# Vision: fixture
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{
+  "criteria": [
+    {
+      "name": "Ratified floor",
+      "input": "Run the finished thing.",
+      "observation": "It reports success."
+    }
+  ]
+}
+```
+
+## Decomposition hints
+
+None.
+"#,
+        )
+        .expect("vision fixture");
+        let criteria = read_ratified_acceptance_criteria(&vision_dir).expect("ratified criteria");
+        assert_eq!(criteria.len(), 1);
+        assert_eq!(criteria.as_slice()[0].name().as_str(), "Ratified floor");
+        assert_eq!(
+            criteria.as_slice()[0].input().as_str(),
+            "Run the finished thing."
+        );
+        assert_eq!(
+            criteria.as_slice()[0].observation().as_str(),
+            "It reports success."
+        );
+
+        let missing = directory.path().join("missing");
+        assert_eq!(
+            read_ratified_acceptance_criteria(&missing)
+                .expect_err("missing vision")
+                .to_string(),
+            format!(
+                "failed to read ratified acceptance criteria from {}",
+                missing.join("vision.md").display()
+            )
+        );
+        fs::write(vision_dir.join("vision.md"), "malformed").expect("malformed fixture");
+        assert_eq!(
+            read_ratified_acceptance_criteria(&vision_dir)
+                .expect_err("malformed vision")
+                .to_string(),
+            format!(
+                "failed to parse ratified acceptance criteria from {}",
+                vision_dir.join("vision.md").display()
+            )
+        );
+    }
 
     #[test]
     fn seatbelt_profile_allows_only_sandbox_tree_signals_and_path_filtered_unix_sockets() {
@@ -8397,7 +8618,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_all_eight_registered_payload_schemas() {
+    fn accepts_all_ten_registered_payload_schemas() {
         let directory = tempdir().expect("temporary directory should create");
         let fixtures = [
             (
@@ -8439,6 +8660,16 @@ mod tests {
                 "planning-artifact-approved",
                 r#"{"path":"planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","evidence":"shasum -a 256 planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json"}"#,
                 WriteKind::PlanningArtifactApproved,
+            ),
+            (
+                "criterion-execution",
+                r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+                WriteKind::CriterionExecution,
+            ),
+            (
+                "criterion-added",
+                r#"{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}"#,
+                WriteKind::CriterionAdded,
             ),
         ];
 
@@ -8967,6 +9198,121 @@ mod tests {
     }
 
     #[test]
+    fn completion_parser_accepts_only_the_canonical_ordered_shape() {
+        let canonical = [
+            "completion",
+            "check",
+            "--file",
+            "events.jsonl",
+            "--vision-dir",
+            "planning/2026-08-03-a-gate-runs-what-was-built",
+            "--finished-result",
+            "main@0123456789abcdef",
+        ];
+        let command = parse_command(canonical.into_iter().map(str::to_owned))
+            .expect("completion command should parse");
+        let Command::CompletionCheck {
+            log_path,
+            recovery_log_path,
+            vision_dir,
+            finished_result,
+        } = command
+        else {
+            panic!("completion command expected");
+        };
+        assert_eq!(log_path, PathBuf::from("events.jsonl"));
+        assert_eq!(recovery_log_path.as_str(), "events.jsonl");
+        assert_eq!(
+            vision_dir,
+            PathBuf::from("planning/2026-08-03-a-gate-runs-what-was-built")
+        );
+        assert_eq!(finished_result.as_str(), "main@0123456789abcdef");
+
+        const LINE: &str = "pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>";
+        assert_eq!(USAGE.matches(LINE).count(), 1);
+
+        let invalid = [
+            vec![
+                "completion",
+                "check",
+                "--vision-dir",
+                "vision",
+                "--file",
+                "events.jsonl",
+                "--finished-result",
+                "result",
+            ],
+            vec![
+                "completion",
+                "check",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "vision",
+                "--finished-result",
+            ],
+            vec![
+                "completion",
+                "check",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "vision",
+            ],
+            vec!["completion", "check", "--file", "events.jsonl"],
+            vec!["completion", "check"],
+            vec![
+                "completion",
+                "check",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "vision",
+                "--finished-result",
+                "result",
+                "extra",
+            ],
+            vec!["completion"],
+        ];
+        for args in invalid {
+            let error = parse_command(args.into_iter().map(str::to_owned))
+                .expect_err("invalid completion shape must fail");
+            assert_eq!(error.to_string(), USAGE);
+        }
+        for missing_index in 2..canonical.len() {
+            let args = canonical
+                .iter()
+                .enumerate()
+                .filter_map(|(index, argument)| (index != missing_index).then_some(*argument));
+            let error = parse_command(args.map(str::to_owned))
+                .expect_err("each missing flag or value must fail");
+            assert_eq!(error.to_string(), USAGE);
+        }
+    }
+
+    #[test]
+    fn completion_parser_preserves_blank_finished_result_error_chain() {
+        let error = parse_command(
+            [
+                "completion",
+                "check",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-08-03-a-gate-runs-what-was-built",
+                "--finished-result",
+                "   ",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect_err("blank finished result must fail");
+        let chain = error.chain().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(chain[0], "failed to parse finished result");
+        assert_eq!(chain[1], "finished result cannot be blank");
+    }
+
+    #[test]
     fn vision_check_parser_rejects_arguments_and_unknown_actions_with_usage() {
         for args in [
             vec!["vision", "check", "extra"],
@@ -9343,6 +9689,7 @@ mod tests {
             .collect::<Vec<_>>();
         let state = derive_run_state(
             &records,
+            &ratified_floor(),
             &VisionSlug::parse("2026-07-28-example").expect("vision"),
             &RecoveryLogPath::new("events.jsonl"),
             &[],
@@ -9671,6 +10018,7 @@ mod tests {
             VisionSlug::parse("2026-07-27-event-log").expect("vision fixture should parse");
         let state = derive_run_state(
             &[],
+            &ratified_floor(),
             &vision,
             &RecoveryLogPath::new("events.jsonl"),
             &[],
@@ -9746,6 +10094,7 @@ mod tests {
             VisionSlug::parse("2026-07-27-event-log").expect("vision fixture should parse");
         let state = derive_run_state(
             &records,
+            &ratified_floor(),
             &vision,
             &RecoveryLogPath::new("events.jsonl"),
             &artifacts,

@@ -4,12 +4,145 @@ use std::ffi::OsString;
 use std::fs;
 
 use pce_core::{
-    ArtifactOutcome, CachedInputTokens, DispatchExitStatus, DispatchTokenUsage, ExitCode,
-    InputTokens, OutputTokens, ReasoningOutputTokens, RecoveryLogPath, RunSnapshot, VisionSlug,
-    derive_run_state, parse_event_line,
+    AcceptanceCriteria, ArtifactOutcome, CachedInputTokens, CriterionExecutionOutcome,
+    DispatchExitStatus, DispatchTokenUsage, ExitCode, InputTokens, OutputTokens,
+    ReasoningOutputTokens, RecoveryLogPath, RunSnapshot, VisionSlug, derive_run_state,
+    parse_acceptance_criteria, parse_event_line,
 };
 use serde_json::{Value, json};
 use support::{CliHarness, Invocation, ScriptedResponse};
+
+fn ratified_floor() -> AcceptanceCriteria {
+    parse_acceptance_criteria(
+        r#"# Vision: fixture
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{"criteria":[{"name":"Ratified floor","input":"Run the finished thing.","observation":"It reports success."}]}
+```
+
+## Decomposition hints
+
+None.
+"#,
+    )
+    .expect("ratified floor fixture")
+}
+
+const VISION_DOCUMENT: &str = r#"# Vision: fixture
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{
+  "criteria": [
+    {
+      "name": "Ratified floor",
+      "input": "Run the finished thing.",
+      "observation": "It reports success."
+    }
+  ]
+}
+```
+
+## Decomposition hints
+
+None.
+"#;
+
+fn write_vision_document(vision_dir: &std::path::Path) {
+    fs::create_dir_all(vision_dir).expect("vision directory");
+    fs::write(vision_dir.join("vision.md"), VISION_DOCUMENT).expect("vision fixture");
+}
+
+#[test]
+fn binary_appends_reads_and_refuses_criterion_mutations() {
+    let harness = CliHarness::new().expect("CLI harness");
+    let log = harness.path().join("criterion-events.jsonl");
+    let payload = br#"{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}"#;
+    let append = harness
+        .run(
+            [
+                "log",
+                "--file",
+                log.to_str().expect("UTF-8 path"),
+                "--kind",
+                "criterion-added",
+                "--node",
+                "m2-s1",
+            ],
+            payload,
+        )
+        .expect("append criterion");
+    assert!(append.status.success());
+    assert_eq!(append.stderr, b"");
+
+    let read = harness
+        .run(
+            [
+                "log",
+                "read",
+                "--file",
+                log.to_str().expect("UTF-8 path"),
+                "--kind",
+                "criterion-added",
+            ],
+            b"",
+        )
+        .expect("read criterion");
+    assert!(read.status.success());
+    assert_eq!(read.stderr, b"");
+    assert!(read.stdout.ends_with(b"\n"));
+    assert_eq!(read.stdout.iter().filter(|byte| **byte == b'\n').count(), 1);
+    let line = std::str::from_utf8(&read.stdout)
+        .expect("UTF-8 output")
+        .trim_end();
+    let record = parse_event_line(line).expect("criterion record");
+    assert_eq!(record.sequence().get(), 1);
+    assert_eq!(record.node().as_str(), "m2-s1");
+    let pce_core::ReadPayload::Known(pce_core::KnownPayload::CriterionAdded(payload)) =
+        record.payload()
+    else {
+        panic!("criterion-added payload expected");
+    };
+    assert_eq!(payload.criterion.name().as_str(), "New blocking criterion");
+    assert_eq!(payload.criterion.input().as_str(), "Run the new probe.");
+    assert_eq!(
+        payload.criterion.observation().as_str(),
+        "The probe exits 0."
+    );
+    assert_eq!(
+        payload.change_of_course.as_str(),
+        "Reality exposed an uncovered failure."
+    );
+
+    let before = fs::metadata(&log).expect("log metadata").len();
+    for kind in [
+        "criterion-removed",
+        "criterion-updated",
+        "criterion-weakened",
+    ] {
+        let refused = harness
+            .run(
+                [
+                    "log",
+                    "--file",
+                    log.to_str().expect("UTF-8 path"),
+                    "--kind",
+                    kind,
+                    "--node",
+                    "m2-s1",
+                ],
+                b"{}",
+            )
+            .expect("refused mutation");
+        assert_eq!(refused.status.code(), Some(1));
+        assert_eq!(refused.stdout, b"");
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("failed to parse event kind"));
+        assert_eq!(fs::metadata(&log).expect("log metadata").len(), before);
+    }
+}
 
 fn current_repository_contract(root: &std::path::Path, evidence: &str) -> Value {
     json!({
@@ -119,6 +252,7 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
         VisionSlug::parse("2026-07-31-the-binary-owns-every-dispatch").expect("parse vision");
     let state = derive_run_state(
         &records,
+        &ratified_floor(),
         &vision,
         &RecoveryLogPath::new(log_path.display().to_string()),
         &[],
@@ -157,6 +291,128 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
     assert_eq!(snapshot["schema_id"], "pce.run-snapshot");
     assert_eq!(snapshot["schema_version"], 1);
     assert!(snapshot.get("dispatch_lifecycles").is_none());
+}
+
+#[test]
+fn binary_records_reads_and_folds_distinct_criterion_outcomes() {
+    let harness = CliHarness::new().expect("create criterion execution harness");
+    let log = harness.path().join("events.jsonl");
+    let payloads = [
+        r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        r#"{"criterion":{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"failed","observed_result":"The command exited 7."},"evidence":"git rev-parse HEAD\n./broken-command"}"#,
+        r#"{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":"The run cannot activate the human-installed hook."},"evidence":"test -L ~/.claude/hooks/pre-tool-use.sh"}"#,
+    ];
+    for payload in payloads {
+        let appended = harness
+            .run(
+                [
+                    OsString::from("log"),
+                    OsString::from("--file"),
+                    log.as_os_str().to_owned(),
+                    OsString::from("--kind"),
+                    OsString::from("criterion-execution"),
+                    OsString::from("--node"),
+                    OsString::from("m3-s2"),
+                ],
+                payload.as_bytes(),
+            )
+            .expect("append criterion execution");
+        assert_eq!(appended.status.code(), Some(0));
+        assert!(appended.stdout.is_empty());
+        assert!(appended.stderr.is_empty());
+    }
+
+    let before_rejection = fs::metadata(&log).expect("log metadata").len();
+    let rejected = harness
+        .run(
+            [
+                OsString::from("log"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--kind"),
+                OsString::from("criterion-execution"),
+                OsString::from("--node"),
+                OsString::from("m3-s2"),
+            ],
+            br#"{"criterion":{"name":"Bad","input":"Run","observation":"Pass"},"finished_result":"main@0123456789abcdef","outcome":{"status":"green","observed_result":"green"},"evidence":"command"}"#,
+        )
+        .expect("reject unknown outcome");
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(rejected.stdout.is_empty());
+    assert!(stderr(&rejected).contains("submitted event payload is invalid"));
+    assert_eq!(
+        fs::metadata(&log).expect("log metadata").len(),
+        before_rejection
+    );
+
+    let read = harness
+        .run(
+            [
+                OsString::from("log"),
+                OsString::from("read"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--kind"),
+                OsString::from("criterion-execution"),
+            ],
+            b"",
+        )
+        .expect("read criterion executions");
+    assert_eq!(read.status.code(), Some(0));
+    assert!(read.stderr.is_empty());
+    let stdout = String::from_utf8(read.stdout).expect("UTF-8 event output");
+    assert!(stdout.ends_with('\n'));
+    let records = stdout
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse criterion record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.sequence().get())
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let vision = VisionSlug::parse("2026-08-03-a-gate-runs-what-was-built").expect("vision");
+    let state = derive_run_state(
+        &records,
+        &ratified_floor(),
+        &vision,
+        &RecoveryLogPath::new(log.display().to_string()),
+        &[],
+        &[],
+        &[],
+    )
+    .expect("fold criterion executions");
+    let executions = state.criterion_executions();
+    assert_eq!(executions.len(), 3);
+    assert_eq!(
+        executions
+            .iter()
+            .map(|entry| entry.criterion().name().as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Runnable criterion",
+            "Failing criterion",
+            "Install-only criterion"
+        ]
+    );
+    assert!(
+        matches!(executions[0].outcome(), CriterionExecutionOutcome::Passed { observed_result } if observed_result.as_str() == "The command exited 0.")
+    );
+    assert!(
+        matches!(executions[1].outcome(), CriterionExecutionOutcome::Failed { observed_result } if observed_result.as_str() == "The command exited 7.")
+    );
+    assert!(
+        matches!(executions[2].outcome(), CriterionExecutionOutcome::Unpaid { reason } if reason.as_str() == "The run cannot activate the human-installed hook.")
+    );
+    assert!(
+        executions
+            .iter()
+            .skip(1)
+            .all(|entry| !matches!(entry.outcome(), CriterionExecutionOutcome::Passed { .. }))
+    );
 }
 
 #[test]
@@ -277,6 +533,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
     let harness = CliHarness::new().expect("create CLI harness");
     let root = harness.path().join("repo");
     let vision_dir = root.join("planning/2026-07-27-shim-smoke");
+    write_vision_document(&vision_dir);
     let log = vision_dir.join("events.jsonl");
     fs::create_dir_all(&vision_dir).expect("create scratch vision directory");
 
@@ -652,6 +909,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
     let milestone_1_artifact = vision_dir.join("milestone-1/steps.json");
     let milestone_2_artifact = vision_dir.join("milestone-2/steps.json");
     fs::create_dir(&root).expect("create scratch repository root");
+    write_vision_document(&vision_dir);
     fs::create_dir_all(
         milestone_1_artifact
             .parent()
@@ -1405,6 +1663,7 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
     let log = vision_dir.join("events.jsonl");
     let artifact = vision_dir.join("milestone-3/step-m3-s3/plan.md");
     fs::create_dir(&root).expect("create scratch repository root");
+    write_vision_document(&vision_dir);
     fs::create_dir_all(artifact.parent().expect("artifact parent"))
         .expect("create scratch artifact parent");
     fs::write(&artifact, b"{\"node\":\"m3-s3\",\"status\":\"approved\"}\n")
@@ -1826,6 +2085,7 @@ fn authority_disagreement_reports_inconclusive() {
     let harness = CliHarness::new().expect("create CLI harness");
     let root = harness.path().join("repo");
     let vision_dir = root.join("planning/2026-07-27-authority-disagreement");
+    write_vision_document(&vision_dir);
     let log = vision_dir.join("events.jsonl");
     fs::create_dir_all(&vision_dir).expect("create scratch vision directory");
 
@@ -2201,6 +2461,7 @@ fn merge_base_failure_reports_inconclusive() {
     let harness = CliHarness::new().expect("create CLI harness");
     let root = harness.path().join("repo");
     let vision_dir = root.join("planning/2026-07-27-authority-unreachable");
+    write_vision_document(&vision_dir);
     let log = vision_dir.join("events.jsonl");
     fs::create_dir_all(&vision_dir).expect("create scratch vision directory");
 

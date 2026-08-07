@@ -4158,6 +4158,43 @@ fn binary_owned_issuance_semantics_are_exact() {
 }
 
 #[test]
+fn completion_manual_appends_and_orchestration_are_exact() {
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
+        .expect("skill");
+    let execution = "pce log --file <LOG_PATH> --kind criterion-execution --node <NODE>";
+    let addition = "pce log --file <LOG_PATH> --kind criterion-added --node <NODE>";
+    assert_eq!(skill.lines().filter(|line| *line == execution).count(), 3);
+    assert_eq!(skill.lines().filter(|line| *line == addition).count(), 1);
+
+    for payload in [
+        r#"{"criterion":{"name":"<CRITERION_NAME>","input":"<EXACT_INPUT>","observation":"<EXPECTED_OBSERVATION>"},"finished_result":"<FINISHED_RESULT>","outcome":{"status":"passed","observed_result":"<OBSERVED_RESULT>"},"evidence":"<NON_EMPTY_EXACT_INVOCATION>"}"#,
+        r#"{"criterion":{"name":"<CRITERION_NAME>","input":"<EXACT_INPUT>","observation":"<EXPECTED_OBSERVATION>"},"finished_result":"<FINISHED_RESULT>","outcome":{"status":"failed","observed_result":"<OBSERVED_RESULT>"},"evidence":"<NON_EMPTY_EXACT_INVOCATION>"}"#,
+        r#"{"criterion":{"name":"<CRITERION_NAME>","input":"<EXACT_INPUT>","observation":"<EXPECTED_OBSERVATION>"},"finished_result":"<FINISHED_RESULT>","outcome":{"status":"unpaid","reason":"<WHY_THIS_RUN_CANNOT_EXECUTE_IT>"},"evidence":"<NON_EMPTY_EXACT_INVOCATION>"}"#,
+        r#"{"criterion":{"name":"<CRITERION_NAME>","input":"<EXACT_INPUT>","observation":"<EXPECTED_OBSERVATION>"},"change_of_course":"<NON_EMPTY_CHANGE_OF_COURSE>"}"#,
+    ] {
+        assert_eq!(skill.matches(payload).count(), 1, "payload: {payload}");
+    }
+
+    let command = "pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>";
+    let merge = skill
+        .find("After the final milestone merge")
+        .expect("merge language");
+    let command_offset = skill.find(command).expect("completion command");
+    let done = skill.find("\n## Done\n").expect("done section");
+    assert_eq!(skill.matches(command).count(), 1);
+    assert!(merge < command_offset && command_offset < done);
+
+    for sentence in [
+        "On refusal, do not enter `## Done` and do not post the final summary.",
+        "On completion, name every unpaid criterion with its exact input and unpaid reason; never report it as passed or green.",
+    ] {
+        assert_eq!(skill.matches(sentence).count(), 1);
+        let offset = skill.find(sentence).expect("completion sentence");
+        assert!(command_offset < offset && offset < done);
+    }
+}
+
+#[test]
 fn real_skill_has_no_standalone_dispatch_append_anywhere() {
     let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
         .expect("skill");
