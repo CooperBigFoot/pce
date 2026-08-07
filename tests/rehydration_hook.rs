@@ -472,6 +472,30 @@ fn selected_fixture(harness: &CliHarness, name: &str, timestamp: &str) -> Fixtur
 
 fn real_status_fixture(harness: &CliHarness, name: &str, head: &str) -> RealStatusFixture {
     let fixture = selected_fixture(harness, name, "2026-07-28T10:00:00.000Z");
+    fs::write(
+        fixture.vision_dir.join("vision.md"),
+        r#"# Vision: fixture
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{
+  "criteria": [
+    {
+      "name": "Ratified floor",
+      "input": "Run the finished thing.",
+      "observation": "It reports success."
+    }
+  ]
+}
+```
+
+## Decomposition hints
+
+None.
+"#,
+    )
+    .expect("write ratified vision fixture");
     let bin_dir = executable_dir(harness, true);
     harness
         .materialize_responses(&status_responses(&fixture.root, head))

@@ -9,6 +9,31 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use support::{CliHarness, Invocation, ScriptedResponse};
 
+const VISION_DOCUMENT: &str = r#"# Vision: fixture
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{
+  "criteria": [
+    {
+      "name": "Ratified floor",
+      "input": "Run the finished thing.",
+      "observation": "It reports success."
+    }
+  ]
+}
+```
+
+## Decomposition hints
+
+None.
+"#;
+
+fn write_vision_document(vision_dir: &Path) {
+    fs::write(vision_dir.join("vision.md"), VISION_DOCUMENT).expect("vision fixture");
+}
+
 #[derive(Clone, Copy)]
 enum Authority {
     NotMerged,
@@ -45,6 +70,7 @@ impl ReadyFixture {
         let vision = primary.join("planning/2026-07-28-computed");
         let log = primary.join("events.jsonl");
         fs::create_dir_all(&vision).expect("vision directory");
+        write_vision_document(&vision);
         fs::create_dir_all(&docs).expect("docs repository");
         let graph_path = primary.join("graph.json");
         let bytes = serde_json::to_vec(graph).expect("graph JSON");
