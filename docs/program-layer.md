@@ -25,16 +25,22 @@ Program CLI verb.
    the exact `/to-vision "<name>"` invocation. Work does not invoke
    `/to-vision` or `/pce` automatically and does not write `vision.md`.
 3. **Land.** After that vision's independent `/to-vision "<name>"` then `/pce`
-   delivery cycle is delivered and merged, `/land-ticket <n>` validates the
-   ticket's `Program:` and `Vision:` linkages and explicitly trusts the human's
-   delivery assertion. It closes the Effort ticket, appends or reconciles its
-   one-line landed decision in the Map's `Decisions so far`, links applicable
-   committed ADRs, and runs a reviewed Fog-graduation Grill-with-docs session.
-   Newly sharp Fog becomes lean Effort tickets with real blocking relationships;
-   unresolved territory stays Fog. After re-fetching state, Land considers the
-   Program done only when no open member Effort tickets remain and the Map's Fog
-   is empty. It then presents a final summary and asks separately before closing
-   the Map.
+   delivery cycle finishes, `/land-ticket <n>` validates the ticket's `Program:`
+   and `Vision:` linkages and consumes the binary-owned landing result, which
+   proves executed criteria, merge state, and event evidence without asking the
+   human to assert delivery. It restates only the linked vision's `Goal / Why`
+   and `Scope — In` as one plain-language destination question and asks one
+   combined command-and-observation question for each unpaid criterion. Every
+   such observation is required before any GitHub mutation. It closes the
+   Effort ticket on either destination answer; a negative answer is recorded and
+   minted through the reviewed proposal as named Effort work. Land appends or
+   reconciles the ticket's one-line landed decision in the Map's `Decisions so
+   far`, links applicable committed ADRs, and runs the complete reviewed
+   Fog-graduation Grill-with-docs session. Newly sharp Fog becomes lean Effort
+   tickets with real blocking relationships; unresolved territory stays Fog.
+   After re-fetching state, Land considers the Program done only when no open
+   member Effort tickets remain and the Map's Fog is empty. It then presents a
+   final summary and asks separately before closing the Map.
 
 Each Effort ticket owns an independent `grill -> /to-vision -> /pce` delivery
 cycle. The Program layer selects visions and carries context between them;
