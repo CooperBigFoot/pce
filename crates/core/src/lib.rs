@@ -9,6 +9,7 @@ pub mod dispatch_meter;
 pub mod event_log;
 pub mod gate_execution;
 pub mod gate_replay;
+pub mod landing_readiness;
 pub mod paired_execution_proof;
 pub mod run_state;
 pub mod tracked_contract;
@@ -85,6 +86,10 @@ pub use gate_replay::{
     ReplayArtifactObservation, ReplayObservation, ReplayRefOutcome, ReplayRefResult,
     RepositoryRelativePath, classify_replay_pair, fold_replay_runs, normalize_replay_observation,
     parse_replay_output_path, parse_replay_schema_path, rebase_gate_stimulus,
+};
+pub use landing_readiness::{
+    CompletionCriterionIndex, LandingCriterionEvidence, LandingReadinessDecision,
+    LandingReadinessProblem, LandingReadinessResult, evaluate_landing_readiness,
 };
 pub use run_state::{
     ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BlockingCriterion,

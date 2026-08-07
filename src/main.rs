@@ -33,13 +33,13 @@ use pce_core::{
     GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
     GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
     GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
-    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
-    MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, ObservedExitStatus,
-    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PairedCampaign,
-    PairedExecutionProofError, PairedReplayClassification, PullRequestNumber, PullRequestSelector,
-    RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation, ReplayClassifications,
-    ReplayObservation, ReplayRefResult, RepositoryBranchName, RepositoryContractPayload,
-    RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+    LandingReadinessDecision, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
+    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
+    ObservedExitStatus, ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge,
+    PairedCampaign, PairedExecutionProofError, PairedReplayClassification, PullRequestNumber,
+    PullRequestSelector, RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation,
+    ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
+    RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
     RunSnapshot, Sandbox, SeatbeltCapability, Sha256Digest, SignalNumber, SquashCommitOid,
     StdinBinding, StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName,
@@ -49,14 +49,15 @@ use pce_core::{
     classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
     compose_planning_role_frame, compute_dispatchability, create_vision, derive_merge_status,
     derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
-    dispatch_invocation, dispatch_payload, evaluate_completion, event_record_matches,
-    fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot, meter_dispatches,
-    normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
-    parse_claude_result, parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
-    parse_paired_falsification_verdict, parse_replay_output_path, parse_replay_schema_path,
-    parse_tracked_repository_contract, rebase_gate_stimulus, render_dispatch_projection,
-    render_human_snapshot, seatbelt_capability_probe, serialize_tracked_repository_contract,
-    validate_artifact, validate_verdict_references, validate_workflow_coverage,
+    dispatch_invocation, dispatch_payload, evaluate_completion, evaluate_landing_readiness,
+    event_record_matches, fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot,
+    meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
+    parse_acceptance_criteria, parse_claude_result, parse_event_line,
+    parse_gate_execution_evidence, parse_gate_stimulus, parse_paired_falsification_verdict,
+    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
+    rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
+    seatbelt_capability_probe, serialize_tracked_repository_contract, validate_artifact,
+    validate_verdict_references, validate_workflow_coverage,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -70,6 +71,7 @@ const USAGE: &str = concat!(
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>]\n",
     "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
+    "       pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>\n",
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
@@ -204,6 +206,12 @@ enum Command {
         graph_path: Option<ArtifactPath>,
     },
     CompletionCheck {
+        log_path: PathBuf,
+        recovery_log_path: RecoveryLogPath,
+        vision_dir: PathBuf,
+        finished_result: FinishedResult,
+    },
+    LandingCheck {
         log_path: PathBuf,
         recovery_log_path: RecoveryLogPath,
         vision_dir: PathBuf,
@@ -472,6 +480,12 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             vision_dir,
             finished_result,
         } => run_completion_check(&log_path, &recovery_log_path, &vision_dir, &finished_result),
+        Command::LandingCheck {
+            log_path,
+            recovery_log_path,
+            vision_dir,
+            finished_result,
+        } => run_landing_check(&log_path, &recovery_log_path, &vision_dir, &finished_result),
         Command::ContractCheck {
             contract_path,
             repository_root,
@@ -528,6 +542,7 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "status" => parse_status_command(action, rest),
         [verb, rest @ ..] if verb == "ready" => parse_ready_command(rest),
         [verb, action, rest @ ..] if verb == "completion" => parse_completion_command(action, rest),
+        [verb, action, rest @ ..] if verb == "landing" => parse_landing_command(action, rest),
         [verb, action, rest @ ..] if verb == "contract" => parse_contract_command(action, rest),
         [verb, target, rest @ ..] if verb == "dispatch" => match target.as_str() {
             "codex" => parse_codex_dispatch(target, rest),
@@ -2370,6 +2385,38 @@ fn parse_completion_command(action: &str, rest: &[String]) -> Result<Command> {
     })
 }
 
+fn parse_landing_command(action: &str, rest: &[String]) -> Result<Command> {
+    let [
+        file_flag,
+        raw_path,
+        vision_flag,
+        raw_vision_dir,
+        finished_flag,
+        raw_finished_result,
+    ] = rest
+    else {
+        bail!(USAGE);
+    };
+    if action != "check"
+        || file_flag != "--file"
+        || vision_flag != "--vision-dir"
+        || finished_flag != "--finished-result"
+        || !is_value(raw_path)
+        || !is_value(raw_vision_dir)
+        || !is_value(raw_finished_result)
+    {
+        bail!(USAGE);
+    }
+    let finished_result =
+        FinishedResult::parse(raw_finished_result).context("failed to parse finished result")?;
+    Ok(Command::LandingCheck {
+        log_path: PathBuf::from(raw_path),
+        recovery_log_path: RecoveryLogPath::new(raw_path),
+        vision_dir: PathBuf::from(raw_vision_dir),
+        finished_result,
+    })
+}
+
 fn is_value(raw: &str) -> bool {
     !raw.starts_with("--")
 }
@@ -2571,6 +2618,86 @@ fn run_completion_check(
             missing,
             failed
         );
+    }
+    Ok(())
+}
+
+fn run_landing_check(
+    log_path: &Path,
+    recovery_log_path: &RecoveryLogPath,
+    vision_dir: &Path,
+    finished_result: &FinishedResult,
+) -> Result<()> {
+    let parsed_lines = read_event_log(log_path)?;
+    let records = parsed_lines
+        .iter()
+        .map(|line| line.record.clone())
+        .collect::<Vec<_>>();
+    let contracts = repository_contracts(&records)?;
+    let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
+    let vision = vision_slug(vision_dir)?;
+    let ratified_criteria = read_ratified_acceptance_criteria(vision_dir)?;
+    let (artifacts, _) = current_artifacts(&records, Path::new(contracts[primary_index].root()))?;
+    let canonical_nodes = canonical_nodes(&records, &vision)?;
+
+    let mut repositories = Vec::new();
+    let mut authorities = Vec::new();
+    if !canonical_nodes.is_empty() {
+        let selected_index = canonical_nodes
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, item)| item.latest_sequence)
+            .map(|(index, _)| index)
+            .context("event log contains no canonical step node for repository projection")?;
+        let selected = &canonical_nodes[selected_index];
+        let integration_branches = integration_branches(&canonical_nodes, selected_index);
+        let mut runtimes = Vec::with_capacity(contracts.len());
+        for contract in contracts {
+            let (observation, runtime) = observe_repository(
+                contract.name().clone(),
+                PathBuf::from(contract.root()),
+                &integration_branches,
+                selected.subject.selector(),
+            )?;
+            repositories.push(observation);
+            runtimes.push(runtime);
+        }
+        let primary = runtimes
+            .get(primary_index)
+            .context("resolved primary repository index is unavailable")?;
+        authorities = observe_authorities(&canonical_nodes, primary)?;
+    }
+
+    let state = derive_run_state(
+        &records,
+        &ratified_criteria,
+        &vision,
+        recovery_log_path,
+        &artifacts,
+        &repositories,
+        &authorities,
+    )
+    .context("failed to derive landing state")?;
+    let completion = evaluate_completion(
+        finished_result,
+        state.blocking_criteria(),
+        state.criterion_executions(),
+    );
+    let result =
+        evaluate_landing_readiness(&completion, state.steps(), state.criterion_executions());
+    let refused = result.decision == LandingReadinessDecision::Refuse;
+    let problem_count = result.problems.len();
+
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    serde_json::to_writer(&mut output, &result).context("failed to serialize landing result")?;
+    output
+        .write_all(b"\n")
+        .context("failed to write landing result newline")?;
+    output.flush().context("failed to flush landing result")?;
+
+    if refused {
+        bail!("landing refused: {problem_count} readiness problems");
     }
     Ok(())
 }
@@ -9288,6 +9415,119 @@ None.
                 .expect_err("each missing flag or value must fail");
             assert_eq!(error.to_string(), USAGE);
         }
+    }
+
+    #[test]
+    fn landing_parser_accepts_only_the_canonical_ordered_shape() {
+        let canonical = [
+            "landing",
+            "check",
+            "--file",
+            "events.jsonl",
+            "--vision-dir",
+            "planning/2026-08-03-a-gate-runs-what-was-built",
+            "--finished-result",
+            "main@0123456789abcdef",
+        ];
+        let command = parse_command(canonical.into_iter().map(str::to_owned))
+            .expect("landing command should parse");
+        let Command::LandingCheck {
+            log_path,
+            recovery_log_path,
+            vision_dir,
+            finished_result,
+        } = command
+        else {
+            panic!("landing command expected");
+        };
+        assert_eq!(log_path, PathBuf::from("events.jsonl"));
+        assert_eq!(recovery_log_path.as_str(), "events.jsonl");
+        assert_eq!(
+            vision_dir,
+            PathBuf::from("planning/2026-08-03-a-gate-runs-what-was-built")
+        );
+        assert_eq!(finished_result.as_str(), "main@0123456789abcdef");
+
+        const LINE: &str = "pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>";
+        assert_eq!(USAGE.matches(LINE).count(), 1);
+
+        let invalid = [
+            vec![
+                "landing",
+                "check",
+                "--vision-dir",
+                "vision",
+                "--file",
+                "events.jsonl",
+                "--finished-result",
+                "result",
+            ],
+            vec![
+                "landing",
+                "check",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "vision",
+                "--finished-result",
+            ],
+            vec![
+                "landing",
+                "check",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "vision",
+            ],
+            vec!["landing", "check", "--file", "events.jsonl"],
+            vec!["landing", "check"],
+            vec!["landing"],
+            vec![
+                "landing",
+                "inspect",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "vision",
+                "--finished-result",
+                "result",
+            ],
+            vec![
+                "landing",
+                "check",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "vision",
+                "--finished-result",
+                "result",
+                "extra",
+            ],
+        ];
+        for arguments in invalid {
+            let error = parse_command(arguments.into_iter().map(str::to_owned))
+                .expect_err("non-canonical landing command must fail");
+            assert_eq!(error.to_string(), USAGE);
+        }
+
+        let error = parse_command(
+            [
+                "landing",
+                "check",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "vision",
+                "--finished-result",
+                "   ",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect_err("blank finished result must fail");
+        let chain = format!("{error:#}");
+        assert!(chain.contains("failed to parse finished result"));
+        assert!(chain.contains("finished result cannot be blank"));
     }
 
     #[test]
