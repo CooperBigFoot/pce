@@ -2,6 +2,7 @@
 
 pub mod acceptance_criteria;
 pub mod artifact_validation;
+pub mod completion_gate;
 pub mod contract_measurement;
 pub mod dispatch;
 pub mod dispatch_meter;
@@ -20,6 +21,10 @@ pub use acceptance_criteria::{
 };
 pub use artifact_validation::{
     ArtifactValidationError, FileObservation, StructuredArtifactObservation, validate_artifact,
+};
+pub use completion_gate::{
+    CompletionCriterionReport, CompletionCriterionStatus, CompletionDecision, CompletionGateResult,
+    evaluate_completion,
 };
 pub use contract_measurement::{
     ContractMeasurementError, GateMeasurement, GateMeasurements, MeasuredContractSnapshot,
