@@ -22,13 +22,13 @@ use pce_core::{
     ActReversibility, AppendError, AppendableCategory, AppendableFinding, ArgumentVector,
     ArtifactOutcome, ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode,
     CheckoutFailure, CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage,
-    CompletionCriterionStatus, CompletionDecision, CreationDate, CurrentArtifactObservation,
-    CurrentArtifactState, DispatchCandidate, DispatchDuration, DispatchEnvelope,
-    DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole,
-    DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef,
-    EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
-    Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode,
-    ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
+    CompletionCriterionStatus, CompletionDecision, CreationDate, CriterionChangeDecision,
+    CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchDuration,
+    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef,
+    DispatchRole, DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult,
+    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
+    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable,
+    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
     GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef,
     GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
     GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
@@ -57,7 +57,7 @@ use pce_core::{
     parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
     rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
     seatbelt_capability_probe, serialize_tracked_repository_contract, validate_artifact,
-    validate_verdict_references, validate_workflow_coverage,
+    validate_verdict_references, validate_workflow_coverage, verify_criterion_change,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -70,6 +70,7 @@ const USAGE: &str = concat!(
     "       pce log meter\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>]\n",
+    "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
     "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce contract check --file <CONTRACT_PATH> --repo-root <REPOSITORY_ROOT>\n",
@@ -204,6 +205,11 @@ enum Command {
         recovery_log_path: RecoveryLogPath,
         vision_dir: PathBuf,
         graph_path: Option<ArtifactPath>,
+    },
+    CriteriaCheck {
+        log_path: PathBuf,
+        recovery_log_path: RecoveryLogPath,
+        vision_dir: PathBuf,
     },
     CompletionCheck {
         log_path: PathBuf,
@@ -474,6 +480,11 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             &vision_dir,
             graph_path.as_ref(),
         ),
+        Command::CriteriaCheck {
+            log_path,
+            recovery_log_path,
+            vision_dir,
+        } => run_criteria_check(&log_path, &recovery_log_path, &vision_dir, input),
         Command::CompletionCheck {
             log_path,
             recovery_log_path,
@@ -541,6 +552,7 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "log" => parse_log_command(action, rest),
         [verb, action, rest @ ..] if verb == "status" => parse_status_command(action, rest),
         [verb, rest @ ..] if verb == "ready" => parse_ready_command(rest),
+        [verb, action, rest @ ..] if verb == "criteria" => parse_criteria_command(action, rest),
         [verb, action, rest @ ..] if verb == "completion" => parse_completion_command(action, rest),
         [verb, action, rest @ ..] if verb == "landing" => parse_landing_command(action, rest),
         [verb, action, rest @ ..] if verb == "contract" => parse_contract_command(action, rest),
@@ -2385,6 +2397,25 @@ fn parse_completion_command(action: &str, rest: &[String]) -> Result<Command> {
     })
 }
 
+fn parse_criteria_command(action: &str, rest: &[String]) -> Result<Command> {
+    let [file_flag, raw_path, vision_flag, raw_vision_dir] = rest else {
+        bail!(USAGE);
+    };
+    if action != "check"
+        || file_flag != "--file"
+        || vision_flag != "--vision-dir"
+        || !is_value(raw_path)
+        || !is_value(raw_vision_dir)
+    {
+        bail!(USAGE);
+    }
+    Ok(Command::CriteriaCheck {
+        log_path: PathBuf::from(raw_path),
+        recovery_log_path: RecoveryLogPath::new(raw_path),
+        vision_dir: PathBuf::from(raw_vision_dir),
+    })
+}
+
 fn parse_landing_command(action: &str, rest: &[String]) -> Result<Command> {
     let [
         file_flag,
@@ -2617,6 +2648,58 @@ fn run_completion_check(
             missing + failed,
             missing,
             failed
+        );
+    }
+    Ok(())
+}
+
+fn run_criteria_check(
+    log_path: &Path,
+    recovery_log_path: &RecoveryLogPath,
+    vision_dir: &Path,
+    input: &mut dyn Read,
+) -> Result<()> {
+    let mut document = String::new();
+    input
+        .read_to_string(&mut document)
+        .context("failed to read proposed vision from stdin to EOF")?;
+    let proposed_criteria = parse_acceptance_criteria(&document)
+        .context("failed to parse proposed acceptance criteria")?;
+    let parsed_lines = read_event_log(log_path)?;
+    let records = parsed_lines
+        .iter()
+        .map(|line| line.record.clone())
+        .collect::<Vec<_>>();
+    let contracts = repository_contracts(&records)?;
+    let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
+    let vision = vision_slug(vision_dir)?;
+    let ratified_criteria = read_ratified_acceptance_criteria(vision_dir)?;
+    let (artifacts, _) = current_artifacts(&records, Path::new(contracts[primary_index].root()))?;
+    let state = derive_run_state(
+        &records,
+        &ratified_criteria,
+        &vision,
+        recovery_log_path,
+        &artifacts,
+        &[],
+        &[],
+    )
+    .context("failed to derive criterion-change state")?;
+    let result = verify_criterion_change(state.blocking_criteria(), &proposed_criteria);
+    let refused = result.decision == CriterionChangeDecision::Refuse;
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    serde_json::to_writer(&mut output, &result)
+        .context("failed to serialize criterion-change verification")?;
+    output
+        .write_all(b"\n")
+        .context("failed to write criterion-change verification newline")?;
+    output
+        .flush()
+        .context("failed to flush criterion-change verification")?;
+    if refused {
+        bail!(
+            "criterion change refused: proposed acceptance criteria must exactly match the ratified floor plus logged criterion-added events"
         );
     }
     Ok(())
@@ -9415,6 +9498,103 @@ None.
                 .expect_err("each missing flag or value must fail");
             assert_eq!(error.to_string(), USAGE);
         }
+    }
+
+    #[test]
+    fn criteria_parser_accepts_only_the_canonical_ordered_shape() {
+        let canonical = [
+            "criteria",
+            "check",
+            "--file",
+            "events.jsonl",
+            "--vision-dir",
+            "planning/2026-08-03-a-gate-runs-what-was-built",
+        ];
+        let command = parse_command(canonical.into_iter().map(str::to_owned))
+            .expect("criteria command should parse");
+        let Command::CriteriaCheck {
+            log_path,
+            recovery_log_path,
+            vision_dir,
+        } = command
+        else {
+            panic!("criteria command expected");
+        };
+        assert_eq!(log_path, PathBuf::from("events.jsonl"));
+        assert_eq!(recovery_log_path.as_str(), "events.jsonl");
+        assert_eq!(
+            vision_dir,
+            PathBuf::from("planning/2026-08-03-a-gate-runs-what-was-built")
+        );
+        const LINE: &str = "pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>";
+        assert_eq!(USAGE.matches(LINE).count(), 1);
+
+        let invalid = [
+            vec![
+                "criteria",
+                "check",
+                "--vision-dir",
+                "vision",
+                "--file",
+                "events.jsonl",
+            ],
+            vec!["criteria", "check"],
+            vec![
+                "criteria",
+                "check",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "vision",
+                "extra",
+            ],
+            vec![
+                "criteria",
+                "validate",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "vision",
+            ],
+            vec!["criteria"],
+        ];
+        for args in invalid {
+            let error = parse_command(args.into_iter().map(str::to_owned))
+                .expect_err("invalid criteria shape must fail");
+            assert_eq!(error.to_string(), USAGE);
+        }
+        for missing_index in 2..canonical.len() {
+            let args = canonical
+                .iter()
+                .enumerate()
+                .filter_map(|(index, argument)| (index != missing_index).then_some(*argument));
+            let error = parse_command(args.map(str::to_owned))
+                .expect_err("each missing flag or value must fail");
+            assert_eq!(error.to_string(), USAGE);
+        }
+    }
+
+    #[test]
+    fn criteria_check_reports_stdin_read_failure_before_filesystem_access() {
+        struct BrokenReader;
+        impl std::io::Read for BrokenReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("reader failed"))
+            }
+        }
+        let error = super::run_criteria_check(
+            Path::new("missing-events.jsonl"),
+            &RecoveryLogPath::new("missing-events.jsonl"),
+            Path::new("missing-vision"),
+            &mut BrokenReader,
+        )
+        .expect_err("reader failure should stop the command");
+        let chain = error.chain().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(
+            chain
+                .iter()
+                .any(|message| message == "failed to read proposed vision from stdin to EOF")
+        );
     }
 
     #[test]

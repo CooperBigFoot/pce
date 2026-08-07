@@ -260,7 +260,8 @@ fn malformed_status_and_missing_digest_are_silent_noops_and_preserve_exact_argv(
 
 #[test]
 fn merge_hook_settings_is_isolated_structural_and_idempotent() {
-    const MANAGED_COMMAND: &str = "$HOME/.local/bin/pce-rehydrate";
+    const REHYDRATE_COMMAND: &str = "$HOME/.local/bin/pce-rehydrate";
+    const PROTECTION_COMMAND: &str = "$HOME/.local/bin/pce-protect-criteria";
 
     let harness = CliHarness::new().expect("create CLI harness");
     let fake_home = harness.path().join("fake-home");
@@ -291,8 +292,8 @@ fn merge_hook_settings_is_isolated_structural_and_idempotent() {
                 {
                     "matcher": "resume",
                     "hooks": [
-                        {"type": "command", "command": MANAGED_COMMAND},
-                        {"type": "command", "command": MANAGED_COMMAND},
+                        {"type": "command", "command": REHYDRATE_COMMAND},
+                        {"type": "command", "command": REHYDRATE_COMMAND},
                         {"type": "command", "command": "preserve-neighbor"}
                     ]
                 }
@@ -300,8 +301,18 @@ fn merge_hook_settings_is_isolated_structural_and_idempotent() {
             "PostCompact": [{
                 "matcher": "compact",
                 "hooks": [
-                    {"type": "command", "command": MANAGED_COMMAND},
+                    {"type": "command", "command": REHYDRATE_COMMAND},
+                    {"type": "command", "command": PROTECTION_COMMAND},
                     {"type": "command", "command": "preserve-post-compact"}
+                ]
+            }],
+            "PreToolUse": [{
+                "matcher": "Edit",
+                "preserved": "group-field",
+                "hooks": [
+                    {"type": "command", "command": PROTECTION_COMMAND},
+                    {"type": "command", "command": PROTECTION_COMMAND},
+                    {"type": "command", "command": "preserve-pre-tool-neighbor"}
                 ]
             }]
         }
@@ -341,7 +352,15 @@ fn merge_hook_settings_is_isolated_structural_and_idempotent() {
             "hooks": [{"type": "command", "command": "preserve-post-compact"}]
         }])
     );
-    assert_managed_settings_shape(&first_value, MANAGED_COMMAND);
+    assert_eq!(
+        first_value["hooks"]["PreToolUse"][0],
+        json!({
+            "matcher": "Edit",
+            "preserved": "group-field",
+            "hooks": [{"type": "command", "command": "preserve-pre-tool-neighbor"}]
+        })
+    );
+    assert_managed_settings_shape(&first_value, REHYDRATE_COMMAND, PROTECTION_COMMAND);
     assert_fake_home_untouched(&fake_home, sentinel);
 
     let second = run_settings_merge(&fake_home, &settings_path, None);
@@ -354,7 +373,7 @@ fn merge_hook_settings_is_isolated_structural_and_idempotent() {
     assert_eq!(after_second, after_first);
     let second_value: Value =
         serde_json::from_slice(&after_second).expect("parse second merge result");
-    assert_managed_settings_shape(&second_value, MANAGED_COMMAND);
+    assert_managed_settings_shape(&second_value, REHYDRATE_COMMAND, PROTECTION_COMMAND);
     assert_fake_home_untouched(&fake_home, sentinel);
 
     let before_missing_python = after_second;
@@ -404,7 +423,11 @@ fn run_settings_merge(fake_home: &Path, settings_path: &Path, python: Option<&Os
     command.output().expect("run isolated settings merge")
 }
 
-fn assert_managed_settings_shape(settings: &Value, managed_command: &str) {
+fn assert_managed_settings_shape(
+    settings: &Value,
+    rehydrate_command: &str,
+    protection_command: &str,
+) {
     let session_start = settings["hooks"]["SessionStart"]
         .as_array()
         .expect("SessionStart array");
@@ -412,13 +435,13 @@ fn assert_managed_settings_shape(settings: &Value, managed_command: &str) {
         .iter()
         .filter_map(|group| group.get("hooks").and_then(Value::as_array))
         .flatten()
-        .filter(|hook| hook.get("command").and_then(Value::as_str) == Some(managed_command))
+        .filter(|hook| hook.get("command").and_then(Value::as_str) == Some(rehydrate_command))
         .count();
     assert_eq!(managed_count, 1);
 
     let canonical_group = json!({
         "matcher": "resume|compact",
-        "hooks": [{"type": "command", "command": managed_command}]
+        "hooks": [{"type": "command", "command": rehydrate_command}]
     });
     assert_eq!(
         session_start
@@ -428,15 +451,42 @@ fn assert_managed_settings_shape(settings: &Value, managed_command: &str) {
         1
     );
 
-    let post_compact_count = settings["hooks"]["PostCompact"]
+    let pre_tool_use = settings["hooks"]["PreToolUse"]
         .as_array()
-        .expect("PostCompact array")
-        .iter()
-        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-        .flatten()
-        .filter(|hook| hook.get("command").and_then(Value::as_str) == Some(managed_command))
-        .count();
-    assert_eq!(post_compact_count, 0);
+        .expect("PreToolUse array");
+    let protection_group = json!({
+        "matcher": "Bash|Edit|Write",
+        "hooks": [{"type": "command", "command": protection_command}]
+    });
+    assert_eq!(
+        pre_tool_use
+            .iter()
+            .filter(|group| **group == protection_group)
+            .count(),
+        1
+    );
+
+    for (managed, canonical_event) in [
+        (rehydrate_command, "SessionStart"),
+        (protection_command, "PreToolUse"),
+    ] {
+        let mut global_count = 0;
+        for (event, groups) in settings["hooks"].as_object().expect("hooks object") {
+            let event_count = groups
+                .as_array()
+                .expect("event groups")
+                .iter()
+                .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+                .flatten()
+                .filter(|hook| hook.get("command").and_then(Value::as_str) == Some(managed))
+                .count();
+            global_count += event_count;
+            if event != canonical_event {
+                assert_eq!(event_count, 0);
+            }
+        }
+        assert_eq!(global_count, 1);
+    }
 }
 
 fn assert_fake_home_untouched(fake_home: &Path, sentinel: &[u8]) {
