@@ -2237,6 +2237,172 @@ fn phase3_planning_act_lifecycle_is_explicit() {
 }
 
 #[test]
+fn phase3_executes_falsification_before_pr_creation() {
+    let markdown = real_skill_markdown();
+    let phase3_start = markdown
+        .find("## Phase 3 — Per step PCE-PR-C")
+        .expect("Phase 3");
+    let remainder = &markdown[phase3_start..];
+    let phase3_end = remainder[3..]
+        .find("\n## ")
+        .map_or(markdown.len(), |offset| phase3_start + 3 + offset + 1);
+    let phase3 = &markdown[phase3_start..phase3_end];
+    let headings = [
+        "1. **Plan (Codex)**",
+        "2. **Isolate and contract check**",
+        "3. **Execute (Codex)**",
+        "4. **Falsify (Claude)**",
+        "5. **PR (you)**",
+        "6. **Review**",
+        "7. **Merge (you)**",
+    ];
+    let mut previous = 0;
+    for heading in headings {
+        assert_eq!(phase3.matches(heading).count(), 1, "heading {heading}");
+        let position = phase3.find(heading).expect("phase heading");
+        assert!(position >= previous, "heading order for {heading}");
+        previous = position;
+    }
+
+    let falsify_start = phase3.find(headings[3]).expect("falsify stage");
+    let pr_start = phase3.find(headings[4]).expect("PR stage");
+    let falsify = &phase3[falsify_start..pr_start];
+    let clean = "git -C <worktree-abs> status --porcelain=v1 --untracked-files=no";
+    assert_eq!(falsify.matches("`falsification-critic`").count(), 2);
+    for expected in [
+        "Only `APPROVE` together with `blocking_issues: []` advances to stage 5.",
+        "Any non-empty `blocking_issues` is blocking regardless of the outer `verdict` token.",
+        "Any non-empty validated `blocking_issues` list dispatches `step-executor` at the exact current committed step head after the tracked-clean observation.",
+        "`REVISE` or `BLOCK` with `blocking_issues: []` enters the existing routing for that token and does not start a repair.",
+        "Missing, unreadable, malformed, schema-invalid, unknown, or reference-invalid verdict data stops loudly.",
+    ] {
+        assert_eq!(
+            falsify.matches(expected).count(),
+            1,
+            "classification {expected}"
+        );
+    }
+    assert_eq!(phase3.matches(clean).count(), 1);
+    for expected in [
+        "Require exit status `0`",
+        "stdout to be exactly empty (zero bytes)",
+        "stderr to be exactly empty (zero bytes)",
+        "before either stage 5 or any `REVISE` re-dispatch",
+    ] {
+        assert_eq!(
+            falsify.matches(expected).count(),
+            1,
+            "clean result {expected}"
+        );
+    }
+    let clean_position = phase3.find(clean).expect("tracked-clean command");
+    assert!(clean_position < pr_start);
+    let repair = "Repair the committed step artifact at exact head <current-step-head>";
+    let repair_position = phase3.find(repair).expect("repair task");
+    assert!(clean_position < repair_position);
+    assert!(repair_position < pr_start);
+    assert!(
+        falsify_start
+            < phase3
+                .find("push the branch")
+                .expect("first push instruction")
+    );
+    for binary_owned in [
+        "A blocking issue is admissible only for a demonstrated break.",
+        "do not block on style, naming, design preference, scope",
+        "mutate the subject it claims to test and rerun the check",
+        "delete the configuration entry that activates it",
+    ] {
+        assert!(
+            !falsify.contains(binary_owned),
+            "binary-owned mandate leaked into skill"
+        );
+    }
+}
+
+#[test]
+fn phase3_falsification_repair_is_bounded_and_mechanical() {
+    let markdown = real_skill_markdown();
+    let phase3_start = markdown
+        .find("## Phase 3 — Per step PCE-PR-C")
+        .expect("Phase 3");
+    let phase3_remainder = &markdown[phase3_start..];
+    let phase3_end = phase3_remainder[3..]
+        .find("\n## ")
+        .map_or(markdown.len(), |offset| phase3_start + 3 + offset + 1);
+    let phase3 = &markdown[phase3_start..phase3_end];
+    let falsify_start = phase3
+        .find("4. **Falsify (Claude)**")
+        .expect("falsify stage");
+    let pr_start = phase3.find("5. **PR (you)**").expect("PR stage");
+    let falsify = &phase3[falsify_start..pr_start];
+    let task = "Repair the committed step artifact at exact head <current-step-head> from the accepted pre-PR falsification verdict at <absolute-review-json-path>. Apply every supplied required_change and replacement_execution mechanically. Do not re-derive, reinterpret, broaden, or re-litigate any supplied finding. Read tracked inputs only with the supplied git show <current-step-head>:<path> commands. Run every acceptance gate from the approved plan. On success, amend the existing single conventional step commit, refresh pr-body.md and leave it untracked, create no tag, and do not push. Emit the normal structured executor result at <worktree-abs>/.codex-result.json. If the repair is infeasible as supplied, do not invent another repair; return the existing structured BLOCK result with the applicable root_cause.";
+    assert_eq!(falsify.matches(task).count(), 1, "complete repair task");
+    for expected in [
+        "<worktree-abs>/.codex-result.json",
+        "refresh pr-body.md and leave it untracked",
+        "amend the existing single conventional step commit",
+        "create no tag",
+        "do not push",
+    ] {
+        assert_eq!(
+            task.matches(expected).count(),
+            1,
+            "repair task policy {expected}"
+        );
+    }
+
+    let policies = [
+        "The first falsification is round `1`; at most `3` falsification dispatches may occur for the step.",
+        "If two consecutive schema-valid verdict artifacts have substantially identical blocking issue sets under the existing comparison rule, append/open the existing escalation and stop before another executor dispatch, push, or PR.",
+        "If dispatch count `3` is blocking, escalate and stop before another executor dispatch, push, or PR.",
+        "After a successful repair result, resolve the new exact committed step head and reissue `falsification-critic` through the same anchored binary route.",
+        "Ground it on that new head, the same approved plan ref, and `git diff <milestone-integration-ref>...<new-step-head>`.",
+        "Supply the prior exact verdict path as the finding to verify and ask the critic to verify the executed replacement on the repaired artifact rather than re-derive the finding.",
+        "Successive gate verdicts remain `review-<n>.json`/`review-<n>.md`, indexed by prior `(node, falsification-critic)` dispatch records; add no counter or artifact family.",
+    ];
+    for expected in policies {
+        assert_eq!(
+            falsify.matches(expected).count(),
+            1,
+            "repair policy {expected}"
+        );
+        assert!(
+            phase3.find(expected).expect("repair policy offset") < pr_start,
+            "repair policy precedes PR: {expected}"
+        );
+    }
+    assert_eq!(falsify.matches("stated.version_policy: NONE").count(), 1);
+    assert!(falsify.contains("means no version edit and no tag"));
+
+    let routing_start = markdown
+        .find("## Routing, caps, and adaptation")
+        .expect("routing section");
+    let routing_remainder = &markdown[routing_start..];
+    let routing_end = routing_remainder[3..]
+        .find("\n## ")
+        .map_or(markdown.len(), |offset| routing_start + 3 + offset + 1);
+    let routing = &markdown[routing_start..routing_end];
+    let general =
+        "- `APPROVE` proceeds, `REVISE` loops with blocking issues, and `BLOCK` escalates.";
+    let exception = "Phase 3 pre-PR falsification is the exception: a schema- and reference-valid verdict with non-empty `blocking_issues` follows stage 4's bounded repair path before generic `BLOCK` escalation while a repair remains available.";
+    assert_eq!(routing.matches(general).count(), 1);
+    assert_eq!(routing.matches(exception).count(), 1);
+    assert!(
+        routing.find(general).expect("general routing")
+            < routing.find(exception).expect("exception")
+    );
+    for inherited in [
+        "Plan/critic and PR/fix caps are 3.",
+        "Derive rounds from dispatch records.",
+        "On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the cap.",
+        "Derive the comparison from review artifacts; do not update separate loop state.",
+    ] {
+        assert_eq!(routing.matches(inherited).count(), 1, "routing {inherited}");
+    }
+}
+
+#[test]
 fn role_registry_exact_set() {
     let measured: std::collections::BTreeSet<_> = repository_routes()
         .iter()
