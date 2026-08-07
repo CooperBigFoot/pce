@@ -4,6 +4,7 @@ pub mod acceptance_criteria;
 pub mod artifact_validation;
 pub mod completion_gate;
 pub mod contract_measurement;
+pub mod criterion_change;
 pub mod dispatch;
 pub mod dispatch_meter;
 pub mod event_log;
@@ -29,6 +30,9 @@ pub use completion_gate::{
 pub use contract_measurement::{
     ContractMeasurementError, GateMeasurement, GateMeasurements, MeasuredContractSnapshot,
     ObservedExitStatus, measure_contract_snapshot,
+};
+pub use criterion_change::{
+    CriterionChangeDecision, CriterionChangeVerification, verify_criterion_change,
 };
 pub use paired_execution_proof::{
     CampaignSide, FalsificationVerdictToken, PairedBlockingIssue, PairedCampaign,
