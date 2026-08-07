@@ -131,6 +131,27 @@ fn refusal_then_later_completion_emit_exact_json() {
 }
 
 #[test]
+fn unpaid_after_failure_keeps_exact_failure_blocking() {
+    let fixture = Fixture::new(
+        r#"{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."}"#,
+    );
+    fixture.append("criterion-execution", r#"{"criterion":{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"failed","observed_result":"The command exited 7."},"evidence":"run the broken command"}"#);
+    fixture.append("criterion-execution", r#"{"criterion":{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":"The run cannot execute the broken command now."},"evidence":"inspect the execution boundary"}"#);
+
+    let output = fixture.check(FINISHED_RESULT);
+    assert_eq!(output.status.code(), Some(1));
+    let expected = concat!(
+        r#"{"decision":"refuse","finished_result":"main@0123456789abcdef","criteria":[{"criterion":{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."},"status":"failed","observed_result":"The command exited 7."}]}"#,
+        "\n"
+    );
+    assert_eq!(output.stdout, expected.as_bytes());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("completion refused: 1 blocking criteria (0 missing, 1 failed)")
+    );
+}
+
+#[test]
 fn evidence_for_a_different_finished_result_does_not_pay() {
     let fixture = Fixture::new(
         r#"{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."}"#,
