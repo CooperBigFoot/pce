@@ -4095,12 +4095,12 @@ fn falsification_reference_admission_uses_only_retained_same_dispatch_records() 
         (
             "missing primary",
             vec![issue("F-1", None, Some("execution-000002"))],
-            "blocking issue `F-1` is missing gate execution reference",
+            "violates schema keyword/location `required` at instance `/blocking_issues/0`: \"execution_ref\" is a required property",
         ),
         (
             "missing replacement",
             vec![issue("F-1", Some("execution-000001"), None)],
-            "blocking issue `F-1` replacement is missing gate execution reference",
+            "violates schema keyword/location `required` at instance `/blocking_issues/0/replacement_execution`: \"execution_ref\" is a required property",
         ),
         (
             "zero reference",

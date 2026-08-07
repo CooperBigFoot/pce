@@ -3255,7 +3255,7 @@ fn verdict_schema_requires_executed_break_and_replacement_evidence() {
         serde_json::from_str(LEGACY_BLOCKING).expect("legacy blocking fixture");
     let approve: serde_json::Value = serde_json::from_str(APPROVE).expect("approval fixture");
     assert_eq!(validator.iter_errors(&blocking).count(), 0);
-    assert_eq!(validator.iter_errors(&legacy_blocking).count(), 0);
+    assert_eq!(validator.iter_errors(&legacy_blocking).count(), 2);
     assert_eq!(validator.iter_errors(&approve).count(), 0);
 
     let opinion: serde_json::Value = serde_json::from_str(OPINION).expect("opinion fixture");

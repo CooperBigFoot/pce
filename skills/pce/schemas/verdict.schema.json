@@ -11,7 +11,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "severity", "location", "problem", "input", "observation", "required_change", "replacement_execution"],
+        "required": ["id", "severity", "location", "problem", "input", "observation", "execution_ref", "required_change", "replacement_execution"],
         "properties": {
           "id": { "type": "string" },
           "severity": { "type": "string", "enum": ["critical", "major"] },
@@ -24,7 +24,7 @@
           "replacement_execution": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["input", "observation"],
+            "required": ["input", "observation", "execution_ref"],
             "properties": {
               "input": { "type": "string", "minLength": 1 },
               "observation": { "type": "string", "minLength": 1 },
