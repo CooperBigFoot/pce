@@ -5,9 +5,9 @@ description: Use `/land-ticket <n>` to land one validated Effort ticket in the s
 
 # Land Ticket
 
-Land one delivered Effort ticket and expose the next Frontier. Run every command from the repository whose Program is being landed. Reconstruct durable state on every invocation from GitHub issues, committed repository source, and human answers; never rely on a previous conversation or a local Program state file.
+Land one delivered Effort ticket and expose the next Frontier. Run every command from the repository whose Program is being landed. Reconstruct durable state on every invocation from GitHub issues, committed repository source, machine proof, and human answers; never rely on a previous conversation or a local Program state file.
 
-Follow this order exactly: parse the argument; discover exactly one active Program; fetch and validate the Effort ticket and Map without mutation; trust the human's delivery assertion; establish the landed decision and ADR links; load complete Program context; conduct the Fog-graduation Grill-with-docs session; classify sharp tickets, retained Fog, and blockers; obtain approval for one complete proposal; ensure the ticket label if needed; apply only the approved changes; re-fetch state; detect Program completion; ask separately before closing the Map; then report verified results and any partial failure.
+Follow this order exactly: parse the argument; discover exactly one active Program; fetch and validate the Effort ticket and Map without mutation; prove delivery; collect every required unpaid observation; confirm the destination; establish the landed decision and ADR links; load complete Program context; perform the full Fog-graduation interview; classify sharp tickets, retained Fog, and blockers; build and approve one complete proposal including any divergence; ensure the label if needed; apply only approved changes; re-fetch; detect Program completion; ask separately before Map closure; report verified results and partial failure.
 
 ## 1. Parse one Effort ticket number
 
@@ -27,7 +27,7 @@ Count the results and apply this rule prominently:
 
 Never create or re-survey a Program during discovery. On zero or more than one result, stop before fetching or closing the selected ticket, grilling, creating labels or issues, editing the Map, or changing dependencies.
 
-## 3. Fetch and validate before any mutation
+## 3. Fetch, validate, and prove delivery before any mutation
 
 Fetch the complete selected issue, including state, and the complete active Map:
 
@@ -55,13 +55,94 @@ Before any GitHub mutation, require all of these conditions:
 
    Require the exact `Vision: ` prefix with one ASCII space and a root-relative `planning/<YYYY-MM-DD>-<slug>` value. Reject a missing, malformed, duplicate, non-root, absolute-path, or conflicting line. Do not normalize or rewrite it.
 
-Validation proves linkage format and membership only. **TRUST THE HUMAN:** the human invoking `/land-ticket` is authoritative that the linked vision was delivered and merged. Ask for that assertion explicitly. Do not inspect the planning directory, `vision.md`, PCE state, commits, git history, pull requests, implementation output, acceptance gates, or delivery artifacts to independently verify delivery. If the human does not assert delivery or says it is not merged, stop without mutation.
+After all linkage validation succeeds, bind the exact Vision value as `VISION_DIR` and bind `LOG_PATH` to its literal child `events.jsonl`. Never ask the human for either value. Run exactly:
 
-## 4. Establish the landed decision and ADR links
+```text
+pce log read --file "$VISION_DIR/events.jsonl" --kind criterion-execution
+```
 
-Inspect the ticket body and comments, Map body and comments, and committed documentation for an unambiguous existing decision and any ADR produced by the ticket's Grill-with-docs session. Because prior chat is not durable, ask the human to supply or confirm the exact one-line decision when it cannot be reconstructed unambiguously. Ask whether that Grill-with-docs session produced an ADR when the fact is not durable. Never invent a decision or ADR association.
+Require successful, validated, ordered output containing at least one criterion-execution record. Select the record with the greatest numeric `sequence` and parse its nonblank string `payload.finished_result` once as `FINISHED_RESULT`; never ask the human to select or confirm it. A missing log, nonzero read, malformed record, empty record set, or missing or blank identity stops before the next command, every human landing question, Grill-with-docs, and every GitHub mutation.
 
-Use one physical Markdown line:
+Capture stdout as `LANDING_JSON` without hiding the exit status when running exactly:
+
+```text
+pce landing check --file "$VISION_DIR/events.jsonl" --vision-dir "$VISION_DIR" --finished-result "$FINISHED_RESULT"
+```
+
+A nonzero exit, malformed JSON, top-level decision other than exact `ready`, any nonempty `problems` array, or any completion report with status `failed` or `missing` is a fatal pre-mutation stop. Report the machine failure without asking the human to interpret or override it. Do not reimplement the completion, merge, event-evidence, or three-valued authority fold in prose, and do not inspect git, GitHub pull requests, or raw delivery artifacts independently of the binary.
+
+For a ready result, retain `completion.criteria` in its existing order. Select exactly the reports whose serialized status is `unpaid`, preserving that order; reports with status `passed` cause no human question. Use each selected report only to compose the plain-language check description in the next section. Never expose the raw status, reason, evidence, authority projection, index, sequence, finished-result identity, `LANDING_JSON`, or its mechanics to the human.
+
+## 4. Confirm the destination and collect required observations
+
+Read the linked `vision.md` only after the machine result is ready. Require exactly one `## Goal / Why` and exactly one `## Scope — In`, in template order, with substantive content in both. Extract each section from its exact header through the next root-level `## ` header or end of document. A missing, duplicate, reordered, unreadable, or empty permitted section is a pre-mutation stop.
+
+Restate the combined meaning of only those two section bodies in concise plain language. Remove mechanism and do not quote a forbidden token merely because the source contains it. Do not use the title, Scope — Out, Constraints, acceptance criteria, decomposition hints, open questions, PCE summary, Map, ticket body, commits, or delivery artifacts to compose the destination.
+
+Put exactly this destination prompt to the human:
+
+```text
+Here is the world this work was meant to deliver:
+
+<plain-language restatement>
+
+Is this where you wanted to land? If not, state what should be different.
+```
+
+For each selected report, restate its criterion as a short plain-language check without exposing raw report keys or mechanics, and put this combined prompt to the human:
+
+```text
+For “<plain-language check>”, what command did you run, and what did you observe?
+```
+
+The preceding template is applied once per reported unpaid criterion at runtime, in result order. These prompts and the destination prompt are the only variable landing questions. Decision reconstruction, the Fog-graduation interview, proposal approval, and final Program closure remain separate lifecycle questions at intent altitude. Artifact bodies presented for review are proposed durable data, not question text.
+
+For every response to a criterion prompt, require two separately identifiable, nonblank parts: the command the human ran and what they observed. An absent, skipped, blank, partial, one-part, or deferred reply is not an observation receipt. Do not re-prompt with a new question; state the failure and stop.
+
+An unanswered, skipped, blank, partial, or deferred observation response stops landing before the landed decision, Fog graduation, proposal review, label assurance, selected-ticket closure, Map edit, issue creation, dependency write, or any other GitHub mutation.
+
+Evaluate that stop rule for every selected report before interpreting the destination answer and before continuing. Once every required receipt exists, interpret the destination answer. An affirmative answer adds no divergence work. A negative answer never stops landing and never remains Fog. Preserve the stated desired difference. A bare negative creates the named fallback below without another question.
+
+On a negative answer, create one mandatory divergence candidate before Fog graduation. Name its title concisely from the stated difference. If the answer contains no detail beyond its negative polarity, use exactly:
+
+```text
+Reconcile the delivered result with the intended destination
+```
+
+Seed the candidate with the normal Effort-ticket shape. With supplied details, replace the angle-bracket content with a faithful plain-language account. Without details, use exactly:
+
+```markdown
+## Question
+
+What should change so the delivered result reaches the intended destination?
+
+## Scope sketch
+
+- Revisit the delivered world described during landing.
+- Establish and deliver the intended difference.
+
+Program: #N
+```
+
+The candidate has no `Vision:` line and no `Depends on:` line unless the later complete Fog-graduation dependency analysis finds a real blocker. Replace `N` with the active Map number in the reviewed proposal. It is mandatory named Effort work, not Fog and not an optional idea: the proposal may revise its wording but may not omit it while the answer remains negative. This is the durable record of the divergence.
+
+The negative answer does not bypass existing safeguards. The complete Fog-graduation interview and whole-proposal approval still run, and no GitHub mutation occurs without that approval. A declined or unanswered proposal approval stops for lack of approval, not because the destination answer was negative.
+
+## 5. Establish the landed decision and ADR links
+
+Inspect the ticket body and comments, Map body and comments, and committed documentation for an unambiguous existing decision and any ADR produced by the ticket's Grill-with-docs session. Because prior chat is not durable, use this mechanic-free question when the one-line decision cannot be reconstructed unambiguously:
+
+```text
+What single sentence should this program remember about what the work settled?
+```
+
+When durable sources do not establish whether the session produced an ADR, ask:
+
+```text
+Did this work create a lasting architecture decision that should be linked?
+```
+
+Never invent a decision or ADR association. Use one physical Markdown line:
 
 ```markdown
 - #<n> — <one-line landed decision>
@@ -77,7 +158,7 @@ Resolve the repository URL and default branch from the current repository. Accep
 
 The approved Map edit must append this entry inside the existing `## Decisions so far` section immediately before the next `## ` header or end of body. Preserve all existing entries and every other section. Never append outside the section, replace history, or duplicate the selected ticket's entry. If `#<n>` already has an entry, reconcile it explicitly in the reviewed proposal.
 
-## 5. Load complete durable Program context
+## 6. Load complete durable Program context
 
 Re-fetch complete bodies and comments as needed. Require these exact Map headers in this order and preserve their spelling:
 
@@ -112,9 +193,9 @@ Load all of the following:
 
 Use complete Program membership to prevent duplicates, preserve blockers, and later detect completion. Exclude foreign `pce:ticket` issues. If a required Map header is missing or `CONTEXT.md` is unreadable, name the missing durable source and stop before grilling or mutation. GitHub issues and the Map are the sole durable Program state; do not introduce a local state file.
 
-## 6. Conduct the Fog-graduation Grill-with-docs session
+## 7. Conduct the Fog-graduation Grill-with-docs session
 
-Invoke and follow the sibling `grill-with-docs` skill completely, including its interview loop, domain-modeling formats, documentation decision rules, and finish rules. Specialize it narrowly to the current Map's `## Not yet specified` Fog after incorporating the selected ticket's landed decision, Map Notes, Decisions-so-far index, every existing Program ticket and blocker, and the root glossary. Do not re-survey or redesign the Program and do not decompose milestones, implementation steps, or code tasks.
+Invoke and follow the sibling `grill-with-docs` skill completely, including its interview loop, domain-modeling formats, documentation decision rules, and finish rules. Specialize it narrowly to the current Map's `## Not yet specified` Fog after incorporating the selected ticket's landed decision, the mandatory divergence candidate when present, Map Notes, Decisions-so-far index, every existing Program ticket and blocker, and the root glossary. Do not re-survey or redesign the Program and do not decompose milestones, implementation steps, or code tasks. The divergence candidate is mandatory input: use the interview to find duplicates, real dependencies, and refined wording, but never reclassify or silently discard it as Fog.
 
 During the interview:
 
@@ -130,15 +211,17 @@ Finish Fog graduation only when every Fog branch is classified as newly sharp or
 
 Identify real ordering dependencies between sharp Program tickets. Do not impose a total order. Add a blocker only for a real dependency. The unblocked actionable Effort tickets form the Frontier. Runtime glossary edits and accepted ADR creation follow the composed skill's documentation rules, but authorize no GitHub mutation and do not bypass review.
 
-## 7. Build and approve one complete proposal
+## 8. Build and approve one complete proposal
 
 Before closing the selected ticket, editing the Map, ensuring a label, creating an issue, or changing any dependency, present one complete proposed GitHub change set containing:
 
-1. The selected Effort ticket `#<n>` and its open-to-closed transition, explicitly stating that delivery is trusted from the human and not independently verified.
+1. The selected Effort ticket `#<n>` and its open-to-closed transition; that the binary proved delivery; that every required command-and-observation answer was supplied; and the destination answer's affirmative or negative polarity.
 2. The complete proposed Map title and full body: the decision entry or reconciliation in `## Decisions so far`; the complete retained `## Not yet specified` Fog; links or index entries for new tickets using mechanical placeholders; and every preserved section.
 3. Every proposed newly sharp Effort ticket title and complete seeded-lean body.
 4. Every blocking edge, naming blocker and blocked ticket, and the exact reviewed `Depends on: #M` fallback to write if native blocking is unavailable.
 5. An explicit current-to-proposed reconciliation covering ticket closure, decision append or reconciliation, minted tickets, retained Fog, unchanged tickets and sections, Map link additions, dependency additions or removals, and every issue-number placeholder with its mechanical substitution explained.
+
+On a negative answer, include the mandatory divergence ticket's title and complete seeded body among the new Effort tickets, its Map link or index placeholder, and every real dependency. The reconciliation must contain `negative destination answer -> mandatory named Effort ticket`, never retained Fog. Approval may revise the candidate but cannot omit it unless the destination answer itself is corrected and the complete proposal is presented again.
 
 Use this seeded-lean ticket body shape:
 
@@ -159,9 +242,15 @@ Program: #N
 
 Use 2–4 reviewed scope bullets. Replace `Program: #N` with the active Map number. Include `Depends on: #M` only for a real fallback dependency and replace `M` with the blocker number or a clearly explained pre-creation placeholder; omit it for an unblocked ticket. Do not stamp `Vision:` because `/work-ticket` owns that transition. Keep each body a seed for a later deep grill, not a miniature vision or implementation plan.
 
-Ask for explicit human approval of the entire proposal. Questions or revisions return to the grill and proposal cycle. Any substantive change to the Map body, ticket bodies, selected closure, or edges invalidates approval and requires presenting the complete revised proposal. Partial approval is insufficient. No GitHub mutation may precede approval; Grill-with-docs documentation changes do not authorize issue writes.
+Ask exactly:
 
-## 8. Apply only approved GitHub changes in auditable order
+```text
+Do you approve this whole change set?
+```
+
+Questions or revisions return to the grill and proposal cycle. Any substantive change to the Map body, ticket bodies, selected closure, or edges invalidates approval and requires presenting the complete revised proposal. Partial approval is insufficient and must be refused. No GitHub mutation may precede whole-proposal approval; Grill-with-docs documentation changes do not authorize issue writes.
+
+## 9. Apply only approved GitHub changes in auditable order
 
 If and only if new Effort tickets are approved, ensure the established shared label immediately before creating them:
 
@@ -171,27 +260,33 @@ gh label create pce:ticket --force
 
 Reuse exact label `pce:ticket`; never create a duplicate or renamed variant. If assurance fails, report the command and failure and stop before any issue write that needs the label. Do not require label creation when no ticket will be minted.
 
-Apply only the approved changes in this order:
+Apply only the approved changes in these six numbered stages and this exact order:
 
 1. Ensure `pce:ticket` when new tickets will be created.
-2. Close the selected ticket with exactly `gh issue close <n>`. If it fails, report it and stop; do not claim the ticket landed.
+2. Close the selected ticket with exactly `gh issue close <n>`. If it fails, report it and stop; do not claim the ticket landed. A negative destination answer reaches this same step: never branch around selected-ticket closure or create the divergence first.
 3. Update the Map with the approved full body, including the reconciled decision entry and retained Fog while preserving every other approved section.
-4. Create only the approved newly sharp tickets with label `pce:ticket`, retaining every assigned issue number.
+4. Create all and only approved newly sharp tickets, including the mandatory divergence ticket when applicable, with label `pce:ticket`, retaining every assigned issue number.
 5. Mechanically substitute reviewed number placeholders and update approved Map ticket links or indexes.
 6. Create approved native blocking relationships whenever reachable through the supported `gh` CLI or API. Make each named blocker block the named blocked ticket. If native blocking cannot be created, write the already-reviewed exact `Depends on: #M` line into the blocked ticket body. Do not claim a native edge when only fallback text exists, and do not retain fallback text for a successful native edge unless the proposal approved both.
 
-Retain the issue number and result after every mutation. If any write fails partway, stop immediately and report exactly what closed, what was created or edited, what failed, and what remains unapplied. Do not conceal, roll back, or automatically compensate for partial state. Only mechanical number substitution and the reviewed native-to-fallback choice are pre-authorized; any substantive deviation requires a new complete review.
+Retain the issue number and result after every mutation. If any write fails partway, including a Map edit, divergence mint, placeholder substitution, or dependency write, stop immediately and report exactly what closed, what was created or edited, what failed, and what remains unapplied. Do not conceal, roll back, automatically compensate, or claim an unapplied mutation. Only mechanical number substitution and the reviewed native-to-fallback choice are pre-authorized; any substantive deviation requires a new complete review.
 
-## 9. Re-fetch, detect Program completion, and report
+## 10. Re-fetch, detect Program completion, and report
 
 After all approved landing and Fog-graduation writes succeed, re-fetch the active Map, every open issue labeled `pce:ticket` with complete bodies, and dependency state. Program-done is true only when both conditions hold simultaneously:
 
 1. No open `pce:ticket` issue has exactly one `Program: #N` linkage to the active Map. Count Program members, not foreign tickets.
 2. The Map's `## Not yet specified` section has no substantive Fog after ignoring whitespace and the untouched template comment.
 
-Newly minted Effort tickets are open, so they make the Program not done. If either an open member ticket or retained Fog remains, keep the Map open, report the remaining Frontier and Fog, and do not ask to close it.
+A newly minted divergence ticket is open, so it keeps the Program open and enters the reported Frontier unless a real blocker excludes it. Any other newly minted Effort ticket has the same open-member effect. If either an open member ticket or retained Fog remains, keep the Map open, report the remaining Frontier and Fog, and do not ask to close it.
 
-Only when both conditions are true, compose a final Program summary from the Map Destination, Notes, complete Decisions-so-far index, completed member-ticket set, ADR links, and Out-of-scope section. Present it and ask the human separately and explicitly whether to close the Map. Earlier proposal approval does not authorize Map closure. On an affirmative answer only, run:
+Only when both conditions are true, compose a final Program summary from the Map Destination, Notes, complete Decisions-so-far index, completed member-ticket set, ADR links, and Out-of-scope section. Present it, then ask separately:
+
+```text
+Should I close this program now?
+```
+
+Earlier proposal approval never authorizes Map closure. On an affirmative answer only, run:
 
 ```bash
 gh issue close <program-number>
@@ -199,4 +294,4 @@ gh issue close <program-number>
 
 If the human declines or does not answer, leave the Map open. If closing fails, report the failure and do not claim completion. After success, re-fetch the Map and verify its closed state.
 
-Conclude with the selected ticket and active Map; the verified `Program:` and `Vision:` lines; the trusted-human delivery stance; the exact one-line decision and applicable ADR links; newly minted tickets; the native or fallback representation of every dependency; retained Fog and current Frontier; `CONTEXT.md` and ADR changes from the grill; whether Program-done was detected; whether Map closure was offered, declined, or verified; and any partial-state warning. Never report an issue, edge, edit, or closure that was not re-fetched or otherwise verified.
+Conclude with the selected ticket and active Map; the verified `Program:` and `Vision:` linkages; machine-proved delivery; whether all required external observations were supplied; destination-answer polarity; the exact one-line decision and applicable ADR links; the divergence ticket when applicable; every other minted ticket and native or fallback dependency; retained Fog and current Frontier; `CONTEXT.md` and ADR changes from the grill; whether Program-done was detected; whether Map closure was offered, declined, or verified; and every partial-state warning. Never report an issue, edge, edit, or closure that was not re-fetched or otherwise verified.
