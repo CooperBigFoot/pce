@@ -4,9 +4,9 @@ use std::ffi::OsString;
 use std::fs;
 
 use pce_core::{
-    ArtifactOutcome, CachedInputTokens, DispatchExitStatus, DispatchTokenUsage, ExitCode,
-    InputTokens, OutputTokens, ReasoningOutputTokens, RecoveryLogPath, RunSnapshot, VisionSlug,
-    derive_run_state, parse_event_line,
+    ArtifactOutcome, CachedInputTokens, CriterionExecutionOutcome, DispatchExitStatus,
+    DispatchTokenUsage, ExitCode, InputTokens, OutputTokens, ReasoningOutputTokens,
+    RecoveryLogPath, RunSnapshot, VisionSlug, derive_run_state, parse_event_line,
 };
 use serde_json::{Value, json};
 use support::{CliHarness, Invocation, ScriptedResponse};
@@ -157,6 +157,127 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
     assert_eq!(snapshot["schema_id"], "pce.run-snapshot");
     assert_eq!(snapshot["schema_version"], 1);
     assert!(snapshot.get("dispatch_lifecycles").is_none());
+}
+
+#[test]
+fn binary_records_reads_and_folds_distinct_criterion_outcomes() {
+    let harness = CliHarness::new().expect("create criterion execution harness");
+    let log = harness.path().join("events.jsonl");
+    let payloads = [
+        r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+        r#"{"criterion":{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"failed","observed_result":"The command exited 7."},"evidence":"git rev-parse HEAD\n./broken-command"}"#,
+        r#"{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":"The run cannot activate the human-installed hook."},"evidence":"test -L ~/.claude/hooks/pre-tool-use.sh"}"#,
+    ];
+    for payload in payloads {
+        let appended = harness
+            .run(
+                [
+                    OsString::from("log"),
+                    OsString::from("--file"),
+                    log.as_os_str().to_owned(),
+                    OsString::from("--kind"),
+                    OsString::from("criterion-execution"),
+                    OsString::from("--node"),
+                    OsString::from("m3-s2"),
+                ],
+                payload.as_bytes(),
+            )
+            .expect("append criterion execution");
+        assert_eq!(appended.status.code(), Some(0));
+        assert!(appended.stdout.is_empty());
+        assert!(appended.stderr.is_empty());
+    }
+
+    let before_rejection = fs::metadata(&log).expect("log metadata").len();
+    let rejected = harness
+        .run(
+            [
+                OsString::from("log"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--kind"),
+                OsString::from("criterion-execution"),
+                OsString::from("--node"),
+                OsString::from("m3-s2"),
+            ],
+            br#"{"criterion":{"name":"Bad","input":"Run","observation":"Pass"},"finished_result":"main@0123456789abcdef","outcome":{"status":"green","observed_result":"green"},"evidence":"command"}"#,
+        )
+        .expect("reject unknown outcome");
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(rejected.stdout.is_empty());
+    assert!(stderr(&rejected).contains("submitted event payload is invalid"));
+    assert_eq!(
+        fs::metadata(&log).expect("log metadata").len(),
+        before_rejection
+    );
+
+    let read = harness
+        .run(
+            [
+                OsString::from("log"),
+                OsString::from("read"),
+                OsString::from("--file"),
+                log.as_os_str().to_owned(),
+                OsString::from("--kind"),
+                OsString::from("criterion-execution"),
+            ],
+            b"",
+        )
+        .expect("read criterion executions");
+    assert_eq!(read.status.code(), Some(0));
+    assert!(read.stderr.is_empty());
+    let stdout = String::from_utf8(read.stdout).expect("UTF-8 event output");
+    assert!(stdout.ends_with('\n'));
+    let records = stdout
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse criterion record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.sequence().get())
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let vision = VisionSlug::parse("2026-08-03-a-gate-runs-what-was-built").expect("vision");
+    let state = derive_run_state(
+        &records,
+        &vision,
+        &RecoveryLogPath::new(log.display().to_string()),
+        &[],
+        &[],
+        &[],
+    )
+    .expect("fold criterion executions");
+    let executions = state.criterion_executions();
+    assert_eq!(executions.len(), 3);
+    assert_eq!(
+        executions
+            .iter()
+            .map(|entry| entry.criterion().name().as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Runnable criterion",
+            "Failing criterion",
+            "Install-only criterion"
+        ]
+    );
+    assert!(
+        matches!(executions[0].outcome(), CriterionExecutionOutcome::Passed { observed_result } if observed_result.as_str() == "The command exited 0.")
+    );
+    assert!(
+        matches!(executions[1].outcome(), CriterionExecutionOutcome::Failed { observed_result } if observed_result.as_str() == "The command exited 7.")
+    );
+    assert!(
+        matches!(executions[2].outcome(), CriterionExecutionOutcome::Unpaid { reason } if reason.as_str() == "The run cannot activate the human-installed hook.")
+    );
+    assert!(
+        executions
+            .iter()
+            .skip(1)
+            .all(|entry| !matches!(entry.outcome(), CriterionExecutionOutcome::Passed { .. }))
+    );
 }
 
 #[test]

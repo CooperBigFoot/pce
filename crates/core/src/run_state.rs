@@ -1,4 +1,4 @@
-//! run_state : Ordered<EventRecord> × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String; compute_dispatchability : ArtifactProvenance × Ordered<DispatchCandidate> × OrderingEdge* × (CanonicalNode → MergeStatus) × (RepositoryName → VersionPolicy) → Ordered<DispatchabilityResult> ∪ RunStateError   (pure, deterministic)
+//! run_state : Ordered<EventRecord> × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState × Ordered<CriterionExecutionObservation> ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String; compute_dispatchability : ArtifactProvenance × Ordered<DispatchCandidate> × OrderingEdge* × (CanonicalNode → MergeStatus) × (RepositoryName → VersionPolicy) → Ordered<DispatchabilityResult> ∪ RunStateError   (pure, deterministic)
 //! This module performs no I/O.
 
 use chrono::SecondsFormat;
@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
+use crate::AcceptanceCriterion;
 use crate::event_log::{
-    ArtifactOutcome, ArtifactPath, DispatchDuration, DispatchExitStatus, DispatchRef, DispatchRole,
-    DispatchTokenUsage, EscalationKey, EventBodyRef, EventRecord, EventTimestamp, KnownPayload,
-    NodeId, RepositoryName, Sequence, Sha256Digest,
+    ArtifactOutcome, ArtifactPath, CriterionExecutionOutcome, DispatchDuration, DispatchExitStatus,
+    DispatchRef, DispatchRole, DispatchTokenUsage, EscalationKey, EventBodyRef, EventRecord,
+    EventTimestamp, Evidence, FinishedResult, KnownPayload, NodeId, RepositoryName, Sequence,
+    Sha256Digest,
 };
 
 /// A vision-directory basename suffix with its leading date prefix removed.
@@ -1524,6 +1526,49 @@ pub enum ResumeObservation {
     },
 }
 
+/// One exact criterion execution retained in event-sequence order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CriterionExecutionObservation {
+    sequence: Sequence,
+    node: NodeId,
+    criterion: AcceptanceCriterion,
+    finished_result: FinishedResult,
+    outcome: CriterionExecutionOutcome,
+    evidence: Evidence,
+}
+
+impl CriterionExecutionObservation {
+    /// Return the source event sequence.
+    pub const fn sequence(&self) -> Sequence {
+        self.sequence
+    }
+
+    /// Return the source event node.
+    pub const fn node(&self) -> &NodeId {
+        &self.node
+    }
+
+    /// Return the exact criterion supplied for execution.
+    pub const fn criterion(&self) -> &AcceptanceCriterion {
+        &self.criterion
+    }
+
+    /// Return the exact supplied finished result.
+    pub const fn finished_result(&self) -> &FinishedResult {
+        &self.finished_result
+    }
+
+    /// Return the distinct execution outcome.
+    pub const fn outcome(&self) -> &CriterionExecutionOutcome {
+        &self.outcome
+    }
+
+    /// Return the execution evidence.
+    pub const fn evidence(&self) -> &Evidence {
+        &self.evidence
+    }
+}
+
 /// Pure derived run state with deterministic collection order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivedRunState {
@@ -1531,6 +1576,7 @@ pub struct DerivedRunState {
     steps: Vec<StepMergeResult>,
     dispatches: Vec<DispatchObservation>,
     dispatch_lifecycles: Vec<DispatchLifecycleObservation>,
+    criterion_executions: Vec<CriterionExecutionObservation>,
     rounds: Vec<RoundSeries>,
     holds: Vec<HoldObservation>,
     provenance: Vec<ArtifactProvenance>,
@@ -1557,6 +1603,11 @@ impl DerivedRunState {
     /// Return measured dispatch lifecycles in completion-record order.
     pub fn dispatch_lifecycles(&self) -> &[DispatchLifecycleObservation] {
         &self.dispatch_lifecycles
+    }
+
+    /// Return every criterion execution in event-sequence order.
+    pub fn criterion_executions(&self) -> &[CriterionExecutionObservation] {
+        &self.criterion_executions
     }
 
     /// Return first-seen-ordered exact `(node, role)` round series.
@@ -2713,6 +2764,7 @@ pub fn derive_run_state(
     let mut visible_nodes = Vec::<VisibleNode>::new();
     let mut dispatches = Vec::<DispatchObservation>::new();
     let mut dispatch_lifecycles = Vec::<DispatchLifecycleObservation>::new();
+    let mut criterion_executions = Vec::<CriterionExecutionObservation>::new();
     let mut rounds = Vec::<RoundSeries>::new();
     let mut holds = Vec::<HoldObservation>::new();
     let mut approvals = Vec::<LatestApproval>::new();
@@ -2869,6 +2921,16 @@ pub fn derive_run_state(
                     payload.evidence.as_str(),
                 ));
             }
+            EventBodyRef::Known(KnownPayload::CriterionExecution(payload)) => {
+                criterion_executions.push(CriterionExecutionObservation {
+                    sequence: record.sequence(),
+                    node: record.node().clone(),
+                    criterion: payload.criterion.clone(),
+                    finished_result: payload.finished_result.clone(),
+                    outcome: payload.outcome.clone(),
+                    evidence: payload.evidence.clone(),
+                });
+            }
             EventBodyRef::Known(KnownPayload::Delta(payload)) => {
                 recovery_deltas.push(RecoveryCandidate {
                     sequence: record.sequence().get(),
@@ -2943,6 +3005,7 @@ pub fn derive_run_state(
         steps,
         dispatches,
         dispatch_lifecycles,
+        criterion_executions,
         rounds,
         holds,
         provenance,
@@ -3387,21 +3450,22 @@ mod tests {
     use std::error::Error;
 
     use crate::event_log::{
-        ArtifactOutcome, ArtifactPath, CachedInputTokens, DeltaPayload, DispatchCompletionPayload,
-        DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef, DispatchRole,
-        DispatchTokenUsage, EscalationClosePayload, EscalationKey, EscalationOpenPayload,
-        EventRecord, EventTimestamp, Evidence, ExitCode, InputTokens, KnownPayload, NodeId,
-        OutputTokens, PlanningArtifactApprovedPayload, ReasoningOutputTokens, RepositoryName,
-        Sequence, Sha256Digest,
+        ArtifactOutcome, ArtifactPath, CachedInputTokens, CriterionExecutionOutcome, DeltaPayload,
+        DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload,
+        DispatchRef, DispatchRole, DispatchTokenUsage, EscalationClosePayload, EscalationKey,
+        EscalationOpenPayload, EventRecord, EventTimestamp, Evidence, ExitCode, InputTokens,
+        KnownPayload, NodeId, OutputTokens, PlanningArtifactApprovedPayload, ReasoningOutputTokens,
+        RepositoryName, Sequence, Sha256Digest, parse_event_line,
     };
     use crate::run_state::{
         ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BranchState,
-        CanonicalNode, CurrentArtifactObservation, CurrentArtifactState, CyclePosition,
-        DispatchCandidate, DispatchRoleClass, DispatchabilityResult, ExactPullRequestIdentity,
-        ExactPullRequestState, GitAuthorityObservation, GitHubAuthorityObservation,
-        GitHubPullRequestObservation, GitMergeObservation, HoldStatus, MergeStatus, MergeSubject,
-        MilestoneMergeSubject, MilestoneNode, OrderingEdge, PullRequestNumber, PullRequestSelector,
-        RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation, RepositoryObservation,
+        CanonicalNode, CriterionExecutionObservation, CurrentArtifactObservation,
+        CurrentArtifactState, CyclePosition, DispatchCandidate, DispatchRoleClass,
+        DispatchabilityResult, ExactPullRequestIdentity, ExactPullRequestState,
+        GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
+        GitMergeObservation, HoldStatus, MergeStatus, MergeSubject, MilestoneMergeSubject,
+        MilestoneNode, OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
+        RepositoryBranchName, RepositoryFetchObservation, RepositoryObservation,
         RepositoryObservationFailure, RepositoryObservationRef, ResumeObservation, RoundCount,
         RunSnapshot, RunStateError, SquashCommitOid, StepAuthorityObservation, StepNode, TagName,
         TagState, TagTarget, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
@@ -5790,6 +5854,163 @@ mod tests {
         assert!(
             render_human_snapshot(&RunSnapshot::from(&state)).contains("cycle=no-round-dispatch")
         );
+        Ok(())
+    }
+
+    fn assert_exact_criterion_executions(
+        executions: &[CriterionExecutionObservation],
+        expected_sequences: &[u64],
+    ) {
+        assert_eq!(executions.len(), 3);
+        assert_eq!(
+            executions
+                .iter()
+                .map(|entry| entry.sequence().get())
+                .collect::<Vec<_>>(),
+            expected_sequences
+        );
+        assert_eq!(
+            executions
+                .iter()
+                .map(|entry| entry.node().as_str())
+                .collect::<Vec<_>>(),
+            ["m3-s2", "m3-s2", "m3-s2"]
+        );
+        assert_eq!(
+            executions
+                .iter()
+                .map(|entry| entry.criterion().name().as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Runnable criterion",
+                "Failing criterion",
+                "Install-only criterion"
+            ]
+        );
+        assert_eq!(
+            executions
+                .iter()
+                .map(|entry| entry.criterion().input().as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Run the finished command.",
+                "Run the broken command.",
+                "Install the hook, then attempt the forbidden command."
+            ]
+        );
+        assert_eq!(
+            executions
+                .iter()
+                .map(|entry| entry.criterion().observation().as_str())
+                .collect::<Vec<_>>(),
+            ["It exits 0.", "It exits 0.", "The command is denied."]
+        );
+        assert_eq!(
+            executions
+                .iter()
+                .map(|entry| entry.finished_result().as_str())
+                .collect::<Vec<_>>(),
+            [
+                "main@0123456789abcdef",
+                "main@0123456789abcdef",
+                "main@0123456789abcdef"
+            ]
+        );
+        assert_eq!(
+            executions
+                .iter()
+                .map(|entry| entry.evidence().as_str())
+                .collect::<Vec<_>>(),
+            [
+                "git rev-parse HEAD\n./finished-command",
+                "git rev-parse HEAD\n./broken-command",
+                "test -L ~/.claude/hooks/pre-tool-use.sh"
+            ]
+        );
+        assert!(
+            matches!(executions[0].outcome(), CriterionExecutionOutcome::Passed { observed_result } if observed_result.as_str() == "The command exited 0.")
+        );
+        assert!(
+            matches!(executions[1].outcome(), CriterionExecutionOutcome::Failed { observed_result } if observed_result.as_str() == "The command exited 7.")
+        );
+        assert!(
+            matches!(executions[2].outcome(), CriterionExecutionOutcome::Unpaid { reason } if reason.as_str() == "The run cannot activate the human-installed hook.")
+        );
+        assert_eq!(
+            executions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    matches!(entry.outcome(), CriterionExecutionOutcome::Passed { .. })
+                        .then_some(index + 1)
+                })
+                .collect::<Vec<_>>(),
+            [1]
+        );
+    }
+
+    #[test]
+    fn folds_clean_criterion_executions_at_sequences_one_two_three() -> Result<(), Box<dyn Error>> {
+        let lines = [
+            r#"{"sequence":1,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}}"#,
+            r#"{"sequence":2,"timestamp":"2026-07-27T12:35:04.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"failed","observed_result":"The command exited 7."},"evidence":"git rev-parse HEAD\n./broken-command"}}"#,
+            r#"{"sequence":3,"timestamp":"2026-07-27T12:35:05.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":"The run cannot activate the human-installed hook."},"evidence":"test -L ~/.claude/hooks/pre-tool-use.sh"}}"#,
+        ];
+        let records = lines
+            .into_iter()
+            .map(parse_event_line)
+            .collect::<Result<Vec<_>, _>>()?;
+        let state = derive_run_state(
+            &records,
+            &VisionSlug::parse("2026-08-03-a-gate-runs-what-was-built")?,
+            &RecoveryLogPath::new("events.jsonl"),
+            &[],
+            &[],
+            &[],
+        )?;
+        assert_exact_criterion_executions(state.criterion_executions(), &[1, 2, 3]);
+
+        let duplicate_records = [
+            parse_event_line(lines[0])?,
+            parse_event_line(&lines[0].replacen("\"sequence\":1", "\"sequence\":2", 1))?,
+        ];
+        let duplicate_state = derive_run_state(
+            &duplicate_records,
+            &VisionSlug::parse("2026-08-03-a-gate-runs-what-was-built")?,
+            &RecoveryLogPath::new("events.jsonl"),
+            &[],
+            &[],
+            &[],
+        )?;
+        assert_eq!(duplicate_state.criterion_executions().len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_event_between_first_and_second_execution_preserves_exact_fold()
+    -> Result<(), Box<dyn Error>> {
+        // Sequence 2 belongs to the inserted unknown record, so the latter two typed records are
+        // renumbered from the clean fold's [2, 3] to [3, 4].
+        let lines = [
+            r#"{"sequence":1,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}}"#,
+            r#"{"sequence":2,"timestamp":"2026-07-27T12:35:03.500Z","kind":"criterion-execution-v2","node":"m3-s2","payload":{"kept":true}}"#,
+            r#"{"sequence":3,"timestamp":"2026-07-27T12:35:04.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Failing criterion","input":"Run the broken command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"failed","observed_result":"The command exited 7."},"evidence":"git rev-parse HEAD\n./broken-command"}}"#,
+            r#"{"sequence":4,"timestamp":"2026-07-27T12:35:05.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":"The run cannot activate the human-installed hook."},"evidence":"test -L ~/.claude/hooks/pre-tool-use.sh"}}"#,
+        ];
+        let records = lines
+            .into_iter()
+            .map(parse_event_line)
+            .collect::<Result<Vec<_>, _>>()?;
+        let state = derive_run_state(
+            &records,
+            &VisionSlug::parse("2026-08-03-a-gate-runs-what-was-built")?,
+            &RecoveryLogPath::new("events.jsonl"),
+            &[],
+            &[],
+            &[],
+        )?;
+
+        assert_exact_criterion_executions(state.criterion_executions(), &[1, 3, 4]);
         Ok(())
     }
 }
