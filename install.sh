@@ -23,7 +23,7 @@ import sys
 import tempfile
 
 
-def merge(settings_path, command):
+def merge(settings_path, rehydrate_command, protection_command):
     if os.path.exists(settings_path):
         with open(settings_path, "r", encoding="utf-8") as source:
             settings = json.load(source)
@@ -57,7 +57,11 @@ def merge(settings_path, command):
             for hook in inner_hooks:
                 if not isinstance(hook, dict):
                     raise ValueError(f"hooks.{event_name} inner hooks must be objects")
-            filtered = [hook for hook in inner_hooks if hook.get("command") != command]
+            filtered = [
+                hook
+                for hook in inner_hooks
+                if hook.get("command") not in (rehydrate_command, protection_command)
+            ]
             removed_managed = len(filtered) != len(inner_hooks)
             if removed_managed and not filtered:
                 continue
@@ -75,7 +79,20 @@ def merge(settings_path, command):
     session_start.append(
         {
             "matcher": "resume|compact",
-            "hooks": [{"type": "command", "command": command}],
+            "hooks": [{"type": "command", "command": rehydrate_command}],
+        }
+    )
+
+    pre_tool_use = hooks.get("PreToolUse")
+    if pre_tool_use is None:
+        pre_tool_use = []
+        hooks["PreToolUse"] = pre_tool_use
+    if not isinstance(pre_tool_use, list):
+        raise ValueError("hooks.PreToolUse must be an array")
+    pre_tool_use.append(
+        {
+            "matcher": "Bash|Edit|Write",
+            "hooks": [{"type": "command", "command": protection_command}],
         }
     )
 
@@ -108,11 +125,11 @@ def merge(settings_path, command):
 
 
 try:
-    merge(sys.argv[1], sys.argv[2])
+    merge(sys.argv[1], sys.argv[2], sys.argv[3])
 except Exception as error:
     sys.stderr.write(f"ERROR: failed to merge hook settings: {error}\n")
     sys.exit(1)
-' "$settings_path" '$HOME/.local/bin/pce-rehydrate'
+' "$settings_path" '$HOME/.local/bin/pce-rehydrate' '$HOME/.local/bin/pce-protect-criteria'
 }
 
 verify_hook_settings() {
@@ -122,7 +139,7 @@ import json
 import sys
 
 
-def verify(settings_path, command):
+def verify(settings_path, rehydrate_command, protection_command):
     with open(settings_path, "r", encoding="utf-8") as source:
         settings = json.load(source)
     if not isinstance(settings, dict):
@@ -134,55 +151,56 @@ def verify(settings_path, command):
     if not isinstance(session_start, list):
         raise ValueError("hooks.SessionStart must be an array")
 
-    managed_count = 0
-    exact_group_count = 0
-    expected_hooks = [{"type": "command", "command": command}]
-    for group in session_start:
-        if not isinstance(group, dict):
-            raise ValueError("hooks.SessionStart entries must be objects")
-        inner_hooks = group.get("hooks")
-        if inner_hooks is not None and not isinstance(inner_hooks, list):
-            raise ValueError("hooks.SessionStart group hooks must be an array")
-        if isinstance(inner_hooks, list):
-            for hook in inner_hooks:
-                if not isinstance(hook, dict):
-                    raise ValueError("hooks.SessionStart inner hooks must be objects")
-                if hook.get("command") == command:
-                    managed_count += 1
-        if group.get("matcher") == "resume|compact" and inner_hooks == expected_hooks:
-            exact_group_count += 1
+    counts = {rehydrate_command: 0, protection_command: 0}
+    exact_rehydrate = 0
+    exact_protection = 0
+    for event_name, groups in hooks.items():
+        if not isinstance(groups, list):
+            raise ValueError(f"hooks.{event_name} must be an array")
+        for group in groups:
+            if not isinstance(group, dict):
+                raise ValueError(f"hooks.{event_name} entries must be objects")
+            inner_hooks = group.get("hooks")
+            if inner_hooks is not None and not isinstance(inner_hooks, list):
+                raise ValueError(f"hooks.{event_name} group hooks must be an array")
+            if isinstance(inner_hooks, list):
+                for hook in inner_hooks:
+                    if not isinstance(hook, dict):
+                        raise ValueError(f"hooks.{event_name} inner hooks must be objects")
+                    command = hook.get("command")
+                    if command in counts:
+                        counts[command] += 1
+                        if command == rehydrate_command and event_name != "SessionStart":
+                            raise ValueError("managed rehydration command is under a noncanonical event")
+                        if command == protection_command and event_name != "PreToolUse":
+                            raise ValueError("managed protection command is under a noncanonical event")
+            if event_name == "SessionStart" and group == {
+                "matcher": "resume|compact",
+                "hooks": [{"type": "command", "command": rehydrate_command}],
+            }:
+                exact_rehydrate += 1
+            if event_name == "PreToolUse" and group == {
+                "matcher": "Bash|Edit|Write",
+                "hooks": [{"type": "command", "command": protection_command}],
+            }:
+                exact_protection += 1
 
-    post_compact_count = 0
-    post_compact = hooks.get("PostCompact", [])
-    if not isinstance(post_compact, list):
-        raise ValueError("hooks.PostCompact must be an array")
-    for group in post_compact:
-        if not isinstance(group, dict):
-            raise ValueError("hooks.PostCompact entries must be objects")
-        inner_hooks = group.get("hooks")
-        if inner_hooks is not None and not isinstance(inner_hooks, list):
-            raise ValueError("hooks.PostCompact group hooks must be an array")
-        if isinstance(inner_hooks, list):
-            for hook in inner_hooks:
-                if not isinstance(hook, dict):
-                    raise ValueError("hooks.PostCompact inner hooks must be objects")
-                if hook.get("command") == command:
-                    post_compact_count += 1
-
-    if managed_count != 1:
-        raise ValueError(f"managed SessionStart command count is {managed_count}, expected 1")
-    if exact_group_count != 1:
-        raise ValueError(f"canonical SessionStart group count is {exact_group_count}, expected 1")
-    if post_compact_count != 0:
-        raise ValueError(f"managed PostCompact command count is {post_compact_count}, expected 0")
+    if counts[rehydrate_command] != 1:
+        raise ValueError(f"managed rehydration command count is {counts[rehydrate_command]}, expected 1")
+    if exact_rehydrate != 1:
+        raise ValueError(f"canonical SessionStart group count is {exact_rehydrate}, expected 1")
+    if counts[protection_command] != 1:
+        raise ValueError(f"managed protection command count is {counts[protection_command]}, expected 1")
+    if exact_protection != 1:
+        raise ValueError(f"canonical PreToolUse group count is {exact_protection}, expected 1")
 
 
 try:
-    verify(sys.argv[1], sys.argv[2])
+    verify(sys.argv[1], sys.argv[2], sys.argv[3])
 except Exception as error:
     sys.stderr.write(f"ERROR: hook settings verification failed: {error}\n")
     sys.exit(1)
-' "$settings_path" '$HOME/.local/bin/pce-rehydrate'
+' "$settings_path" '$HOME/.local/bin/pce-rehydrate' '$HOME/.local/bin/pce-protect-criteria'
 }
 
 if [ "${1:-}" = "--merge-hook-settings" ]; then
@@ -240,13 +258,19 @@ status=0
 
 HOOK_LINK="$BIN_DIR/pce-rehydrate"
 HOOK_SOURCE="$REPO_ROOT/hooks/pce-rehydrate.sh"
-if [ -e "$HOOK_LINK" ] && [ ! -L "$HOOK_LINK" ]; then
-    echo "ERROR: $HOOK_LINK already exists and is not a symlink." >&2
-    echo "Refusing to overwrite it. Move it aside, then re-run install.sh." >&2
-    exit 1
-fi
+HOOK_PROTECTION_LINK="$BIN_DIR/pce-protect-criteria"
+HOOK_PROTECTION_SOURCE="$REPO_ROOT/hooks/pce-protect-criteria.sh"
+for hook_link in "$HOOK_LINK" "$HOOK_PROTECTION_LINK"; do
+    if [ -e "$hook_link" ] && [ ! -L "$hook_link" ]; then
+        echo "ERROR: $hook_link already exists and is not a symlink." >&2
+        echo "Refusing to overwrite it. Move it aside, then re-run install.sh." >&2
+        exit 1
+    fi
+done
 ln -sfn "$HOOK_SOURCE" "$HOOK_LINK"
 echo "Linked $HOOK_LINK -> $HOOK_SOURCE"
+ln -sfn "$HOOK_PROTECTION_SOURCE" "$HOOK_PROTECTION_LINK"
+echo "Linked $HOOK_PROTECTION_LINK -> $HOOK_PROTECTION_SOURCE"
 
 SETTINGS_PATH="$HOME/.claude/settings.json"
 if [ "$python_executable" -eq 1 ]; then
@@ -259,7 +283,7 @@ else
 fi
 
 # --- Post-install verification ---------------------------------------------------
-for link in "$BIN_DIR/pce" "$HOOK_LINK" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DIR/domain-modeling" "$SKILLS_DIR/grill-with-docs" "$SKILLS_DIR/chart-program" "$SKILLS_DIR/work-ticket" "$SKILLS_DIR/land-ticket"; do
+for link in "$BIN_DIR/pce" "$HOOK_LINK" "$HOOK_PROTECTION_LINK" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DIR/domain-modeling" "$SKILLS_DIR/grill-with-docs" "$SKILLS_DIR/chart-program" "$SKILLS_DIR/work-ticket" "$SKILLS_DIR/land-ticket"; do
     if [ -L "$link" ] && [ -e "$link" ]; then
         echo "OK: $link resolves"
     else
@@ -270,6 +294,10 @@ done
 
 if [ ! -x "$HOOK_LINK" ]; then
     echo "ERROR: $HOOK_LINK is not executable." >&2
+    status=1
+fi
+if [ ! -x "$HOOK_PROTECTION_LINK" ]; then
+    echo "ERROR: $HOOK_PROTECTION_LINK is not executable." >&2
     status=1
 fi
 
