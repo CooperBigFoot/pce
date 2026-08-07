@@ -14,7 +14,7 @@ pub enum CompletionDecision {
     Refuse,
 }
 
-/// The latest execution status for one effective criterion and finished result.
+/// The folded execution status for one effective criterion and finished result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "kebab-case")]
 pub enum CompletionCriterionStatus {
@@ -30,7 +30,7 @@ pub enum CompletionCriterionStatus {
     Missing,
 }
 
-/// One effective criterion paired with its latest execution status.
+/// One effective criterion paired with its folded execution status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CompletionCriterionReport {
     pub criterion: AcceptanceCriterion,
@@ -46,7 +46,7 @@ pub struct CompletionGateResult {
     pub criteria: Vec<CompletionCriterionReport>,
 }
 
-/// Evaluate the latest exact execution evidence for every effective criterion.
+/// Evaluate the folded exact execution evidence for every effective criterion.
 pub fn evaluate_completion(
     finished_result: &FinishedResult,
     effective_criteria: &[BlockingCriterion],
@@ -58,14 +58,13 @@ pub fn evaluate_completion(
             let criterion = blocking.criterion();
             let status = executions
                 .iter()
-                .rev()
-                .find(|execution| {
+                .filter(|execution| {
                     execution.criterion() == criterion
                         && execution.finished_result() == finished_result
                 })
-                .map_or(
+                .fold(
                     CompletionCriterionStatus::Missing,
-                    |execution| match execution.outcome() {
+                    |current, execution| match execution.outcome() {
                         CriterionExecutionOutcome::Passed { observed_result } => {
                             CompletionCriterionStatus::Passed {
                                 observed_result: observed_result.clone(),
@@ -76,11 +75,12 @@ pub fn evaluate_completion(
                                 observed_result: observed_result.clone(),
                             }
                         }
-                        CriterionExecutionOutcome::Unpaid { reason } => {
-                            CompletionCriterionStatus::Unpaid {
+                        CriterionExecutionOutcome::Unpaid { reason } => match current {
+                            failed @ CompletionCriterionStatus::Failed { .. } => failed,
+                            _ => CompletionCriterionStatus::Unpaid {
                                 reason: reason.clone(),
-                            }
-                        }
+                            },
+                        },
                     },
                 );
             CompletionCriterionReport {
@@ -247,7 +247,28 @@ mod tests {
     }
 
     #[test]
-    fn latest_matching_execution_wins() -> Result<(), Box<dyn Error>> {
+    fn later_unpaid_does_not_supersede_failed_execution() -> Result<(), Box<dyn Error>> {
+        let failed = execution(
+            RUNNABLE,
+            RESULT,
+            r#"{"status":"failed","observed_result":"The command exited 7."}"#,
+        );
+        let unpaid = execution(
+            RUNNABLE,
+            RESULT,
+            r#"{"status":"unpaid","reason":"The run cannot execute the command now."}"#,
+        );
+        let result = evaluate(RUNNABLE, &[&failed, &unpaid])?;
+        assert_eq!(result.decision, CompletionDecision::Refuse);
+        assert_eq!(result.criteria.len(), 1);
+        assert!(
+            matches!(&result.criteria[0].status, CompletionCriterionStatus::Failed { observed_result } if observed_result.as_str() == "The command exited 7.")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn later_passed_supersedes_failed_execution_after_repair() -> Result<(), Box<dyn Error>> {
         let failed = execution(
             RUNNABLE,
             RESULT,
@@ -258,28 +279,33 @@ mod tests {
             RESULT,
             r#"{"status":"passed","observed_result":"The command exited 0."}"#,
         );
-        for (events, decision, observed) in [
-            (
-                vec![failed.as_str(), passed.as_str()],
-                CompletionDecision::Complete,
-                "The command exited 0.",
-            ),
-            (
-                vec![passed.as_str(), failed.as_str()],
-                CompletionDecision::Refuse,
-                "The command exited 7.",
-            ),
-        ] {
-            let result = evaluate(RUNNABLE, &events)?;
-            assert_eq!(result.decision, decision);
-            match &result.criteria[0].status {
-                CompletionCriterionStatus::Passed { observed_result }
-                | CompletionCriterionStatus::Failed { observed_result } => {
-                    assert_eq!(observed_result.as_str(), observed)
-                }
-                status => panic!("unexpected status: {status:?}"),
-            }
-        }
+        let result = evaluate(RUNNABLE, &[&failed, &passed])?;
+        assert_eq!(result.decision, CompletionDecision::Complete);
+        assert_eq!(result.criteria.len(), 1);
+        assert!(
+            matches!(&result.criteria[0].status, CompletionCriterionStatus::Passed { observed_result } if observed_result.as_str() == "The command exited 0.")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn later_failed_supersedes_passed_execution() -> Result<(), Box<dyn Error>> {
+        let passed = execution(
+            RUNNABLE,
+            RESULT,
+            r#"{"status":"passed","observed_result":"The command exited 0."}"#,
+        );
+        let failed = execution(
+            RUNNABLE,
+            RESULT,
+            r#"{"status":"failed","observed_result":"The command exited 7."}"#,
+        );
+        let result = evaluate(RUNNABLE, &[&passed, &failed])?;
+        assert_eq!(result.decision, CompletionDecision::Refuse);
+        assert_eq!(result.criteria.len(), 1);
+        assert!(
+            matches!(&result.criteria[0].status, CompletionCriterionStatus::Failed { observed_result } if observed_result.as_str() == "The command exited 7.")
+        );
         Ok(())
     }
 
