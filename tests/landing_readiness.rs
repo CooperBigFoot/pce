@@ -9,6 +9,10 @@ use serde_json::{Value, json};
 use support::{CliHarness, Invocation, ScriptedResponse};
 
 const FINISHED_RESULT: &str = "main@0123456789abcdef";
+const READY_STDOUT: &str = concat!(
+    r#"{"decision":"ready","completion":{"decision":"complete","finished_result":"main@0123456789abcdef","criteria":[{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"status":"passed","observed_result":"The command exited 0."},{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"status":"unpaid","reason":"The run cannot activate the human-installed hook."}]},"steps":[{"node":"m6-s1","subject":{"milestone":6,"step":1,"head_branch":"pce/landing-fixture/m6-s1","integration_branch":"pce/landing-fixture/milestone-6","pull_request_selector":{"head":"pce/landing-fixture/m6-s1","base":"pce/landing-fixture/milestone-6"}},"github":{"availability":"reachable","cardinality":"one-exact-match","pull_request":{"number":61,"selector":{"head":"pce/landing-fixture/m6-s1","base":"pce/landing-fixture/milestone-6"},"state":{"status":"merged","squash_commit_oid":"squash-landing-oid"}}},"git":{"availability":"reachable","state":"squash-commit-reachable","squash_commit_oid":"squash-landing-oid"},"merge_status":"merged"}],"criterion_evidence":[{"status":"recorded","criterion_index":0,"sequence":3,"node":"m6-s1","criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"run the finished command"},{"status":"recorded","criterion_index":1,"sequence":4,"node":"m6-s1","criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":"The run cannot activate the human-installed hook."},"evidence":"inspect the human-install boundary"}],"problems":[]}"#,
+    "\n"
+);
 
 struct Fixture {
     harness: CliHarness,
@@ -174,14 +178,7 @@ fn binary_emits_exact_ready_proof_and_reuses_status_authorities() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.stderr.is_empty());
-    assert_eq!(output.stdout.last(), Some(&b'\n'));
-    let proof: Value = serde_json::from_slice(&output.stdout).expect("landing JSON");
-    assert_eq!(proof["decision"], "ready");
-    assert_eq!(proof["completion"]["decision"], "complete");
-    assert_eq!(proof["steps"][0]["merge_status"], "merged");
-    assert_eq!(proof["criterion_evidence"][0]["sequence"], 3);
-    assert_eq!(proof["criterion_evidence"][1]["sequence"], 4);
-    assert_eq!(proof["problems"], json!([]));
+    assert_eq!(output.stdout, READY_STDOUT.as_bytes());
     let root = fixture.harness.path();
     let expected = vec![
         invocation("git", git_args(root, &["remote", "get-url", "origin"])),

@@ -210,6 +210,7 @@ mod tests {
     };
 
     const RESULT: &str = "main@0123456789abcdef";
+    const READY_JSON: &str = r#"{"decision":"ready","completion":{"decision":"complete","finished_result":"main@0123456789abcdef","criteria":[{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"status":"passed","observed_result":"The command exited 0."},{"criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"status":"unpaid","reason":"The run cannot activate the human-installed hook."}]},"steps":[{"node":"m6-s1","subject":{"milestone":6,"step":1,"head_branch":"pce/landing-fixture/m6-s1","integration_branch":"pce/landing-fixture/milestone-6","pull_request_selector":{"head":"pce/landing-fixture/m6-s1","base":"pce/landing-fixture/milestone-6"}},"github":{"availability":"reachable","cardinality":"one-exact-match","pull_request":{"number":61,"selector":{"head":"pce/landing-fixture/m6-s1","base":"pce/landing-fixture/milestone-6"},"state":{"status":"merged","squash_commit_oid":"squash-landing-oid"}}},"git":{"availability":"reachable","state":"squash-commit-reachable","squash_commit_oid":"squash-landing-oid"},"merge_status":"merged"}],"criterion_evidence":[{"status":"recorded","criterion_index":0,"sequence":3,"node":"m6-s1","criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"run the finished command"},{"status":"recorded","criterion_index":1,"sequence":4,"node":"m6-s1","criterion":{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."},"finished_result":"main@0123456789abcdef","outcome":{"status":"unpaid","reason":"The run cannot activate the human-installed hook."},"evidence":"inspect the human-install boundary"}],"problems":[]}"#;
 
     fn criteria(names: &[&str]) -> crate::AcceptanceCriteria {
         let values = names
@@ -332,7 +333,13 @@ mod tests {
 
     #[test]
     fn complete_merged_and_evidenced_is_ready_in_effective_order() -> Result<(), Box<dyn Error>> {
-        let criteria = criteria(&["Runnable criterion", "Install-only criterion"]);
+        let criteria = parse_acceptance_criteria(concat!(
+            "# Vision\n\n",
+            "## Acceptance criteria (vision-level \"done\")\n\n",
+            "```json\n",
+            r#"{"criteria":[{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},{"name":"Install-only criterion","input":"Install the hook, then attempt the forbidden command.","observation":"The command is denied."}]}"#,
+            "\n```\n"
+        ))?;
         let records = vec![
             execution(
                 3,
@@ -361,10 +368,20 @@ mod tests {
         assert_eq!(result.decision, LandingReadinessDecision::Ready);
         assert!(result.problems.is_empty());
         assert_eq!(result.criterion_evidence.len(), 2);
+        let serialized = serde_json::to_value(&result)?;
+        assert_eq!(serialized["criterion_evidence"][0]["criterion_index"], 0);
+        assert_eq!(serialized["criterion_evidence"][1]["criterion_index"], 1);
+        assert_eq!(serialized["criterion_evidence"][0]["sequence"], 3);
+        assert_eq!(serialized["criterion_evidence"][1]["sequence"], 4);
         assert_eq!(
-            serde_json::to_value(&result)?["steps"][0]["merge_status"],
-            "merged"
+            serialized["criterion_evidence"][0]["evidence"],
+            "run the finished command"
         );
+        assert_eq!(
+            serialized["criterion_evidence"][1]["evidence"],
+            "inspect the human-install boundary"
+        );
+        assert_eq!(serialized, serde_json::from_str::<Value>(READY_JSON)?);
         Ok(())
     }
 
@@ -553,44 +570,104 @@ mod tests {
     #[test]
     fn criterion_status_and_outcome_values_must_match_exactly() -> Result<(), Box<dyn Error>> {
         let criteria = criteria(&["Runnable criterion"]);
-        let record = execution(
-            1,
-            &criteria.as_slice()[0],
-            RESULT,
-            json!({"status":"passed","observed_result":"actual"}),
-            "run",
-        );
-        let state = state(&criteria, &[record], &[])?;
-        let completion = CompletionGateResult {
-            decision: CompletionDecision::Complete,
-            finished_result: crate::FinishedResult::parse(RESULT)?,
-            criteria: vec![CompletionCriterionReport {
-                criterion: criteria.as_slice()[0].clone(),
-                status: CompletionCriterionStatus::Passed {
-                    observed_result: ObservedCriterionResult::parse("expected")?,
+        let cases = vec![
+            (
+                "passed observed-result mismatch",
+                json!({"status":"passed","observed_result":"actual pass"}),
+                CompletionCriterionStatus::Passed {
+                    observed_result: ObservedCriterionResult::parse("expected pass")?,
                 },
-            }],
-        };
-        let mismatch = evaluate_landing_readiness(&completion, &[], state.criterion_executions());
-        assert!(matches!(
-            mismatch.criterion_evidence[0],
-            LandingCriterionEvidence::Missing { .. }
-        ));
-        let exact = CompletionGateResult {
-            criteria: vec![CompletionCriterionReport {
-                criterion: criteria.as_slice()[0].clone(),
-                status: CompletionCriterionStatus::Passed {
-                    observed_result: ObservedCriterionResult::parse("actual")?,
+                CompletionCriterionStatus::Passed {
+                    observed_result: ObservedCriterionResult::parse("actual pass")?,
                 },
-            }],
-            ..completion
-        };
-        let control = evaluate_landing_readiness(&exact, &[], state.criterion_executions());
-        assert!(matches!(
-            control.criterion_evidence[0],
-            LandingCriterionEvidence::Recorded { .. }
-        ));
-        let _ = UnpaidCriterionReason::parse("reason")?;
+                CompletionDecision::Complete,
+            ),
+            (
+                "failed observed-result mismatch",
+                json!({"status":"failed","observed_result":"actual failure"}),
+                CompletionCriterionStatus::Failed {
+                    observed_result: ObservedCriterionResult::parse("expected failure")?,
+                },
+                CompletionCriterionStatus::Failed {
+                    observed_result: ObservedCriterionResult::parse("actual failure")?,
+                },
+                CompletionDecision::Refuse,
+            ),
+            (
+                "unpaid reason mismatch",
+                json!({"status":"unpaid","reason":"actual reason"}),
+                CompletionCriterionStatus::Unpaid {
+                    reason: UnpaidCriterionReason::parse("expected reason")?,
+                },
+                CompletionCriterionStatus::Unpaid {
+                    reason: UnpaidCriterionReason::parse("actual reason")?,
+                },
+                CompletionDecision::Complete,
+            ),
+            (
+                "cross-variant mismatch",
+                json!({"status":"unpaid","reason":"cross-variant reason"}),
+                CompletionCriterionStatus::Passed {
+                    observed_result: ObservedCriterionResult::parse("cross-variant result")?,
+                },
+                CompletionCriterionStatus::Unpaid {
+                    reason: UnpaidCriterionReason::parse("cross-variant reason")?,
+                },
+                CompletionDecision::Complete,
+            ),
+        ];
+        let vision = VisionSlug::parse("2026-08-03-landing-fixture")?;
+
+        for (name, outcome, mismatch_status, exact_status, exact_decision) in cases {
+            let record = execution(1, &criteria.as_slice()[0], RESULT, outcome, "run");
+            let state = state(&criteria, &[record], &[merged_authority(&vision, "m6-s1")])?;
+            let mismatch_completion = CompletionGateResult {
+                decision: exact_decision.clone(),
+                finished_result: crate::FinishedResult::parse(RESULT)?,
+                criteria: vec![CompletionCriterionReport {
+                    criterion: criteria.as_slice()[0].clone(),
+                    status: mismatch_status,
+                }],
+            };
+            let mismatch = evaluate_landing_readiness(
+                &mismatch_completion,
+                state.steps(),
+                state.criterion_executions(),
+            );
+            assert!(
+                matches!(mismatch.criterion_evidence.as_slice(), [LandingCriterionEvidence::Missing { criterion_index }] if criterion_index.get() == 0),
+                "{name} must not record mismatching evidence"
+            );
+            assert!(
+                mismatch.problems.iter().any(|problem| matches!(problem, LandingReadinessProblem::CriterionExecutionMissing { criterion_index } if criterion_index.get() == 0)),
+                "{name} must report the missing exact execution"
+            );
+
+            let exact_completion = CompletionGateResult {
+                decision: exact_decision.clone(),
+                finished_result: crate::FinishedResult::parse(RESULT)?,
+                criteria: vec![CompletionCriterionReport {
+                    criterion: criteria.as_slice()[0].clone(),
+                    status: exact_status,
+                }],
+            };
+            let control = evaluate_landing_readiness(
+                &exact_completion,
+                state.steps(),
+                state.criterion_executions(),
+            );
+            assert!(
+                matches!(control.criterion_evidence.as_slice(), [LandingCriterionEvidence::Recorded { criterion_index, .. }] if criterion_index.get() == 0),
+                "{name} exact control must record its evidence"
+            );
+            if exact_decision == CompletionDecision::Refuse {
+                assert_eq!(control.decision, LandingReadinessDecision::Refuse);
+                assert!(matches!(
+                    control.problems.as_slice(),
+                    [LandingReadinessProblem::CompletionRefused]
+                ));
+            }
+        }
         Ok(())
     }
 }
