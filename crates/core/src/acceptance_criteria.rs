@@ -1,33 +1,10 @@
-//! acceptance_criteria : VisionDocument → AcceptanceCriteria; CriterionFields → AcceptanceCriterion   (fallible, deterministic)
+//! acceptance_criteria : VisionDocument → AcceptanceCriteria; CriterionWire ↔ AcceptanceCriterion   (fallible, deterministic)
 //!
 //! Parses the sole fenced JSON acceptance contract from a complete vision document.
 
 use std::fmt::{Display, Formatter};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-macro_rules! strict_criterion_string_serde {
-    ($name:ident) => {
-        impl Serialize for $name {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                serializer.serialize_str(self.as_str())
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                let value = String::deserialize(deserializer)?;
-                Self::parse(&value).map_err(serde::de::Error::custom)
-            }
-        }
-    };
-}
+use serde::{Deserialize, Serialize};
 
 /// A known field required on every acceptance criterion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +28,8 @@ impl Display for CriterionField {
 }
 
 /// A non-empty plain-language acceptance-criterion name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct CriterionName(String);
 
 impl CriterionName {
@@ -70,10 +48,23 @@ impl CriterionName {
     }
 }
 
-strict_criterion_string_serde!(CriterionName);
+impl TryFrom<String> for CriterionName {
+    type Error = AcceptanceCriteriaError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<CriterionName> for String {
+    fn from(value: CriterionName) -> Self {
+        value.0
+    }
+}
 
 /// A non-empty concrete input or action for an acceptance criterion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct CriterionInput(String);
 
 impl CriterionInput {
@@ -92,10 +83,23 @@ impl CriterionInput {
     }
 }
 
-strict_criterion_string_serde!(CriterionInput);
+impl TryFrom<String> for CriterionInput {
+    type Error = AcceptanceCriteriaError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<CriterionInput> for String {
+    fn from(value: CriterionInput) -> Self {
+        value.0
+    }
+}
 
 /// A non-empty externally observable acceptance-criterion result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct CriterionObservation(String);
 
 impl CriterionObservation {
@@ -114,7 +118,19 @@ impl CriterionObservation {
     }
 }
 
-strict_criterion_string_serde!(CriterionObservation);
+impl TryFrom<String> for CriterionObservation {
+    type Error = AcceptanceCriteriaError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<CriterionObservation> for String {
+    fn from(value: CriterionObservation) -> Self {
+        value.0
+    }
+}
 
 /// One named input-and-observation acceptance contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,7 +142,7 @@ pub struct AcceptanceCriterion {
 }
 
 impl AcceptanceCriterion {
-    /// Construct a criterion from already-parsed domain fields.
+    /// Construct a criterion from already-parsed domain values.
     pub const fn new(
         name: CriterionName,
         input: CriterionInput,
@@ -467,7 +483,6 @@ mod tests {
         AcceptanceCriteriaError, AcceptanceCriterion, CriterionField, CriterionInput,
         CriterionName, CriterionObservation, parse_acceptance_criteria,
     };
-
     #[test]
     fn criterion_strict_wire_shape_trims_and_rejects_invalid_objects() {
         let criterion = AcceptanceCriterion::new(
@@ -537,6 +552,36 @@ None.
             "It emits the result."
         );
         assert_eq!(criteria.as_slice()[1].name().as_str(), "Second criterion");
+    }
+
+    #[test]
+    fn criterion_wire_shape_is_strict_and_trimmed() -> Result<(), Box<dyn std::error::Error>> {
+        let criterion = AcceptanceCriterion::new(
+            CriterionName::parse("New blocking criterion")?,
+            CriterionInput::parse("Run the new probe.")?,
+            CriterionObservation::parse("The probe exits 0.")?,
+        );
+        assert_eq!(
+            serde_json::to_string(&criterion)?,
+            r#"{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."}"#
+        );
+
+        let decoded: AcceptanceCriterion = serde_json::from_str(
+            r#"{"name":"  New blocking criterion  ","input":"  Run the new probe.  ","observation":"  The probe exits 0.  "}"#,
+        )?;
+        assert_eq!(decoded.name().as_str(), "New blocking criterion");
+        assert_eq!(decoded.input().as_str(), "Run the new probe.");
+        assert_eq!(decoded.observation().as_str(), "The probe exits 0.");
+
+        for invalid in [
+            r#"{"name":"   ","input":"Run.","observation":"Done."}"#,
+            r#"{"name":"Name","input":"   ","observation":"Done."}"#,
+            r#"{"name":"Name","input":"Run.","observation":"   "}"#,
+            r#"{"name":"Name","input":"Run.","observation":"Done.","extra":true}"#,
+        ] {
+            assert!(serde_json::from_str::<AcceptanceCriterion>(invalid).is_err());
+        }
+        Ok(())
     }
 
     #[test]

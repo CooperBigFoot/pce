@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::OpenOptionsExt;
@@ -18,19 +18,20 @@ use pce_core::GateCommand;
 use pce_core::tracked_contract::parse_gate_command;
 use pce_core::{
     AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
-    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ActReversibility,
-    AppendError, AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome,
-    ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode, CheckoutFailure,
-    CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage, CreationDate,
-    CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchDuration,
-    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef,
-    DispatchRole, DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult,
-    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
-    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable,
-    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, GateExecutionEvidence,
-    GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection,
-    GateExecutionResponse, GateObservedResult, GateProcessObservation, GateProcessStimulus,
-    GateStimulus, GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
+    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AcceptanceCriteria,
+    ActReversibility, AppendError, AppendableCategory, AppendableFinding, ArgumentVector,
+    ArtifactOutcome, ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode,
+    CheckoutFailure, CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage,
+    CreationDate, CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate,
+    DispatchDuration, DispatchEnvelope, DispatchExitStatus, DispatchLogging,
+    DispatchProjectionInput, DispatchRef, DispatchRole, DispatchRoleClass, DispatchTarget,
+    DispatchTokenUsage, DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail,
+    EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
+    ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode, ExpectedVerdictOutcome,
+    FileObservation, FindingAdmission, GateExecutionEvidence, GateExecutionRecord,
+    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
+    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
+    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, ObservedExitStatus,
@@ -2414,6 +2415,7 @@ fn run_status(
     let contracts = repository_contracts(&records)?;
     let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
     let vision = vision_slug(vision_dir)?;
+    let ratified_criteria = read_ratified_acceptance_criteria(vision_dir)?;
     let (artifacts, _) = current_artifacts(&records, Path::new(contracts[primary_index].root()))?;
     let canonical_nodes = canonical_nodes(&records, &vision)?;
     let selected_index = canonical_nodes
@@ -2443,6 +2445,7 @@ fn run_status(
     let authorities = observe_authorities(&canonical_nodes, primary)?;
     let state = derive_run_state(
         &records,
+        &ratified_criteria,
         &vision,
         recovery_log_path,
         &artifacts,
@@ -2489,6 +2492,7 @@ fn run_ready(
     let contracts = repository_contracts(&records)?;
     let primary_index = resolve_primary_repository(&contracts, log_path, vision_dir)?;
     let vision = vision_slug(vision_dir)?;
+    let ratified_criteria = read_ratified_acceptance_criteria(vision_dir)?;
 
     let mut approvals = records
         .iter()
@@ -2505,8 +2509,16 @@ fn run_ready(
 
     let (artifacts, artifact_bytes) =
         current_artifacts(&records, Path::new(contracts[primary_index].root()))?;
-    let state = derive_run_state(&records, &vision, recovery_log_path, &artifacts, &[], &[])
-        .context("failed to derive readiness provenance and dispatch history")?;
+    let state = derive_run_state(
+        &records,
+        &ratified_criteria,
+        &vision,
+        recovery_log_path,
+        &artifacts,
+        &[],
+        &[],
+    )
+    .context("failed to derive readiness provenance and dispatch history")?;
     let (approval_sequence, artifact_path, parsed_graph) = if let Some(requested_path) = graph_path
     {
         let (approval_sequence, artifact_path) = approvals
@@ -4090,6 +4102,22 @@ fn vision_slug(vision_dir: &Path) -> Result<VisionSlug> {
         .to_str()
         .context("vision directory basename must be valid Unicode")?;
     VisionSlug::parse(basename).context("failed to parse vision directory basename")
+}
+
+fn read_ratified_acceptance_criteria(vision_dir: &Path) -> Result<AcceptanceCriteria> {
+    let path = vision_dir.join("vision.md");
+    let document = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "failed to read ratified acceptance criteria from {}",
+            path.display()
+        )
+    })?;
+    parse_acceptance_criteria(&document).with_context(|| {
+        format!(
+            "failed to parse ratified acceptance criteria from {}",
+            path.display()
+        )
+    })
 }
 
 fn current_artifacts(
@@ -7271,17 +7299,18 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use pce_core::{
-        AppendableFinding, ArtifactPath, BranchState, CachedInputTokens, CodexTerminalObservation,
-        CurrentArtifactObservation, CurrentArtifactState, DispatchExitStatus, DispatchTokenUsage,
-        EventKindName, EventRecord, EventRecordFilter, ExitCode, GitAuthorityObservation,
-        GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, InputTokens,
-        KnownPayload, MilestoneMergeSubject, MilestoneNode, NESTED_SEATBELT_SKIP_MARKER, NodeId,
+        AcceptanceCriteria, AppendableFinding, ArtifactPath, BranchState, CachedInputTokens,
+        CodexTerminalObservation, CurrentArtifactObservation, CurrentArtifactState,
+        DispatchExitStatus, DispatchTokenUsage, EventKindName, EventRecord, EventRecordFilter,
+        ExitCode, GitAuthorityObservation, GitHubAuthorityObservation,
+        GitHubPullRequestObservation, GitMergeObservation, InputTokens, KnownPayload,
+        MilestoneMergeSubject, MilestoneNode, NESTED_SEATBELT_SKIP_MARKER, NodeId,
         ObservedExitStatus, OutputTokens, ReadKind, ReadPayload, ReasoningOutputTokens,
         RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation, RepositoryName,
         RepositoryObservation, RepositoryObservationFailure, RunSnapshot, SeatbeltCapability,
         Sha256Digest, StepAuthorityObservation, StepNode, TagName, TagState, VersionPolicy,
         VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, classify_codex_terminal_usage,
-        derive_run_state, parse_event_line, render_human_snapshot,
+        derive_run_state, parse_acceptance_criteria, parse_event_line, render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -7292,10 +7321,92 @@ mod tests {
         StatusFormat, USAGE, already_dispatched, github_pull_request_list_args,
         lexically_normalized_repository_root, measure_tracked_contract_at_root, observe_git,
         observe_terminal_line, parse_command, parse_dispatch_graph, parse_tracked_contract,
-        read_at_default_branch_head, read_event_log, readiness_version_policies,
-        render_seatbelt_profile, repository_contracts, run, run_log_read,
-        seatbelt_execution_capability, select_bootstrap_candidate, validated_snapshot_value,
+        read_at_default_branch_head, read_event_log, read_ratified_acceptance_criteria,
+        readiness_version_policies, render_seatbelt_profile, repository_contracts, run,
+        run_log_read, seatbelt_execution_capability, select_bootstrap_candidate,
+        validated_snapshot_value,
     };
+
+    fn ratified_floor() -> AcceptanceCriteria {
+        parse_acceptance_criteria(
+            r#"# Vision: fixture
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{"criteria":[{"name":"Ratified floor","input":"Run the finished thing.","observation":"It reports success."}]}
+```
+
+## Decomposition hints
+
+None.
+"#,
+        )
+        .expect("ratified floor fixture")
+    }
+
+    #[test]
+    fn composition_root_loads_ratified_acceptance_criteria_with_exact_context() {
+        let directory = tempdir().expect("temporary directory");
+        let vision_dir = directory.path().join("planning/2026-08-03-fixture");
+        fs::create_dir_all(&vision_dir).expect("vision directory");
+        fs::write(
+            vision_dir.join("vision.md"),
+            r#"# Vision: fixture
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{
+  "criteria": [
+    {
+      "name": "Ratified floor",
+      "input": "Run the finished thing.",
+      "observation": "It reports success."
+    }
+  ]
+}
+```
+
+## Decomposition hints
+
+None.
+"#,
+        )
+        .expect("vision fixture");
+        let criteria = read_ratified_acceptance_criteria(&vision_dir).expect("ratified criteria");
+        assert_eq!(criteria.len(), 1);
+        assert_eq!(criteria.as_slice()[0].name().as_str(), "Ratified floor");
+        assert_eq!(
+            criteria.as_slice()[0].input().as_str(),
+            "Run the finished thing."
+        );
+        assert_eq!(
+            criteria.as_slice()[0].observation().as_str(),
+            "It reports success."
+        );
+
+        let missing = directory.path().join("missing");
+        assert_eq!(
+            read_ratified_acceptance_criteria(&missing)
+                .expect_err("missing vision")
+                .to_string(),
+            format!(
+                "failed to read ratified acceptance criteria from {}",
+                missing.join("vision.md").display()
+            )
+        );
+        fs::write(vision_dir.join("vision.md"), "malformed").expect("malformed fixture");
+        assert_eq!(
+            read_ratified_acceptance_criteria(&vision_dir)
+                .expect_err("malformed vision")
+                .to_string(),
+            format!(
+                "failed to parse ratified acceptance criteria from {}",
+                vision_dir.join("vision.md").display()
+            )
+        );
+    }
 
     #[test]
     fn seatbelt_profile_allows_only_sandbox_tree_signals_and_path_filtered_unix_sockets() {
@@ -8397,7 +8508,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_all_nine_registered_payload_schemas() {
+    fn accepts_all_ten_registered_payload_schemas() {
         let directory = tempdir().expect("temporary directory should create");
         let fixtures = [
             (
@@ -8444,6 +8555,11 @@ mod tests {
                 "criterion-execution",
                 r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
                 WriteKind::CriterionExecution,
+            ),
+            (
+                "criterion-added",
+                r#"{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}"#,
+                WriteKind::CriterionAdded,
             ),
         ];
 
@@ -9348,6 +9464,7 @@ mod tests {
             .collect::<Vec<_>>();
         let state = derive_run_state(
             &records,
+            &ratified_floor(),
             &VisionSlug::parse("2026-07-28-example").expect("vision"),
             &RecoveryLogPath::new("events.jsonl"),
             &[],
@@ -9676,6 +9793,7 @@ mod tests {
             VisionSlug::parse("2026-07-27-event-log").expect("vision fixture should parse");
         let state = derive_run_state(
             &[],
+            &ratified_floor(),
             &vision,
             &RecoveryLogPath::new("events.jsonl"),
             &[],
@@ -9751,6 +9869,7 @@ mod tests {
             VisionSlug::parse("2026-07-27-event-log").expect("vision fixture should parse");
         let state = derive_run_state(
             &records,
+            &ratified_floor(),
             &vision,
             &RecoveryLogPath::new("events.jsonl"),
             &artifacts,

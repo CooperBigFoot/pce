@@ -1,4 +1,4 @@
-//! decode : EventLogLine → KnownEvent ∪ UnknownEvent; append : AppendInput → AppendIntent; criterion_execution : AcceptanceCriterion × FinishedResult × Outcome × Evidence → CriterionExecutionPayload; select : EventRecord × EventRecordFilter → Bool; persist_contract : RepositoryName × RepositoryRoot × TrackedRepositoryContract × GateMeasurements × Evidence → RepositoryContractPayload.
+//! decode : EventLogLine → KnownEvent ∪ UnknownEvent; append : AppendInput → AppendIntent; criterion_execution : AcceptanceCriterion × FinishedResult × Outcome × Evidence → CriterionExecutionPayload; criterion_added : AcceptanceCriterion × ChangeOfCourse → KnownEvent; select : EventRecord × EventRecordFilter → Bool; persist_contract : RepositoryName × RepositoryRoot × TrackedRepositoryContract × GateMeasurements × Evidence → RepositoryContractPayload.
 //! This module is pure domain logic and performs no I/O.
 
 use std::collections::BTreeMap;
@@ -244,6 +244,45 @@ impl Evidence {
     }
 }
 
+/// A non-empty plain-language explanation for an accepted change of course.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ChangeOfCourse(String);
+
+impl ChangeOfCourse {
+    /// Parse and trim a change-of-course explanation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventLogError::BlankChangeOfCourse`] when `raw` is blank.
+    pub fn parse(raw: &str) -> Result<Self, EventLogError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(EventLogError::BlankChangeOfCourse);
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    /// Return the trimmed explanation.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ChangeOfCourse {
+    type Error = EventLogError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<ChangeOfCourse> for String {
+    fn from(value: ChangeOfCourse) -> Self {
+        value.0
+    }
+}
+
 impl TryFrom<String> for Evidence {
     type Error = EventLogError;
 
@@ -421,6 +460,8 @@ pub enum WriteKind {
     PlanningArtifactApproved,
     /// One criterion's observed outcome against a supplied finished result.
     CriterionExecution,
+    /// A blocking criterion accepted as a visible change of course.
+    CriterionAdded,
 }
 
 impl WriteKind {
@@ -441,6 +482,7 @@ impl WriteKind {
             "repository-contract" => Ok(Self::RepositoryContract),
             "planning-artifact-approved" => Ok(Self::PlanningArtifactApproved),
             "criterion-execution" => Ok(Self::CriterionExecution),
+            "criterion-added" => Ok(Self::CriterionAdded),
             _ => Err(EventLogError::UnknownWriteKind {
                 kind: raw.to_owned(),
             }),
@@ -459,6 +501,7 @@ impl WriteKind {
             Self::RepositoryContract => "repository-contract",
             Self::PlanningArtifactApproved => "planning-artifact-approved",
             Self::CriterionExecution => "criterion-execution",
+            Self::CriterionAdded => "criterion-added",
         }
     }
 
@@ -473,7 +516,8 @@ impl WriteKind {
             Self::DispatchCompletion
             | Self::Delta
             | Self::EscalationOpen
-            | Self::EscalationClose => EvidencePolicy::Absent,
+            | Self::EscalationClose
+            | Self::CriterionAdded => EvidencePolicy::Absent,
         }
     }
 }
@@ -964,6 +1008,16 @@ pub struct CriterionExecutionPayload {
     pub evidence: Evidence,
 }
 
+/// The complete payload for `criterion-added`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionAddedPayload {
+    /// The newly accepted blocking criterion.
+    pub criterion: AcceptanceCriterion,
+    /// Why reality required this change of course.
+    pub change_of_course: ChangeOfCourse,
+}
+
 /// A typed known payload whose variant determines its write kind.
 // Keeping the schema variants direct preserves the settled public construction API.
 #[allow(clippy::large_enum_variant)]
@@ -989,6 +1043,8 @@ pub enum KnownPayload {
     PlanningArtifactApproved(PlanningArtifactApprovedPayload),
     /// A `criterion-execution` payload.
     CriterionExecution(CriterionExecutionPayload),
+    /// A `criterion-added` payload.
+    CriterionAdded(CriterionAddedPayload),
 }
 
 impl KnownPayload {
@@ -1005,6 +1061,7 @@ impl KnownPayload {
             Self::LegacyRepositoryContract(_) => WriteKind::RepositoryContract,
             Self::PlanningArtifactApproved(_) => WriteKind::PlanningArtifactApproved,
             Self::CriterionExecution(_) => WriteKind::CriterionExecution,
+            Self::CriterionAdded(_) => WriteKind::CriterionAdded,
         }
     }
 }
@@ -1026,6 +1083,7 @@ impl Serialize for KnownPayload {
             Self::LegacyRepositoryContract(payload) => payload.serialize(serializer),
             Self::PlanningArtifactApproved(payload) => payload.serialize(serializer),
             Self::CriterionExecution(payload) => payload.serialize(serializer),
+            Self::CriterionAdded(payload) => payload.serialize(serializer),
         }
     }
 }
@@ -1433,6 +1491,9 @@ fn decode_known_payload(
         WriteKind::CriterionExecution => {
             serde_json::from_value(payload).map(KnownPayload::CriterionExecution)
         }
+        WriteKind::CriterionAdded => {
+            serde_json::from_value(payload).map(KnownPayload::CriterionAdded)
+        }
     };
     decoded.map_err(|source| EventLogError::InvalidKnownPayload {
         kind,
@@ -1482,6 +1543,10 @@ pub enum EventLogError {
     /// Returned when an unpaid criterion reason is empty after trimming.
     #[error("unpaid criterion reason cannot be blank")]
     BlankUnpaidCriterionReason,
+
+    /// Returned when a criterion addition's change-of-course explanation is blank.
+    #[error("criterion addition change of course cannot be blank")]
+    BlankChangeOfCourse,
 
     /// Returned when an event timestamp is not valid RFC 3339.
     #[error("invalid RFC 3339 event timestamp: {input:?}")]
@@ -1590,13 +1655,13 @@ mod tests {
     use crate::contract_measurement::{ObservedExitStatus, measure_contract_snapshot};
     use crate::event_log::{
         AppendError, ArtifactOutcome, CacheCreationInputTokens, CacheReadInputTokens,
-        DispatchTokenUsage, EventBodyRef, EventKindName, EventLogError, EventLogTail,
-        EventLogTailError, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
-        Evidence, EvidencePresence, FinishedResult, InputTokens, KnownPayload, NodeId,
-        ObservedCriterionResult, OutputTokens, ReadKind, ReadPayload, RepositoryContractPayload,
-        RepositoryName, RepositoryRoot, Sequence, Sha256Digest, UnpaidCriterionReason,
-        UnparsedPayload, WriteKind, append_event, event_record_matches, parse_event_line,
-        serialize_event_line, successor_sequence, validate_evidence_policy,
+        ChangeOfCourse, DispatchTokenUsage, EventBodyRef, EventKindName, EventLogError,
+        EventLogTail, EventLogTailError, EventLogTailLine, EventRecord, EventRecordFilter,
+        EventTimestamp, Evidence, EvidencePresence, FinishedResult, InputTokens, KnownPayload,
+        NodeId, ObservedCriterionResult, OutputTokens, ReadKind, ReadPayload,
+        RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence, Sha256Digest,
+        UnpaidCriterionReason, UnparsedPayload, WriteKind, append_event, event_record_matches,
+        parse_event_line, serialize_event_line, successor_sequence, validate_evidence_policy,
     };
     use crate::run_state::VersionPolicy;
     use crate::tracked_contract::{GateKind, parse_tracked_repository_contract};
@@ -1646,7 +1711,7 @@ mod tests {
         ));
     }
 
-    const KNOWN_LINES: [&str; 8] = [
+    const KNOWN_LINES: [&str; 9] = [
         r#"{"sequence":1,"timestamp":"2026-07-27T12:34:56.000Z","kind":"dispatch","node":"m1-s1","payload":{"role":"step-executor","ref":"ca9788ded3daec9b9e9fd7679caa24e7c64a8193","evidence":"git rev-parse HEAD"}}"#,
         r#"{"sequence":2,"timestamp":"2026-07-27T12:34:57.000Z","kind":"delta","node":"m1-s1","payload":{"message":"Require exact UTC timestamp spelling in the event envelope."}}"#,
         r#"{"sequence":3,"timestamp":"2026-07-27T12:34:58.000Z","kind":"escalation-open","node":"m1-s1","payload":{"key":"timestamp-precision","question":"Which RFC 3339 sub-second precision is canonical?"}}"#,
@@ -1655,6 +1720,7 @@ mod tests {
         r#"{"sequence":6,"timestamp":"2026-07-27T12:35:01.000Z","kind":"repository-contract","node":"m1-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stack":"Rust 2024-edition Cargo workspace (rustc/cargo 1.93.1)","format":"cargo fmt --all --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --workspace","preflight":"cargo check --workspace --all-targets","gates_rule":"From the repo root, all four gates must exit zero before committing.","install":"None required for gates.","evidence":"rustc --version\ncargo --version\ngit rev-parse --show-toplevel"}}"#,
         r#"{"sequence":7,"timestamp":"2026-07-27T12:35:02.000Z","kind":"planning-artifact-approved","node":"m1-s1","payload":{"path":"planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","evidence":"shasum -a 256 planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json"}}"#,
         r#"{"sequence":8,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}}"#,
+        r#"{"sequence":9,"timestamp":"2026-07-27T12:35:04.000Z","kind":"criterion-added","node":"m2-s1","payload":{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}}"#,
     ];
     const UNKNOWN_LINE: &str = r#"{"sequence":9,"timestamp":"2026-07-27T12:35:04.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
     const CURRENT_REPOSITORY_CONTRACT_LINE: &str = r#"{"sequence":10,"timestamp":"2026-07-27T12:35:05.000Z","kind":"repository-contract","node":"m2-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stated":{"format":"cargo fmt --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --release","version_policy":"NONE","branch_convention":"pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>","pull_request_convention":"step head targets the matching milestone integration branch"},"observations":{"format":0,"lint":0,"typecheck":0,"test":0,"build":0},"workflow_map":{"ci.yml":"cargo test --workspace","docs.yml":null},"appendable":{"environment_hazards":["stdin is reserved for event payload input"],"gate_orderings":["format before lint before typecheck before test before build"],"lockfile_rules":["Cargo.lock must remain synchronized with Cargo.toml"]},"evidence":"cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release"}}"#;
@@ -2117,6 +2183,7 @@ mod tests {
             WriteKind::RepositoryContract,
             WriteKind::PlanningArtifactApproved,
             WriteKind::CriterionExecution,
+            WriteKind::CriterionAdded,
         ];
 
         for (index, (line, expected_kind)) in
@@ -2140,6 +2207,7 @@ mod tests {
                         ReadPayload::Known(KnownPayload::PlanningArtifactApproved(_))
                     )
                     | (7, ReadPayload::Known(KnownPayload::CriterionExecution(_)))
+                    | (8, ReadPayload::Known(KnownPayload::CriterionAdded(_)))
             );
             assert!(expected_payload);
             assert_eq!(serialize_event_line(&record)?, line);
@@ -2168,6 +2236,7 @@ mod tests {
                         EventBodyRef::Known(KnownPayload::PlanningArtifactApproved(_))
                     )
                     | (7, EventBodyRef::Known(KnownPayload::CriterionExecution(_)))
+                    | (8, EventBodyRef::Known(KnownPayload::CriterionAdded(_)))
             );
             assert!(expected_payload);
         }
@@ -2242,6 +2311,7 @@ mod tests {
             WriteKind::Delta,
             WriteKind::EscalationOpen,
             WriteKind::EscalationClose,
+            WriteKind::CriterionAdded,
         ];
 
         for kind in required {
@@ -2449,12 +2519,97 @@ mod tests {
             WriteKind::DispatchCompletion.as_str(),
             "dispatch-completion"
         );
+        assert!(matches!(
+            WriteKind::parse("criterion-added"),
+            Ok(WriteKind::CriterionAdded)
+        ));
+        assert_eq!(WriteKind::CriterionAdded.as_str(), "criterion-added");
+        for raw in [
+            "criterion-removed",
+            "criterion-updated",
+            "criterion-weakened",
+        ] {
+            assert!(matches!(
+                WriteKind::parse(raw),
+                Err(EventLogError::UnknownWriteKind { kind }) if kind == raw
+            ));
+        }
         for raw in ["future-kind", "dispatch-cost", "Dispatch", "DISPATCH", ""] {
             assert!(matches!(
                 WriteKind::parse(raw),
                 Err(EventLogError::UnknownWriteKind { .. })
             ));
         }
+    }
+
+    #[test]
+    fn criterion_added_payload_is_strict_and_appends_exactly_once() -> Result<(), EventLogError> {
+        const PAYLOAD: &str = r#"{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}"#;
+        assert_eq!(
+            ChangeOfCourse::parse("  Reality exposed an uncovered failure.  ")?.as_str(),
+            "Reality exposed an uncovered failure."
+        );
+        for blank in ["", "   "] {
+            assert!(matches!(
+                ChangeOfCourse::parse(blank),
+                Err(EventLogError::BlankChangeOfCourse)
+            ));
+        }
+
+        let invalid = [
+            r#"{"change_of_course":"change"}"#,
+            r#"{"criterion":{"name":"Name","input":"Run.","observation":"Done."}}"#,
+            r#"{"criterion":{"name":"Name","input":"Run.","observation":"Done."},"change_of_course":"change","extra":true}"#,
+            r#"{"criterion":{"name":"Name","input":"Run.","observation":"Done.","extra":true},"change_of_course":"change"}"#,
+            r#"{"criterion":{"name":" ","input":"Run.","observation":"Done."},"change_of_course":"change"}"#,
+            r#"{"criterion":{"name":"Name","input":" ","observation":"Done."},"change_of_course":"change"}"#,
+            r#"{"criterion":{"name":"Name","input":"Run.","observation":" "},"change_of_course":"change"}"#,
+            r#"{"criterion":{"name":"Name","input":"Run.","observation":"Done."},"change_of_course":" "}"#,
+        ];
+        for payload in invalid {
+            let calls = Cell::new(0);
+            let error = append_event(
+                WriteKind::CriterionAdded,
+                UnparsedPayload::new(payload),
+                EventLogTail::Empty,
+                NodeId::parse("m2-s1")?,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_785_155_703),
+                |_| {
+                    calls.set(calls.get() + 1);
+                    Ok::<(), io::Error>(())
+                },
+            )
+            .expect_err("invalid criterion addition");
+            assert!(matches!(
+                error,
+                AppendError::InvalidSubmittedPayload {
+                    source: EventLogError::InvalidKnownPayload {
+                        kind: WriteKind::CriterionAdded,
+                        ..
+                    }
+                }
+            ));
+            assert_eq!(calls.get(), 0);
+        }
+
+        let intent = append_event(
+            WriteKind::CriterionAdded,
+            UnparsedPayload::new(PAYLOAD),
+            EventLogTail::Empty,
+            NodeId::parse("m2-s1")?,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_785_155_703),
+            |_| Ok::<(), io::Error>(()),
+        )
+        .map_err(append_test_error)?;
+        assert_eq!(
+            intent.as_bytes(),
+            concat!(
+                r#"{"sequence":1,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-added","node":"m2-s1","payload":{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}}"#,
+                "\n"
+            )
+            .as_bytes()
+        );
+        Ok(())
     }
 
     #[test]
@@ -2465,7 +2620,7 @@ mod tests {
             assert!(!encoded.contains('\n'));
             serialized.push(encoded);
         }
-        assert_eq!(serialized.join("\n").lines().count(), 8);
+        assert_eq!(serialized.join("\n").lines().count(), 9);
         Ok(())
     }
 

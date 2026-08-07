@@ -1,4 +1,4 @@
-//! run_state : Ordered<EventRecord> × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState × Ordered<CriterionExecutionObservation> ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String; compute_dispatchability : ArtifactProvenance × Ordered<DispatchCandidate> × OrderingEdge* × (CanonicalNode → MergeStatus) × (RepositoryName → VersionPolicy) → Ordered<DispatchabilityResult> ∪ RunStateError   (pure, deterministic)
+//! run_state : Ordered<EventRecord> × AcceptanceCriteria × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState × Ordered<CriterionExecutionObservation> ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String; compute_dispatchability : ArtifactProvenance × Ordered<DispatchCandidate> × OrderingEdge* × (CanonicalNode → MergeStatus) × (RepositoryName → VersionPolicy) → Ordered<DispatchabilityResult> ∪ RunStateError   (pure, deterministic)
 //! This module performs no I/O.
 
 use chrono::SecondsFormat;
@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
-use crate::AcceptanceCriterion;
 use crate::event_log::{
-    ArtifactOutcome, ArtifactPath, CriterionExecutionOutcome, DispatchDuration, DispatchExitStatus,
-    DispatchRef, DispatchRole, DispatchTokenUsage, EscalationKey, EventBodyRef, EventRecord,
-    EventTimestamp, Evidence, FinishedResult, KnownPayload, NodeId, RepositoryName, Sequence,
-    Sha256Digest,
+    ArtifactOutcome, ArtifactPath, ChangeOfCourse, CriterionExecutionOutcome, DispatchDuration,
+    DispatchExitStatus, DispatchRef, DispatchRole, DispatchTokenUsage, EscalationKey, EventBodyRef,
+    EventRecord, EventTimestamp, Evidence, FinishedResult, KnownPayload, NodeId, RepositoryName,
+    Sequence, Sha256Digest,
 };
+use crate::{AcceptanceCriteria, AcceptanceCriterion};
 
 /// A vision-directory basename suffix with its leading date prefix removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1569,9 +1569,42 @@ impl CriterionExecutionObservation {
     }
 }
 
+/// The immutable source of one effective blocking criterion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockingCriterionOrigin {
+    /// The criterion was ratified in the vision.
+    Ratified,
+    /// The criterion was accepted during the run as a change of course.
+    Added {
+        sequence: Sequence,
+        node: NodeId,
+        change_of_course: ChangeOfCourse,
+    },
+}
+
+/// One effective blocking criterion and its immutable origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockingCriterion {
+    criterion: AcceptanceCriterion,
+    origin: BlockingCriterionOrigin,
+}
+
+impl BlockingCriterion {
+    /// Return the criterion contract.
+    pub const fn criterion(&self) -> &AcceptanceCriterion {
+        &self.criterion
+    }
+
+    /// Return the criterion's immutable origin.
+    pub const fn origin(&self) -> &BlockingCriterionOrigin {
+        &self.origin
+    }
+}
+
 /// Pure derived run state with deterministic collection order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivedRunState {
+    blocking_criteria: Vec<BlockingCriterion>,
     repositories: Vec<RepositoryObservation>,
     steps: Vec<StepMergeResult>,
     dispatches: Vec<DispatchObservation>,
@@ -1585,6 +1618,10 @@ pub struct DerivedRunState {
 }
 
 impl DerivedRunState {
+    /// Return the ratified floor followed by accepted additions in event order.
+    pub fn blocking_criteria(&self) -> &[BlockingCriterion] {
+        &self.blocking_criteria
+    }
     /// Return repository observations in caller order.
     pub fn repositories(&self) -> &[RepositoryObservation] {
         &self.repositories
@@ -2743,6 +2780,7 @@ struct RecoveryCandidate<T> {
 /// absent authority nodes, or empty raw values passed to typed constructors.
 #[instrument(skip(
     records,
+    ratified_criteria,
     vision,
     recovery_log_path,
     artifacts,
@@ -2751,6 +2789,7 @@ struct RecoveryCandidate<T> {
 ))]
 pub fn derive_run_state(
     records: &[EventRecord],
+    ratified_criteria: &AcceptanceCriteria,
     vision: &VisionSlug,
     recovery_log_path: &RecoveryLogPath,
     artifacts: &[CurrentArtifactObservation],
@@ -2761,6 +2800,15 @@ pub fn derive_run_state(
     validate_artifact_inputs(artifacts)?;
     validate_authority_duplicates(authorities)?;
 
+    let mut blocking_criteria = ratified_criteria
+        .as_slice()
+        .iter()
+        .cloned()
+        .map(|criterion| BlockingCriterion {
+            criterion,
+            origin: BlockingCriterionOrigin::Ratified,
+        })
+        .collect::<Vec<_>>();
     let mut visible_nodes = Vec::<VisibleNode>::new();
     let mut dispatches = Vec::<DispatchObservation>::new();
     let mut dispatch_lifecycles = Vec::<DispatchLifecycleObservation>::new();
@@ -2964,6 +3012,16 @@ pub fn derive_run_state(
                     payload.evidence.as_str(),
                 ));
             }
+            EventBodyRef::Known(KnownPayload::CriterionAdded(payload)) => {
+                blocking_criteria.push(BlockingCriterion {
+                    criterion: payload.criterion.clone(),
+                    origin: BlockingCriterionOrigin::Added {
+                        sequence: record.sequence(),
+                        node: record.node().clone(),
+                        change_of_course: payload.change_of_course.clone(),
+                    },
+                });
+            }
             EventBodyRef::Unknown { .. } => {}
         }
     }
@@ -3001,6 +3059,7 @@ pub fn derive_run_state(
     };
 
     Ok(DerivedRunState {
+        blocking_criteria,
         repositories: repositories.to_vec(),
         steps,
         dispatches,
@@ -3449,6 +3508,7 @@ pub enum RunStateError {
 mod tests {
     use std::error::Error;
 
+    use crate::acceptance_criteria::{AcceptanceCriteria, parse_acceptance_criteria};
     use crate::event_log::{
         ArtifactOutcome, ArtifactPath, CachedInputTokens, CriterionExecutionOutcome, DeltaPayload,
         DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload,
@@ -3458,9 +3518,9 @@ mod tests {
         RepositoryName, Sequence, Sha256Digest, parse_event_line,
     };
     use crate::run_state::{
-        ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BranchState,
-        CanonicalNode, CriterionExecutionObservation, CurrentArtifactObservation,
-        CurrentArtifactState, CyclePosition, DispatchCandidate, DispatchRoleClass,
+        ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BlockingCriterionOrigin,
+        BranchState, CanonicalNode, CriterionExecutionObservation, CurrentArtifactObservation,
+        CurrentArtifactState, CyclePosition, DerivedRunState, DispatchCandidate, DispatchRoleClass,
         DispatchabilityResult, ExactPullRequestIdentity, ExactPullRequestState,
         GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
         GitMergeObservation, HoldStatus, MergeStatus, MergeSubject, MilestoneMergeSubject,
@@ -3475,6 +3535,181 @@ mod tests {
 
     const RUN_SNAPSHOT_SCHEMA: &str =
         include_str!("../../../skills/pce/schemas/run-snapshot.schema.json");
+
+    fn ratified_floor() -> AcceptanceCriteria {
+        parse_acceptance_criteria(
+            r#"# Vision: fixture
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{"criteria":[{"name":"Ratified one","input":"Run input one.","observation":"Observe one."},{"name":"Ratified two","input":"Run input two.","observation":"Observe two."}]}
+```
+
+## Decomposition hints
+
+None.
+"#,
+        )
+        .expect("ratified floor fixture")
+    }
+
+    fn criterion_added_record(
+        sequence: u64,
+        node: &str,
+        name: &str,
+        input: &str,
+        observation: &str,
+        change: &str,
+    ) -> EventRecord {
+        parse_event_line(&format!(
+            r#"{{"sequence":{sequence},"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-added","node":"{node}","payload":{{"criterion":{{"name":"{name}","input":"{input}","observation":"{observation}"}},"change_of_course":"{change}"}}}}"#
+        ))
+        .expect("criterion-added fixture")
+    }
+
+    fn floor_state(records: &[EventRecord]) -> Result<DerivedRunState, RunStateError> {
+        derive_run_state(
+            records,
+            &ratified_floor(),
+            &VisionSlug::parse("2026-07-27-example")?,
+            &RecoveryLogPath::new("events.jsonl"),
+            &[],
+            &[],
+            &[],
+        )
+    }
+
+    #[test]
+    fn ratified_criteria_are_the_initial_blocking_floor() -> Result<(), RunStateError> {
+        let state = floor_state(&[])?;
+        assert_eq!(state.blocking_criteria().len(), 2);
+        assert_eq!(
+            state
+                .blocking_criteria()
+                .iter()
+                .map(|item| item.criterion().name().as_str())
+                .collect::<Vec<_>>(),
+            ["Ratified one", "Ratified two"]
+        );
+        assert!(
+            state
+                .blocking_criteria()
+                .iter()
+                .all(|item| matches!(item.origin(), BlockingCriterionOrigin::Ratified))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn additions_append_in_sequence_order_with_exact_origin() -> Result<(), RunStateError> {
+        let records = [
+            criterion_added_record(
+                2,
+                "m2-s1",
+                "Added one",
+                "Run added one.",
+                "Observe added one.",
+                "First course change.",
+            ),
+            criterion_added_record(
+                4,
+                "m3-s1",
+                "Added two",
+                "Run added two.",
+                "Observe added two.",
+                "Second course change.",
+            ),
+        ];
+        let state = floor_state(&records)?;
+        assert_eq!(
+            state
+                .blocking_criteria()
+                .iter()
+                .map(|item| item.criterion().name().as_str())
+                .collect::<Vec<_>>(),
+            ["Ratified one", "Ratified two", "Added one", "Added two"]
+        );
+        assert!(matches!(
+            state.blocking_criteria()[2].origin(),
+            BlockingCriterionOrigin::Added { sequence, node, change_of_course }
+                if sequence.get() == 2 && node.as_str() == "m2-s1"
+                    && change_of_course.as_str() == "First course change."
+        ));
+        assert!(matches!(
+            state.blocking_criteria()[3].origin(),
+            BlockingCriterionOrigin::Added { sequence, node, change_of_course }
+                if sequence.get() == 4 && node.as_str() == "m3-s1"
+                    && change_of_course.as_str() == "Second course change."
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_additions_remain_blocking_and_unknown_mutations_are_inert()
+    -> Result<(), RunStateError> {
+        let duplicate = criterion_added_record(
+            1,
+            "m2-s1",
+            "Ratified one",
+            "Run input one.",
+            "Observe one.",
+            "Duplicate exposed.",
+        );
+        let duplicate_state = floor_state(&[duplicate])?;
+        assert_eq!(
+            duplicate_state
+                .blocking_criteria()
+                .iter()
+                .map(|item| item.criterion().name().as_str())
+                .collect::<Vec<_>>(),
+            ["Ratified one", "Ratified two", "Ratified one"]
+        );
+
+        let records = [
+            criterion_added_record(1, "m2-s1", "Added one", "Run added one.", "Observe added one.", "First course change."),
+            parse_event_line(r#"{"sequence":2,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-removed","node":"m2-s1","payload":{"name":"Ratified one"}}"#).expect("unknown removal"),
+            parse_event_line(r#"{"sequence":3,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-updated","node":"m2-s1","payload":{"name":"Ratified one"}}"#).expect("unknown update"),
+            parse_event_line(r#"{"sequence":4,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-weakened","node":"m2-s1","payload":{"name":"Ratified one"}}"#).expect("unknown weakening"),
+            criterion_added_record(5, "m3-s1", "Added two", "Run added two.", "Observe added two.", "Second course change."),
+        ];
+        let state = floor_state(&records)?;
+        assert_eq!(
+            state
+                .blocking_criteria()
+                .iter()
+                .map(|item| item.criterion().name().as_str())
+                .collect::<Vec<_>>(),
+            ["Ratified one", "Ratified two", "Added one", "Added two"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn blocking_floor_does_not_relax_sequence_refusal() {
+        for (records, expected) in [
+            (
+                [
+                    criterion_added_record(2, "m2-s1", "A", "I", "O", "C"),
+                    criterion_added_record(1, "m2-s1", "B", "I", "O", "C"),
+                ],
+                (2, 1),
+            ),
+            (
+                [
+                    criterion_added_record(1, "m2-s1", "A", "I", "O", "C"),
+                    criterion_added_record(1, "m2-s1", "B", "I", "O", "C"),
+                ],
+                (1, 1),
+            ),
+        ] {
+            assert!(matches!(
+                floor_state(&records),
+                Err(RunStateError::NonIncreasingSequence { previous, current })
+                    if (previous.get(), current.get()) == expected
+            ));
+        }
+    }
 
     fn subject(slug: &str, node: &str) -> Result<MergeSubject, Box<dyn Error>> {
         let slug = VisionSlug::parse(slug)?;
@@ -3736,6 +3971,7 @@ mod tests {
         let vision = VisionSlug::parse("2026-07-27-example")?;
         derive_run_state(
             records,
+            &ratified_floor(),
             &vision,
             &RecoveryLogPath::new("events.jsonl"),
             artifacts,
@@ -3911,6 +4147,7 @@ mod tests {
         ];
         Ok(derive_run_state(
             &records,
+            &ratified_floor(),
             &vision,
             &RecoveryLogPath::new("events.jsonl"),
             &artifacts,
@@ -4950,6 +5187,7 @@ mod tests {
         ];
         let state = derive_run_state(
             &records,
+            &ratified_floor(),
             &vision,
             &RecoveryLogPath::new("events.jsonl"),
             &[],
@@ -4973,6 +5211,7 @@ mod tests {
         let all_merged_records = vec![delta(1, "m2-s1")?];
         let all_merged = derive_run_state(
             &all_merged_records,
+            &ratified_floor(),
             &vision,
             &RecoveryLogPath::new("events.jsonl"),
             &[],
@@ -5308,6 +5547,7 @@ mod tests {
         }
         let state = derive_run_state(
             &records,
+            &ratified_floor(),
             &VisionSlug::parse("2026-07-27-example")?,
             &RecoveryLogPath::new("dir/it's log.jsonl"),
             &[],
@@ -5377,6 +5617,7 @@ mod tests {
         let authority = merged_authority(&vision, "m2-s1")?;
         let state = derive_run_state(
             &records,
+            &ratified_floor(),
             &vision,
             &RecoveryLogPath::new("events.jsonl"),
             &artifacts,
@@ -5432,6 +5673,7 @@ mod tests {
         );
         let state = derive_run_state(
             &records,
+            &ratified_floor(),
             &vision,
             &RecoveryLogPath::new("events.jsonl"),
             &[],
@@ -5467,6 +5709,7 @@ mod tests {
             );
             let state = derive_run_state(
                 &records,
+                &ratified_floor(),
                 &vision,
                 &RecoveryLogPath::new("events.jsonl"),
                 &[],
@@ -5962,6 +6205,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         let state = derive_run_state(
             &records,
+            &ratified_floor(),
             &VisionSlug::parse("2026-08-03-a-gate-runs-what-was-built")?,
             &RecoveryLogPath::new("events.jsonl"),
             &[],
@@ -5976,6 +6220,7 @@ mod tests {
         ];
         let duplicate_state = derive_run_state(
             &duplicate_records,
+            &ratified_floor(),
             &VisionSlug::parse("2026-08-03-a-gate-runs-what-was-built")?,
             &RecoveryLogPath::new("events.jsonl"),
             &[],
@@ -6003,6 +6248,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         let state = derive_run_state(
             &records,
+            &ratified_floor(),
             &VisionSlug::parse("2026-08-03-a-gate-runs-what-was-built")?,
             &RecoveryLogPath::new("events.jsonl"),
             &[],
