@@ -798,6 +798,22 @@
           ],
           "properties": {
             "state": {
+              "const": "falsification-dispatched"
+            },
+            "sequence": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "sequence"
+          ],
+          "properties": {
+            "state": {
               "const": "review-dispatched"
             },
             "sequence": {
