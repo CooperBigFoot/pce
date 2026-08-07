@@ -2479,7 +2479,7 @@ fn select_falsification_critic(argv: &mut [String]) {
 
 fn falsification_mandate(output: &Path, client: &Path) -> String {
     format!(
-        "You are the falsification critic. Judge the built artifact by executing probes, never by reviewing prose alone. Submit every stimulus and all of its setup through the harness command between the markers by writing exactly one request JSON object to its standard input: <gate-exec-command>{} gate exec</gate-exec-command>. The harness alone executes the command and setup, observes the result, and returns its execution_ref and observed_result; an execution the harness did not perform is not admissible evidence. A blocking issue is admissible only for a demonstrated break. For every blocking_issues entry, summarize the exact input in input and the returned observed_result in observation, and put that issue's returned harness reference in execution_ref; do not block on style, naming, design preference, scope, or any other reading-based opinion. Put the exact replacement you executed in required_change, summarize its input and returned observed_result in replacement_execution, and put that replacement run's returned harness reference in replacement_execution.execution_ref. If you cannot demonstrate a break, emit no blocking issue. Treat every check as a claim: mutate the subject it claims to test and rerun the check; if it stays green, that demonstrated vacuity is blocking, including when the check belongs to this gate rather than to the subject. For every rule the delivered work adds, delete the configuration entry that activates it and rerun the rule's checks; if they stay green, block. Run each mutation, configuration deletion, check, and replacement through the harness, and give each blocking issue its own execution rather than reusing one issue's evidence for another. You may reference harness records but cannot author or edit them. Write exactly one conforming verdict JSON object to the absolute path between the markers below: <output-path>{}</output-path>",
+        "You are the falsification critic. Judge the built artifact by executing probes, never by reviewing prose alone. Submit every stimulus and all of its setup through the harness command between the markers by writing exactly one request JSON object to its standard input: <gate-exec-command>{} gate exec</gate-exec-command>. The harness alone executes the command and setup, observes the result, and returns its execution_ref and observed_result; an execution the harness did not perform is not admissible evidence. A blocking issue is admissible only for a demonstrated break. For every blocking_issues entry, summarize the exact input in input and the returned observed_result in observation, and put that issue's returned harness reference in execution_ref; do not block on style, naming, design preference, scope, or any other reading-based opinion. For every rejection probe, execute an acceptance probe on the same built artifact whose input differs only in the property under test, and identify that acceptance execution's exact input, returned observed_result, and returned harness reference in the same issue's input and observation. Put the exact replacement you executed in required_change, summarize its input and returned observed_result in replacement_execution, and put that replacement run's returned harness reference in replacement_execution.execution_ref. If you cannot demonstrate a break, emit no blocking issue. Treat every check as a claim: mutate the subject it claims to test and rerun the check; if it stays green, that demonstrated vacuity is blocking, including when the check belongs to this gate rather than to the subject. For every rule the delivered work adds, delete the configuration entry that activates it and rerun the rule's checks; if they stay green, block. Run each mutation, configuration deletion, check, and replacement through the harness, and give each blocking issue its own execution rather than reusing one issue's evidence for another. You may reference harness records but cannot author or edit them. Write exactly one conforming verdict JSON object to the absolute path between the markers below: <output-path>{}</output-path>",
         client.display(),
         output.display()
     )
@@ -2924,6 +2924,7 @@ fn falsification_critic_dry_run_and_live_share_binary_owned_frame() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let mandate = falsification_mandate(&fixture.output_path, &client);
         let expected = [
             "-p".to_owned(),
             "--output-format".to_owned(),
@@ -2935,7 +2936,7 @@ fn falsification_critic_dry_run_and_live_share_binary_owned_frame() {
             "Grep".to_owned(),
             "Write".to_owned(),
             "--append-system-prompt".to_owned(),
-            falsification_mandate(&fixture.output_path, &client),
+            mandate.clone(),
             "probe the built artifact".to_owned(),
         ];
         let actual = if dry_run {
@@ -2956,6 +2957,8 @@ fn falsification_critic_dry_run_and_live_share_binary_owned_frame() {
                 .collect::<Vec<_>>()
         };
         assert_eq!(actual, expected);
+        let acceptance_twin = "For every rejection probe, execute an acceptance probe on the same built artifact whose input differs only in the property under test, and identify that acceptance execution's exact input, returned observed_result, and returned harness reference in the same issue's input and observation.";
+        assert_eq!(mandate.matches(acceptance_twin).count(), 1);
         assert_eq!(
             actual
                 .iter()

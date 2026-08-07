@@ -2237,6 +2237,65 @@ fn phase3_planning_act_lifecycle_is_explicit() {
 }
 
 #[test]
+fn phase3_executes_falsification_before_pr_creation() {
+    let markdown = real_skill_markdown();
+    let phase3_start = markdown
+        .find("## Phase 3 — Per step PCE-PR-C")
+        .expect("Phase 3");
+    let remainder = &markdown[phase3_start..];
+    let phase3_end = remainder[3..]
+        .find("\n## ")
+        .map_or(markdown.len(), |offset| phase3_start + 3 + offset + 1);
+    let phase3 = &markdown[phase3_start..phase3_end];
+    let headings = [
+        "3. **Execute (Codex)**",
+        "4. **Falsify (Claude)**",
+        "5. **PR (you)**",
+        "6. **Review**",
+        "7. **Merge (you)**",
+    ];
+    let mut previous = 0;
+    for heading in headings {
+        assert_eq!(phase3.matches(heading).count(), 1, "heading {heading}");
+        let position = phase3.find(heading).expect("phase heading");
+        assert!(position >= previous, "heading order for {heading}");
+        previous = position;
+    }
+
+    let falsify_start = phase3.find(headings[1]).expect("falsify stage");
+    let pr_start = phase3.find(headings[2]).expect("PR stage");
+    let falsify = &phase3[falsify_start..pr_start];
+    let clean = "git -C <worktree-abs> status --porcelain=v1 --untracked-files=no";
+    assert!(falsify.contains("`falsification-critic`"));
+    assert!(falsify.contains("Only `APPROVE` together with `blocking_issues: []`"));
+    assert!(falsify.contains("`REVISE`, `BLOCK`, or any non-empty `blocking_issues`"));
+    assert_eq!(phase3.matches(clean).count(), 1);
+    assert!(falsify.contains("Require exit status `0`"));
+    assert!(falsify.contains("stdout to be exactly empty (zero bytes)"));
+    assert!(falsify.contains("stderr to be exactly empty (zero bytes)"));
+    let clean_position = phase3.find(clean).expect("tracked-clean command");
+    assert!(clean_position < pr_start);
+    assert!(falsify.contains("before either stage 5 or any `REVISE` re-dispatch"));
+    assert!(
+        falsify_start
+            < phase3
+                .find("push the branch")
+                .expect("first push instruction")
+    );
+    for binary_owned in [
+        "mutate the subject it claims to test",
+        "do not block on style",
+        "delete the configuration entry that activates it",
+        "For every rejection probe, execute an acceptance probe on the same built artifact whose input differs only in the property under test, and identify that acceptance execution's exact input, returned observed_result, and returned harness reference in the same issue's input and observation.",
+    ] {
+        assert!(
+            !falsify.contains(binary_owned),
+            "binary-owned mandate leaked into skill"
+        );
+    }
+}
+
+#[test]
 fn role_registry_exact_set() {
     let measured: std::collections::BTreeSet<_> = repository_routes()
         .iter()
