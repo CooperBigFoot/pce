@@ -154,12 +154,15 @@ The dispatch-issuance consolidation marker immediately above activates only `rej
 
 The orchestrator owns append decisions. `pce dispatch` appends dispatch issuance from its complete ordered logging envelope; the orchestrator invokes the following manual append, read, status, readiness, and contract surfaces in their exact argument order:
 
+After the final milestone merge, it may also invoke the completion surface listed here.
+
 ```text
 pce log --file <LOG_PATH> --kind <KIND> --node <NODE>          payload read from STDIN to EOF
 pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]
 pce log meter                                                     JSONL read from STDIN to EOF
 pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]
 pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>]
+pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>
 pce contract check --file <REPOSITORY_ROOT>/.pce/repository-contract.json --repo-root <REPOSITORY_ROOT>
 pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>
 pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>
@@ -225,6 +228,18 @@ pce log --file <LOG_PATH> --kind repository-contract --node <NODE>
 
 pce log --file <LOG_PATH> --kind planning-artifact-approved --node <NODE>
 {"path":"<ARTIFACT_PATH>","sha256":"<64_LOWERCASE_HEX_CHARACTERS>","evidence":"<NON_EMPTY_EXACT_DIGEST_INVOCATION>"}
+
+pce log --file <LOG_PATH> --kind criterion-execution --node <NODE>
+{"criterion":{"name":"<CRITERION_NAME>","input":"<EXACT_INPUT>","observation":"<EXPECTED_OBSERVATION>"},"finished_result":"<FINISHED_RESULT>","outcome":{"status":"passed","observed_result":"<OBSERVED_RESULT>"},"evidence":"<NON_EMPTY_EXACT_INVOCATION>"}
+
+pce log --file <LOG_PATH> --kind criterion-execution --node <NODE>
+{"criterion":{"name":"<CRITERION_NAME>","input":"<EXACT_INPUT>","observation":"<EXPECTED_OBSERVATION>"},"finished_result":"<FINISHED_RESULT>","outcome":{"status":"failed","observed_result":"<OBSERVED_RESULT>"},"evidence":"<NON_EMPTY_EXACT_INVOCATION>"}
+
+pce log --file <LOG_PATH> --kind criterion-execution --node <NODE>
+{"criterion":{"name":"<CRITERION_NAME>","input":"<EXACT_INPUT>","observation":"<EXPECTED_OBSERVATION>"},"finished_result":"<FINISHED_RESULT>","outcome":{"status":"unpaid","reason":"<WHY_THIS_RUN_CANNOT_EXECUTE_IT>"},"evidence":"<NON_EMPTY_EXACT_INVOCATION>"}
+
+pce log --file <LOG_PATH> --kind criterion-added --node <NODE>
+{"criterion":{"name":"<CRITERION_NAME>","input":"<EXACT_INPUT>","observation":"<EXPECTED_OBSERVATION>"},"change_of_course":"<NON_EMPTY_CHANGE_OF_COURSE>"}
 ```
 
 For binary-owned `dispatch`, `evidence` is the non-empty exact invocation supplied through the ordered dispatch envelope. Manually appended `key-finding`, `repository-contract`, and `planning-artifact-approved` payloads require non-empty `evidence`. `delta`, `escalation-open`, and `escalation-close` forbid the `evidence` key. The current repository payload is a `deny_unknown_fields` boundary with exactly seven top-level keys: `repository`, `repo_root`, `stated`, `observations`, `workflow_map`, `appendable`, and `evidence`. `stated` has exactly `format`, `lint`, `typecheck`, `test`, `build`, `version_policy`, `branch_convention`, and `pull_request_convention`; `observations` has exactly `format`, `lint`, `typecheck`, `test`, and `build`; `appendable` has exactly `environment_hazards`, `gate_orderings`, and `lockfile_rules`. Every observation is a JSON integer. Every workflow-map value is either an exact JSON string command or the JSON literal `null`; an absent key differs from an explicit `null`. Arrays may be empty. Non-empty `evidence` remains required. Unknown fields such as top-level `stack`, `preflight`, `gates_rule`, `install`, or any unknown nested key are rejected; no bytes are appended and the command exits non-zero. Legacy twelve-field repository payloads are read-only compatibility data: they are accepted only while reading persisted logs and are rejected for new appends without writing bytes. The planning-artifact payload is also `deny_unknown_fields` with exactly `path`, `sha256`, and non-empty `evidence`. Its digest is exactly 64 lowercase hexadecimal characters. Relative artifact paths resolve against the primary repository root; absolute paths are used as-is.
@@ -487,6 +502,14 @@ VISION_DIR/
 ```
 
 The verdict, graph, and run-snapshot schemas, including `~/.claude/skills/pce/schemas/run-snapshot.schema.json`, are installed schemas rather than per-run artifacts.
+
+After the final milestone merge, obtain one stable finished-result identity for the fully merged multi-milestone result and invoke the completion command documented in the manual command-surface block with that identity. Quote its JSON verbatim. For every returned `missing` report, execute the report's exact criterion input against that exact finished result when the run can do so and append exactly one `passed` or `failed` `criterion-execution` event with the actual observation; append `unpaid` only when the run genuinely cannot perform that input. After recording observations or repairs, reinvoke the documented command by reference until it returns `complete` or no in-run action remains.
+
+On refusal, do not enter `## Done` and do not post the final summary.
+
+Surface every `missing` and `failed` report, including its exact input and status or observed result. Continue the in-scope repair and execution loop while action remains; otherwise stop on the existing escalation path.
+
+On completion, reproduce every criterion report's exact input and recorded status or result in the existing final summary. On completion, name every unpaid criterion with its exact input and unpaid reason; never report it as passed or green.
 
 ## Done
 
