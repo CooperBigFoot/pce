@@ -1509,6 +1509,8 @@ pub enum CyclePosition {
     CritiqueDispatched { sequence: Sequence },
     /// The latest recognized dispatch is step execution.
     ExecutionDispatched { sequence: Sequence },
+    /// The latest recognized dispatch is pre-PR falsification.
+    FalsificationDispatched { sequence: Sequence },
     /// The latest recognized dispatch is PR review.
     ReviewDispatched { sequence: Sequence },
 }
@@ -2268,6 +2270,8 @@ pub enum CyclePositionSnapshot {
     CritiqueDispatched { sequence: u64 },
     /// Execution was dispatched.
     ExecutionDispatched { sequence: u64 },
+    /// Pre-PR falsification was dispatched.
+    FalsificationDispatched { sequence: u64 },
     /// PR review was dispatched.
     ReviewDispatched { sequence: u64 },
 }
@@ -2283,6 +2287,9 @@ impl From<CyclePosition> for CyclePositionSnapshot {
                 sequence: sequence.get(),
             },
             CyclePosition::ExecutionDispatched { sequence } => Self::ExecutionDispatched {
+                sequence: sequence.get(),
+            },
+            CyclePosition::FalsificationDispatched { sequence } => Self::FalsificationDispatched {
                 sequence: sequence.get(),
             },
             CyclePosition::ReviewDispatched { sequence } => Self::ReviewDispatched {
@@ -2650,6 +2657,9 @@ fn render_resume(output: &mut String, resume: &ResumeSnapshot<'_>) {
                 ),
                 CyclePositionSnapshot::ExecutionDispatched { sequence } => output.push_str(
                     &format!(" cycle=execution-dispatched cycle-sequence={sequence}\n"),
+                ),
+                CyclePositionSnapshot::FalsificationDispatched { sequence } => output.push_str(
+                    &format!(" cycle=falsification-dispatched cycle-sequence={sequence}\n"),
                 ),
                 CyclePositionSnapshot::ReviewDispatched { sequence } => output.push_str(&format!(
                     " cycle=review-dispatched cycle-sequence={sequence}\n"
@@ -3218,7 +3228,8 @@ fn update_cycle_position(
             CyclePosition::CritiqueDispatched { sequence }
         }
         "step-executor" => CyclePosition::ExecutionDispatched { sequence },
-        "falsification-critic" | "pr-reviewer" => CyclePosition::ReviewDispatched { sequence },
+        "falsification-critic" => CyclePosition::FalsificationDispatched { sequence },
+        "pr-reviewer" => CyclePosition::ReviewDispatched { sequence },
         _ => return,
     };
     if let Some(existing) = visible_nodes.iter_mut().find(|item| item.node == *node) {
@@ -5283,7 +5294,7 @@ None.
             ),
             (
                 "falsification-critic",
-                CyclePosition::ReviewDispatched {
+                CyclePosition::FalsificationDispatched {
                     sequence: Sequence::parse(1)?,
                 },
             ),
@@ -5301,6 +5312,18 @@ None.
                 ResumeObservation::Candidate { cycle_position, latest_sequence, .. }
                     if *cycle_position == expected && latest_sequence.get() == 4
             ));
+            if role == "falsification-critic" {
+                let snapshot = RunSnapshot::from(&state);
+                let serialized = serde_json::to_value(&snapshot)?;
+                assert_eq!(
+                    serialized["resume"]["cycle_position"],
+                    serde_json::json!({
+                        "state": "falsification-dispatched",
+                        "sequence": 1
+                    })
+                );
+                assert!(snapshot_validator()?.is_valid(&serialized));
+            }
         }
         Ok(())
     }
@@ -6084,7 +6107,7 @@ None.
             ("pr-reviewer", "review-dispatched", "critique-producing"),
             (
                 "falsification-critic",
-                "review-dispatched",
+                "falsification-dispatched",
                 "critique-producing",
             ),
         ] {
