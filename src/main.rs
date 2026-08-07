@@ -8397,7 +8397,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_all_eight_registered_payload_schemas() {
+    fn accepts_all_nine_registered_payload_schemas() {
         let directory = tempdir().expect("temporary directory should create");
         let fixtures = [
             (
@@ -8439,6 +8439,11 @@ mod tests {
                 "planning-artifact-approved",
                 r#"{"path":"planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","evidence":"shasum -a 256 planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json"}"#,
                 WriteKind::PlanningArtifactApproved,
+            ),
+            (
+                "criterion-execution",
+                r#"{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}"#,
+                WriteKind::CriterionExecution,
             ),
         ];
 

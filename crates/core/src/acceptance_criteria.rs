@@ -1,10 +1,33 @@
-//! acceptance_criteria : VisionDocument → AcceptanceCriteria   (fallible, deterministic)
+//! acceptance_criteria : VisionDocument → AcceptanceCriteria; CriterionFields → AcceptanceCriterion   (fallible, deterministic)
 //!
 //! Parses the sole fenced JSON acceptance contract from a complete vision document.
 
 use std::fmt::{Display, Formatter};
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+macro_rules! strict_criterion_string_serde {
+    ($name:ident) => {
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::parse(&value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
 
 /// A known field required on every acceptance criterion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +70,8 @@ impl CriterionName {
     }
 }
 
+strict_criterion_string_serde!(CriterionName);
+
 /// A non-empty concrete input or action for an acceptance criterion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CriterionInput(String);
@@ -66,6 +91,8 @@ impl CriterionInput {
         &self.0
     }
 }
+
+strict_criterion_string_serde!(CriterionInput);
 
 /// A non-empty externally observable acceptance-criterion result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,8 +114,11 @@ impl CriterionObservation {
     }
 }
 
+strict_criterion_string_serde!(CriterionObservation);
+
 /// One named input-and-observation acceptance contract.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AcceptanceCriterion {
     name: CriterionName,
     input: CriterionInput,
@@ -96,6 +126,18 @@ pub struct AcceptanceCriterion {
 }
 
 impl AcceptanceCriterion {
+    /// Construct a criterion from already-parsed domain fields.
+    pub const fn new(
+        name: CriterionName,
+        input: CriterionInput,
+        observation: CriterionObservation,
+    ) -> Self {
+        Self {
+            name,
+            input,
+            observation,
+        }
+    }
     /// Returns the criterion name.
     pub fn name(&self) -> &CriterionName {
         &self.name
@@ -421,7 +463,38 @@ fn parse_non_empty(value: &str, field: CriterionField) -> Result<String, Accepta
 
 #[cfg(test)]
 mod tests {
-    use super::{AcceptanceCriteriaError, CriterionField, parse_acceptance_criteria};
+    use super::{
+        AcceptanceCriteriaError, AcceptanceCriterion, CriterionField, CriterionInput,
+        CriterionName, CriterionObservation, parse_acceptance_criteria,
+    };
+
+    #[test]
+    fn criterion_strict_wire_shape_trims_and_rejects_invalid_objects() {
+        let criterion = AcceptanceCriterion::new(
+            CriterionName::parse("Runnable criterion").expect("name"),
+            CriterionInput::parse("Run the finished command.").expect("input"),
+            CriterionObservation::parse("It exits 0.").expect("observation"),
+        );
+        assert_eq!(
+            serde_json::to_string(&criterion).expect("serialize criterion"),
+            r#"{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."}"#
+        );
+        let decoded: AcceptanceCriterion = serde_json::from_str(
+            r#"{"name":"  Runnable criterion  ","input":"  Run the finished command.  ","observation":"  It exits 0.  "}"#,
+        )
+        .expect("deserialize trimmed criterion");
+        assert_eq!(decoded.name().as_str(), "Runnable criterion");
+        assert_eq!(decoded.input().as_str(), "Run the finished command.");
+        assert_eq!(decoded.observation().as_str(), "It exits 0.");
+        for invalid in [
+            r#"{"name":"   ","input":"go","observation":"done"}"#,
+            r#"{"name":"one","input":"   ","observation":"done"}"#,
+            r#"{"name":"one","input":"go","observation":"   "}"#,
+            r#"{"name":"one","input":"go","observation":"done","extra":true}"#,
+        ] {
+            assert!(serde_json::from_str::<AcceptanceCriterion>(invalid).is_err());
+        }
+    }
 
     const DOCUMENT: &str = r#"# Vision: example
 
