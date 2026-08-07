@@ -1,4 +1,4 @@
-//! dispatch_invocation : DispatchTarget × DispatchEnvelope → Executable × Argv; dispatch_projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; codex_terminal_usage : CodexTerminalObservation* × DispatchExitStatus → DispatchTokenUsage; claude_result_usage : ClaudeResultEnvelope × DispatchExitStatus → DispatchTokenUsage; SeatbeltCapability = classify(permissive_profile_probe_status); planning_role_frame : DispatchRole × ActReversibility × ArgumentVector → ArgumentVector ∪ PlanningFrameError   (pure, deterministic)
+//! dispatch_invocation : DispatchTarget × DispatchEnvelope → Executable × Argv; compose_gate_arguments : Option<DispatchRole> × AbsoluteOutputPath × Option<AbsoluteGateExecClientPath> × ArgumentVector → Result<ArgumentVector, DispatchError>; dispatch_projection : DispatchEnvelope × DispatchLogging × EventLogTail → JSON; codex_terminal_usage : CodexTerminalObservation* × DispatchExitStatus → DispatchTokenUsage; claude_result_usage : ClaudeResultEnvelope × DispatchExitStatus → DispatchTokenUsage; SeatbeltCapability = classify(permissive_profile_probe_status); planning_role_frame : DispatchRole × ActReversibility × ArgumentVector → ArgumentVector ∪ PlanningFrameError   (pure, deterministic)
 //! This module describes complete shell-free child invocations; the binary adapter performs all I/O and process work.
 
 use std::collections::BTreeMap;
@@ -17,6 +17,7 @@ use crate::event_log::{
     InputTokens, NodeId, OutputTokens, ReasoningOutputTokens, Sequence, UsageAbsenceReason,
     WriteKind, successor_sequence,
 };
+use crate::gate_execution::{AbsoluteGateExecClientPath, GateExecutionRecorderConfig};
 
 const SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 const PERMISSIVE_SEATBELT_PROFILE: &str = "(version 1)(allow default)";
@@ -698,6 +699,57 @@ impl ArgumentVector {
     }
 }
 
+/// Compose the role-owned argument frame for a gate dispatch.
+///
+/// # Errors
+///
+/// Returns [`DispatchError::FalsificationCriticCallerSystemPrompt`] when the exact
+/// `falsification-critic` role's caller tail attempts to supply the binary-owned system prompt.
+pub fn compose_gate_arguments(
+    role: Option<&DispatchRole>,
+    output_path: &AbsoluteOutputPath,
+    gate_exec_client: Option<&AbsoluteGateExecClientPath>,
+    arguments: ArgumentVector,
+) -> Result<ArgumentVector, DispatchError> {
+    if role.is_none_or(|role| role.as_str() != "falsification-critic") {
+        return Ok(arguments);
+    }
+    if let Some(argument) = arguments.as_slice().iter().find(|argument| {
+        argument.as_str() == "--append-system-prompt"
+            || argument.starts_with("--append-system-prompt=")
+    }) {
+        return Err(DispatchError::FalsificationCriticCallerSystemPrompt {
+            argument: argument.clone(),
+        });
+    }
+    if let Some(argument) = arguments.as_slice().iter().find(|argument| {
+        argument.as_str() == "--allowedTools" || argument.starts_with("--allowedTools=")
+    }) {
+        return Err(DispatchError::FalsificationCriticCallerAllowedTools {
+            argument: argument.clone(),
+        });
+    }
+    let gate_exec_client =
+        gate_exec_client.ok_or(DispatchError::FalsificationCriticMissingGateExecClient)?;
+    let client = gate_exec_client.as_path().display();
+    let mandate = format!(
+        "You are the falsification critic. Judge the built artifact by executing probes, never by reviewing prose alone. Submit every stimulus and all of its setup through the harness command between the markers by writing exactly one request JSON object to its standard input: <gate-exec-command>{client} gate exec</gate-exec-command>. The harness alone executes the command and setup, observes the result, and returns its execution_ref and observed_result; an execution the harness did not perform is not admissible evidence. A blocking issue is admissible only for a demonstrated break. For every blocking_issues entry, summarize the exact input in input and the returned observed_result in observation, and put that issue's returned harness reference in execution_ref; do not block on style, naming, design preference, scope, or any other reading-based opinion. Put the exact replacement you executed in required_change, summarize its input and returned observed_result in replacement_execution, and put that replacement run's returned harness reference in replacement_execution.execution_ref. If you cannot demonstrate a break, emit no blocking issue. Treat every check as a claim: mutate the subject it claims to test and rerun the check; if it stays green, that demonstrated vacuity is blocking, including when the check belongs to this gate rather than to the subject. For every rule the delivered work adds, delete the configuration entry that activates it and rerun the rule's checks; if they stay green, block. Run each mutation, configuration deletion, check, and replacement through the harness, and give each blocking issue its own execution rather than reusing one issue's evidence for another. You may reference harness records but cannot author or edit them. Write exactly one conforming verdict JSON object to the absolute path between the markers below: <output-path>{}</output-path>",
+        output_path.as_path().display(),
+    );
+    let mut composed = vec![
+        "--allowedTools".to_owned(),
+        format!("Bash({client} gate exec:*)"),
+        "Read".to_owned(),
+        "Glob".to_owned(),
+        "Grep".to_owned(),
+        "Write".to_owned(),
+        "--append-system-prompt".to_owned(),
+        mandate,
+    ];
+    composed.extend(arguments.as_slice().iter().cloned());
+    Ok(ArgumentVector::new(composed))
+}
+
 /// The complete explicit child environment.
 ///
 /// A later process adapter must clear the inherited environment before applying these entries.
@@ -835,6 +887,7 @@ pub struct DispatchEnvelope {
     sandbox: Option<Sandbox>,
     schema_path: Option<AbsoluteSchemaPath>,
     output_path: Option<AbsoluteOutputPath>,
+    gate_execution_recorder: Option<GateExecutionRecorderConfig>,
 }
 
 impl DispatchEnvelope {
@@ -854,6 +907,7 @@ impl DispatchEnvelope {
             sandbox: None,
             schema_path: None,
             output_path: None,
+            gate_execution_recorder: None,
         }
     }
 
@@ -890,6 +944,33 @@ impl DispatchEnvelope {
     pub fn with_output_path(mut self, output_path: AbsoluteOutputPath) -> Self {
         self.output_path = Some(output_path);
         self
+    }
+
+    /// Attach the exact-role recorder and inject its two binary-owned environment entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns a collision error when the caller supplied either reserved name.
+    pub fn with_gate_execution_recorder(
+        mut self,
+        recorder: GateExecutionRecorderConfig,
+    ) -> Result<Self, DispatchError> {
+        if self.environment.0.contains_key("PCE_GATE_EXEC_CLIENT") {
+            return Err(DispatchError::FalsificationCriticClientEnvironmentCollision);
+        }
+        if self.environment.0.contains_key("PCE_GATE_EXEC_SOCKET") {
+            return Err(DispatchError::FalsificationCriticSocketEnvironmentCollision);
+        }
+        self.environment.0.insert(
+            "PCE_GATE_EXEC_CLIENT".to_owned(),
+            recorder.client().as_path().display().to_string(),
+        );
+        self.environment.0.insert(
+            "PCE_GATE_EXEC_SOCKET".to_owned(),
+            recorder.socket().as_path().display().to_string(),
+        );
+        self.gate_execution_recorder = Some(recorder);
+        Ok(self)
     }
 
     /// Borrow the executable.
@@ -930,6 +1011,11 @@ impl DispatchEnvelope {
     /// Borrow the optional absolute output path.
     pub fn output_path(&self) -> Option<&AbsoluteOutputPath> {
         self.output_path.as_ref()
+    }
+
+    /// Borrow the optional exact-role gate execution recorder configuration.
+    pub fn gate_execution_recorder(&self) -> Option<&GateExecutionRecorderConfig> {
+        self.gate_execution_recorder.as_ref()
     }
 }
 
@@ -979,6 +1065,21 @@ pub const fn classify_seatbelt_capability(status: ObservedExitStatus) -> Seatbel
 /// A dispatch value failed pure parsing.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DispatchError {
+    /// The exact falsification critic caller attempted to replace the binary-owned system prompt.
+    #[error("falsification-critic caller arguments must not contain `--append-system-prompt`")]
+    FalsificationCriticCallerSystemPrompt { argument: String },
+    /// The exact falsification critic caller attempted to replace the binary-owned tool grant.
+    #[error("falsification-critic caller arguments must not contain `--allowedTools`")]
+    FalsificationCriticCallerAllowedTools { argument: String },
+    /// Exact-role composition omitted the required absolute helper executable.
+    #[error("falsification-critic requires an absolute pce gate-exec client path")]
+    FalsificationCriticMissingGateExecClient,
+    /// The caller supplied the binary-owned helper executable environment name.
+    #[error("falsification-critic environment must not supply binary-owned `PCE_GATE_EXEC_CLIENT`")]
+    FalsificationCriticClientEnvironmentCollision,
+    /// The caller supplied the binary-owned recorder socket environment name.
+    #[error("falsification-critic environment must not supply binary-owned `PCE_GATE_EXEC_SOCKET`")]
+    FalsificationCriticSocketEnvironmentCollision,
     /// The executable parser received a zero-byte program name.
     #[error("executable must not be empty; rejected {executable:?}")]
     EmptyExecutable { executable: String },
@@ -1003,14 +1104,16 @@ mod tests {
         ArgumentVector, ChildEnvironment, ClaudeResultEnvelope, CodexTerminalObservation,
         CodexTerminalUsage, DispatchEnvelope, DispatchError, DispatchTarget, Executable,
         PlanningFrameError, Sandbox, SeatbeltCapability, StdinBinding, classify_claude_result,
-        classify_codex_terminal_usage, classify_seatbelt_capability, compose_planning_role_frame,
-        dispatch_completion_payload, parse_claude_result, seatbelt_capability_probe,
+        classify_codex_terminal_usage, classify_seatbelt_capability, compose_gate_arguments,
+        compose_planning_role_frame, dispatch_completion_payload, parse_claude_result,
+        seatbelt_capability_probe,
     };
     use crate::contract_measurement::ObservedExitStatus;
     use crate::event_log::{
         ArtifactOutcome, DispatchDuration, DispatchExitStatus, DispatchRole, DispatchTokenUsage,
         ExitCode, Sequence, SignalNumber, UsageAbsenceReason,
     };
+    use crate::gate_execution::AbsoluteGateExecClientPath;
 
     const REPEATABLE_FIXTURE: &str = "Plan the step.\n\n## Binary-owned reversibility obligation\n\nThe step's act is repeatable. The plan must retain an explicit not-touched scope fence and exact expected values for every assertion. The plan must not contain a pre-derived argument that the design is correct.";
     const IRREVERSIBLE_FIXTURE: &str = "Plan the step.\n\n## Binary-owned reversibility obligation\n\nThe step's act cannot be repeated. The plan must retain the existing front-loaded pre-proof of correctness, an explicit not-touched scope fence, and exact expected values for every assertion.";
@@ -1526,6 +1629,67 @@ mod tests {
             &["positional prompt".to_owned()]
         );
         assert_eq!(envelope.stdin(), &StdinBinding::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn composes_only_the_exact_falsification_critic_frame() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let output = AbsoluteOutputPath::parse("/workspace/path with spaces/verdict.json")?;
+        let client = AbsoluteGateExecClientPath::parse("/workspace/bin/pce")?;
+        let caller = ArgumentVector::new(vec!["probe".to_owned(), "--flag".to_owned()]);
+        for role in [
+            None,
+            Some(DispatchRole::new("pr-reviewer")),
+            Some(DispatchRole::new("step-plan-critic")),
+            Some(DispatchRole::new("Falsification-Critic")),
+            Some(DispatchRole::new("falsification_critic")),
+        ] {
+            assert_eq!(
+                compose_gate_arguments(role.as_ref(), &output, None, caller.clone())?,
+                caller
+            );
+        }
+
+        let role = DispatchRole::new("falsification-critic");
+        let composed = compose_gate_arguments(Some(&role), &output, Some(&client), caller.clone())?;
+        assert_eq!(
+            &composed.as_slice()[..7],
+            [
+                "--allowedTools",
+                "Bash(/workspace/bin/pce gate exec:*)",
+                "Read",
+                "Glob",
+                "Grep",
+                "Write",
+                "--append-system-prompt"
+            ]
+        );
+        assert_eq!(&composed.as_slice()[8..], caller.as_slice());
+        let mandate = &composed.as_slice()[7];
+        assert_eq!(mandate.matches("<output-path>").count(), 1);
+        assert_eq!(mandate.matches("</output-path>").count(), 1);
+        assert!(
+            mandate.contains("<output-path>/workspace/path with spaces/verdict.json</output-path>")
+        );
+        assert!(!mandate.contains("schema"));
+
+        for forbidden in [
+            "--append-system-prompt",
+            "--append-system-prompt=caller-value",
+        ] {
+            let error = compose_gate_arguments(
+                Some(&role),
+                &output,
+                Some(&client),
+                ArgumentVector::new(vec![forbidden.to_owned()]),
+            )
+            .expect_err("caller override must fail");
+            assert_eq!(
+                error.to_string(),
+                "falsification-critic caller arguments must not contain `--append-system-prompt`"
+            );
+        }
         Ok(())
     }
 

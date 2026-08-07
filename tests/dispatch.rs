@@ -4,7 +4,11 @@ mod support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::Shutdown;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
@@ -2465,6 +2469,22 @@ fn insert_gate_logging(argv: &mut Vec<String>, log_path: &Path, dry_run: bool) {
     argv.splice(delimiter..delimiter, logging);
 }
 
+fn select_falsification_critic(argv: &mut [String]) {
+    let role = argv
+        .iter()
+        .position(|value| value == "--role")
+        .expect("logging role");
+    argv[role + 1] = "falsification-critic".to_owned();
+}
+
+fn falsification_mandate(output: &Path, client: &Path) -> String {
+    format!(
+        "You are the falsification critic. Judge the built artifact by executing probes, never by reviewing prose alone. Submit every stimulus and all of its setup through the harness command between the markers by writing exactly one request JSON object to its standard input: <gate-exec-command>{} gate exec</gate-exec-command>. The harness alone executes the command and setup, observes the result, and returns its execution_ref and observed_result; an execution the harness did not perform is not admissible evidence. A blocking issue is admissible only for a demonstrated break. For every blocking_issues entry, summarize the exact input in input and the returned observed_result in observation, and put that issue's returned harness reference in execution_ref; do not block on style, naming, design preference, scope, or any other reading-based opinion. Put the exact replacement you executed in required_change, summarize its input and returned observed_result in replacement_execution, and put that replacement run's returned harness reference in replacement_execution.execution_ref. If you cannot demonstrate a break, emit no blocking issue. Treat every check as a claim: mutate the subject it claims to test and rerun the check; if it stays green, that demonstrated vacuity is blocking, including when the check belongs to this gate rather than to the subject. For every rule the delivered work adds, delete the configuration entry that activates it and rerun the rule's checks; if they stay green, block. Run each mutation, configuration deletion, check, and replacement through the harness, and give each blocking issue its own execution rather than reusing one issue's evidence for another. You may reference harness records but cannot author or edit them. Write exactly one conforming verdict JSON object to the absolute path between the markers below: <output-path>{}</output-path>",
+        client.display(),
+        output.display()
+    )
+}
+
 fn gate_completion(log_path: &Path) -> pce_core::DispatchCompletionPayload {
     let records = fs::read_to_string(log_path)
         .expect("read gate log")
@@ -2477,6 +2497,169 @@ fn gate_completion(log_path: &Path) -> pce_core::DispatchCompletionPayload {
         panic!("second gate record is not a completion")
     };
     completion.clone()
+}
+
+fn gate_request_directories(
+    fixture: &GateFixture,
+    requests: &[Value],
+) -> (PathBuf, Vec<(String, String)>) {
+    let request_directory = fixture.harness.path().join("gate-exec-requests");
+    let response_directory = fixture.harness.path().join("gate-exec-responses");
+    fs::create_dir(&request_directory).expect("create gate request directory");
+    fs::create_dir(&response_directory).expect("create gate response directory");
+    for (index, request) in requests.iter().enumerate() {
+        fs::write(
+            request_directory.join(format!("{:04}.json", index + 1)),
+            serde_json::to_vec_pretty(request).expect("gate request JSON"),
+        )
+        .expect("write gate request");
+    }
+    let mut environment = fixture.environment(0);
+    environment.extend([
+        (
+            "PCE_CLAUDE_GATE_EXEC_REQUEST_DIR".to_owned(),
+            request_directory.display().to_string(),
+        ),
+        (
+            "PCE_CLAUDE_GATE_EXEC_RESPONSE_DIR".to_owned(),
+            response_directory.display().to_string(),
+        ),
+    ]);
+    (response_directory, environment)
+}
+
+fn spawn_blocked_falsification_recorder(
+    fixture: &GateFixture,
+    name: &str,
+) -> (std::process::Child, PathBuf, PathBuf, PathBuf) {
+    fs::write(
+        &fixture.schema_path,
+        include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+    )
+    .expect("write tracked verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"none"}"#,
+    )
+    .expect("write approval verdict");
+    let block = fixture.harness.path().join(format!("release-{name}"));
+    let mut environment = fixture.environment(0);
+    environment.push((
+        "PCE_CLAUDE_BLOCK_FILE".to_owned(),
+        block.display().to_string(),
+    ));
+    let log = fixture.harness.path().join(format!("{name}.jsonl"));
+    let mut argv = fixture.argv(&environment, &["probe"]);
+    insert_gate_logging(&mut argv, &log, false);
+    select_falsification_critic(&mut argv);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pce"));
+    command.args(&argv);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let child = command.spawn().expect("spawn parent dispatch");
+    let environment_path = fixture.record_root.join("invocation/environment.bin");
+    let ready_path = fixture.record_root.join("invocation/pid");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready_path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !ready_path.exists() {
+        let output = child
+            .wait_with_output()
+            .expect("collect dispatch that did not spawn the gate child");
+        panic!(
+            "dispatch did not spawn the gate child: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let environment_bytes = fs::read(&environment_path).expect("recorded Claude environment");
+    let socket = environment_bytes
+        .split(|byte| *byte == 0)
+        .find_map(|entry| {
+            entry
+                .strip_prefix(b"PCE_GATE_EXEC_SOCKET=")
+                .map(|value| PathBuf::from(OsString::from_vec(value.to_vec())))
+        })
+        .expect("socket environment entry");
+    (child, socket, block, log)
+}
+
+fn wait_for_dispatch_deadline(
+    mut child: std::process::Child,
+    panic_message: &str,
+) -> std::process::Output {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match child.try_wait().expect("poll parent dispatch") {
+            Some(_status) => return child.wait_with_output().expect("collect parent dispatch"),
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            None => {
+                child.kill().expect("kill overdue parent dispatch");
+                let _status = child.wait().expect("reap overdue parent dispatch");
+                panic!("{panic_message}");
+            }
+        }
+    }
+}
+
+#[test]
+fn falsification_dispatch_starts_while_a_stale_socket_file_exists() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("stale socket issuance", CLAUDE_SUCCESS);
+    let stale_socket = fixture.harness.path().join("pce-gate-exec-stale-1.sock");
+    let stale_listener = std::os::unix::net::UnixListener::bind(&stale_socket)
+        .expect("stale socket fixture should bind");
+    drop(stale_listener);
+    let (child, socket, block, _log) =
+        spawn_blocked_falsification_recorder(&fixture, "stale-socket");
+    assert!(stale_socket.exists());
+    assert_ne!(socket, stale_socket);
+    let response = raw_gate_response(
+        &socket,
+        &json!({
+            "working_directory": fixture.cwd,
+            "setup": [],
+            "command": {"program":"/usr/bin/true","arguments":[],"input":[],"environment":{}}
+        }),
+    );
+    assert_eq!(response["execution_ref"], "execution-000001");
+    fs::write(&block, []).expect("release Claude child");
+    let output = wait_for_dispatch_deadline(child, "stale-socket dispatch exceeded 15 seconds");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_evidence(&fixture)["executions"]
+            .as_array()
+            .expect("executions")
+            .len(),
+        1
+    );
+}
+
+fn raw_gate_response(socket: &Path, request: &Value) -> Value {
+    let wire = serde_json::to_vec(request).expect("raw gate request JSON");
+    let mut stream = UnixStream::connect(socket).expect("connect raw gate client");
+    stream.write_all(&wire).expect("write raw gate request");
+    stream
+        .shutdown(Shutdown::Write)
+        .expect("finish raw gate request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("read raw gate response");
+    serde_json::from_slice(&response).expect("raw gate response JSON")
+}
+
+fn gate_evidence(fixture: &GateFixture) -> Value {
+    serde_json::from_slice(
+        &fs::read(format!("{}.executions.json", fixture.output_path.display()))
+            .expect("gate execution evidence"),
+    )
+    .expect("gate execution evidence JSON")
 }
 
 #[test]
@@ -2709,6 +2892,1761 @@ fn gate_rejects_caller_output_format_spellings() {
         ]
         .map(OsString::from)
     );
+}
+
+#[test]
+fn falsification_critic_dry_run_and_live_share_binary_owned_frame() {
+    let _guard = dispatch_test_guard();
+    let mut projected = None;
+    let fixture = GateFixture::new("falsification path with spaces", CLAUDE_SUCCESS);
+    fs::write(
+        &fixture.schema_path,
+        include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+    )
+    .expect("write tracked verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"no demonstrated break"}"#,
+    )
+    .expect("write approval verdict");
+    let client = PathBuf::from(env!("CARGO_BIN_EXE_pce"));
+    for dry_run in [true, false] {
+        let log = fixture.harness.path().join("falsification.jsonl");
+        let mut argv = fixture.argv(&fixture.environment(0), &["probe the built artifact"]);
+        insert_gate_logging(&mut argv, &log, dry_run);
+        select_falsification_critic(&mut argv);
+        let output = fixture
+            .harness
+            .run(&argv, b"")
+            .expect("run falsification critic");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = [
+            "-p".to_owned(),
+            "--output-format".to_owned(),
+            "json".to_owned(),
+            "--allowedTools".to_owned(),
+            format!("Bash({} gate exec:*)", client.display()),
+            "Read".to_owned(),
+            "Glob".to_owned(),
+            "Grep".to_owned(),
+            "Write".to_owned(),
+            "--append-system-prompt".to_owned(),
+            falsification_mandate(&fixture.output_path, &client),
+            "probe the built artifact".to_owned(),
+        ];
+        let actual = if dry_run {
+            let value: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("projection");
+            value["envelope"]["argv"]
+                .as_array()
+                .expect("argv")
+                .iter()
+                .map(|value| value.as_str().expect("argument").to_owned())
+                .collect::<Vec<_>>()
+        } else {
+            let invocation = fixture.invocation();
+            invocation
+                .argv
+                .iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual
+                .iter()
+                .filter(|arg| *arg == "--append-system-prompt")
+                .count(),
+            1
+        );
+        let mandate = &actual[10];
+        for clause in [
+            "mutate the subject it claims to test",
+            "including when the check belongs to this gate rather than to the subject",
+            "delete the configuration entry that activates it",
+        ] {
+            assert_eq!(mandate.matches(clause).count(), 1, "{clause}");
+        }
+        assert_eq!(mandate.matches("<output-path>").count(), 1);
+        assert_eq!(mandate.matches("</output-path>").count(), 1);
+        assert!(!mandate.contains(&fixture.schema_path.display().to_string()));
+        if dry_run {
+            projected = Some(actual);
+            assert!(!log.exists());
+            assert!(
+                !PathBuf::from(format!("{}.executions.json", fixture.output_path.display()))
+                    .exists()
+            );
+        } else {
+            assert_eq!(projected.as_ref().expect("dry projection"), &actual);
+            let records = fs::read_to_string(&log).expect("event log");
+            assert_eq!(records.lines().count(), 2);
+            assert!(
+                records
+                    .lines()
+                    .next()
+                    .expect("issuance")
+                    .contains("\"role\":\"falsification-critic\"")
+            );
+            let evidence =
+                PathBuf::from(format!("{}.executions.json", fixture.output_path.display()));
+            assert_eq!(
+                fs::read(&evidence).expect("empty evidence sidecar"),
+                b"{\"schema_id\":\"pce.gate-execution-evidence\",\"schema_version\":1,\"executions\":[]}\n"
+            );
+            assert_eq!(
+                fs::metadata(evidence)
+                    .expect("evidence metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o444
+            );
+        }
+    }
+}
+
+#[test]
+fn falsification_recorder_executes_two_requests_and_persists_parent_observations() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("falsification executions", CLAUDE_SUCCESS);
+    fs::write(
+        &fixture.schema_path,
+        include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+    )
+    .expect("write tracked verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"REVISE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"dispatch route","problem":"demonstrated break","input":"primary","observation":"exit 7","execution_ref":"execution-000001","required_change":"replacement","replacement_execution":{"input":"replacement","observation":"exit 0","execution_ref":"execution-000002"}}],"non_blocking_notes":[],"summary":"one demonstrated break"}"#,
+    )
+    .expect("write referenced verdict");
+
+    let working_directory = fixture.cwd.join("worktree");
+    let bin = fixture.harness.path().join("fixture-bin");
+    let requests = fixture.harness.path().join("gate-exec-requests");
+    let responses = fixture.harness.path().join("gate-exec-responses");
+    for directory in [&working_directory, &bin, &requests, &responses] {
+        fs::create_dir_all(directory).expect("create recorder fixture directory");
+    }
+    let setup = bin.join("setup");
+    let primary = bin.join("probe");
+    let replacement = bin.join("replacement");
+    let common_checks = format!(
+        "[ \"$PWD\" = '{}' ] || exit 91\n[ \"$LANG\" = C ] || exit 92\n",
+        working_directory.display()
+    );
+    fs::write(
+        &setup,
+        format!(
+            "#!/bin/sh\n{common_checks}[ \"$TOKEN\" = setup ] || exit 93\n[ \"$1\" = --prepare ] || exit 94\n[ \"$2\" = 'value with spaces' ] || exit 95\n/bin/cat\nprintf '%s' '-out'\nprintf '%s' 'setup-err' >&2\n"
+        ),
+    )
+    .expect("write setup executable");
+    fs::write(
+        &primary,
+        format!(
+            "#!/bin/sh\n{common_checks}[ \"$TOKEN\" = probe ] || exit 93\n[ \"$1\" = --check ] || exit 94\n[ \"$2\" = 'value with spaces' ] || exit 95\n/bin/cat\nprintf '%s' 'probe-err' >&2\nexit 7\n"
+        ),
+    )
+    .expect("write primary executable");
+    fs::write(
+        &replacement,
+        format!(
+            "#!/bin/sh\n{common_checks}[ \"$TOKEN\" = replacement ] || exit 93\n[ \"$1\" = --verify ] || exit 94\n[ \"$2\" = 'value with spaces' ] || exit 95\n/bin/cat\nprintf '%s' 'ment-out'\n"
+        ),
+    )
+    .expect("write replacement executable");
+    for executable in [&setup, &primary, &replacement] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+    }
+    let primary_request = json!({
+        "working_directory": working_directory,
+        "setup": [{
+            "program": setup,
+            "arguments": ["--prepare", "value with spaces"],
+            "input": [115, 101, 116, 117, 112],
+            "environment": {"LANG": "C", "TOKEN": "setup"}
+        }],
+        "command": {
+            "program": primary,
+            "arguments": ["--check", "value with spaces"],
+            "input": [0, 255, 10],
+            "environment": {"LANG": "C", "TOKEN": "probe"}
+        }
+    });
+    let replacement_request = json!({
+        "working_directory": fixture.cwd.join("worktree"),
+        "setup": [],
+        "command": {
+            "program": replacement,
+            "arguments": ["--verify", "value with spaces"],
+            "input": [114, 101, 112, 108, 97, 99, 101],
+            "environment": {"LANG": "C", "TOKEN": "replacement"}
+        }
+    });
+    fs::write(
+        requests.join("0001.json"),
+        serde_json::to_vec_pretty(&primary_request).expect("primary request JSON"),
+    )
+    .expect("write primary request");
+    fs::write(
+        requests.join("0002.json"),
+        serde_json::to_vec_pretty(&replacement_request).expect("replacement request JSON"),
+    )
+    .expect("write replacement request");
+
+    let mut environment = fixture.environment(0);
+    environment.extend([
+        (
+            "PCE_CLAUDE_GATE_EXEC_REQUEST_DIR".to_owned(),
+            requests.display().to_string(),
+        ),
+        (
+            "PCE_CLAUDE_GATE_EXEC_RESPONSE_DIR".to_owned(),
+            responses.display().to_string(),
+        ),
+    ]);
+    let mut argv = fixture.argv(&environment, &["probe the built artifact"]);
+    let log = fixture
+        .harness
+        .path()
+        .join("falsification-executions.jsonl");
+    insert_gate_logging(&mut argv, &log, false);
+    select_falsification_critic(&mut argv);
+    let output = fixture.harness.run(&argv, b"").expect("run recorder");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let primary_response: Value =
+        serde_json::from_slice(&fs::read(responses.join("0001.json")).expect("primary response"))
+            .expect("primary response JSON");
+    assert_eq!(primary_response["execution_ref"], "execution-000001");
+    assert_eq!(
+        primary_response["observed_result"]["setup"][0]["stdout"],
+        json!(b"setup-out")
+    );
+    assert_eq!(
+        primary_response["observed_result"]["setup"][0]["stderr"],
+        json!(b"setup-err")
+    );
+    assert_eq!(
+        primary_response["observed_result"]["command"]["status"],
+        json!({"kind":"exited","code":7})
+    );
+    assert_eq!(
+        primary_response["observed_result"]["command"]["stdout"],
+        json!([0, 255, 10])
+    );
+    assert_eq!(
+        primary_response["observed_result"]["command"]["stderr"],
+        json!(b"probe-err")
+    );
+    let replacement_response: Value = serde_json::from_slice(
+        &fs::read(responses.join("0002.json")).expect("replacement response"),
+    )
+    .expect("replacement response JSON");
+    assert_eq!(replacement_response["execution_ref"], "execution-000002");
+    assert_eq!(
+        replacement_response["observed_result"]["command"]["stdout"],
+        json!(b"replacement-out")
+    );
+    assert_eq!(
+        replacement_response["observed_result"]["command"]["stderr"],
+        json!([])
+    );
+    let evidence_path = PathBuf::from(format!("{}.executions.json", fixture.output_path.display()));
+    let evidence: Value = serde_json::from_slice(&fs::read(&evidence_path).expect("evidence"))
+        .expect("evidence JSON");
+    assert_eq!(
+        evidence["executions"].as_array().expect("executions").len(),
+        2
+    );
+    assert_eq!(
+        evidence["executions"][0]["execution_ref"],
+        "execution-000001"
+    );
+    assert_eq!(
+        evidence["executions"][1]["execution_ref"],
+        "execution-000002"
+    );
+    assert_eq!(
+        fs::metadata(evidence_path)
+            .expect("evidence metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o444
+    );
+}
+
+#[test]
+fn falsification_recorder_preserves_large_request_through_real_client() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("large falsification execution", CLAUDE_SUCCESS);
+    fs::write(
+        &fixture.schema_path,
+        include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+    )
+    .expect("write tracked verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"large request recorded"}"#,
+    )
+    .expect("write approval verdict");
+    let input = (0..200_000)
+        .map(|index| u8::try_from(index % 251).expect("bounded input byte"))
+        .collect::<Vec<_>>();
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {
+            "program": "/bin/sh",
+            "arguments": ["-c", "/bin/cat >/dev/null"],
+            "input": input,
+            "environment": {}
+        }
+    });
+    let (responses, environment) = gate_request_directories(&fixture, &[request]);
+    let mut argv = fixture.argv(&environment, &["probe a large input"]);
+    let log = fixture.harness.path().join("large-falsification.jsonl");
+    insert_gate_logging(&mut argv, &log, false);
+    select_falsification_critic(&mut argv);
+
+    let output = fixture
+        .harness
+        .run(&argv, b"")
+        .expect("run large recorder request");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(
+        &fs::read(responses.join("0001.json")).expect("large request response"),
+    )
+    .expect("large response JSON");
+    assert_eq!(response["execution_ref"], "execution-000001");
+    assert_eq!(response["observed_result"]["command"]["stdout"], json!([]));
+
+    let evidence_path = PathBuf::from(format!("{}.executions.json", fixture.output_path.display()));
+    let evidence: Value = serde_json::from_slice(&fs::read(evidence_path).expect("large evidence"))
+        .expect("large evidence JSON");
+    assert_eq!(
+        evidence["executions"][0]["execution_ref"],
+        "execution-000001"
+    );
+    assert_eq!(
+        evidence["executions"][0]["stimulus"]["command"]["input"],
+        json!(input)
+    );
+}
+
+#[test]
+fn gate_execution_echoes_large_input_without_deadlock() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("large input echo", CLAUDE_SUCCESS);
+    let (child, socket, block, _log) =
+        spawn_blocked_falsification_recorder(&fixture, "large-input-echo");
+    let input = vec![65_u8; 200_000];
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {"program":"/bin/cat","arguments":[],"input":input,"environment":{}}
+    });
+    let response = raw_gate_response(&socket, &request);
+    let finalization_started = Instant::now();
+    fs::write(&block, []).expect("release Claude child");
+    let output = wait_for_dispatch_deadline(
+        child,
+        "echoing large-input gate execution exceeded 15 seconds",
+    );
+    assert!(
+        finalization_started.elapsed() < Duration::from_millis(500),
+        "large-input evidence finalization exceeded 0.5 seconds"
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(response["execution_ref"], "execution-000001");
+    assert_eq!(response["observed_result"]["setup"], json!([]));
+    assert_eq!(
+        response["observed_result"]["command"]["status"],
+        json!({"kind":"exited","code":0})
+    );
+    assert_eq!(
+        response["observed_result"]["command"]["stdout"],
+        json!(input)
+    );
+    assert_eq!(response["observed_result"]["command"]["stderr"], json!([]));
+    let evidence = gate_evidence(&fixture);
+    assert_eq!(
+        evidence["executions"][0]["stimulus"]["command"]["input"],
+        json!(input)
+    );
+    assert_eq!(
+        evidence["executions"][0]["observed_result"]["command"]["stdout"],
+        json!(input)
+    );
+}
+
+#[test]
+fn gate_execution_records_process_that_ignores_large_stdin() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("ignore large stdin", CLAUDE_SUCCESS);
+    let (child, socket, block, _log) =
+        spawn_blocked_falsification_recorder(&fixture, "ignore-large-stdin");
+    let input = vec![65_u8; 200_000];
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {"program":"/usr/bin/true","arguments":[],"input":input,"environment":{}}
+    });
+    let response = raw_gate_response(&socket, &request);
+    assert_eq!(
+        response["execution_ref"], "execution-000001",
+        "ignoring-stdin stimulus did not return execution-000001"
+    );
+    assert_eq!(
+        response["observed_result"]["command"],
+        json!({"status":{"kind":"exited","code":0},"stdout":[],"stderr":[]})
+    );
+    fs::write(&block, []).expect("release Claude child");
+    let output = wait_for_dispatch_deadline(
+        child,
+        "ignoring-stdin stimulus did not return execution-000001",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_evidence(&fixture)["executions"][0]["stimulus"]["command"]["input"],
+        json!(input)
+    );
+}
+
+#[test]
+fn gate_execution_drains_three_pipes_concurrently() {
+    let _guard = dispatch_test_guard();
+    for executable in ["/usr/bin/yes", "/usr/bin/tr", "/usr/bin/head"] {
+        assert!(
+            Path::new(executable).exists(),
+            "required fixture executable {executable} is unavailable"
+        );
+    }
+    let fixture = GateFixture::new("three pipe pressure", CLAUDE_SUCCESS);
+    let script = fixture.harness.path().join("three-pipe-fixture.sh");
+    fs::write(
+        &script,
+        b"#!/bin/sh\n/usr/bin/yes O | /usr/bin/tr -d '\\n' | /usr/bin/head -c 200000\n/usr/bin/yes E | /usr/bin/tr -d '\\n' | /usr/bin/head -c 200000 >&2\n/bin/cat\n",
+    )
+    .expect("write three-pipe fixture");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
+        .expect("make three-pipe fixture executable");
+    let (child, socket, block, _log) = spawn_blocked_falsification_recorder(&fixture, "three-pipe");
+    let input = vec![65_u8; 200_000];
+    let mut expected_stdout = vec![79_u8; 200_000];
+    expected_stdout.extend_from_slice(&input);
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {"program":script,"arguments":[],"input":input,"environment":{}}
+    });
+    let response = raw_gate_response(&socket, &request);
+    fs::write(&block, []).expect("release Claude child");
+    let output = wait_for_dispatch_deadline(child, "three-pipe gate execution exceeded 15 seconds");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(response["execution_ref"], "execution-000001");
+    assert_eq!(
+        response["observed_result"]["command"]["status"],
+        json!({"kind":"exited","code":0})
+    );
+    assert_eq!(
+        response["observed_result"]["command"]["stdout"],
+        json!(expected_stdout)
+    );
+    assert_eq!(
+        response["observed_result"]["command"]["stderr"],
+        json!(vec![69_u8; 200_000])
+    );
+}
+
+#[test]
+fn gate_execution_records_a_never_reading_process_that_signals_itself() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("never reading process", CLAUDE_SUCCESS);
+    let (child, socket, block, _log) =
+        spawn_blocked_falsification_recorder(&fixture, "never-reading-process");
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {"program":"/bin/sh","arguments":["-c", "kill -KILL $$"],"input":vec![65_u8; 200_000],"environment":{}}
+    });
+    let started = Instant::now();
+    let response = raw_gate_response(&socket, &request);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "unexpected execution duration {elapsed:?}"
+    );
+    assert_eq!(response["execution_ref"], "execution-000001");
+    assert_eq!(
+        response["observed_result"]["command"],
+        json!({"status":{"kind":"signaled","signal":9},"stdout":[],"stderr":[]})
+    );
+    fs::write(&block, []).expect("release Claude child");
+    let output =
+        wait_for_dispatch_deadline(child, "never-reading gate execution exceeded 15 seconds");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_evidence(&fixture)["executions"][0]["observed_result"]["command"]["status"],
+        json!({"kind":"signaled","signal":9})
+    );
+}
+
+#[test]
+fn gate_execution_rejects_partial_and_silent_requests_without_reference_skew() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("bounded raw requests", CLAUDE_SUCCESS);
+    let (child, socket, block, _log) =
+        spawn_blocked_falsification_recorder(&fixture, "bounded-raw-requests");
+    let exact_rejection = br#"{"error":"gate execution request read timed out after 2 seconds"}"#;
+
+    let mut partial = UnixStream::connect(&socket).expect("connect partial gate client");
+    partial
+        .set_read_timeout(Some(Duration::from_secs(6)))
+        .expect("bound partial response read");
+    partial
+        .write_all(br#"{"working_directory":"#)
+        .expect("write partial gate request");
+    let mut rejection = Vec::new();
+    partial.read_to_end(&mut rejection).unwrap_or_else(|error| {
+        panic!("partial gate request produced no rejection within 6 seconds: {error}")
+    });
+    assert_eq!(rejection, exact_rejection);
+
+    let mut silent = UnixStream::connect(&socket).expect("connect silent gate client");
+    silent
+        .set_read_timeout(Some(Duration::from_secs(6)))
+        .expect("bound silent response read");
+    rejection.clear();
+    silent.read_to_end(&mut rejection).unwrap_or_else(|error| {
+        panic!("silent gate connection produced no rejection within 6 seconds: {error}")
+    });
+    assert_eq!(rejection, exact_rejection);
+
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {"program":"/usr/bin/true","arguments":[],"input":[],"environment":{}}
+    });
+    let response = raw_gate_response(&socket, &request);
+    assert_eq!(response["execution_ref"], "execution-000001");
+    fs::write(&block, []).expect("release Claude child");
+    let output = wait_for_dispatch_deadline(child, "bounded raw gate requests exceeded 15 seconds");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_evidence(&fixture)["executions"]
+            .as_array()
+            .expect("executions")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn gate_execution_request_read_uses_total_deadline_and_hard_size_cap() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("dribbling raw request", CLAUDE_SUCCESS);
+    let (child, socket, block, _log) =
+        spawn_blocked_falsification_recorder(&fixture, "dribbling-raw-request");
+    let mut stream = UnixStream::connect(&socket).expect("connect dribbling gate client");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(4)))
+        .expect("bound dribbling response read");
+    let started = Instant::now();
+    stream.write_all(b"{").expect("write first dripped byte");
+    thread::sleep(Duration::from_millis(1_500));
+    stream.write_all(b"\"").expect("write second dripped byte");
+    let mut response_bytes = Vec::new();
+    stream
+        .read_to_end(&mut response_bytes)
+        .unwrap_or_else(|error| {
+            panic!("dribbling gate request produced no response within 4 seconds: {error}")
+        });
+    assert_eq!(
+        response_bytes,
+        br#"{"error":"gate execution request read timed out after 2 seconds"}"#
+    );
+    assert!(
+        started.elapsed() <= Duration::from_millis(2_250),
+        "dribbling gate request exceeded the total read deadline: {:?}",
+        started.elapsed()
+    );
+
+    let mut oversized = UnixStream::connect(&socket).expect("connect oversized gate client");
+    oversized
+        .set_read_timeout(Some(Duration::from_secs(6)))
+        .expect("bound oversized response read");
+    oversized
+        .write_all(&vec![b' '; 16 * 1024 * 1024 + 1])
+        .expect("write oversized gate request");
+    if let Err(error) = oversized.shutdown(Shutdown::Write)
+        && !matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::NotConnected
+        )
+    {
+        panic!("finish oversized gate request: {error}");
+    }
+    let mut rejection = Vec::new();
+    oversized
+        .read_to_end(&mut rejection)
+        .unwrap_or_else(|error| {
+            panic!("oversized gate request produced no rejection within 6 seconds: {error}")
+        });
+    assert_eq!(
+        rejection,
+        br#"{"error":"gate execution request exceeds 16777216 bytes"}"#
+    );
+
+    let response = raw_gate_response(
+        &socket,
+        &json!({
+            "working_directory": fixture.cwd,
+            "setup": [],
+            "command": {"program":"/usr/bin/true","arguments":[],"input":[],"environment":{}}
+        }),
+    );
+    assert_eq!(response["execution_ref"], "execution-000001");
+    fs::write(&block, []).expect("release Claude child");
+    let output =
+        wait_for_dispatch_deadline(child, "dribbling raw gate request exceeded 15 seconds");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_evidence(&fixture)["executions"]
+            .as_array()
+            .expect("executions")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn gate_execution_allocates_concurrent_partial_requests_in_parse_order() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("concurrent partial requests", CLAUDE_SUCCESS);
+    let (child, socket, block, _log) =
+        spawn_blocked_falsification_recorder(&fixture, "concurrent-partial-requests");
+    let requests = [1_u8, 2, 3].map(|byte| {
+        serde_json::to_vec(&json!({
+            "working_directory": fixture.cwd,
+            "setup": [],
+            "command": {"program":"/usr/bin/true","arguments":[],"input":[byte],"environment":{}}
+        }))
+        .expect("partial request JSON")
+    });
+    let mut streams = [
+        UnixStream::connect(&socket).expect("connect partial client one"),
+        UnixStream::connect(&socket).expect("connect partial client two"),
+        UnixStream::connect(&socket).expect("connect partial client three"),
+    ];
+    for (stream, request) in streams.iter_mut().zip(&requests) {
+        stream
+            .write_all(&request[..24])
+            .expect("write request prefix");
+    }
+    thread::sleep(Duration::from_millis(100));
+    let mut finish = |index: usize| -> Value {
+        streams[index]
+            .write_all(&requests[index][24..])
+            .expect("finish partial request");
+        streams[index]
+            .shutdown(Shutdown::Write)
+            .expect("finish partial request write half");
+        let mut bytes = Vec::new();
+        streams[index]
+            .read_to_end(&mut bytes)
+            .expect("read partial request response");
+        serde_json::from_slice(&bytes).expect("partial request response JSON")
+    };
+    let second = finish(1);
+    let first = finish(0);
+    let third = finish(2);
+    assert_eq!(second["execution_ref"], "execution-000001");
+    assert_eq!(first["execution_ref"], "execution-000002");
+    assert_eq!(third["execution_ref"], "execution-000003");
+    fs::write(&block, []).expect("release Claude child");
+    let output = wait_for_dispatch_deadline(
+        child,
+        "concurrent partial gate requests exceeded 15 seconds",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let evidence = gate_evidence(&fixture);
+    assert_eq!(
+        evidence["executions"][0]["execution_ref"],
+        "execution-000001"
+    );
+    assert_eq!(
+        evidence["executions"][1]["execution_ref"],
+        "execution-000002"
+    );
+    assert_eq!(
+        evidence["executions"][2]["execution_ref"],
+        "execution-000003"
+    );
+}
+
+#[test]
+fn gate_execution_allocates_unique_refs_for_simultaneous_requests() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("simultaneous complete requests", CLAUDE_SUCCESS);
+    let (child, socket, block, _log) =
+        spawn_blocked_falsification_recorder(&fixture, "simultaneous-complete-requests");
+    let request = serde_json::to_vec(&json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {"program":"/bin/sh","arguments":["-c","/bin/sleep 0.5"],"input":[],"environment":{}}
+    }))
+    .expect("simultaneous request JSON");
+    let mut first = UnixStream::connect(&socket).expect("connect first simultaneous client");
+    let mut second = UnixStream::connect(&socket).expect("connect second simultaneous client");
+    first
+        .write_all(&request)
+        .expect("write first simultaneous request");
+    first
+        .shutdown(Shutdown::Write)
+        .expect("finish first simultaneous request");
+    second
+        .write_all(&request)
+        .expect("write second simultaneous request");
+    second
+        .shutdown(Shutdown::Write)
+        .expect("finish second simultaneous request");
+    let mut first_bytes = Vec::new();
+    let mut second_bytes = Vec::new();
+    first
+        .read_to_end(&mut first_bytes)
+        .expect("read first simultaneous response");
+    second
+        .read_to_end(&mut second_bytes)
+        .expect("read second simultaneous response");
+    let first: Value =
+        serde_json::from_slice(&first_bytes).expect("first simultaneous response JSON");
+    let second: Value =
+        serde_json::from_slice(&second_bytes).expect("second simultaneous response JSON");
+    assert_ne!(
+        first["execution_ref"], second["execution_ref"],
+        "concurrent gate requests received duplicate execution references"
+    );
+    let mut references = vec![
+        first["execution_ref"].as_str().expect("first reference"),
+        second["execution_ref"].as_str().expect("second reference"),
+    ];
+    references.sort_unstable();
+    assert_eq!(references, ["execution-000001", "execution-000002"]);
+    fs::write(&block, []).expect("release Claude child");
+    let output =
+        wait_for_dispatch_deadline(child, "simultaneous gate requests exceeded 15 seconds");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let evidence = gate_evidence(&fixture);
+    assert_eq!(
+        evidence["executions"][0]["execution_ref"],
+        "execution-000001"
+    );
+    assert_eq!(
+        evidence["executions"][1]["execution_ref"],
+        "execution-000002"
+    );
+}
+
+#[test]
+fn unread_large_gate_response_cannot_suppress_record() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("unread large response", CLAUDE_SUCCESS);
+    let (child, socket, block, log) =
+        spawn_blocked_falsification_recorder(&fixture, "unread-large-response");
+    let input = vec![65_u8; 200_000];
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {"program":"/bin/cat","arguments":[],"input":input,"environment":{}}
+    });
+    let wire = serde_json::to_vec(&request).expect("unread request JSON");
+    let mut stream = UnixStream::connect(&socket).expect("connect unread-response client");
+    stream
+        .write_all(&wire)
+        .expect("write unread-response request");
+    stream
+        .shutdown(Shutdown::Write)
+        .expect("finish unread-response request");
+    thread::sleep(Duration::from_secs(2));
+    fs::write(&block, []).expect("release Claude child");
+    let output = wait_for_dispatch_deadline(
+        child,
+        "unread gate response suppressed the record within 15 seconds",
+    );
+    drop(stream);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_completion(&log).artifact_outcome,
+        ArtifactOutcome::Validated
+    );
+    let evidence = gate_evidence(&fixture);
+    assert_eq!(
+        evidence["executions"][0]["execution_ref"],
+        "execution-000001"
+    );
+    assert_eq!(
+        evidence["executions"][0]["stimulus"]["command"]["input"],
+        json!(input)
+    );
+    assert_eq!(
+        evidence["executions"][0]["observed_result"]["command"]["stdout"],
+        json!(input)
+    );
+}
+
+#[test]
+fn gate_execution_connection_limit_rejects_without_allocating() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("connection limit", CLAUDE_SUCCESS);
+    let (child, socket, block, log) =
+        spawn_blocked_falsification_recorder(&fixture, "connection-limit");
+    let mut peers = (0..33)
+        .map(|_| UnixStream::connect(&socket).expect("connect held gate peer"))
+        .collect::<Vec<_>>();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let exact = br#"{"error":"gate execution recorder connection limit reached"}"#;
+    let mut delivered = false;
+    while !delivered && Instant::now() < deadline {
+        for peer in &mut peers {
+            peer.set_nonblocking(true)
+                .expect("make held peer nonblocking");
+            let mut bytes = Vec::new();
+            match peer.read_to_end(&mut bytes) {
+                Ok(_) if bytes == exact => {
+                    delivered = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("read connection-limit rejection: {error}"),
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        delivered,
+        "connection-limit rejection was not delivered within 4 seconds"
+    );
+    drop(peers);
+    thread::sleep(Duration::from_millis(100));
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {"program":"/usr/bin/true","arguments":[],"input":[],"environment":{}}
+    });
+    let response = raw_gate_response(&socket, &request);
+    assert_eq!(response["execution_ref"], "execution-000001");
+    fs::write(&block, []).expect("release Claude child");
+    let output = wait_for_dispatch_deadline(child, "connection-limit dispatch exceeded 15 seconds");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_completion(&log).artifact_outcome,
+        ArtifactOutcome::Validated
+    );
+    assert_eq!(
+        gate_evidence(&fixture)["executions"]
+            .as_array()
+            .expect("executions")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn falsification_recorder_preserves_setup_spawn_and_signal_observations() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("terminal observations", CLAUDE_SUCCESS);
+    fs::write(
+        &fixture.schema_path,
+        include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+    )
+    .expect("write tracked verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"observed"}"#,
+    )
+    .expect("write approval verdict");
+    let missing_program = fixture.harness.path().join("does-not-exist");
+    let requests = [
+        json!({
+            "working_directory": fixture.cwd,
+            "setup": [{
+                "program": "/bin/sh",
+                "arguments": ["-c", "exit 23"],
+                "input": [],
+                "environment": {}
+            }],
+            "command": {
+                "program": "/bin/true",
+                "arguments": [],
+                "input": [],
+                "environment": {}
+            }
+        }),
+        json!({
+            "working_directory": fixture.cwd,
+            "setup": [],
+            "command": {
+                "program": missing_program,
+                "arguments": [],
+                "input": [],
+                "environment": {}
+            }
+        }),
+        json!({
+            "working_directory": fixture.cwd,
+            "setup": [],
+            "command": {
+                "program": "/bin/sh",
+                "arguments": ["-c", "kill -9 \"$$\""],
+                "input": [],
+                "environment": {}
+            }
+        }),
+    ];
+    let (responses, environment) = gate_request_directories(&fixture, &requests);
+    let log = fixture.harness.path().join("terminal-observations.jsonl");
+    let mut argv = fixture.argv(&environment, &["probe"]);
+    insert_gate_logging(&mut argv, &log, false);
+    select_falsification_critic(&mut argv);
+    let output = fixture.harness.run(&argv, b"").expect("run exact role");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response = |name: &str| -> Value {
+        serde_json::from_slice(&fs::read(responses.join(name)).expect("gate response"))
+            .expect("gate response JSON")
+    };
+    let setup_failed = response("0001.json");
+    assert_eq!(setup_failed["execution_ref"], "execution-000001");
+    assert_eq!(
+        setup_failed["observed_result"]["setup"][0]["status"],
+        json!({"kind":"exited","code":23})
+    );
+    assert!(setup_failed["observed_result"]["command"].is_null());
+    let spawn_failed = response("0002.json");
+    assert_eq!(spawn_failed["execution_ref"], "execution-000002");
+    assert_eq!(
+        spawn_failed["observed_result"]["command"]["status"],
+        json!({"kind":"spawn-failed","detail":"No such file or directory (os error 2)"})
+    );
+    assert_eq!(
+        spawn_failed["observed_result"]["command"]["stdout"],
+        json!([])
+    );
+    assert_eq!(
+        spawn_failed["observed_result"]["command"]["stderr"],
+        json!([])
+    );
+    let signaled = response("0003.json");
+    assert_eq!(signaled["execution_ref"], "execution-000003");
+    assert_eq!(
+        signaled["observed_result"]["command"]["status"],
+        json!({"kind":"signaled","signal":9})
+    );
+    assert!(
+        signaled["observed_result"]["command"]["status"]
+            .get("code")
+            .is_none()
+    );
+    let evidence: Value = serde_json::from_slice(
+        &fs::read(format!("{}.executions.json", fixture.output_path.display()))
+            .expect("terminal observation evidence"),
+    )
+    .expect("terminal observation evidence JSON");
+    assert_eq!(
+        evidence["executions"].as_array().expect("executions").len(),
+        3
+    );
+    assert_eq!(
+        evidence["executions"][0]["observed_result"]["setup"][0]["status"],
+        json!({"kind":"exited","code":23})
+    );
+    assert!(evidence["executions"][0]["observed_result"]["command"].is_null());
+    assert_eq!(
+        evidence["executions"][1]["observed_result"]["command"]["status"],
+        json!({"kind":"spawn-failed","detail":"No such file or directory (os error 2)"})
+    );
+    assert_eq!(
+        evidence["executions"][1]["observed_result"]["command"]["stdout"],
+        json!([])
+    );
+    assert_eq!(
+        evidence["executions"][1]["observed_result"]["command"]["stderr"],
+        json!([])
+    );
+    assert_eq!(
+        evidence["executions"][2]["observed_result"]["command"]["status"],
+        json!({"kind":"signaled","signal":9})
+    );
+}
+
+#[test]
+fn falsification_reference_admission_uses_binary_owned_verdict_schema() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("installed verdict schema", CLAUDE_SUCCESS);
+    let installed_schema = br#"{
+      "type":"object",
+      "additionalProperties":false,
+      "required":["verdict","self_sufficiency","root_cause","blocking_issues","non_blocking_notes","summary"],
+      "properties":{
+        "verdict":{"type":"string","enum":["APPROVE","REVISE","BLOCK"]},
+        "self_sufficiency":{"type":"string","enum":["PASS","FAIL","NOT_APPLICABLE"]},
+        "root_cause":{"type":"string","enum":["execution","step_plan","milestone_plan","vision"]},
+        "blocking_issues":{"type":"array","items":{
+          "type":"object",
+          "additionalProperties":false,
+          "required":["id","severity","location","problem","required_change"],
+          "properties":{
+            "id":{"type":"string"},
+            "severity":{"type":"string","enum":["critical","major"]},
+            "location":{"type":"string"},
+            "problem":{"type":"string"},
+            "required_change":{"type":"string"}
+          }
+        }},
+        "non_blocking_notes":{"type":"array","items":{"type":"string"}},
+        "summary":{"type":"string"}
+      }
+    }"#;
+    fs::write(&fixture.schema_path, installed_schema).expect("write five-field installed schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"REVISE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"dispatch route","problem":"demonstrated break","input":"primary","observation":"exit 1","execution_ref":"execution-000001","required_change":"replacement","replacement_execution":{"input":"replacement","observation":"exit 0","execution_ref":"execution-000001"}}],"non_blocking_notes":[],"summary":"demonstrated and repaired"}"#,
+    )
+    .expect("write binary-schema verdict");
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {"program":"/usr/bin/true","arguments":[],"input":[],"environment":{}}
+    });
+    let (_responses, environment) = gate_request_directories(&fixture, &[request]);
+    let log = fixture
+        .harness
+        .path()
+        .join("installed-schema-reference-admission.jsonl");
+    let mut argv = fixture.argv(&environment, &["probe"]);
+    insert_gate_logging(&mut argv, &log, false);
+    select_falsification_critic(&mut argv);
+
+    let output = fixture
+        .harness
+        .run(&argv, b"")
+        .expect("run against five-field installed schema");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_completion(&log).artifact_outcome,
+        ArtifactOutcome::Validated
+    );
+    let evidence = gate_evidence(&fixture);
+    assert_eq!(
+        evidence["executions"].as_array().expect("executions").len(),
+        1
+    );
+    assert_eq!(
+        evidence["executions"][0]["execution_ref"],
+        "execution-000001"
+    );
+}
+
+#[test]
+fn falsification_reference_admission_does_not_read_the_installed_verdict_schema() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("missing installed verdict schema", CLAUDE_SUCCESS);
+    fs::remove_file(&fixture.schema_path).expect("remove installed verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"binary-owned schema"}"#,
+    )
+    .expect("write binary-schema verdict");
+    let log = fixture
+        .harness
+        .path()
+        .join("missing-schema-reference-admission.jsonl");
+    let environment = fixture.environment(0);
+    let mut argv = fixture.argv(&environment, &["probe"]);
+    insert_gate_logging(&mut argv, &log, false);
+    select_falsification_critic(&mut argv);
+
+    let output = fixture
+        .harness
+        .run(&argv, b"")
+        .expect("run without installed verdict schema");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_completion(&log).artifact_outcome,
+        ArtifactOutcome::Validated
+    );
+}
+
+#[test]
+fn falsification_reference_admission_uses_only_retained_same_dispatch_records() {
+    let _guard = dispatch_test_guard();
+    let issue = |id: &str, primary: Option<&str>, replacement: Option<&str>| {
+        let mut issue = json!({
+            "id": id,
+            "severity": "major",
+            "location": "dispatch route",
+            "problem": "claimed break",
+            "input": "primary",
+            "observation": "claimed",
+            "required_change": "replacement",
+            "replacement_execution": {
+                "input": "replacement",
+                "observation": "claimed"
+            }
+        });
+        if let Some(primary) = primary {
+            issue["execution_ref"] = json!(primary);
+        }
+        if let Some(replacement) = replacement {
+            issue["replacement_execution"]["execution_ref"] = json!(replacement);
+        }
+        issue
+    };
+    let cases = [
+        (
+            "unknown replacement",
+            vec![issue(
+                "F-1",
+                Some("execution-000001"),
+                Some("execution-000003"),
+            )],
+            "blocking issue `F-1` replacement references unknown gate execution `execution-000003`",
+        ),
+        (
+            "unknown neighboring issue",
+            vec![
+                issue("F-1", Some("execution-000001"), Some("execution-000002")),
+                issue("F-2", Some("execution-000003"), Some("execution-000002")),
+            ],
+            "blocking issue `F-2` references unknown gate execution `execution-000003`",
+        ),
+        (
+            "missing primary",
+            vec![issue("F-1", None, Some("execution-000002"))],
+            "blocking issue `F-1` is missing gate execution reference",
+        ),
+        (
+            "missing replacement",
+            vec![issue("F-1", Some("execution-000001"), None)],
+            "blocking issue `F-1` replacement is missing gate execution reference",
+        ),
+        (
+            "zero reference",
+            vec![issue(
+                "F-1",
+                Some("execution-000000"),
+                Some("execution-000002"),
+            )],
+            "invalid gate execution reference `execution-000000`",
+        ),
+    ];
+    for (name, blocking_issues, diagnostic) in cases {
+        let fixture = GateFixture::new(name, CLAUDE_SUCCESS);
+        fs::write(
+            &fixture.schema_path,
+            include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+        )
+        .expect("write tracked verdict schema");
+        fs::write(
+            &fixture.output_path,
+            serde_json::to_vec(&json!({
+                "verdict": "REVISE",
+                "self_sufficiency": "NOT_APPLICABLE",
+                "root_cause": "execution",
+                "blocking_issues": blocking_issues,
+                "non_blocking_notes": [],
+                "summary": "claimed break"
+            }))
+            .expect("verdict JSON"),
+        )
+        .expect("write reference verdict");
+        let requests = [
+            json!({
+                "working_directory": fixture.cwd,
+                "setup": [],
+                "command": {"program":"/bin/true","arguments":[],"input":[],"environment":{}}
+            }),
+            json!({
+                "working_directory": fixture.cwd,
+                "setup": [],
+                "command": {"program":"/bin/true","arguments":[],"input":[],"environment":{}}
+            }),
+        ];
+        let (_responses, environment) = gate_request_directories(&fixture, &requests);
+        let log = fixture.harness.path().join("reference-admission.jsonl");
+        let mut argv = fixture.argv(&environment, &["probe"]);
+        insert_gate_logging(&mut argv, &log, false);
+        select_falsification_critic(&mut argv);
+        let output = fixture.harness.run(&argv, b"").expect("run exact role");
+        assert!(!output.status.success(), "{name} unexpectedly succeeded");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            gate_completion(&log).artifact_outcome,
+            ArtifactOutcome::SchemaViolating,
+            "{name}"
+        );
+        let evidence: Value = serde_json::from_slice(
+            &fs::read(format!("{}.executions.json", fixture.output_path.display()))
+                .expect("durable evidence"),
+        )
+        .expect("evidence JSON");
+        assert_eq!(
+            evidence["executions"].as_array().expect("executions").len(),
+            2,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn falsification_evidence_destination_is_never_overwritten() {
+    let _guard = dispatch_test_guard();
+    for raced in [false, true] {
+        let fixture = GateFixture::new(
+            if raced {
+                "raced evidence"
+            } else {
+                "preexisting evidence"
+            },
+            CLAUDE_SUCCESS,
+        );
+        fs::write(
+            &fixture.schema_path,
+            include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+        )
+        .expect("write tracked verdict schema");
+        fs::write(
+            &fixture.output_path,
+            br#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"none"}"#,
+        )
+        .expect("write approval");
+        let evidence = PathBuf::from(format!("{}.executions.json", fixture.output_path.display()));
+        let mut environment = fixture.environment(0);
+        if raced {
+            environment.extend([
+                (
+                    "PCE_CLAUDE_GATE_EXEC_RACE_EVIDENCE".to_owned(),
+                    "1".to_owned(),
+                ),
+                (
+                    "PCE_CLAUDE_OUTPUT_PATH".to_owned(),
+                    fixture.output_path.display().to_string(),
+                ),
+            ]);
+        } else {
+            fs::write(&evidence, b"preexisting").expect("write preexisting evidence");
+        }
+        let log = fixture.harness.path().join("immutable.jsonl");
+        let mut argv = fixture.argv(&environment, &["probe"]);
+        insert_gate_logging(&mut argv, &log, false);
+        select_falsification_critic(&mut argv);
+        let output = fixture.harness.run(&argv, b"").expect("run immutable case");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("gate execution evidence path already exists")
+        );
+        assert_eq!(
+            fs::read(&evidence).expect("preserved evidence bytes"),
+            if raced {
+                b"critic-authored".as_slice()
+            } else {
+                b"preexisting".as_slice()
+            }
+        );
+        let invocation_count = fixture
+            .harness
+            .claude_invocations(&fixture.record_root)
+            .expect("invocations")
+            .len();
+        assert_eq!(invocation_count, usize::from(raced));
+    }
+}
+
+#[test]
+fn gate_exec_client_rejects_typed_input_before_connecting() {
+    let valid = br#"{"working_directory":"/tmp","setup":[],"command":{"program":"/bin/true","arguments":[],"input":[],"environment":{}}}"#;
+    let cases: [(&[u8], Option<&str>, &str); 4] = [
+        (
+            valid,
+            None,
+            "PCE_GATE_EXEC_SOCKET is required for `pce gate exec`",
+        ),
+        (
+            br#"{"working_directory":"relative","setup":[],"command":{"program":"/bin/true","arguments":[],"input":[],"environment":{}}}"#,
+            Some("/tmp/does-not-exist.sock"),
+            "gate execution working directory must be absolute",
+        ),
+        (
+            br#"{"working_directory":"/tmp","setup":[],"command":{"program":"","arguments":[],"input":[],"environment":{}}}"#,
+            Some("/tmp/does-not-exist.sock"),
+            "gate execution program must not be empty",
+        ),
+        (
+            br#"{"working_directory":"/tmp","setup":[],"command":{"program":"/bin/true","arguments":[],"input":[],"environment":{"":"value"}}}"#,
+            Some("/tmp/does-not-exist.sock"),
+            "gate execution environment name must not be empty",
+        ),
+    ];
+    for (request, socket, diagnostic) in cases {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pce"));
+        command.args(["gate", "exec"]);
+        command.env_clear();
+        if let Some(socket) = socket {
+            command.env("PCE_GATE_EXEC_SOCKET", socket);
+        }
+        command.stdin(Stdio::piped());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn gate exec client");
+        child
+            .stdin
+            .take()
+            .expect("client stdin")
+            .write_all(request)
+            .expect("write request");
+        let output = child.wait_with_output().expect("client output");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, format!("{diagnostic}\n").as_bytes());
+    }
+}
+
+#[test]
+fn raw_socket_request_repeats_parent_validation_without_allocating_a_reference() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("raw parent rejection", CLAUDE_SUCCESS);
+    fs::write(
+        &fixture.schema_path,
+        include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+    )
+    .expect("write tracked verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"none"}"#,
+    )
+    .expect("write approval");
+    let block = fixture.harness.path().join("release-claude");
+    let mut environment = fixture.environment(0);
+    environment.push((
+        "PCE_CLAUDE_BLOCK_FILE".to_owned(),
+        block.display().to_string(),
+    ));
+    let log = fixture.harness.path().join("raw-parent.jsonl");
+    let mut argv = fixture.argv(&environment, &["probe"]);
+    insert_gate_logging(&mut argv, &log, false);
+    select_falsification_critic(&mut argv);
+    let mut parent = Command::new(env!("CARGO_BIN_EXE_pce"));
+    parent.args(&argv);
+    parent.stdin(Stdio::null());
+    parent.stdout(Stdio::piped());
+    parent.stderr(Stdio::piped());
+    let child = parent.spawn().expect("spawn parent dispatch");
+    let environment_path = fixture.record_root.join("invocation/environment.bin");
+    let ready_path = fixture.record_root.join("invocation/pid");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready_path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let environment_bytes = fs::read(&environment_path).expect("recorded Claude environment");
+    let socket = environment_bytes
+        .split(|byte| *byte == 0)
+        .find_map(|entry| {
+            entry
+                .strip_prefix(b"PCE_GATE_EXEC_SOCKET=")
+                .map(|value| PathBuf::from(OsString::from_vec(value.to_vec())))
+        })
+        .expect("socket environment entry");
+    let mut stream = UnixStream::connect(&socket).expect("connect raw socket client");
+    stream
+        .write_all(br#"{"working_directory":"relative","setup":[],"command":{"program":"/bin/true","arguments":[],"input":[],"environment":{}}}"#)
+        .expect("write raw request");
+    stream
+        .shutdown(Shutdown::Write)
+        .expect("finish raw request");
+    let mut rejection = Vec::new();
+    stream.read_to_end(&mut rejection).expect("read rejection");
+    fs::write(&block, []).expect("release Claude child");
+    let output = child.wait_with_output().expect("parent output");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        rejection,
+        br#"{"error":"gate execution working directory must be absolute"}"#
+    );
+    assert_eq!(
+        fs::read(format!("{}.executions.json", fixture.output_path.display()))
+            .expect("empty evidence"),
+        b"{\"schema_id\":\"pce.gate-execution-evidence\",\"schema_version\":1,\"executions\":[]}\n"
+    );
+    assert!(!socket.exists());
+}
+
+#[test]
+fn hung_up_gate_client_cannot_suppress_completion_or_evidence() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("hung-up client", CLAUDE_SUCCESS);
+    fs::write(
+        &fixture.schema_path,
+        include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+    )
+    .expect("write tracked verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"none"}"#,
+    )
+    .expect("write approval");
+    let block = fixture.harness.path().join("release-hung-up-claude");
+    let mut environment = fixture.environment(0);
+    environment.push((
+        "PCE_CLAUDE_BLOCK_FILE".to_owned(),
+        block.display().to_string(),
+    ));
+    let log = fixture.harness.path().join("hung-up-client.jsonl");
+    let mut argv = fixture.argv(&environment, &["probe"]);
+    insert_gate_logging(&mut argv, &log, false);
+    select_falsification_critic(&mut argv);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pce"));
+    command.args(&argv);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let child = command.spawn().expect("spawn parent dispatch");
+    let environment_path = fixture.record_root.join("invocation/environment.bin");
+    let ready_path = fixture.record_root.join("invocation/pid");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready_path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let environment_bytes = fs::read(&environment_path).expect("recorded Claude environment");
+    let socket = environment_bytes
+        .split(|byte| *byte == 0)
+        .find_map(|entry| {
+            entry
+                .strip_prefix(b"PCE_GATE_EXEC_SOCKET=")
+                .map(|value| PathBuf::from(OsString::from_vec(value.to_vec())))
+        })
+        .expect("socket environment entry");
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {
+            "program": "/bin/sh",
+            "arguments": ["-c", "/bin/sleep 0.1"],
+            "input": [],
+            "environment": {}
+        }
+    });
+    let mut stream = UnixStream::connect(&socket).expect("connect raw socket client");
+    stream
+        .write_all(&serde_json::to_vec(&request).expect("raw request JSON"))
+        .expect("write raw request");
+    stream
+        .shutdown(Shutdown::Both)
+        .expect("hang up raw request");
+    drop(stream);
+    thread::sleep(Duration::from_millis(250));
+    fs::write(&block, []).expect("release Claude child");
+    let output = child.wait_with_output().expect("parent output");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        gate_completion(&log).artifact_outcome,
+        ArtifactOutcome::Validated
+    );
+    let evidence: Value = serde_json::from_slice(
+        &fs::read(format!("{}.executions.json", fixture.output_path.display()))
+            .expect("hung-up client evidence"),
+    )
+    .expect("hung-up client evidence JSON");
+    assert_eq!(
+        evidence["executions"].as_array().expect("executions").len(),
+        1,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        evidence["executions"][0]["execution_ref"],
+        "execution-000001"
+    );
+    assert!(!socket.exists());
+}
+
+#[test]
+fn long_running_gate_stimulus_has_bounded_shutdown_and_durable_evidence() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("long-running stimulus", CLAUDE_SUCCESS);
+    fs::write(
+        &fixture.schema_path,
+        include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+    )
+    .expect("write tracked verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"none"}"#,
+    )
+    .expect("write approval");
+    let block = fixture.harness.path().join("release-long-running-claude");
+    let stimulus_release = fixture.harness.path().join("release-long-running-stimulus");
+    let mut environment = fixture.environment(0);
+    environment.push((
+        "PCE_CLAUDE_BLOCK_FILE".to_owned(),
+        block.display().to_string(),
+    ));
+    let log = fixture.harness.path().join("long-running-stimulus.jsonl");
+    let mut argv = fixture.argv(&environment, &["probe"]);
+    insert_gate_logging(&mut argv, &log, false);
+    select_falsification_critic(&mut argv);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pce"));
+    command.args(&argv);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let child = command.spawn().expect("spawn parent dispatch");
+    let environment_path = fixture.record_root.join("invocation/environment.bin");
+    let ready_path = fixture.record_root.join("invocation/pid");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready_path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let environment_bytes = fs::read(&environment_path).expect("recorded Claude environment");
+    let socket = environment_bytes
+        .split(|byte| *byte == 0)
+        .find_map(|entry| {
+            entry
+                .strip_prefix(b"PCE_GATE_EXEC_SOCKET=")
+                .map(|value| PathBuf::from(OsString::from_vec(value.to_vec())))
+        })
+        .expect("socket environment entry");
+    let request = json!({
+        "working_directory": fixture.cwd,
+        "setup": [],
+        "command": {
+            "program": "/bin/sh",
+            "arguments": [
+                "-c",
+                "while [ ! -e \"$1\" ]; do /bin/sleep 0.01; done",
+                "gate-long-running",
+                stimulus_release
+            ],
+            "input": [],
+            "environment": {}
+        }
+    });
+    let mut stream = UnixStream::connect(&socket).expect("connect raw socket client");
+    stream
+        .write_all(&serde_json::to_vec(&request).expect("raw request JSON"))
+        .expect("write raw request");
+    stream
+        .shutdown(Shutdown::Write)
+        .expect("finish long-running raw request");
+    drop(stream);
+    thread::sleep(Duration::from_millis(100));
+    let started_shutdown = Instant::now();
+    fs::write(&block, []).expect("release Claude child");
+    let output =
+        wait_for_dispatch_deadline(child, "bounded-shutdown gate execution exceeded 15 seconds");
+    let shutdown_duration = started_shutdown.elapsed();
+    fs::write(&stimulus_release, []).expect("release detached stimulus");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        shutdown_duration < Duration::from_secs(8),
+        "shutdown took {shutdown_duration:?}"
+    );
+    assert_eq!(
+        gate_completion(&log).artifact_outcome,
+        ArtifactOutcome::Validated
+    );
+    let evidence: Value = serde_json::from_slice(
+        &fs::read(format!("{}.executions.json", fixture.output_path.display()))
+            .expect("bounded-shutdown evidence"),
+    )
+    .expect("bounded-shutdown evidence JSON");
+    assert_eq!(
+        evidence["executions"].as_array().expect("executions").len(),
+        1
+    );
+    assert_eq!(
+        evidence["executions"][0]["execution_ref"],
+        "execution-000001"
+    );
+    assert_eq!(
+        evidence["executions"][0]["observed_result"]["command"]["status"],
+        json!({"kind":"signaled","signal":9})
+    );
+    assert_eq!(
+        evidence["executions"][0]["observed_result"]["command"]["stdout"],
+        json!([])
+    );
+    assert_eq!(
+        evidence["executions"][0]["observed_result"]["command"]["stderr"],
+        json!([])
+    );
+    assert!(!socket.exists());
+}
+
+#[test]
+fn falsification_critic_rejects_caller_owned_system_prompt_before_issuance() {
+    let _guard = dispatch_test_guard();
+    for (token, diagnostic) in [
+        (
+            "--append-system-prompt",
+            "falsification-critic caller arguments must not contain `--append-system-prompt`",
+        ),
+        (
+            "--append-system-prompt=caller-value",
+            "falsification-critic caller arguments must not contain `--append-system-prompt`",
+        ),
+        (
+            "--allowedTools",
+            "falsification-critic caller arguments must not contain `--allowedTools`",
+        ),
+        (
+            "--allowedTools=Bash",
+            "falsification-critic caller arguments must not contain `--allowedTools`",
+        ),
+    ] {
+        let fixture = GateFixture::new("falsification reject", CLAUDE_SUCCESS);
+        let log = fixture.harness.path().join("rejected.jsonl");
+        let mut argv = fixture.argv(&fixture.environment(0), &[token]);
+        insert_gate_logging(&mut argv, &log, false);
+        select_falsification_critic(&mut argv);
+        let output = fixture
+            .harness
+            .run(&argv, b"")
+            .expect("reject caller frame");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(diagnostic));
+        assert!(!log.exists() || fs::read(&log).expect("log bytes").is_empty());
+        assert!(
+            fixture
+                .harness
+                .claude_invocations(&fixture.record_root)
+                .expect("invocations")
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn falsification_critic_rejects_reserved_environment_before_issuance() {
+    let _guard = dispatch_test_guard();
+    for (name, diagnostic) in [
+        (
+            "PCE_GATE_EXEC_CLIENT",
+            "falsification-critic environment must not supply binary-owned `PCE_GATE_EXEC_CLIENT`",
+        ),
+        (
+            "PCE_GATE_EXEC_SOCKET",
+            "falsification-critic environment must not supply binary-owned `PCE_GATE_EXEC_SOCKET`",
+        ),
+    ] {
+        let fixture = GateFixture::new(name, CLAUDE_SUCCESS);
+        let mut environment = fixture.environment(0);
+        environment.push((name.to_owned(), "caller-owned".to_owned()));
+        let log = fixture.harness.path().join("reserved.jsonl");
+        let mut argv = fixture.argv(&environment, &["probe"]);
+        insert_gate_logging(&mut argv, &log, false);
+        select_falsification_critic(&mut argv);
+        let output = fixture
+            .harness
+            .run(&argv, b"")
+            .expect("reject reserved env");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(diagnostic));
+        assert!(!log.exists());
+        assert!(
+            fixture
+                .harness
+                .claude_invocations(&fixture.record_root)
+                .expect("invocations")
+                .is_empty()
+        );
+    }
 }
 
 #[test]
@@ -3374,17 +5312,12 @@ fn run_measured_gate(
 }
 
 #[test]
-fn gate_duration_compares_binary_measurements() {
+fn gate_duration_reports_child_runtime() {
     let _guard = dispatch_test_guard();
-    let fast = run_measured_gate("duration-fast", CLAUDE_SUCCESS, None);
-    let slow = run_measured_gate("duration-slow", CLAUDE_SUCCESS, Some("0.2"));
+    let slow = run_measured_gate("duration-slow", CLAUDE_SUCCESS, Some("0.5"));
     assert!(
-        slow.duration_ms
-            .get()
-            .checked_sub(fast.duration_ms.get())
-            .is_some_and(|difference| difference >= 150),
-        "fast={} slow={}",
-        fast.duration_ms.get(),
+        slow.duration_ms.get() >= 500,
+        "recorded duration was {} ms for a child that slept 500 ms",
         slow.duration_ms.get()
     );
 }

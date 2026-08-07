@@ -212,6 +212,20 @@ pwd -P > "$root/invocation/cwd.bin" || exit 126
 /usr/bin/env -0 > "$root/invocation/environment.bin" || exit 126
 cat > "$root/invocation/stdin.bin" || exit 126
 printf '%s\n' "$$" > "$root/invocation/pid" || exit 126
+if [ -n "${PCE_CLAUDE_GATE_EXEC_REQUEST_DIR:-}" ] || [ -n "${PCE_CLAUDE_GATE_EXEC_RESPONSE_DIR:-}" ]; then
+    if [ -z "${PCE_CLAUDE_GATE_EXEC_REQUEST_DIR:-}" ] || [ -z "${PCE_CLAUDE_GATE_EXEC_RESPONSE_DIR:-}" ]; then
+        printf '%s\n' 'gate exec request and response directories must be supplied together' >&2
+        exit 126
+    fi
+    for request in "$PCE_CLAUDE_GATE_EXEC_REQUEST_DIR"/*.json; do
+        [ -f "$request" ] || continue
+        basename=${request##*/}
+        "$PCE_GATE_EXEC_CLIENT" gate exec < "$request" > "$PCE_CLAUDE_GATE_EXEC_RESPONSE_DIR/$basename" || exit 126
+    done
+fi
+if [ "${PCE_CLAUDE_GATE_EXEC_RACE_EVIDENCE:-}" = 1 ]; then
+    printf '%s' 'critic-authored' > "$PCE_CLAUDE_OUTPUT_PATH.executions.json" || exit 126
+fi
 if [ -n "${PCE_CLAUDE_BLOCK_FILE:-}" ]; then
     while [ ! -e "$PCE_CLAUDE_BLOCK_FILE" ]; do sleep 0.01; done
 fi

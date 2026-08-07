@@ -1051,9 +1051,11 @@ impl DispatchRoleClass {
     pub fn classify(role: &DispatchRole) -> Self {
         match role.as_str() {
             "milestone-planner" | "step-planner" | "step-plan-writer" => Self::PlanProducing,
-            "milestone-critic" | "step-critic" | "step-plan-critic" | "pr-reviewer" => {
-                Self::CritiqueProducing
-            }
+            "milestone-critic"
+            | "step-critic"
+            | "step-plan-critic"
+            | "falsification-critic"
+            | "pr-reviewer" => Self::CritiqueProducing,
             "step-executor" => Self::Execution,
             "repository-analyst" => Self::ExplicitlyNonRoundBearing,
             _ => Self::Unrecognized,
@@ -3094,7 +3096,7 @@ fn update_cycle_position(
             CyclePosition::CritiqueDispatched { sequence }
         }
         "step-executor" => CyclePosition::ExecutionDispatched { sequence },
-        "pr-reviewer" => CyclePosition::ReviewDispatched { sequence },
+        "falsification-critic" | "pr-reviewer" => CyclePosition::ReviewDispatched { sequence },
         _ => return,
     };
     if let Some(existing) = visible_nodes.iter_mut().find(|item| item.node == *node) {
@@ -4545,10 +4547,12 @@ mod tests {
             dispatch(6, "m2-s2", "step-planner", "other-node")?,
             dispatch(7, "m2-s1", "repository-analyst", "analyst-ref")?,
             dispatch(8, "m2-s1", "step-planer", "misspelled-ref")?,
+            dispatch(9, "m2-s1", "falsification-critic", "falsification-1")?,
+            dispatch(10, "m2-s1", "falsification-critic", "falsification-2")?,
         ];
 
         let state = derive(&records, &[], &[], &[])?;
-        assert_eq!(state.dispatches().len(), 8);
+        assert_eq!(state.dispatches().len(), 10);
         assert_eq!(state.dispatches()[6].role().as_str(), "repository-analyst");
         assert_eq!(state.dispatches()[6].sequence().get(), 7);
         assert_eq!(state.dispatches()[6].node().as_str(), "m2-s1");
@@ -4560,7 +4564,7 @@ mod tests {
             state.dispatches()[7].dispatch_ref().as_str(),
             "misspelled-ref"
         );
-        assert_eq!(state.rounds().len(), 3);
+        assert_eq!(state.rounds().len(), 4);
         assert_eq!(state.rounds()[0].node().as_str(), "m2-s1");
         assert_eq!(state.rounds()[0].role().as_str(), "step-planner");
         assert_eq!(state.rounds()[0].count().get(), 2);
@@ -4568,6 +4572,13 @@ mod tests {
         assert_eq!(state.rounds()[1].count().get(), 3);
         assert_eq!(state.rounds()[2].node().as_str(), "m2-s2");
         assert_eq!(state.rounds()[2].count().get(), 1);
+        assert_eq!(state.rounds()[3].node().as_str(), "m2-s1");
+        assert_eq!(state.rounds()[3].role().as_str(), "falsification-critic");
+        assert_eq!(
+            state.rounds()[3].classification(),
+            DispatchRoleClass::CritiqueProducing
+        );
+        assert_eq!(state.rounds()[3].count().get(), 2);
         Ok(())
     }
 
@@ -4581,6 +4592,7 @@ mod tests {
             ("milestone-critic", DispatchRoleClass::CritiqueProducing),
             ("step-critic", DispatchRoleClass::CritiqueProducing),
             ("step-plan-critic", DispatchRoleClass::CritiqueProducing),
+            ("falsification-critic", DispatchRoleClass::CritiqueProducing),
             ("pr-reviewer", DispatchRoleClass::CritiqueProducing),
             ("step-executor", DispatchRoleClass::Execution),
             (
@@ -4599,8 +4611,8 @@ mod tests {
         }
 
         let state = derive(&records, &[], &[], &[])?;
-        assert_eq!(state.rounds().len(), 8);
-        assert_eq!(state.dispatches().len(), 10);
+        assert_eq!(state.rounds().len(), 9);
+        assert_eq!(state.dispatches().len(), 11);
         Ok(())
     }
 
@@ -4962,6 +4974,12 @@ mod tests {
             ),
             (
                 "pr-reviewer",
+                CyclePosition::ReviewDispatched {
+                    sequence: Sequence::parse(1)?,
+                },
+            ),
+            (
+                "falsification-critic",
                 CyclePosition::ReviewDispatched {
                     sequence: Sequence::parse(1)?,
                 },
@@ -5757,6 +5775,11 @@ mod tests {
             ("step-critic", "critique-dispatched", "critique-producing"),
             ("step-executor", "execution-dispatched", "execution"),
             ("pr-reviewer", "review-dispatched", "critique-producing"),
+            (
+                "falsification-critic",
+                "review-dispatched",
+                "critique-producing",
+            ),
         ] {
             let state = derive(&[dispatch(1, "m2-s1", role, "ref")?], &[], &[], &[])?;
             let rendered = render_human_snapshot(&RunSnapshot::from(&state));

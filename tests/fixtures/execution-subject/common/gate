@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+actual=$(./artifact ordinary-input)
+test "$actual" = "ordinary-output"

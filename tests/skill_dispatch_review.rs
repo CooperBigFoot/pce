@@ -11,8 +11,8 @@ use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 
-const EXPECTED_ANCHORED_ROUTE_COUNT: usize = 11;
-const EXPECTED_ROLE_ANCHOR_COUNT: usize = 9;
+const EXPECTED_ANCHORED_ROUTE_COUNT: usize = 12;
+const EXPECTED_ROLE_ANCHOR_COUNT: usize = 10;
 const EXPECTED_PURPOSE_ANCHOR_COUNT: usize = 2;
 /// The child environment is cleared before `--env` entries are applied, so a route must supply
 /// every variable its child needs: `PATH` to resolve the executable, `HOME` to reach the
@@ -22,13 +22,14 @@ const REQUIRED_ENVIRONMENT_ENTRIES: usize = 3;
 const ENVIRONMENT_PLACEHOLDERS: [&str; 3] = ["{{PATH_ENV}}", "{{HOME_ENV}}", "{{USER_ENV}}"];
 const MARKER_START: &str = "<!-- pce-dispatch-route";
 const CONSOLIDATION_MARKER: &str = "<!-- pce-dispatch-issuance-consolidated -->";
-const ROLE_REGISTRY: [&str; 9] = [
+const ROLE_REGISTRY: [&str; 10] = [
     "milestone-planner",
     "step-planner",
     "step-plan-writer",
     "milestone-critic",
     "step-critic",
     "step-plan-critic",
+    "falsification-critic",
     "pr-reviewer",
     "step-executor",
     "repository-analyst",
@@ -438,7 +439,12 @@ for arg in "$@"; do
   if [ "$previous" = out ]; then out=$arg; previous=; continue; fi
   if [ "$arg" = --append-system-prompt ]; then count=$((count + 1)); previous=out; fi
 done
-if [ "$count" != 1 ] || [ -z "$out" ] || [ "${out#/}" = "$out" ]; then exit 75; fi
+if [ "$count" != 1 ] || [ -z "$out" ]; then exit 75; fi
+if [ "${out#/}" = "$out" ]; then
+  out=${out#*<output-path>}
+  out=${out%%</output-path>*}
+fi
+if [ -z "$out" ] || [ "${out#/}" = "$out" ]; then exit 75; fi
 printf '%s' "$out" > "$PWD/.review/recovered-path"
 printf '{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"fixture"}' > "$out"
 "#
@@ -920,6 +926,19 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
         matches!(token.as_ref(), "-p" | "--output-format") || token.starts_with("--output-format=")
     }) {
         return Err(ReviewError::CallerTailResuppliesBinaryArgument);
+    } else if route_role(route) == Some("falsification-critic") {
+        if tail.len() != 1 {
+            return Err(ReviewError::GateTailCardinality);
+        }
+        if tail[0].is_empty() {
+            return Err(ReviewError::GateTailPrompt);
+        }
+        if tail.iter().any(|token| {
+            let token = token.to_string_lossy();
+            token == "--append-system-prompt" || token.starts_with("--append-system-prompt=")
+        }) {
+            return Err(ReviewError::CallerTailResuppliesBinaryArgument);
+        }
     } else if route_role(route).is_some() {
         if tail.len() != 3 {
             return Err(ReviewError::GateTailCardinality);
@@ -985,6 +1004,7 @@ fn expected_kind(role: &str) -> RouteKind {
             | "milestone-critic"
             | "step-critic"
             | "step-plan-critic"
+            | "falsification-critic"
             | "pr-reviewer"
     ) {
         RouteKind::GateStructured
@@ -1650,7 +1670,7 @@ fn complete_args(f: &Fixture, target: &str) -> Vec<OsString> {
 }
 
 #[test]
-fn real_skill_has_exact_pinned_anchor_partition_eleven() {
+fn real_skill_has_exact_pinned_anchor_partition_twelve() {
     let fixture = fixture();
     let markdown = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
         .expect("repository skill");
@@ -1673,7 +1693,7 @@ fn real_skill_has_exact_pinned_anchor_partition_eleven() {
             && report.observations.len() == EXPECTED_ANCHORED_ROUTE_COUNT
             && role_measured == EXPECTED_ROLE_ANCHOR_COUNT
             && purpose_measured == EXPECTED_PURPOSE_ANCHOR_COUNT,
-        "real_skill_has_exact_pinned_anchor_partition_eleven/partition: routes={} expected={}, observations={} expected={}, roles={} expected={}, purposes={} expected={}",
+        "real_skill_has_exact_pinned_anchor_partition_twelve/partition: routes={} expected={}, observations={} expected={}, roles={} expected={}, purposes={} expected={}",
         report.routes.len(),
         EXPECTED_ANCHORED_ROUTE_COUNT,
         report.observations.len(),
@@ -2410,9 +2430,16 @@ fn remaining_role_metadata_classes() {
                 .iter()
                 .position(|token| token == "--")
                 .expect("delimiter");
-            assert_eq!(
-                &route.tokens[delimiter + 1..],
-                ["--append-system-prompt", "{{OUTPUT}}", "{{CALLER_ARG}}"],
+            let expected: &[&str] = if role == "falsification-critic" {
+                &["{{CALLER_ARG}}"]
+            } else {
+                &["--append-system-prompt", "{{OUTPUT}}", "{{CALLER_ARG}}"]
+            };
+            assert!(
+                route.tokens[delimiter + 1..]
+                    .iter()
+                    .map(String::as_str)
+                    .eq(expected.iter().copied()),
                 "caller_tail_class_by_role/{role}"
             );
         }
@@ -2476,6 +2503,7 @@ fn caller_tail_class_by_role() {
             .position(|token| token == "--")
             .expect("delimiter");
         let expected: &[&str] = match route.kind {
+            RouteKind::GateStructured if role == "falsification-critic" => &["{{CALLER_ARG}}"],
             RouteKind::GateStructured => {
                 &["--append-system-prompt", "{{OUTPUT}}", "{{CALLER_ARG}}"]
             }
@@ -3046,6 +3074,94 @@ fn verdict_schema_invalid_reds() {
 }
 
 #[test]
+fn verdict_schema_requires_executed_break_and_replacement_evidence() {
+    const BLOCKING: &str = r#"{"verdict":"REVISE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"dispatch route","problem":"the executed route cannot authenticate","input":"pce dispatch gate through the candidate route","observation":"exit 1; Not logged in; verdict artifact absent","execution_ref":"execution-000001","required_change":"supply PATH, HOME, and USER to the cleared child environment","replacement_execution":{"input":"pce dispatch gate through the replacement route with PATH, HOME, and USER","observation":"exit 0; authenticated; conforming verdict artifact written","execution_ref":"execution-000002"}}],"non_blocking_notes":[],"summary":"one demonstrated break"}"#;
+    const LEGACY_BLOCKING: &str = r#"{"verdict":"REVISE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"dispatch route","problem":"the executed route cannot authenticate","input":"pce dispatch gate through the candidate route","observation":"exit 1; Not logged in; verdict artifact absent","required_change":"supply PATH, HOME, and USER to the cleared child environment","replacement_execution":{"input":"pce dispatch gate through the replacement route with PATH, HOME, and USER","observation":"exit 0; authenticated; conforming verdict artifact written"}}],"non_blocking_notes":[],"summary":"one demonstrated break"}"#;
+    const APPROVE: &str = r#"{"verdict":"APPROVE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[],"non_blocking_notes":[],"summary":"no demonstrated break"}"#;
+    const OPINION: &str = r#"{"verdict":"REVISE","self_sufficiency":"NOT_APPLICABLE","root_cause":"execution","blocking_issues":[{"id":"F-1","severity":"major","location":"dispatch route","problem":"looks wrong","required_change":"change it"}],"non_blocking_notes":[],"summary":"opinion only"}"#;
+
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../skills/pce/schemas/verdict.schema.json"))
+            .expect("schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("verdict validator");
+    let blocking: serde_json::Value = serde_json::from_str(BLOCKING).expect("blocking fixture");
+    let legacy_blocking: serde_json::Value =
+        serde_json::from_str(LEGACY_BLOCKING).expect("legacy blocking fixture");
+    let approve: serde_json::Value = serde_json::from_str(APPROVE).expect("approval fixture");
+    assert_eq!(validator.iter_errors(&blocking).count(), 0);
+    assert_eq!(validator.iter_errors(&legacy_blocking).count(), 0);
+    assert_eq!(validator.iter_errors(&approve).count(), 0);
+
+    let opinion: serde_json::Value = serde_json::from_str(OPINION).expect("opinion fixture");
+    let opinion_errors: Vec<_> = validator
+        .iter_errors(&opinion)
+        .map(|error| (error.instance_path().to_string(), error.to_string()))
+        .collect();
+    for property in ["input", "observation", "replacement_execution"] {
+        assert!(
+            opinion_errors.iter().any(|(path, message)| {
+                path == "/blocking_issues/0" && message.contains(property)
+            })
+        );
+    }
+
+    for (pointer, fragment, mutate) in [
+        (
+            "/blocking_issues/0/input",
+            "shorter than 1 character",
+            "input",
+        ),
+        (
+            "/blocking_issues/0/observation",
+            "shorter than 1 character",
+            "observation",
+        ),
+        (
+            "/blocking_issues/0/required_change",
+            "shorter than 1 character",
+            "required_change",
+        ),
+    ] {
+        let mut instance: serde_json::Value = serde_json::from_str(BLOCKING).expect("fixture");
+        instance["blocking_issues"][0][mutate] = serde_json::json!("");
+        assert!(validator.iter_errors(&instance).any(|error| {
+            error.instance_path().to_string() == pointer && error.to_string().contains(fragment)
+        }));
+    }
+    for field in ["input", "observation"] {
+        let mut instance: serde_json::Value = serde_json::from_str(BLOCKING).expect("fixture");
+        instance["blocking_issues"][0]["replacement_execution"][field] = serde_json::json!("");
+        let pointer = format!("/blocking_issues/0/replacement_execution/{field}");
+        assert!(validator.iter_errors(&instance).any(|error| {
+            error.instance_path().to_string() == pointer
+                && error.to_string().contains("shorter than 1 character")
+        }));
+    }
+    for pointer in [
+        "/blocking_issues/0/execution_ref",
+        "/blocking_issues/0/replacement_execution/execution_ref",
+    ] {
+        for malformed in ["", "execution-1", "execution-000001x"] {
+            let mut instance: serde_json::Value = serde_json::from_str(BLOCKING).expect("fixture");
+            *instance.pointer_mut(pointer).expect("reference pointer") =
+                serde_json::json!(malformed);
+            assert!(
+                validator
+                    .iter_errors(&instance)
+                    .any(|error| { error.instance_path().to_string() == pointer })
+            );
+        }
+    }
+    let mut extra: serde_json::Value = serde_json::from_str(BLOCKING).expect("fixture");
+    extra["blocking_issues"][0]["replacement_execution"]["command"] =
+        serde_json::json!("pce dispatch gate");
+    assert!(validator.iter_errors(&extra).any(|error| {
+        error.instance_path().to_string() == "/blocking_issues/0/replacement_execution"
+            && error.to_string().contains("command")
+    }));
+}
+
+#[test]
 fn verdict_unknown_value_reds() {
     let f = fixture();
     let path = f.bindings.verdict_root.join("unknown.json");
@@ -3229,6 +3345,151 @@ fn conformance_paths_and_projection_limitation() {
     );
 }
 
+#[test]
+fn falsification_route_has_one_binary_owned_frame_and_recoverable_path() {
+    let f = fixture();
+    let route = repository_route("falsification-critic");
+    let delimiter = route
+        .tokens
+        .iter()
+        .position(|token| token == "--")
+        .expect("delimiter");
+    assert_eq!(&route.tokens[delimiter + 1..], ["{{CALLER_ARG}}"]);
+    assert_eq!(
+        route.tokens[delimiter + 1..]
+            .iter()
+            .filter(|token| {
+                token.as_str() == "--append-system-prompt"
+                    || token.starts_with("--append-system-prompt=")
+            })
+            .count(),
+        0
+    );
+
+    let argv = substitute_route(&route, &f.bindings).expect("falsification binding");
+    validate_route(&route, &argv).expect("falsification route");
+    let parent = PathBuf::from(
+        argv.windows(2)
+            .find(|pair| pair[0] == "-o")
+            .expect("parent output")[1]
+            .clone(),
+    );
+    let observation = execute_route(&argv, &f.bindings).expect("falsification spawn");
+    let child: Vec<String> = observation
+        .child_argv
+        .iter()
+        .map(|argument| String::from_utf8(argument.clone()).expect("UTF-8 argv"))
+        .collect();
+    let pce = env!("CARGO_BIN_EXE_pce");
+    let permission = format!("Bash({pce} gate exec:*)");
+    assert_eq!(
+        &child[..10],
+        [
+            "-p",
+            "--output-format",
+            "json",
+            "--allowedTools",
+            permission.as_str(),
+            "Read",
+            "Glob",
+            "Grep",
+            "Write",
+            "--append-system-prompt",
+        ]
+    );
+    assert_eq!(
+        child
+            .iter()
+            .filter(|arg| *arg == "--append-system-prompt")
+            .count(),
+        1
+    );
+    let mandate = &child[10];
+    assert_eq!(child[11], f.bindings.caller_arg.to_string_lossy());
+    assert_eq!(mandate.matches("<output-path>").count(), 1);
+    assert_eq!(mandate.matches("</output-path>").count(), 1);
+    assert_eq!(mandate.matches("<gate-exec-command>").count(), 1);
+    assert_eq!(mandate.matches("</gate-exec-command>").count(), 1);
+    let recovered_command = mandate
+        .split_once("<gate-exec-command>")
+        .and_then(|(_, tail)| tail.split_once("</gate-exec-command>"))
+        .map(|(command, _)| command)
+        .expect("gate exec command");
+    assert_eq!(recovered_command, format!("{pce} gate exec"));
+    assert!(!recovered_command.contains("target/debug/deps/"));
+    let recovered_from_mandate = mandate
+        .split_once("<output-path>")
+        .and_then(|(_, tail)| tail.split_once("</output-path>"))
+        .map(|(path, _)| PathBuf::from(path))
+        .expect("mandate path");
+    assert_eq!(recovered_from_mandate, parent);
+    assert!(!mandate.contains(&f.bindings.verdict_schema.display().to_string()));
+    assert!(!mandate.contains(&f.bindings.caller_arg.to_string_lossy().to_string()));
+    let recovered = PathBuf::from(
+        fs::read_to_string(f.bindings.cwd.join(".review/recovered-path")).expect("shim path"),
+    );
+    assert_eq!(recovered, parent);
+    assert!(parent.exists());
+    assert_schema_valid(
+        &parent,
+        &f.bindings.verdict_schema,
+        "falsification artifact",
+    );
+    let evidence = PathBuf::from(format!("{}.executions.json", parent.display()));
+    assert_eq!(
+        fs::read(&evidence).expect("empty gate execution evidence"),
+        b"{\"schema_id\":\"pce.gate-execution-evidence\",\"schema_version\":1,\"executions\":[]}\n"
+    );
+    assert_eq!(
+        fs::metadata(&evidence)
+            .expect("evidence metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o444
+    );
+    let env = fs::read_to_string(f.bindings.cwd.join(".review/env")).expect("environment");
+    let socket = env
+        .lines()
+        .find_map(|line| line.strip_prefix("PCE_GATE_EXEC_SOCKET="))
+        .map(PathBuf::from)
+        .expect("gate execution socket environment");
+    assert!(socket.is_absolute());
+    assert!(socket.as_os_str().as_encoded_bytes().len() <= 103);
+    assert!(!socket.exists());
+}
+
+#[test]
+fn falsification_gate_tail_deviations_red() {
+    let f = fixture();
+    let route = repository_route("falsification-critic");
+    let base = substitute_route(&route, &f.bindings).expect("falsification binding");
+    let delimiter = base
+        .iter()
+        .position(|token| token == "--")
+        .expect("delimiter");
+    let mut extra = base.clone();
+    extra.push(OsString::from("second"));
+    assert_eq!(
+        validate_route(&route, &extra),
+        Err(ReviewError::GateTailCardinality)
+    );
+    let mut empty = base.clone();
+    empty[delimiter + 1] = OsString::new();
+    assert_eq!(
+        validate_route(&route, &empty),
+        Err(ReviewError::GateTailPrompt)
+    );
+    for token in ["--append-system-prompt", "--append-system-prompt=caller"] {
+        let mut resupplied = base.clone();
+        resupplied[delimiter + 1] = OsString::from(token);
+        assert_eq!(
+            validate_route(&route, &resupplied),
+            Err(ReviewError::CallerTailResuppliesBinaryArgument)
+        );
+    }
+}
+
 fn gate_argv() -> (Fixture, AnchoredRoute, Vec<OsString>) {
     let f = fixture();
     let route = repository_route("pr-reviewer");
@@ -3259,10 +3520,23 @@ fn gate_tail_output_path_equal_accepts() {
         .find(|pair| pair[0] == "--append-system-prompt")
         .expect("tail path");
     assert_eq!(parent[1], tail[1]);
-    for route in repository_routes()
+    let gate_routes: Vec<_> = repository_routes()
         .into_iter()
         .filter(|route| route.kind == RouteKind::GateStructured)
-    {
+        .collect();
+    let excluded: Vec<String> = gate_routes
+        .iter()
+        .filter_map(|route| route_role(route))
+        .filter(|role| *role == "falsification-critic")
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(excluded, ["falsification-critic"]);
+    let caller_authored: Vec<_> = gate_routes
+        .into_iter()
+        .filter(|route| route_role(route) != Some("falsification-critic"))
+        .collect();
+    assert_eq!(caller_authored.len(), 5);
+    for route in caller_authored {
         let f = fixture();
         let argv = substitute_route(&route, &f.bindings).expect("canonical gate binding");
         validate_route(&route, &argv)

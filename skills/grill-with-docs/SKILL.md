@@ -7,7 +7,7 @@ description: Interview the user one question at a time about a program, vision, 
 
 The grill exists so **the user understands what is being built** — well enough that their taste can bite. It is not requirements extraction. They supply ideas, taste and vision; you supply every piece of technique.
 
-You are done when the user can say how this could turn out wrong. That is the test, and it is why the grill produces an end-state picture and a set of falsifiable bets rather than a feeling of agreement.
+You are done when the user can say how this could turn out wrong. That is the test, and it is why the grill produces an end-state picture and falsifiable acceptance criteria rather than a feeling of agreement.
 
 ## What the user owns, and what you own
 
@@ -50,17 +50,19 @@ The picture exists because a user cannot enumerate their own tacit assumptions o
 
 So describe the finished world concretely enough for them to flinch at the part that is wrong. Show what goes away, always. That is where silent assumptions live.
 
-## The bets
+## The acceptance criteria
 
 Every claim the vision makes needs a named way to be proven wrong.
 
-A bet names **an input and an observation**. Not a test that must exist — "must be tested" is satisfied by a test existing, including one that cannot fail.
+Each acceptance criterion has a non-blank **name**, **input**, and **observation**. Not a test that must exist — "must be tested" is satisfied by a test existing, including one that cannot fail.
 
-- Weak: *a test proves standard input is bound for every dispatch shape.*
-- Strong: *set the API key in the parent, look in the child, it must be gone.*
-- Strong: *feed the checker a seal whose predicate is the string `"NOT THE FROZEN PREDICATE"` and whose hashes are zeros — it must refuse.*
+- Weak — name: `Standard input coverage`; input: `the implementation`; observation: `a test exists for every dispatch shape`.
+- Strong — name: `Parent credential is stripped`; input: `set the API key in the parent and execute the child`; observation: `the key is absent from the child's environment`.
+- Strong — name: `Forged seal is refused`; input: `feed the checker a seal whose predicate is the string "NOT THE FROZEN PREDICATE" and whose hashes are zeros`; observation: `the checker refuses the seal`.
 
-At least one bet names an input designed to make the thing fail.
+The weak example is prohibited: it observes that a test exists rather than what the finished thing does. A test command may be an input; test existence may never be the observation.
+
+At least one acceptance criterion names an input designed to make the thing fail.
 
 Write them in this division of labour:
 
@@ -70,7 +72,7 @@ Write them in this division of labour:
 
 Never ask them to ratify something they cannot evaluate.
 
-Note when a bet is only checkable outside the run that delivers it — a global hook, a live environment measurement — and say so rather than letting it be discovered late.
+Note when an acceptance criterion is only checkable outside the run that delivers it — a global hook, a live environment measurement — and say so rather than letting it be discovered late.
 
 ## Writing things down
 
@@ -100,12 +102,12 @@ No ADR for: easy reversals, obvious calls, decisions with no alternative, open q
 
 ## Ending
 
-Stop when every branch is resolved or deliberately left open, and every claim has a bet.
+Stop when every branch is resolved or deliberately left open, and every claim has an acceptance criterion.
 
 Give, in this order:
 
 1. **The end-state picture** — where we start, where we end, what disappears, what happens next. Plain words.
-2. **The bets** — each as an input and an observation, in one line each.
+2. **The acceptance criteria** — each with its non-blank name, input, and observation, in one line each. Refuse to call the grill finished when any criterion lacks one of those three fields or any field is blank.
 3. What is still open, without guessing at answers.
 4. Underneath, or on request: which `CONTEXT.md` entries changed and which ADRs you wrote.
 
