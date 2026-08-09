@@ -220,6 +220,12 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
         "abc123".to_owned(),
         "--evidence".to_owned(),
         "binary lifecycle fixture".to_owned(),
+        "--required-artifact".to_owned(),
+        harness
+            .path()
+            .join("lifecycle-artifact.json")
+            .display()
+            .to_string(),
         "--".to_owned(),
         "PROMPT".to_owned(),
     ];
@@ -248,6 +254,16 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
         .map(|line| parse_event_line(line).expect("parse binary-written record"))
         .collect::<Vec<_>>();
     assert_eq!(records.len(), 2);
+    let raw_log = fs::read_to_string(&log_path).expect("read raw lifecycle log");
+    assert_eq!(raw_log.lines().count(), 2);
+    for forbidden in [
+        "process_number",
+        "process_start_identity",
+        "required_artifact_path",
+        "pce.dispatch-process-identity",
+    ] {
+        assert!(!raw_log.contains(forbidden), "event log leaked {forbidden}");
+    }
     let vision =
         VisionSlug::parse("2026-07-31-the-binary-owns-every-dispatch").expect("parse vision");
     let state = derive_run_state(
