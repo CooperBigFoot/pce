@@ -21,16 +21,17 @@ use pce_core::{
     AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
     AbsoluteOutputPath, AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
     AcceptanceCriteria, ActReversibility, AppendError, AppendableCategory, AppendableFinding,
-    ArgumentVector, ArtifactOutcome, ArtifactPath, AuthorityFailure, BranchState,
-    CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
+    ArgumentVector, ArtifactOutcome, ArtifactPath, ArtifactProduction, AuthorityFailure,
+    BranchState, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
     CodexTerminalObservation, CodexTerminalUsage, CompletionCriterionStatus, CompletionDecision,
     CreationDate, CriterionChangeDecision, CurrentArtifactObservation, CurrentArtifactState,
-    DispatchCandidate, DispatchDuration, DispatchEnvelope, DispatchExitStatus, DispatchLogging,
-    DispatchProcessIdentity, DispatchProjectionInput, DispatchRef, DispatchRole, DispatchRoleClass,
-    DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef, EventKindName,
-    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
-    ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode, ExpectedVerdictOutcome,
-    FileObservation, FindingAdmission, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
+    DispatchCandidate, DispatchDuration, DispatchEnvelope, DispatchExitStatus,
+    DispatchIdentityObservation, DispatchLogging, DispatchProcessIdentity, DispatchProjectionInput,
+    DispatchRef, DispatchRole, DispatchRoleClass, DispatchTarget, DispatchTokenUsage,
+    DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
+    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
+    ExactPullRequestState, Executable, ExitCode, ExpectedVerdictOutcome, FileObservation,
+    FindingAdmission, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
     GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
     GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
     GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
@@ -38,27 +39,28 @@ use pce_core::{
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, ObservedExitStatus,
     ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PairedCampaign,
-    PairedExecutionProofError, PairedReplayClassification, ProcessNumber, ProcessStartIdentity,
-    PullRequestNumber, PullRequestSelector, RecoveryLogPath, ReferenceValidation,
-    ReplayArtifactObservation, ReplayClassifications, ReplayObservation, ReplayRefResult,
-    RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation, RepositoryName,
-    RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
+    PairedExecutionProofError, PairedReplayClassification, ProcessIdentityObservation,
+    ProcessNumber, ProcessStartIdentity, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
+    ReferenceValidation, ReplayArtifactObservation, ReplayClassifications, ReplayObservation,
+    ReplayRefResult, RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation,
+    RepositoryName, RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
     RepositoryRelativePath, RepositoryRoot, RunSnapshot, Sandbox, SeatbeltCapability, Sha256Digest,
     SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
     StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
     UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
     WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
-    classify_codex_terminal_usage, classify_replay_pair, classify_seatbelt_capability,
-    compose_gate_arguments, compose_planning_role_frame, compute_dispatchability, create_vision,
-    derive_merge_status, derive_milestone_merge_status, derive_run_state,
-    dispatch_completion_payload, dispatch_invocation, dispatch_payload, evaluate_completion,
-    evaluate_landing_readiness, event_record_matches, fold_paired_execution_proof,
-    fold_replay_runs, measure_contract_snapshot, meter_dispatches, normalize_replay_observation,
-    paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result, parse_event_line,
+    classify_codex_terminal_usage, classify_dispatch_check_in, classify_replay_pair,
+    classify_seatbelt_capability, compose_gate_arguments, compose_planning_role_frame,
+    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
+    derive_run_state, dispatch_completion_payload, dispatch_invocation, dispatch_payload,
+    evaluate_completion, evaluate_landing_readiness, event_record_matches,
+    fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot, meter_dispatches,
+    normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
+    parse_claude_result, parse_dispatch_process_identity, parse_event_line,
     parse_gate_execution_evidence, parse_gate_stimulus, parse_paired_falsification_verdict,
     parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
     rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
-    seatbelt_capability_probe, serialize_dispatch_process_identity,
+    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_tracked_repository_contract, validate_artifact, validate_verdict_references,
     validate_workflow_coverage, verify_criterion_change,
 };
@@ -82,6 +84,7 @@ const USAGE: &str = concat!(
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
     "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CODEX_ARGUMENT>...\n",
     "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
+    "       pce dispatch check-in --file <ABSOLUTE_LOG_PATH>\n",
     "       pce gate exec\n",
     "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>\n",
     "       pce gate execution-subject-probe --output <REPOSITORY_RELATIVE_OUTPUT_PATH>\n",
@@ -182,6 +185,9 @@ enum Command {
     Dispatch {
         envelope: DispatchEnvelope,
         logging: Option<DispatchLoggingMode>,
+    },
+    DispatchCheckIn {
+        log_path: PathBuf,
     },
     VisionNew {
         name: VisionName,
@@ -453,6 +459,11 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             }
             None => spawn_dispatch(&envelope, None),
         },
+        Command::DispatchCheckIn { log_path } => {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            run_dispatch_check_in(&log_path, &mut output)
+        }
         Command::VisionNew { name } => run_vision_new(&name),
         Command::VisionCheck => run_vision_check(input),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
@@ -559,6 +570,9 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "completion" => parse_completion_command(action, rest),
         [verb, action, rest @ ..] if verb == "landing" => parse_landing_command(action, rest),
         [verb, action, rest @ ..] if verb == "contract" => parse_contract_command(action, rest),
+        [verb, action, rest @ ..] if verb == "dispatch" && action == "check-in" => {
+            parse_dispatch_check_in(rest)
+        }
         [verb, target, rest @ ..] if verb == "dispatch" => match target.as_str() {
             "codex" => parse_codex_dispatch(target, rest),
             "gate" => parse_gate_dispatch(rest),
@@ -567,6 +581,23 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         .with_context(|| USAGE),
         _ => bail!(USAGE),
     }
+}
+
+fn parse_dispatch_check_in(rest: &[String]) -> Result<Command> {
+    let [file_flag, raw_log_path] = rest else {
+        bail!(USAGE);
+    };
+    if file_flag != "--file" || raw_log_path.is_empty() {
+        bail!(USAGE);
+    }
+    let log_path = PathBuf::from(raw_log_path);
+    if !log_path.is_absolute() {
+        bail!(
+            "dispatch check-in event-log path must be absolute: {}",
+            log_path.display()
+        );
+    }
+    Ok(Command::DispatchCheckIn { log_path })
 }
 
 fn parse_gate_replay(rest: &[String]) -> Result<Command> {
@@ -4196,6 +4227,101 @@ fn read_event_log(path: &Path) -> Result<Vec<ParsedEventLine>> {
     read_event_log_lines(&mut reader, path)
 }
 
+fn run_dispatch_check_in(log_path: &Path, output: &mut dyn Write) -> Result<()> {
+    let parsed = read_event_log(log_path)?;
+    let records = parsed
+        .iter()
+        .map(|line| line.record.clone())
+        .collect::<Vec<_>>();
+    let issuance_sequences = records
+        .iter()
+        .filter_map(|record| match record.body_ref() {
+            EventBodyRef::Known(KnownPayload::Dispatch(_)) => Some(record.sequence()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let identity_directory = dispatch_identity_directory(log_path);
+    let mut observations = Vec::with_capacity(issuance_sequences.len());
+    for issuance_sequence in issuance_sequences {
+        let sidecar_path = identity_directory.join(format!("{}.json", issuance_sequence.get()));
+        let Some(identity) = read_dispatch_identity_sidecar(&sidecar_path)? else {
+            observations.push(DispatchIdentityObservation::unrecorded(issuance_sequence));
+            continue;
+        };
+        if identity.issuance_sequence() != issuance_sequence {
+            bail!(
+                "dispatch process identity sidecar issuance sequence {} does not match event issuance {}",
+                identity.issuance_sequence().get(),
+                issuance_sequence.get()
+            );
+        }
+        let process_identity = observe_darwin_process_number(identity.process_number())?;
+        let artifact_production =
+            observe_required_dispatch_artifact(identity.required_artifact_path().as_path())?;
+        observations.push(DispatchIdentityObservation::new(
+            issuance_sequence,
+            identity.process_start_identity(),
+            process_identity,
+            artifact_production,
+        ));
+    }
+    let report = classify_dispatch_check_in(&records, &observations)?;
+    let bytes = serialize_dispatch_check_in(&report)?;
+    output
+        .write_all(&bytes)
+        .context("failed to write dispatch check-in report")?;
+    output
+        .flush()
+        .context("failed to flush dispatch check-in report")
+}
+
+fn read_dispatch_identity_sidecar(path: &Path) -> Result<Option<DispatchProcessIdentity>> {
+    const MAX_SIDECAR_BYTES: u64 = 65_536;
+
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).context("failed to open dispatch process identity sidecar");
+        }
+    };
+    let metadata = file
+        .metadata()
+        .context("failed to read dispatch process identity sidecar")?;
+    if !metadata.file_type().is_file() {
+        bail!("dispatch process identity sidecar is not a regular file");
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        bail!("dispatch process identity sidecar is not owned by the current user");
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(MAX_SIDECAR_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("failed to read dispatch process identity sidecar")?;
+    if bytes.len() > MAX_SIDECAR_BYTES as usize {
+        bail!("dispatch process identity sidecar exceeds 65536 bytes");
+    }
+    parse_dispatch_process_identity(&bytes)
+        .map(Some)
+        .context("failed to parse dispatch process identity sidecar")
+}
+
+fn observe_required_dispatch_artifact(path: &Path) -> Result<ArtifactProduction> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(ArtifactProduction::Produced),
+        Ok(_) => Ok(ArtifactProduction::NotProduced),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(ArtifactProduction::NotProduced)
+        }
+        Err(error) => Err(error).context("failed to inspect required dispatch artifact"),
+    }
+}
+
 fn read_event_log_lines(reader: &mut dyn BufRead, path: &Path) -> Result<Vec<ParsedEventLine>> {
     let mut lines = Vec::<ParsedEventLine>::new();
     let mut physical_line = 0_u64;
@@ -6319,8 +6445,8 @@ impl GateRecorderRuntime {
                         if admitted {
                             let worker_state = Arc::clone(&server_state);
                             let worker_stop = Arc::clone(&server_stop);
-                            let accepted_at = Instant::now();
                             workers.push(std::thread::spawn(move || {
+                                let accepted_at = Instant::now();
                                 let outcome = std::panic::catch_unwind(|| {
                                     serve_gate_execution(
                                         stream,
@@ -7154,12 +7280,12 @@ fn dispatch_identity_directory(log_path: &Path) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
-fn observe_darwin_process_identity(
-    child: &std::process::Child,
-) -> Result<(ProcessNumber, ProcessStartIdentity)> {
-    let child_id = child.id();
-    let process_number = ProcessNumber::new(child_id)?;
-    let pid = i32::try_from(child_id).context("child process number exceeds Darwin pid_t")?;
+fn observe_darwin_process_number(
+    process_number: ProcessNumber,
+) -> Result<ProcessIdentityObservation> {
+    let process_number_value = process_number.get();
+    let pid = i32::try_from(process_number_value)
+        .context("dispatch process number exceeds Darwin pid_t")?;
     let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
     let expected_size = std::mem::size_of::<libc::proc_bsdinfo>();
     let expected_size_i32 = i32::try_from(expected_size)
@@ -7173,25 +7299,59 @@ fn observe_darwin_process_identity(
             expected_size_i32,
         )
     };
-    if observed_size != expected_size_i32 || info.pbi_pid != child_id {
+    if observed_size == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(ProcessIdentityObservation::Absent);
+        }
+        if error.raw_os_error() == Some(libc::EPERM) {
+            return Ok(ProcessIdentityObservation::ForeignPresent);
+        }
         bail!(
-            "failed to observe Darwin process identity for child PID {child_id}: proc_pidinfo returned {observed_size} bytes with PID {}; expected {expected_size_i32} bytes and PID {child_id}: {}",
+            "failed to observe Darwin process identity for PID {process_number_value}: proc_pidinfo returned 0 bytes: {error}"
+        );
+    }
+    if observed_size != expected_size_i32 || info.pbi_pid != process_number_value {
+        bail!(
+            "failed to observe Darwin process identity for PID {process_number_value}: proc_pidinfo returned {observed_size} bytes with PID {}; expected {expected_size_i32} bytes and PID {process_number_value}: {}",
             info.pbi_pid,
             std::io::Error::last_os_error()
         );
     }
     let seconds_since_unix_epoch = info.pbi_start_tvsec;
     let microseconds = u32::try_from(info.pbi_start_tvusec)
-        .context("Darwin child start microseconds exceed u32")?;
+        .context("Darwin process start microseconds exceed u32")?;
     let process_start_identity = ProcessStartIdentity::new(seconds_since_unix_epoch, microseconds)?;
-    Ok((process_number, process_start_identity))
+    Ok(ProcessIdentityObservation::Present(process_start_identity))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn observe_darwin_process_identity(
-    _child: &std::process::Child,
-) -> Result<(ProcessNumber, ProcessStartIdentity)> {
+fn observe_darwin_process_number(
+    _process_number: ProcessNumber,
+) -> Result<ProcessIdentityObservation> {
     bail!("dispatch process identity observation is unsupported outside macOS/Darwin")
+}
+
+fn observe_darwin_process_identity(
+    child: &std::process::Child,
+) -> Result<(ProcessNumber, ProcessStartIdentity)> {
+    let child_id = child.id();
+    let process_number = ProcessNumber::new(child_id)?;
+    let observation = observe_darwin_process_number(process_number)?;
+    let process_start_identity = match observation {
+        ProcessIdentityObservation::Present(identity) => identity,
+        ProcessIdentityObservation::Absent => {
+            bail!(
+                "failed to observe Darwin process identity for child PID {child_id}: process is absent"
+            )
+        }
+        ProcessIdentityObservation::ForeignPresent => {
+            bail!(
+                "failed to observe Darwin process identity for child PID {child_id}: process identity is unreadable"
+            )
+        }
+    };
+    Ok((process_number, process_start_identity))
 }
 
 fn ensure_dispatch_identity_directory(path: &Path) -> Result<()> {
@@ -10825,6 +10985,61 @@ None.
         assert_eq!(
             value["recovery_digest"]["facts"]["entries"][0]["kind"],
             "planning-artifact-approved"
+        );
+    }
+
+    #[test]
+    fn dispatch_check_in_parser_accepts_the_one_absolute_shape() {
+        let command = parse_command(
+            ["dispatch", "check-in", "--file", "/tmp/events.jsonl"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("canonical check-in command");
+        let Command::DispatchCheckIn { log_path } = command else {
+            panic!("parsed another command")
+        };
+        assert_eq!(log_path, PathBuf::from("/tmp/events.jsonl"));
+        assert_eq!(
+            USAGE
+                .matches("pce dispatch check-in --file <ABSOLUTE_LOG_PATH>")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn dispatch_check_in_parser_rejects_every_noncanonical_shape_with_usage() {
+        for rejected in [
+            vec!["dispatch", "check-in"],
+            vec![
+                "dispatch",
+                "check-in",
+                "--file",
+                "/tmp/events.jsonl",
+                "extra",
+            ],
+            vec!["dispatch", "check-in", "/tmp/events.jsonl", "--file"],
+            vec!["dispatch", "check-in", "--file", ""],
+            vec!["dispatch", "check-in", "--unknown", "/tmp/events.jsonl"],
+        ] {
+            let error = parse_command(rejected.into_iter().map(str::to_owned))
+                .expect_err("noncanonical check-in command");
+            assert_eq!(error.to_string(), USAGE);
+        }
+    }
+
+    #[test]
+    fn dispatch_check_in_parser_rejects_relative_log_before_filesystem_access() {
+        let error = parse_command(
+            ["dispatch", "check-in", "--file", "relative/events.jsonl"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect_err("relative check-in log path");
+        assert_eq!(
+            error.to_string(),
+            "dispatch check-in event-log path must be absolute: relative/events.jsonl"
         );
     }
 

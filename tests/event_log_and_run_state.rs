@@ -1,7 +1,22 @@
 mod support;
 
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
 use std::ffi::OsString;
 use std::fs;
+
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::FileTypeExt;
+#[cfg(target_os = "macos")]
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::{Child, Command, Output, Stdio};
+#[cfg(target_os = "macos")]
+use std::sync::{Mutex, MutexGuard};
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
 
 use pce_core::{
     AcceptanceCriteria, ArtifactOutcome, CachedInputTokens, CriterionExecutionOutcome,
@@ -9,8 +24,664 @@ use pce_core::{
     ReasoningOutputTokens, RecoveryLogPath, RunSnapshot, VisionSlug, derive_run_state,
     parse_acceptance_criteria, parse_event_line,
 };
+#[cfg(target_os = "macos")]
+use pce_core::{
+    DispatchCompletionPayload, DispatchProcessIdentity, EventBodyRef, KnownPayload, ProcessNumber,
+    ProcessStartIdentity, parse_dispatch_process_identity,
+};
 use serde_json::{Value, json};
 use support::{CliHarness, Invocation, ScriptedResponse};
+
+#[cfg(target_os = "macos")]
+static CHECK_IN_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(target_os = "macos")]
+const CHECK_IN_SHIM: &str = r#"#!/bin/sh
+printf '%s\n' "$$" > "${PCE_CHILD_PID_FILE:?PCE_CHILD_PID_FILE is required}" || exit 126
+while [ ! -e "${PCE_RELEASE_FILE:?PCE_RELEASE_FILE is required}" ]; do /bin/sleep 0.01; done
+if [ -n "${PCE_ARTIFACT_FILE:-}" ]; then
+    printf '%s' '{"artifact":"real"}' > "$PCE_ARTIFACT_FILE" || exit 126
+fi
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":4}}'
+exit 0
+"#;
+
+#[cfg(target_os = "macos")]
+const CHECK_IN_REPORT: &[u8] = b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"finished\",\"completion\":\"recorded\",\"artifact_production\":\"produced\"},{\"issuance_sequence\":3,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":4,\"state\":\"running\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":5,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":6,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n";
+
+#[cfg(target_os = "macos")]
+const CHECK_IN_EVENT: &[u8] = b"{\"sequence\":1,\"timestamp\":\"2026-08-09T12:00:00.000Z\",\"kind\":\"dispatch\",\"node\":\"m1-s2\",\"payload\":{\"role\":\"step-executor\",\"ref\":\"abc123\",\"evidence\":\"fixture\"}}\n";
+
+#[cfg(target_os = "macos")]
+fn check_in_test_guard() -> MutexGuard<'static, ()> {
+    CHECK_IN_PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(target_os = "macos")]
+struct CheckInPhase {
+    pid_file: PathBuf,
+    release_file: PathBuf,
+    artifact_file: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_check_in_dispatch(
+    harness: &CliHarness,
+    cwd: &Path,
+    log_path: &Path,
+    phase: &CheckInPhase,
+) -> Child {
+    let argv = [
+        "dispatch".to_owned(),
+        "codex".to_owned(),
+        "--cwd".to_owned(),
+        cwd.display().to_string(),
+        "--sandbox".to_owned(),
+        "workspace-write".to_owned(),
+        "--env".to_owned(),
+        format!("PATH={}", harness.shim_path()),
+        "--env".to_owned(),
+        format!("PCE_CHILD_PID_FILE={}", phase.pid_file.display()),
+        "--env".to_owned(),
+        format!("PCE_RELEASE_FILE={}", phase.release_file.display()),
+        "--env".to_owned(),
+        format!("PCE_ARTIFACT_FILE={}", phase.artifact_file.display()),
+        "--log-file".to_owned(),
+        log_path.display().to_string(),
+        "--node".to_owned(),
+        "m1-s2".to_owned(),
+        "--role".to_owned(),
+        "step-executor".to_owned(),
+        "--ref".to_owned(),
+        "abc123".to_owned(),
+        "--evidence".to_owned(),
+        "fixture invocation".to_owned(),
+        "--required-artifact".to_owned(),
+        phase.artifact_file.display().to_string(),
+        "--".to_owned(),
+        "PROMPT".to_owned(),
+    ];
+    // This helper calls env_clear(), so every variable read by the shim is an explicit --env pair.
+    Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(argv)
+        .env_clear()
+        .env("PATH", harness.shim_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn dispatch")
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_failing_check_in_dispatch(cwd: &Path, log_path: &Path, phase: &CheckInPhase) -> Child {
+    let argv = [
+        "dispatch".to_owned(),
+        "codex".to_owned(),
+        "--cwd".to_owned(),
+        cwd.display().to_string(),
+        "--sandbox".to_owned(),
+        "workspace-write".to_owned(),
+        "--env".to_owned(),
+        "PATH=/usr/bin:/bin".to_owned(),
+        "--env".to_owned(),
+        format!("PCE_CHILD_PID_FILE={}", phase.pid_file.display()),
+        "--env".to_owned(),
+        format!("PCE_RELEASE_FILE={}", phase.release_file.display()),
+        "--env".to_owned(),
+        format!("PCE_ARTIFACT_FILE={}", phase.artifact_file.display()),
+        "--log-file".to_owned(),
+        log_path.display().to_string(),
+        "--node".to_owned(),
+        "m1-s2".to_owned(),
+        "--role".to_owned(),
+        "step-executor".to_owned(),
+        "--ref".to_owned(),
+        "abc123".to_owned(),
+        "--evidence".to_owned(),
+        "fixture invocation".to_owned(),
+        "--required-artifact".to_owned(),
+        phase.artifact_file.display().to_string(),
+        "--".to_owned(),
+        "PROMPT".to_owned(),
+    ];
+    Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(argv)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn failing dispatch")
+}
+
+#[cfg(target_os = "macos")]
+fn bounded_output(command: &mut Command) -> Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bounded command");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if child.try_wait().expect("poll bounded command").is_some() {
+            return child.wait_with_output().expect("collect bounded command");
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill timed-out command");
+            child.wait().expect("reap timed-out command");
+            panic!("timed out waiting for process exit");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_check_in_path(path: &Path, failure: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "{failure}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_check_in_identity(path: &Path) -> (Vec<u8>, DispatchProcessIdentity) {
+    let bytes = fs::read(path).expect("read dispatch sidecar");
+    let identity = parse_dispatch_process_identity(&bytes).expect("parse dispatch sidecar");
+    (bytes, identity)
+}
+
+#[cfg(target_os = "macos")]
+fn observe_test_darwin_process(process_number: ProcessNumber) -> Option<ProcessStartIdentity> {
+    let pid = i32::try_from(process_number.get()).expect("PID fits Darwin pid_t");
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let expected = std::mem::size_of::<libc::proc_bsdinfo>();
+    let observed = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::from_mut(&mut info).cast(),
+            i32::try_from(expected).expect("proc_bsdinfo size"),
+        )
+    };
+    if observed == 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return None;
+    }
+    assert_eq!(observed, i32::try_from(expected).expect("size fits"));
+    assert_eq!(info.pbi_pid, process_number.get());
+    Some(
+        ProcessStartIdentity::new(
+            info.pbi_start_tvsec,
+            u32::try_from(info.pbi_start_tvusec).expect("start microseconds"),
+        )
+        .expect("normalized start identity"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_test_process_exit(process_number: ProcessNumber) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while observe_test_darwin_process(process_number).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for process exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn stop_child_and_kill_dispatch_parent(parent: &mut Child, identity: &DispatchProcessIdentity) {
+    let parent_pid = i32::try_from(parent.id()).expect("parent PID");
+    let child_pid = i32::try_from(identity.process_number().get()).expect("child PID");
+    assert_eq!(unsafe { libc::kill(parent_pid, libc::SIGSTOP) }, 0);
+    assert_eq!(unsafe { libc::kill(child_pid, libc::SIGKILL) }, 0);
+    assert_eq!(unsafe { libc::kill(parent_pid, libc::SIGKILL) }, 0);
+    parent.wait().expect("reap killed dispatch parent");
+    wait_for_test_process_exit(identity.process_number());
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_dispatch_parent(parent: &mut Child) -> std::process::ExitStatus {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = parent.try_wait().expect("poll dispatch parent") {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for process exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct ReusedProcessHolder {
+    process_number: ProcessNumber,
+    start_identity: ProcessStartIdentity,
+    created_by_test: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn force_darwin_pid_reuse(
+    target: ProcessNumber,
+    recorded: ProcessStartIdentity,
+) -> ReusedProcessHolder {
+    let started = Instant::now();
+    for _ in 0..200_000 {
+        assert!(
+            started.elapsed() < Duration::from_secs(15 * 60),
+            "timed out forcing Darwin PID reuse"
+        );
+        if let Some(start_identity) = observe_test_darwin_process(target) {
+            assert_ne!(start_identity, recorded);
+            return ReusedProcessHolder {
+                process_number: target,
+                start_identity,
+                created_by_test: false,
+            };
+        }
+        let forked = unsafe { libc::fork() };
+        assert!(forked >= 0, "fork failed while forcing Darwin PID reuse");
+        if forked == 0 {
+            if unsafe { libc::getpid() } == i32::try_from(target.get()).expect("target PID") {
+                loop {
+                    unsafe { libc::pause() };
+                }
+            }
+            unsafe { libc::_exit(0) };
+        }
+        if u32::try_from(forked).expect("forked PID") == target.get() {
+            let start_identity = loop {
+                if let Some(identity) = observe_test_darwin_process(target) {
+                    break identity;
+                }
+                std::thread::yield_now();
+            };
+            assert_ne!(start_identity, recorded);
+            return ReusedProcessHolder {
+                process_number: target,
+                start_identity,
+                created_by_test: true,
+            };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(forked, &mut status, 0) }, forked);
+    }
+    panic!("exceeded 200000 forks forcing Darwin PID reuse");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "slow: forces real Darwin PID wraparound to prove process-number reuse"]
+fn production_check_in_pairs_dead_running_and_reused_process_number() {
+    let _guard = check_in_test_guard();
+    let harness = CliHarness::new().expect("create check-in harness");
+    harness
+        .install_shim("codex", CHECK_IN_SHIM)
+        .expect("install exact check-in shim");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize harness path");
+    let log_path = cwd.join("events.jsonl");
+    let phase = |sequence| CheckInPhase {
+        pid_file: cwd.join(format!("pid-{sequence}")),
+        release_file: cwd.join(format!("release-{sequence}")),
+        artifact_file: cwd.join(format!("artifact-{sequence}.json")),
+    };
+    let phase_1 = phase(1);
+    let phase_3 = phase(3);
+    let phase_4 = phase(4);
+    let phase_5 = phase(5);
+    let phase_6 = phase(6);
+
+    fs::write(&phase_1.release_file, []).expect("create release-1");
+    let phase_1_output = spawn_check_in_dispatch(&harness, &cwd, &log_path, &phase_1)
+        .wait_with_output()
+        .expect("complete issuance-1 dispatch");
+    assert!(phase_1_output.status.success());
+    assert_eq!(
+        phase_1_output.stdout,
+        b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":2,\"output_tokens\":3,\"reasoning_output_tokens\":4}}\n"
+    );
+    assert_eq!(phase_1_output.stderr, b"");
+    assert_eq!(
+        fs::read(&phase_1.artifact_file).expect("read artifact-1"),
+        b"{\"artifact\":\"real\"}"
+    );
+
+    let sidecar_directory = PathBuf::from(format!("{}.dispatches", log_path.display()));
+    let sidecar_1_path = sidecar_directory.join("1.json");
+    wait_for_check_in_path(&phase_1.pid_file, "timed out waiting for dispatch child");
+    wait_for_check_in_path(&sidecar_1_path, "timed out waiting for dispatch sidecar");
+    let (sidecar_1_bytes, identity_1) = read_check_in_identity(&sidecar_1_path);
+    assert_eq!(identity_1.issuance_sequence().get(), 1);
+
+    let mut phase_3_parent = spawn_check_in_dispatch(&harness, &cwd, &log_path, &phase_3);
+    let sidecar_3_path = sidecar_directory.join("3.json");
+    wait_for_check_in_path(&phase_3.pid_file, "timed out waiting for dispatch child");
+    wait_for_check_in_path(&sidecar_3_path, "timed out waiting for dispatch sidecar");
+    let (sidecar_3_bytes, identity_3) = read_check_in_identity(&sidecar_3_path);
+    assert_eq!(
+        fs::read_to_string(&phase_3.pid_file)
+            .expect("read pid-3")
+            .trim()
+            .parse::<u32>()
+            .expect("parse pid-3"),
+        identity_3.process_number().get()
+    );
+    stop_child_and_kill_dispatch_parent(&mut phase_3_parent, &identity_3);
+    assert!(!phase_3.artifact_file.exists());
+
+    let mut phase_4_parent = spawn_check_in_dispatch(&harness, &cwd, &log_path, &phase_4);
+    let sidecar_4_path = sidecar_directory.join("4.json");
+    wait_for_check_in_path(&phase_4.pid_file, "timed out waiting for dispatch child");
+    wait_for_check_in_path(&sidecar_4_path, "timed out waiting for dispatch sidecar");
+    let (sidecar_4_bytes, identity_4) = read_check_in_identity(&sidecar_4_path);
+    assert_eq!(
+        fs::read_to_string(&phase_4.pid_file)
+            .expect("read pid-4")
+            .trim()
+            .parse::<u32>()
+            .expect("parse pid-4"),
+        identity_4.process_number().get()
+    );
+    assert_eq!(
+        observe_test_darwin_process(identity_4.process_number()),
+        Some(identity_4.process_start_identity())
+    );
+
+    let mut phase_5_parent = spawn_check_in_dispatch(&harness, &cwd, &log_path, &phase_5);
+    let sidecar_5_path = sidecar_directory.join("5.json");
+    wait_for_check_in_path(&phase_5.pid_file, "timed out waiting for dispatch child");
+    wait_for_check_in_path(&sidecar_5_path, "timed out waiting for dispatch sidecar");
+    let (sidecar_5_bytes, identity_5) = read_check_in_identity(&sidecar_5_path);
+    assert_eq!(
+        fs::read_to_string(&phase_5.pid_file)
+            .expect("read pid-5")
+            .trim()
+            .parse::<u32>()
+            .expect("parse pid-5"),
+        identity_5.process_number().get()
+    );
+    stop_child_and_kill_dispatch_parent(&mut phase_5_parent, &identity_5);
+    assert!(!phase_5.artifact_file.exists());
+
+    let phase_6_output = spawn_failing_check_in_dispatch(&cwd, &log_path, &phase_6)
+        .wait_with_output()
+        .expect("complete issuance-6 failed dispatch");
+    assert!(!phase_6_output.status.success());
+    assert!(String::from_utf8_lossy(&phase_6_output.stderr).contains("failed to spawn `codex`"));
+    let records_after_spawn_failure = fs::read_to_string(&log_path)
+        .expect("read event log after spawn failure")
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse event after spawn failure"))
+        .collect::<Vec<_>>();
+    assert_eq!(records_after_spawn_failure.len(), 6);
+    assert_eq!(records_after_spawn_failure[5].sequence().get(), 6);
+    assert!(matches!(
+        records_after_spawn_failure[5].body_ref(),
+        EventBodyRef::Known(KnownPayload::Dispatch(_))
+    ));
+    assert!(!sidecar_directory.join("6.json").exists());
+    assert!(!phase_6.pid_file.exists());
+    assert!(!phase_6.release_file.exists());
+    assert!(!phase_6.artifact_file.exists());
+
+    let holder = force_darwin_pid_reuse(
+        identity_5.process_number(),
+        identity_5.process_start_identity(),
+    );
+    assert_eq!(holder.process_number, identity_5.process_number());
+    assert_ne!(holder.start_identity, identity_5.process_start_identity());
+
+    for required in [
+        &phase_1.pid_file,
+        &phase_3.pid_file,
+        &phase_4.pid_file,
+        &phase_5.pid_file,
+        &phase_1.release_file,
+        &phase_1.artifact_file,
+    ] {
+        assert!(
+            required.exists(),
+            "required check-in fixture missing: {}",
+            required.display()
+        );
+    }
+    for absent in [
+        &phase_3.release_file,
+        &phase_4.release_file,
+        &phase_5.release_file,
+        &phase_6.pid_file,
+        &phase_6.release_file,
+        &phase_3.artifact_file,
+        &phase_4.artifact_file,
+        &phase_5.artifact_file,
+        &phase_6.artifact_file,
+    ] {
+        assert!(
+            !absent.exists(),
+            "unexpected check-in fixture: {}",
+            absent.display()
+        );
+    }
+
+    let event_log_before = fs::read(&log_path).expect("read event log before check-in");
+    assert_eq!(
+        std::str::from_utf8(&event_log_before)
+            .expect("UTF-8 event log")
+            .lines()
+            .count(),
+        6
+    );
+    let check_in = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "dispatch",
+            "check-in",
+            "--file",
+            log_path.to_str().expect("absolute UTF-8 log path"),
+        ])
+        .env_clear()
+        .env("PATH", harness.shim_path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run real dispatch check-in");
+    assert!(
+        check_in.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check_in.stderr)
+    );
+    assert_eq!(check_in.stdout, CHECK_IN_REPORT);
+    assert_eq!(check_in.stderr, b"");
+
+    assert_eq!(
+        fs::read(&log_path).expect("read event log after check-in"),
+        event_log_before
+    );
+    for (path, bytes) in [
+        (&sidecar_1_path, &sidecar_1_bytes),
+        (&sidecar_3_path, &sidecar_3_bytes),
+        (&sidecar_4_path, &sidecar_4_bytes),
+        (&sidecar_5_path, &sidecar_5_bytes),
+    ] {
+        assert_eq!(fs::read(path).expect("reread dispatch sidecar"), *bytes);
+    }
+    assert_eq!(
+        observe_test_darwin_process(identity_4.process_number()),
+        Some(identity_4.process_start_identity())
+    );
+    assert_eq!(
+        observe_test_darwin_process(holder.process_number),
+        Some(holder.start_identity)
+    );
+    assert_eq!(
+        std::str::from_utf8(&fs::read(&log_path).expect("reread event log"))
+            .expect("UTF-8 event log")
+            .lines()
+            .count(),
+        6
+    );
+
+    fs::write(&phase_4.release_file, []).expect("release working issuance-4 child");
+    let phase_4_status = wait_for_dispatch_parent(&mut phase_4_parent);
+    assert!(phase_4_status.success());
+    assert_eq!(
+        fs::read(&phase_4.artifact_file).expect("read artifact-4"),
+        b"{\"artifact\":\"real\"}"
+    );
+    assert!(!phase_3.artifact_file.exists());
+    assert!(!phase_5.artifact_file.exists());
+
+    let final_log = fs::read_to_string(&log_path).expect("read completed event log");
+    let final_records = final_log
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse final event record"))
+        .collect::<Vec<_>>();
+    assert_eq!(final_records.len(), 7);
+    assert_eq!(final_records[6].sequence().get(), 7);
+    let EventBodyRef::Known(KnownPayload::DispatchCompletion(DispatchCompletionPayload {
+        issuance_sequence,
+        usage,
+        exit_status,
+        artifact_outcome,
+        ..
+    })) = final_records[6].body_ref()
+    else {
+        panic!("sequence 7 must be the real issuance-4 completion")
+    };
+    assert_eq!(issuance_sequence.get(), 4);
+    assert_eq!(
+        usage,
+        &DispatchTokenUsage::Measured {
+            input_tokens: pce_core::InputTokens::new(1),
+            cached_input_tokens: pce_core::CachedInputTokens::new(2),
+            output_tokens: pce_core::OutputTokens::new(3),
+            reasoning_output_tokens: pce_core::ReasoningOutputTokens::new(4),
+        }
+    );
+    assert_eq!(
+        exit_status,
+        &DispatchExitStatus::Exited {
+            code: pce_core::ExitCode::new(0),
+        }
+    );
+    assert_eq!(artifact_outcome, &ArtifactOutcome::NotValidated);
+    assert!(final_records.iter().all(|record| {
+        !matches!(
+            record.body_ref(),
+            EventBodyRef::Known(KnownPayload::DispatchCompletion(completion))
+                if completion.issuance_sequence.get() == 3
+                    || completion.issuance_sequence.get() == 5
+                    || completion.issuance_sequence.get() == 6
+        )
+    }));
+
+    if holder.created_by_test {
+        assert_eq!(
+            unsafe {
+                libc::kill(
+                    i32::try_from(holder.process_number.get()).expect("holder PID"),
+                    libc::SIGKILL,
+                )
+            },
+            0
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe {
+                libc::waitpid(
+                    i32::try_from(holder.process_number.get()).expect("holder PID"),
+                    &mut status,
+                    0,
+                )
+            },
+            i32::try_from(holder.process_number.get()).expect("holder PID")
+        );
+    }
+
+    let fifo_directory = cwd.join("fifo-sidecar");
+    fs::create_dir(&fifo_directory).expect("create FIFO scenario directory");
+    let fifo_log = fifo_directory.join("events.jsonl");
+    fs::write(&fifo_log, CHECK_IN_EVENT).expect("write FIFO event log");
+    let fifo_sidecar_directory = PathBuf::from(format!("{}.dispatches", fifo_log.display()));
+    fs::create_dir(&fifo_sidecar_directory).expect("create FIFO sidecar directory");
+    let fifo_sidecar = fifo_sidecar_directory.join("1.json");
+    let fifo_sidecar_c =
+        CString::new(fifo_sidecar.as_os_str().as_bytes()).expect("FIFO path has no NUL");
+    assert_eq!(unsafe { libc::mkfifo(fifo_sidecar_c.as_ptr(), 0o600) }, 0);
+    let fifo_log_before = fs::read(&fifo_log).expect("read FIFO log before check-in");
+    let fifo_output = bounded_output(
+        Command::new(env!("CARGO_BIN_EXE_pce"))
+            .args([
+                "dispatch",
+                "check-in",
+                "--file",
+                fifo_log.to_str().expect("UTF-8 FIFO log path"),
+            ])
+            .env_clear(),
+    );
+    assert!(!fifo_output.status.success());
+    assert_eq!(fifo_output.stdout, b"");
+    assert_eq!(
+        fifo_output.stderr,
+        b"Error: dispatch process identity sidecar is not a regular file\n"
+    );
+    assert_eq!(
+        fs::read(&fifo_log).expect("reread FIFO log"),
+        fifo_log_before
+    );
+    assert!(
+        fs::symlink_metadata(&fifo_sidecar)
+            .expect("inspect FIFO sidecar")
+            .file_type()
+            .is_fifo()
+    );
+
+    let non_regular_directory = cwd.join("non-regular-artifact");
+    fs::create_dir(&non_regular_directory).expect("create artifact scenario directory");
+    let non_regular_log = non_regular_directory.join("events.jsonl");
+    fs::write(&non_regular_log, CHECK_IN_EVENT).expect("write artifact event log");
+    let non_regular_sidecar_directory =
+        PathBuf::from(format!("{}.dispatches", non_regular_log.display()));
+    fs::create_dir(&non_regular_sidecar_directory)
+        .expect("create artifact scenario sidecar directory");
+    let non_regular_artifact = non_regular_directory.join("artifact-1.json");
+    fs::create_dir(&non_regular_artifact).expect("create non-regular artifact");
+    let sidecar_bytes = format!(
+        "{{\"schema_id\":\"pce.dispatch-process-identity\",\"schema_version\":1,\"issuance_sequence\":1,\"process_number\":999999,\"process_start_identity\":{{\"seconds_since_unix_epoch\":1723200000,\"microseconds\":123456}},\"required_artifact_path\":\"{}\"}}\n",
+        non_regular_artifact.display()
+    );
+    fs::write(non_regular_sidecar_directory.join("1.json"), sidecar_bytes)
+        .expect("write artifact scenario sidecar");
+    let non_regular_output = bounded_output(
+        Command::new(env!("CARGO_BIN_EXE_pce"))
+            .args([
+                "dispatch",
+                "check-in",
+                "--file",
+                non_regular_log
+                    .to_str()
+                    .expect("UTF-8 artifact scenario log path"),
+            ])
+            .env_clear(),
+    );
+    assert!(
+        non_regular_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&non_regular_output.stderr)
+    );
+    assert_eq!(
+        non_regular_output.stdout,
+        b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n"
+    );
+    assert_eq!(non_regular_output.stderr, b"");
+}
 
 fn ratified_floor() -> AcceptanceCriteria {
     parse_acceptance_criteria(
@@ -2897,4 +3568,58 @@ fn is_millisecond_z_timestamp(value: &str) -> bool {
             .enumerate()
             .filter(|(index, _)| ![4, 7, 10, 13, 16, 19, 23].contains(index))
             .all(|(_, byte)| byte.is_ascii_digit())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn check_in_classifies_a_foreign_owned_process_number_without_aborting_the_report() {
+    let root = std::env::temp_dir().join("pce-check-in-foreign-owned");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create scenario root");
+    let log_path = root.join("events.jsonl");
+    let mut log = Vec::new();
+    for sequence in [1_u64, 2] {
+        log.extend_from_slice(
+            format!(
+                "{{\"sequence\":{sequence},\"timestamp\":\"2026-08-09T12:00:00.000Z\",\"kind\":\"dispatch\",\"node\":\"m1-s2\",\"payload\":{{\"role\":\"step-executor\",\"ref\":\"abc123\",\"evidence\":\"fixture\"}}}}\n"
+            )
+            .as_bytes(),
+        );
+    }
+    fs::write(&log_path, &log).expect("write event log");
+    let sidecars = PathBuf::from(format!("{}.dispatches", log_path.display()));
+    fs::create_dir(&sidecars).expect("create sidecar directory");
+    // PID 1 is launchd: it is always alive and always owned by root, so proc_pidinfo answers
+    // EPERM for this unprivileged process. Issuance 2 names an absent process number.
+    for (sequence, process_number) in [(1_u64, 1_u32), (2, 999_999)] {
+        let artifact = root.join(format!("artifact-{sequence}.json"));
+        fs::write(
+            sidecars.join(format!("{sequence}.json")),
+            format!(
+                "{{\"schema_id\":\"pce.dispatch-process-identity\",\"schema_version\":1,\"issuance_sequence\":{sequence},\"process_number\":{process_number},\"process_start_identity\":{{\"seconds_since_unix_epoch\":1723200000,\"microseconds\":123456}},\"required_artifact_path\":\"{}\"}}\n",
+                artifact.display()
+            ),
+        )
+        .expect("write sidecar");
+    }
+    let output = bounded_output(
+        Command::new(env!("CARGO_BIN_EXE_pce"))
+            .args([
+                "dispatch",
+                "check-in",
+                "--file",
+                log_path.to_str().expect("UTF-8 log path"),
+            ])
+            .env_clear(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stderr, b"");
+    assert_eq!(
+        output.stdout,
+        b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":2,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n"
+    );
 }
