@@ -4,18 +4,7 @@ mod support;
 use std::ffi::CString;
 use std::ffi::OsString;
 use std::fs;
-
-#[cfg(target_os = "macos")]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(target_os = "macos")]
-use std::os::unix::fs::FileTypeExt;
-#[cfg(target_os = "macos")]
-use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
-use std::process::{Child, Command, Output, Stdio};
-#[cfg(target_os = "macos")]
-use std::sync::{Mutex, MutexGuard};
-#[cfg(target_os = "macos")]
+use std::thread;
 use std::time::{Duration, Instant};
 
 use pce_core::{
@@ -30,6 +19,16 @@ use pce_core::{
     ProcessStartIdentity, parse_dispatch_process_identity,
 };
 use serde_json::{Value, json};
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::FileTypeExt;
+#[cfg(target_os = "macos")]
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::{Child, Command, Output, Stdio};
+#[cfg(target_os = "macos")]
+use std::sync::{Mutex, MutexGuard};
 use support::{CliHarness, Invocation, ScriptedResponse};
 
 #[cfg(target_os = "macos")]
@@ -906,6 +905,23 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
         "dispatch stderr: {}",
         stderr(&dispatched)
     );
+    assert_eq!(dispatched.stdout, b"");
+    assert_eq!(dispatched.stderr, b"");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let settled = fs::read_to_string(&log_path).ok().is_some_and(|contents| {
+            let records = contents
+                .lines()
+                .map(parse_event_line)
+                .collect::<Result<Vec<_>, _>>();
+            records.is_ok_and(|records| records.len() == 2)
+        });
+        if settled {
+            break;
+        }
+        assert!(Instant::now() < deadline, "lifecycle did not settle");
+        thread::sleep(Duration::from_millis(10));
+    }
 
     let read = harness
         .run(
