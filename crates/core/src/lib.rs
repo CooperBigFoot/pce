@@ -6,6 +6,7 @@ pub mod completion_gate;
 pub mod contract_measurement;
 pub mod criterion_change;
 pub mod dispatch;
+pub mod dispatch_check_in;
 pub mod dispatch_meter;
 pub mod dispatch_process_identity;
 pub mod event_log;
@@ -57,6 +58,11 @@ pub use dispatch::{
     classify_seatbelt_capability, compose_gate_arguments, compose_planning_role_frame,
     dispatch_completion_payload, dispatch_invocation, dispatch_payload, parse_claude_result,
     render_dispatch_projection, seatbelt_capability_probe,
+};
+pub use dispatch_check_in::{
+    ArtifactProduction, DispatchCheckInEntry, DispatchCheckInError, DispatchCheckInReport,
+    DispatchCompletionAccounting, DispatchIdentityObservation, DispatchLiveness,
+    ProcessIdentityObservation, classify_dispatch_check_in, serialize_dispatch_check_in,
 };
 pub use dispatch_meter::{
     DispatchMeterCompletion, DispatchMeterError, DispatchMeterIssuance, DispatchMeterRecord,
