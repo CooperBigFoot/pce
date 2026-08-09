@@ -266,6 +266,8 @@ impl Campaign {
             "HEAD".into(),
             "--evidence".into(),
             repository.case.into(),
+            "--required-artifact".into(),
+            output.as_os_str().to_owned(),
             "--".into(),
             caller_task.into(),
         ]);

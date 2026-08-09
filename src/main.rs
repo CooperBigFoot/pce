@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::Shutdown;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -18,46 +19,50 @@ use pce_core::GateCommand;
 use pce_core::tracked_contract::parse_gate_command;
 use pce_core::{
     AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
-    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, AcceptanceCriteria,
-    ActReversibility, AppendError, AppendableCategory, AppendableFinding, ArgumentVector,
-    ArtifactOutcome, ArtifactPath, AuthorityFailure, BranchState, CanonicalNode as DispatchNode,
-    CheckoutFailure, CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage,
-    CompletionCriterionStatus, CompletionDecision, CreationDate, CriterionChangeDecision,
-    CurrentArtifactObservation, CurrentArtifactState, DispatchCandidate, DispatchDuration,
-    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchProjectionInput, DispatchRef,
-    DispatchRole, DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult,
-    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
-    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable,
-    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
-    GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef,
-    GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
-    GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
-    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
-    LandingReadinessDecision, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
-    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
-    ObservedExitStatus, ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge,
-    PairedCampaign, PairedExecutionProofError, PairedReplayClassification, PullRequestNumber,
-    PullRequestSelector, RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation,
-    ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
-    RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
-    RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest, SignalNumber,
-    SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
+    AbsoluteOutputPath, AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
+    AcceptanceCriteria, ActReversibility, AppendError, AppendableCategory, AppendableFinding,
+    ArgumentVector, ArtifactOutcome, ArtifactPath, ArtifactProduction, AuthorityFailure,
+    BranchState, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
+    CodexTerminalObservation, CodexTerminalUsage, CompletionCriterionStatus, CompletionDecision,
+    CreationDate, CriterionChangeDecision, CurrentArtifactObservation, CurrentArtifactState,
+    DispatchCandidate, DispatchDuration, DispatchEnvelope, DispatchExitStatus,
+    DispatchIdentityObservation, DispatchLogging, DispatchProcessIdentity, DispatchProjectionInput,
+    DispatchRef, DispatchRole, DispatchRoleClass, DispatchTarget, DispatchTokenUsage,
+    DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
+    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
+    ExactPullRequestState, Executable, ExitCode, ExpectedVerdictOutcome, FileObservation,
+    FindingAdmission, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
+    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
+    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
+    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
+    GitHubPullRequestObservation, GitMergeObservation, KnownPayload, LandingReadinessDecision,
+    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
+    MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, ObservedExitStatus,
+    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PairedCampaign,
+    PairedExecutionProofError, PairedReplayClassification, ProcessIdentityObservation,
+    ProcessNumber, ProcessStartIdentity, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
+    ReferenceValidation, ReplayArtifactObservation, ReplayClassifications, ReplayObservation,
+    ReplayRefResult, RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation,
+    RepositoryName, RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
+    RepositoryRelativePath, RepositoryRoot, RunSnapshot, Sandbox, SeatbeltCapability, Sequence,
+    Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
     StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
     UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
     WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
-    classify_codex_terminal_usage, classify_replay_pair, classify_seatbelt_capability,
-    compose_gate_arguments, compose_planning_role_frame, compute_dispatchability, create_vision,
-    derive_merge_status, derive_milestone_merge_status, derive_run_state,
-    dispatch_completion_payload, dispatch_invocation, dispatch_payload, evaluate_completion,
-    evaluate_landing_readiness, event_record_matches, fold_paired_execution_proof,
-    fold_replay_runs, measure_contract_snapshot, meter_dispatches, normalize_replay_observation,
-    paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result, parse_event_line,
+    classify_codex_terminal_usage, classify_dispatch_check_in, classify_replay_pair,
+    classify_seatbelt_capability, compose_gate_arguments, compose_planning_role_frame,
+    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
+    derive_run_state, dispatch_completion_payload, dispatch_invocation, dispatch_payload,
+    evaluate_completion, evaluate_landing_readiness, event_record_matches,
+    fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot, meter_dispatches,
+    normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
+    parse_claude_result, parse_dispatch_process_identity, parse_event_line,
     parse_gate_execution_evidence, parse_gate_stimulus, parse_paired_falsification_verdict,
     parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
     rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
-    seatbelt_capability_probe, serialize_tracked_repository_contract, validate_artifact,
-    validate_verdict_references, validate_workflow_coverage, verify_criterion_change,
+    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    serialize_tracked_repository_contract, validate_artifact, validate_verdict_references,
+    validate_workflow_coverage, verify_criterion_change,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -78,8 +83,9 @@ const USAGE: &str = concat!(
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
-    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CODEX_ARGUMENT>...\n",
-    "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
+    "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CODEX_ARGUMENT>...\n",
+    "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
+    "       pce dispatch check-in --file <ABSOLUTE_LOG_PATH>\n",
     "       pce gate exec\n",
     "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>\n",
     "       pce gate execution-subject-probe --output <REPOSITORY_RELATIVE_OUTPUT_PATH>\n",
@@ -181,6 +187,9 @@ enum Command {
     Dispatch {
         envelope: DispatchEnvelope,
         logging: Option<DispatchLoggingMode>,
+    },
+    DispatchCheckIn {
+        log_path: PathBuf,
     },
     VisionNew {
         name: VisionName,
@@ -291,6 +300,7 @@ struct ContinuationCompletion {
     log_path: PathBuf,
     node: NodeId,
     issuance_sequence: Sequence,
+    required_artifact_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -335,6 +345,7 @@ struct LiveDispatchCompletion<'a> {
     path: &'a Path,
     node: &'a NodeId,
     issuance_sequence: Sequence,
+    required_artifact_path: &'a AbsoluteRequiredArtifactPath,
 }
 
 enum OwnedFileObservation {
@@ -503,6 +514,11 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             }
             None => execute_dispatch(&envelope, None),
         },
+        Command::DispatchCheckIn { log_path } => {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            run_dispatch_check_in(&log_path, &mut output)
+        }
         Command::VisionNew { name } => run_vision_new(&name),
         Command::VisionCheck => run_vision_check(input),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
@@ -610,6 +626,9 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "completion" => parse_completion_command(action, rest),
         [verb, action, rest @ ..] if verb == "landing" => parse_landing_command(action, rest),
         [verb, action, rest @ ..] if verb == "contract" => parse_contract_command(action, rest),
+        [verb, action, rest @ ..] if verb == "dispatch" && action == "check-in" => {
+            parse_dispatch_check_in(rest)
+        }
         [verb, target, rest @ ..] if verb == "dispatch" => match target.as_str() {
             "codex" => parse_codex_dispatch(target, rest),
             "gate" => parse_gate_dispatch(rest),
@@ -618,6 +637,23 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         .with_context(|| USAGE),
         _ => bail!(USAGE),
     }
+}
+
+fn parse_dispatch_check_in(rest: &[String]) -> Result<Command> {
+    let [file_flag, raw_log_path] = rest else {
+        bail!(USAGE);
+    };
+    if file_flag != "--file" || raw_log_path.is_empty() {
+        bail!(USAGE);
+    }
+    let log_path = PathBuf::from(raw_log_path);
+    if !log_path.is_absolute() {
+        bail!(
+            "dispatch check-in event-log path must be absolute: {}",
+            log_path.display()
+        );
+    }
+    Ok(Command::DispatchCheckIn { log_path })
 }
 
 fn parse_gate_replay(rest: &[String]) -> Result<Command> {
@@ -1244,9 +1280,10 @@ fn run_paired_critic(
             "campaign-subject",
             "--evidence",
             "campaign-review",
-            "--",
-            &task,
-        ]);
+        ])
+        .arg("--required-artifact")
+        .arg(verdict)
+        .args(["--", &task]);
     let output = run_paired_child(
         &mut command,
         deadline,
@@ -1890,18 +1927,19 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         None
     };
 
-    const LOGGING_DIAGNOSTIC: &str = "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence";
+    const LOGGING_DIAGNOSTIC: &str = "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence, --required-artifact";
     let logging_raw = if rest
         .get(position)
         .is_some_and(|value| value == "--log-file")
     {
-        let parsed = (|| -> Result<(&str, &str, &str, &str, &str)> {
+        let parsed = (|| -> Result<(&str, &str, &str, &str, &str, &str)> {
             Ok((
                 required_option(rest, &mut position, "--log-file")?,
                 required_option(rest, &mut position, "--node")?,
                 required_option(rest, &mut position, "--role")?,
                 required_option(rest, &mut position, "--ref")?,
                 required_option(rest, &mut position, "--evidence")?,
+                required_option(rest, &mut position, "--required-artifact")?,
             ))
         })();
         match parsed {
@@ -1916,7 +1954,7 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
     } else if rest.get(position).is_some_and(|value| {
         matches!(
             value.as_str(),
-            "--node" | "--role" | "--ref" | "--evidence" | "--dry-run"
+            "--node" | "--role" | "--ref" | "--evidence" | "--required-artifact" | "--dry-run"
         )
     }) {
         bail!(LOGGING_DIAGNOSTIC)
@@ -1952,18 +1990,43 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
     let caller_arguments = ArgumentVector::new(rest[position..].to_vec());
 
     let logging = logging_raw
-        .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
-            Ok((
-                PathBuf::from(path),
-                DispatchLogging {
-                    node: NodeId::parse(node).context("failed to parse dispatch logging node")?,
-                    role: DispatchRole::new(role),
-                    dispatch_ref: DispatchRef::new(dispatch_ref),
-                    evidence: Evidence::parse(evidence)
-                        .context("failed to parse dispatch logging evidence")?,
-                },
-            ))
-        })
+        .map(
+            |(path, node, role, dispatch_ref, evidence, required_artifact)| -> Result<_> {
+                let path = PathBuf::from(path);
+                if !path.is_absolute() {
+                    bail!(
+                        "logged dispatch event-log path must be absolute: {}",
+                        path.display()
+                    );
+                }
+                let required_artifact_path =
+                    AbsoluteRequiredArtifactPath::parse(PathBuf::from(required_artifact))?;
+                if let Some((_, output)) = structured {
+                    let output = PathBuf::from(output);
+                    if output.is_absolute()
+                        && required_artifact_path.as_path().as_os_str() != output.as_os_str()
+                    {
+                        bail!(
+                            "dispatch required artifact path `{}` does not match output path `{}`",
+                            required_artifact_path.as_path().display(),
+                            output.display()
+                        );
+                    }
+                }
+                Ok((
+                    path,
+                    DispatchLogging {
+                        node: NodeId::parse(node)
+                            .context("failed to parse dispatch logging node")?,
+                        role: DispatchRole::new(role),
+                        dispatch_ref: DispatchRef::new(dispatch_ref),
+                        evidence: Evidence::parse(evidence)
+                            .context("failed to parse dispatch logging evidence")?,
+                        required_artifact_path,
+                    },
+                ))
+            },
+        )
         .transpose()?;
     let caller_arguments = match (planning_act, logging.as_ref()) {
         (Some(act), Some((_, metadata))) => {
@@ -2038,18 +2101,19 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
     } else {
         None
     };
-    const LOGGING_DIAGNOSTIC: &str = "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence";
+    const LOGGING_DIAGNOSTIC: &str = "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence, --required-artifact";
     let logging_raw = if rest
         .get(position)
         .is_some_and(|value| value == "--log-file")
     {
-        let parsed = (|| -> Result<(&str, &str, &str, &str, &str)> {
+        let parsed = (|| -> Result<(&str, &str, &str, &str, &str, &str)> {
             Ok((
                 required_option(rest, &mut position, "--log-file")?,
                 required_option(rest, &mut position, "--node")?,
                 required_option(rest, &mut position, "--role")?,
                 required_option(rest, &mut position, "--ref")?,
                 required_option(rest, &mut position, "--evidence")?,
+                required_option(rest, &mut position, "--required-artifact")?,
             ))
         })();
         match parsed {
@@ -2064,7 +2128,7 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
     } else if rest.get(position).is_some_and(|value| {
         matches!(
             value.as_str(),
-            "--node" | "--role" | "--ref" | "--evidence" | "--dry-run"
+            "--node" | "--role" | "--ref" | "--evidence" | "--required-artifact" | "--dry-run"
         )
     }) {
         bail!(LOGGING_DIAGNOSTIC)
@@ -2103,18 +2167,41 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
         bail!("gate caller arguments must not contain `--output-format`");
     }
     let logging = logging_raw
-        .map(|(path, node, role, dispatch_ref, evidence)| -> Result<_> {
-            Ok((
-                PathBuf::from(path),
-                DispatchLogging {
-                    node: NodeId::parse(node).context("failed to parse dispatch logging node")?,
-                    role: DispatchRole::new(role),
-                    dispatch_ref: DispatchRef::new(dispatch_ref),
-                    evidence: Evidence::parse(evidence)
-                        .context("failed to parse dispatch logging evidence")?,
-                },
-            ))
-        })
+        .map(
+            |(path, node, role, dispatch_ref, evidence, required_artifact)| -> Result<_> {
+                let path = PathBuf::from(path);
+                if !path.is_absolute() {
+                    bail!(
+                        "logged dispatch event-log path must be absolute: {}",
+                        path.display()
+                    );
+                }
+                let required_artifact_path =
+                    AbsoluteRequiredArtifactPath::parse(PathBuf::from(required_artifact))?;
+                let output = PathBuf::from(output);
+                if output.is_absolute()
+                    && required_artifact_path.as_path().as_os_str() != output.as_os_str()
+                {
+                    bail!(
+                        "dispatch required artifact path `{}` does not match output path `{}`",
+                        required_artifact_path.as_path().display(),
+                        output.display()
+                    );
+                }
+                Ok((
+                    path,
+                    DispatchLogging {
+                        node: NodeId::parse(node)
+                            .context("failed to parse dispatch logging node")?,
+                        role: DispatchRole::new(role),
+                        dispatch_ref: DispatchRef::new(dispatch_ref),
+                        evidence: Evidence::parse(evidence)
+                            .context("failed to parse dispatch logging evidence")?,
+                        required_artifact_path,
+                    },
+                ))
+            },
+        )
         .transpose()?;
     let arguments = ArgumentVector::new(caller_arguments);
     let arguments = match (planning_act, logging.as_ref()) {
@@ -4242,6 +4329,101 @@ fn read_event_log(path: &Path) -> Result<Vec<ParsedEventLine>> {
     read_event_log_lines(&mut reader, path)
 }
 
+fn run_dispatch_check_in(log_path: &Path, output: &mut dyn Write) -> Result<()> {
+    let parsed = read_event_log(log_path)?;
+    let records = parsed
+        .iter()
+        .map(|line| line.record.clone())
+        .collect::<Vec<_>>();
+    let issuance_sequences = records
+        .iter()
+        .filter_map(|record| match record.body_ref() {
+            EventBodyRef::Known(KnownPayload::Dispatch(_)) => Some(record.sequence()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let identity_directory = dispatch_identity_directory(log_path);
+    let mut observations = Vec::with_capacity(issuance_sequences.len());
+    for issuance_sequence in issuance_sequences {
+        let sidecar_path = identity_directory.join(format!("{}.json", issuance_sequence.get()));
+        let Some(identity) = read_dispatch_identity_sidecar(&sidecar_path)? else {
+            observations.push(DispatchIdentityObservation::unrecorded(issuance_sequence));
+            continue;
+        };
+        if identity.issuance_sequence() != issuance_sequence {
+            bail!(
+                "dispatch process identity sidecar issuance sequence {} does not match event issuance {}",
+                identity.issuance_sequence().get(),
+                issuance_sequence.get()
+            );
+        }
+        let process_identity = observe_darwin_process_number(identity.process_number())?;
+        let artifact_production =
+            observe_required_dispatch_artifact(identity.required_artifact_path().as_path())?;
+        observations.push(DispatchIdentityObservation::new(
+            issuance_sequence,
+            identity.process_start_identity(),
+            process_identity,
+            artifact_production,
+        ));
+    }
+    let report = classify_dispatch_check_in(&records, &observations)?;
+    let bytes = serialize_dispatch_check_in(&report)?;
+    output
+        .write_all(&bytes)
+        .context("failed to write dispatch check-in report")?;
+    output
+        .flush()
+        .context("failed to flush dispatch check-in report")
+}
+
+fn read_dispatch_identity_sidecar(path: &Path) -> Result<Option<DispatchProcessIdentity>> {
+    const MAX_SIDECAR_BYTES: u64 = 65_536;
+
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).context("failed to open dispatch process identity sidecar");
+        }
+    };
+    let metadata = file
+        .metadata()
+        .context("failed to read dispatch process identity sidecar")?;
+    if !metadata.file_type().is_file() {
+        bail!("dispatch process identity sidecar is not a regular file");
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        bail!("dispatch process identity sidecar is not owned by the current user");
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(MAX_SIDECAR_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("failed to read dispatch process identity sidecar")?;
+    if bytes.len() > MAX_SIDECAR_BYTES as usize {
+        bail!("dispatch process identity sidecar exceeds 65536 bytes");
+    }
+    parse_dispatch_process_identity(&bytes)
+        .map(Some)
+        .context("failed to parse dispatch process identity sidecar")
+}
+
+fn observe_required_dispatch_artifact(path: &Path) -> Result<ArtifactProduction> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(ArtifactProduction::Produced),
+        Ok(_) => Ok(ArtifactProduction::NotProduced),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(ArtifactProduction::NotProduced)
+        }
+        Err(error) => Err(error).context("failed to inspect required dispatch artifact"),
+    }
+}
+
 fn read_event_log_lines(reader: &mut dyn BufRead, path: &Path) -> Result<Vec<ParsedEventLine>> {
     let mut lines = Vec::<ParsedEventLine>::new();
     let mut physical_line = 0_u64;
@@ -6365,8 +6547,8 @@ impl GateRecorderRuntime {
                         if admitted {
                             let worker_state = Arc::clone(&server_state);
                             let worker_stop = Arc::clone(&server_stop);
-                            let accepted_at = Instant::now();
                             workers.push(std::thread::spawn(move || {
+                                let accepted_at = Instant::now();
                                 let outcome = std::panic::catch_unwind(|| {
                                     serve_gate_execution(
                                         stream,
@@ -7193,6 +7375,291 @@ fn persist_gate_execution_evidence(
         .context("failed to make gate execution evidence read-only")
 }
 
+fn dispatch_identity_directory(log_path: &Path) -> PathBuf {
+    let mut directory = log_path.as_os_str().to_os_string();
+    directory.push(".dispatches");
+    PathBuf::from(directory)
+}
+
+#[cfg(target_os = "macos")]
+fn observe_darwin_process_number(
+    process_number: ProcessNumber,
+) -> Result<ProcessIdentityObservation> {
+    let process_number_value = process_number.get();
+    let pid = i32::try_from(process_number_value)
+        .context("dispatch process number exceeds Darwin pid_t")?;
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let expected_size = std::mem::size_of::<libc::proc_bsdinfo>();
+    let expected_size_i32 = i32::try_from(expected_size)
+        .context("Darwin proc_bsdinfo size exceeds proc_pidinfo input range")?;
+    let observed_size = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::from_mut(&mut info).cast(),
+            expected_size_i32,
+        )
+    };
+    if observed_size == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(ProcessIdentityObservation::Absent);
+        }
+        if error.raw_os_error() == Some(libc::EPERM) {
+            return Ok(ProcessIdentityObservation::ForeignPresent);
+        }
+        bail!(
+            "failed to observe Darwin process identity for PID {process_number_value}: proc_pidinfo returned 0 bytes: {error}"
+        );
+    }
+    if observed_size != expected_size_i32 || info.pbi_pid != process_number_value {
+        bail!(
+            "failed to observe Darwin process identity for PID {process_number_value}: proc_pidinfo returned {observed_size} bytes with PID {}; expected {expected_size_i32} bytes and PID {process_number_value}: {}",
+            info.pbi_pid,
+            std::io::Error::last_os_error()
+        );
+    }
+    let seconds_since_unix_epoch = info.pbi_start_tvsec;
+    let microseconds = u32::try_from(info.pbi_start_tvusec)
+        .context("Darwin process start microseconds exceed u32")?;
+    let process_start_identity = ProcessStartIdentity::new(seconds_since_unix_epoch, microseconds)?;
+    Ok(ProcessIdentityObservation::Present(process_start_identity))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn observe_darwin_process_number(
+    _process_number: ProcessNumber,
+) -> Result<ProcessIdentityObservation> {
+    bail!("dispatch process identity observation is unsupported outside macOS/Darwin")
+}
+
+fn observe_darwin_process_identity(
+    child: &std::process::Child,
+) -> Result<(ProcessNumber, ProcessStartIdentity)> {
+    let child_id = child.id();
+    let process_number = ProcessNumber::new(child_id)?;
+    let observation = observe_darwin_process_number(process_number)?;
+    let process_start_identity = match observation {
+        ProcessIdentityObservation::Present(identity) => identity,
+        ProcessIdentityObservation::Absent => {
+            bail!(
+                "failed to observe Darwin process identity for child PID {child_id}: process is absent"
+            )
+        }
+        ProcessIdentityObservation::ForeignPresent => {
+            bail!(
+                "failed to observe Darwin process identity for child PID {child_id}: process identity is unreadable"
+            )
+        }
+    };
+    Ok((process_number, process_start_identity))
+}
+
+fn ensure_dispatch_identity_directory(path: &Path) -> Result<()> {
+    match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to create dispatch process identity directory {}",
+                    path.display()
+                )
+            });
+        }
+    }
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "failed to inspect dispatch process identity directory {}",
+            path.display()
+        )
+    })?;
+    if !metadata.file_type().is_dir() {
+        bail!(
+            "dispatch process identity directory is not a real directory: {}",
+            path.display()
+        );
+    }
+    #[cfg(target_os = "macos")]
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        bail!(
+            "dispatch process identity directory is not owned by the current user: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn rename_dispatch_identity_exclusive(temporary: &Path, final_path: &Path) -> Result<()> {
+    let temporary_c = CString::new(temporary.as_os_str().as_bytes())
+        .context("dispatch process identity temporary path contains an embedded NUL")?;
+    let final_c = CString::new(final_path.as_os_str().as_bytes())
+        .context("dispatch process identity final path contains an embedded NUL")?;
+    let result =
+        unsafe { libc::renamex_np(temporary_c.as_ptr(), final_c.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        bail!("dispatch process identity sidecar already exists");
+    }
+    Err(error).with_context(|| {
+        format!(
+            "failed to publish dispatch process identity sidecar {}",
+            final_path.display()
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn rename_dispatch_identity_exclusive(_temporary: &Path, _final_path: &Path) -> Result<()> {
+    bail!("exclusive dispatch process identity publication is unsupported outside macOS/Darwin")
+}
+
+fn persist_dispatch_process_identity(
+    log_path: &Path,
+    identity: &DispatchProcessIdentity,
+) -> Result<()> {
+    let directory = dispatch_identity_directory(log_path);
+    ensure_dispatch_identity_directory(&directory)?;
+    let sequence = identity.issuance_sequence().get();
+    let final_path = directory.join(format!("{sequence}.json"));
+    let temporary = directory.join(format!(".{sequence}.{}.tmp", std::process::id()));
+    let mut temporary_created = false;
+    let publication = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc_o_nofollow())
+            .open(&temporary)
+            .with_context(|| {
+                format!(
+                    "failed to create dispatch process identity temporary file {}",
+                    temporary.display()
+                )
+            })?;
+        temporary_created = true;
+        let bytes = serialize_dispatch_process_identity(identity)?;
+        file.write_all(&bytes)
+            .context("failed to write dispatch process identity temporary file")?;
+        file.flush()
+            .context("failed to flush dispatch process identity temporary file")?;
+        file.sync_all()
+            .context("failed to sync dispatch process identity temporary file")?;
+        file.set_permissions(fs::Permissions::from_mode(0o444))
+            .context("failed to make dispatch process identity sidecar immutable")?;
+        drop(file);
+        rename_dispatch_identity_exclusive(&temporary, &final_path)?;
+        File::open(&directory)
+            .with_context(|| {
+                format!(
+                    "failed to open dispatch process identity directory {} for sync",
+                    directory.display()
+                )
+            })?
+            .sync_all()
+            .context("failed to sync dispatch process identity directory")?;
+        Ok(())
+    })();
+    if publication.is_err() && temporary_created {
+        match fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::error!(
+                error = ?error,
+                path = %temporary.display(),
+                "failed to remove dispatch process identity temporary file"
+            ),
+        }
+    }
+    publication
+}
+
+#[cfg(target_os = "macos")]
+const fn libc_o_nofollow() -> i32 {
+    libc::O_NOFOLLOW
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn libc_o_nofollow() -> i32 {
+    0
+}
+
+fn cleanup_failed_dispatch_setup(
+    child: &mut std::process::Child,
+    recorder: Option<GateRecorderRuntime>,
+    envelope: &DispatchEnvelope,
+    completion: Option<&LiveDispatchCompletion<'_>>,
+    started: Instant,
+    primary: Error,
+) -> Error {
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = child.kill() {
+        cleanup_errors.push(format!("failed to kill just-spawned child: {error}"));
+    }
+    let status = match child.wait() {
+        Ok(status) => Some(status),
+        Err(error) => {
+            cleanup_errors.push(format!("failed to reap just-spawned child: {error}"));
+            None
+        }
+    };
+    let recorder_stop = recorder.map(GateRecorderRuntime::stop);
+    let gate_execution_records = recorder_stop
+        .as_ref()
+        .map_or_else(Vec::new, |stopped| stopped.records.clone());
+    if let Some(error) = recorder_stop.and_then(|stopped| stopped.error) {
+        cleanup_errors.push(format!("failed to stop gate recorder: {error:#}"));
+    }
+    if let Some(config) = envelope.gate_execution_recorder()
+        && let Err(error) =
+            persist_gate_execution_evidence(config.evidence(), gate_execution_records)
+    {
+        cleanup_errors.push(format!(
+            "failed to persist gate execution evidence: {error:#}"
+        ));
+    }
+    if let (Some(status), Some(completion)) = (status, completion) {
+        let completion_result = (|| -> Result<()> {
+            let duration_ms = u64::try_from(started.elapsed().as_millis())
+                .context("dispatch duration in milliseconds exceeds u64")?;
+            let payload = dispatch_completion_payload(
+                completion.issuance_sequence,
+                DispatchDuration::new(duration_ms),
+                DispatchTokenUsage::Absent {
+                    reason: UsageAbsenceReason::NoTerminalTurn,
+                },
+                dispatch_exit_status(status)?,
+                ArtifactOutcome::NotValidated,
+            );
+            append_one(
+                completion.path,
+                WriteKind::DispatchCompletion,
+                completion.node.clone(),
+                serde_json::to_string(&payload)
+                    .context("failed to serialize dispatch completion")?,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = completion_result {
+            cleanup_errors.push(format!("failed to append dispatch completion: {error:#}"));
+        }
+    }
+    if cleanup_errors.is_empty() {
+        primary
+    } else {
+        let detail = cleanup_errors.join("; ");
+        tracing::error!(cleanup = %detail, "dispatch identity setup cleanup was incomplete");
+        primary.context(format!(
+            "additionally, dispatch setup cleanup failed: {detail}"
+        ))
+    }
+}
+
 fn start_logged_dispatch(envelope: &DispatchEnvelope, logging: LiveDispatchLog<'_>) -> Result<()> {
     let payload = dispatch_payload(logging.metadata);
     let issuance = append_one(
@@ -7207,6 +7674,11 @@ fn start_logged_dispatch(envelope: &DispatchEnvelope, logging: LiveDispatchLog<'
             log_path: logging.path.to_path_buf(),
             node: logging.metadata.node.clone(),
             issuance_sequence: issuance.sequence(),
+            required_artifact_path: logging
+                .metadata
+                .required_artifact_path
+                .as_path()
+                .to_path_buf(),
         },
     };
     let suffix = format!("dispatch-{:06}", issuance.sequence().get());
@@ -7306,12 +7778,15 @@ fn run_dispatch_continuation(input: &mut dyn Read) -> Result<()> {
         .end()
         .context("dispatch continuation request has trailing non-whitespace bytes")?;
     let envelope = reconstruct_dispatch_envelope(request.envelope)?;
+    let required_artifact_path =
+        AbsoluteRequiredArtifactPath::parse(request.completion.required_artifact_path)?;
     execute_dispatch(
         &envelope,
         Some(LiveDispatchCompletion {
             path: &request.completion.log_path,
             node: &request.completion.node,
             issuance_sequence: request.completion.issuance_sequence,
+            required_artifact_path: &required_artifact_path,
         }),
     )
 }
@@ -7402,6 +7877,34 @@ fn execute_dispatch(
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to spawn `{executable}`"))?;
+    let identity_setup = (|| -> Result<()> {
+        if let Some(completion) = completion.as_ref() {
+            let (process_number, process_start_identity) = observe_darwin_process_identity(&child)?;
+            let identity = DispatchProcessIdentity::new(
+                completion.issuance_sequence,
+                process_number,
+                process_start_identity,
+                completion.required_artifact_path.clone(),
+            );
+            persist_dispatch_process_identity(completion.path, &identity).with_context(|| {
+                format!(
+                    "failed to persist dispatch process identity for child PID {}",
+                    process_number.get()
+                )
+            })?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = identity_setup {
+        return Err(cleanup_failed_dispatch_setup(
+            &mut child,
+            recorder,
+            envelope,
+            completion.as_ref(),
+            started,
+            error,
+        ));
+    }
     let stdin_writer = if let Some(bytes) = invocation.stdin_bytes() {
         let mut child_stdin = child
             .stdin
@@ -10818,6 +11321,61 @@ None.
     }
 
     #[test]
+    fn dispatch_check_in_parser_accepts_the_one_absolute_shape() {
+        let command = parse_command(
+            ["dispatch", "check-in", "--file", "/tmp/events.jsonl"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("canonical check-in command");
+        let Command::DispatchCheckIn { log_path } = command else {
+            panic!("parsed another command")
+        };
+        assert_eq!(log_path, PathBuf::from("/tmp/events.jsonl"));
+        assert_eq!(
+            USAGE
+                .matches("pce dispatch check-in --file <ABSOLUTE_LOG_PATH>")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn dispatch_check_in_parser_rejects_every_noncanonical_shape_with_usage() {
+        for rejected in [
+            vec!["dispatch", "check-in"],
+            vec![
+                "dispatch",
+                "check-in",
+                "--file",
+                "/tmp/events.jsonl",
+                "extra",
+            ],
+            vec!["dispatch", "check-in", "/tmp/events.jsonl", "--file"],
+            vec!["dispatch", "check-in", "--file", ""],
+            vec!["dispatch", "check-in", "--unknown", "/tmp/events.jsonl"],
+        ] {
+            let error = parse_command(rejected.into_iter().map(str::to_owned))
+                .expect_err("noncanonical check-in command");
+            assert_eq!(error.to_string(), USAGE);
+        }
+    }
+
+    #[test]
+    fn dispatch_check_in_parser_rejects_relative_log_before_filesystem_access() {
+        let error = parse_command(
+            ["dispatch", "check-in", "--file", "relative/events.jsonl"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect_err("relative check-in log path");
+        assert_eq!(
+            error.to_string(),
+            "dispatch check-in event-log path must be absolute: relative/events.jsonl"
+        );
+    }
+
+    #[test]
     fn dispatch_logging_group_is_exact_ordered_and_all_or_none() {
         let prefix = [
             "dispatch",
@@ -10840,6 +11398,8 @@ None.
                 "abc",
                 "--evidence",
                 "fixture",
+                "--required-artifact",
+                "/tmp/output.json",
                 "--",
                 "PROMPT",
             ])
@@ -10874,6 +11434,8 @@ None.
                 "abc",
                 "--evidence",
                 "fixture",
+                "--required-artifact",
+                "/tmp/output.json",
                 "--dry-run",
                 "--",
                 "PROMPT",
@@ -10904,7 +11466,7 @@ None.
         ] {
             let args = prefix.into_iter().chain(suffix).map(str::to_owned);
             let error = parse_command(args).expect_err("partial group must fail");
-            assert!(format!("{error:#}").contains("dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence"));
+            assert!(format!("{error:#}").contains("dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence, --required-artifact"));
         }
 
         let misordered = prefix
@@ -10920,12 +11482,14 @@ None.
                 "abc",
                 "--evidence",
                 "fixture",
+                "--required-artifact",
+                "/tmp/output.json",
                 "--",
                 "PROMPT",
             ])
             .map(str::to_owned);
         let error = parse_command(misordered).expect_err("misordered complete group must fail");
-        assert!(format!("{error:#}").contains("dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence"));
+        assert!(format!("{error:#}").contains("dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence, --required-artifact"));
 
         let before_plan = prefix
             .into_iter()
@@ -10940,6 +11504,8 @@ None.
                 "abc",
                 "--evidence",
                 "fixture",
+                "--required-artifact",
+                "/tmp/output.json",
                 "--plan-file",
                 "/tmp/plan.md",
                 "--",
@@ -10978,6 +11544,8 @@ None.
                 "ref",
                 "--evidence",
                 "evidence",
+                "--required-artifact",
+                "/tmp/output.json",
             ];
             if dry_run {
                 suffix.push("--dry-run");
@@ -10994,7 +11562,14 @@ None.
                     | (true, Some(DispatchLoggingMode::DryRun { .. }))
             ));
         }
-        let members = ["--log-file", "--node", "--role", "--ref", "--evidence"];
+        let members = [
+            "--log-file",
+            "--node",
+            "--role",
+            "--ref",
+            "--evidence",
+            "--required-artifact",
+        ];
         for missing in members {
             let values = [
                 ("--log-file", "/tmp/gate.jsonl"),
@@ -11002,6 +11577,7 @@ None.
                 ("--role", "critic"),
                 ("--ref", "ref"),
                 ("--evidence", "evidence"),
+                ("--required-artifact", "/tmp/output.json"),
             ];
             let suffix = values
                 .into_iter()
@@ -11023,6 +11599,84 @@ None.
         assert!(
             format!("{error:#}").contains("dispatch logging options must be supplied together")
         );
+
+        let relative_artifact = prefix
+            .into_iter()
+            .chain([
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--node",
+                "m3-s1",
+                "--role",
+                "step-executor",
+                "--ref",
+                "abc",
+                "--evidence",
+                "fixture",
+                "--required-artifact",
+                "relative/result.json",
+                "--",
+                "PROMPT",
+            ])
+            .map(str::to_owned);
+        let error = parse_command(relative_artifact).expect_err("relative artifact must fail");
+        assert!(
+            format!("{error:#}")
+                .contains("required artifact path must be absolute: relative/result.json")
+        );
+
+        let relative_log = prefix
+            .into_iter()
+            .chain([
+                "--log-file",
+                "relative/events.jsonl",
+                "--node",
+                "m3-s1",
+                "--role",
+                "step-executor",
+                "--ref",
+                "abc",
+                "--evidence",
+                "fixture",
+                "--required-artifact",
+                "/tmp/output.json",
+                "--",
+                "PROMPT",
+            ])
+            .map(str::to_owned);
+        let error = parse_command(relative_log).expect_err("relative log must fail");
+        assert!(
+            format!("{error:#}")
+                .contains("logged dispatch event-log path must be absolute: relative/events.jsonl")
+        );
+
+        let mismatched_artifact = prefix
+            .into_iter()
+            .chain([
+                "--output-schema",
+                "/tmp/schema.json",
+                "-o",
+                "/tmp/output.json",
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--node",
+                "m3-s1",
+                "--role",
+                "step-executor",
+                "--ref",
+                "abc",
+                "--evidence",
+                "fixture",
+                "--required-artifact",
+                "/tmp/other.json",
+                "--",
+                "PROMPT",
+            ])
+            .map(str::to_owned);
+        let error = parse_command(mismatched_artifact).expect_err("mismatch must fail");
+        assert!(format!("{error:#}").contains(
+            "dispatch required artifact path `/tmp/other.json` does not match output path `/tmp/output.json`"
+        ));
     }
 
     #[test]
@@ -11054,6 +11708,8 @@ None.
                     "abc",
                     "--evidence",
                     "fixture",
+                    "--required-artifact",
+                    "/tmp/output.json",
                     "--planning-act",
                     act,
                     "--",
@@ -11086,6 +11742,8 @@ None.
             "abc",
             "--evidence",
             "fixture",
+            "--required-artifact",
+            "/tmp/output.json",
         ];
         for (suffix, diagnostic) in [
             (
@@ -11150,7 +11808,7 @@ None.
                     "--",
                     "Plan the step.",
                 ],
-                "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence",
+                "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence, --required-artifact",
             ),
         ] {
             let error = parse_command(prefix.into_iter().chain(suffix).map(str::to_owned))

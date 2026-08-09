@@ -16,12 +16,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pce_core::{
-    AbsoluteOutputPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory, ArgumentVector,
-    ArtifactOutcome, ChildEnvironment, Deferred, DispatchDuration, DispatchEnvelope,
-    DispatchExitStatus, DispatchLogging, DispatchRef, DispatchRole, DispatchTarget,
-    DispatchTokenUsage, EventBodyRef, EventRecord, EventTimestamp, Evidence, KnownPayload, NodeId,
-    Sandbox, Sequence, StdinBinding, UsageAbsenceReason, WriteKind, dispatch_invocation,
-    dispatch_payload, parse_event_line, serialize_event_line,
+    AbsoluteOutputPath, AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
+    ArgumentVector, ArtifactOutcome, ChildEnvironment, Deferred, DispatchDuration,
+    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchRef, DispatchRole,
+    DispatchTarget, DispatchTokenUsage, EventBodyRef, EventRecord, EventTimestamp, Evidence,
+    KnownPayload, NodeId, Sandbox, Sequence, StdinBinding, UsageAbsenceReason, WriteKind,
+    dispatch_invocation, dispatch_payload, parse_dispatch_process_identity, parse_event_line,
+    serialize_event_line,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -121,6 +122,7 @@ fn codex_planning_frame_is_exact_in_dry_run_and_live_child() {
     fs::write(&stderr_path, []).expect("write stderr");
     let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
     let log_path = harness.path().join("planning.jsonl");
+    let required_artifact = harness.path().join("plan.md");
     let caller = vec!["--caller-option".to_owned(), "Plan the step.".to_owned()];
     let mut dry = dispatch_argv(&cwd, &environment, None, None, caller.as_slice());
     let delimiter = dry
@@ -140,6 +142,8 @@ fn codex_planning_frame_is_exact_in_dry_run_and_live_child() {
             "fixture-ref",
             "--evidence",
             "fixture-evidence",
+            "--required-artifact",
+            required_artifact.to_str().expect("required artifact"),
             "--planning-act",
             "repeatable",
             "--dry-run",
@@ -218,6 +222,7 @@ fn planning_roles_without_planning_act_preserve_caller_arguments_exactly() {
         fs::write(&stderr_path, []).expect("write stderr");
         let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
         let log_path = harness.path().join(format!("{role}.jsonl"));
+        let required_artifact = harness.path().join(format!("{role}-plan.md"));
         let caller = vec!["--caller-option".to_owned(), "Plan the step.".to_owned()];
         let mut argv = dispatch_argv(&cwd, &environment, None, None, caller.as_slice());
         let delimiter = argv
@@ -237,6 +242,8 @@ fn planning_roles_without_planning_act_preserve_caller_arguments_exactly() {
                 "fixture-ref",
                 "--evidence",
                 "fixture-evidence",
+                "--required-artifact",
+                required_artifact.to_str().expect("required artifact"),
                 "--dry-run",
             ]
             .into_iter()
@@ -312,6 +319,7 @@ fn planning_frame_rejections_have_no_dispatch_side_effects() {
         fs::write(&stderr_path, []).expect("write stderr");
         let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
         let log_path = harness.path().join(format!("{name}.jsonl"));
+        let required_artifact = harness.path().join(format!("{name}-plan.md"));
         let mut argv = dispatch_argv(&cwd, &environment, None, None, &[] as &[String]);
         let delimiter = argv
             .iter()
@@ -330,6 +338,8 @@ fn planning_frame_rejections_have_no_dispatch_side_effects() {
                 "fixture-ref".to_owned(),
                 "--evidence".to_owned(),
                 "fixture-evidence".to_owned(),
+                "--required-artifact".to_owned(),
+                required_artifact.display().to_string(),
             ]);
         }
         options.extend(["--planning-act".to_owned(), act.to_owned()]);
@@ -491,7 +501,10 @@ fn assert_dry_projection_case(name: &str, structured: bool, plan: Option<&[u8]>)
         .iter()
         .position(|value| value == "--")
         .expect("delimiter");
-    dry_argv.splice(delimiter..delimiter, logging_arguments(&log_path));
+    dry_argv.splice(
+        delimiter..delimiter,
+        logging_arguments(&log_path, &output_path),
+    );
     let delimiter = dry_argv
         .iter()
         .position(|value| value == "--")
@@ -524,6 +537,12 @@ fn assert_dry_projection_case(name: &str, structured: bool, plan: Option<&[u8]>)
         1
     );
     assert_eq!(after_dry.iter().filter(|byte| **byte == b'\n').count(), 1);
+    assert!(
+        !harness
+            .path()
+            .join(format!("{name}.jsonl.dispatches"))
+            .exists()
+    );
     assert_eq!(
         harness
             .codex_invocations(&record_root)
@@ -656,7 +675,7 @@ fn assert_dry_projection_case(name: &str, structured: bool, plan: Option<&[u8]>)
 }
 
 fn assert_dry_parser_and_tail_failures() {
-    const DIAGNOSTIC: &str = "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence";
+    const DIAGNOSTIC: &str = "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence, --required-artifact";
     let harness = CliHarness::new().expect("create parser harness");
     let cwd = fs::canonicalize(harness.path()).expect("canonicalize parser cwd");
     let prefix = vec![
@@ -667,6 +686,7 @@ fn assert_dry_parser_and_tail_failures() {
         "--sandbox".to_owned(),
         "workspace-write".to_owned(),
     ];
+    let required_artifact = harness.path().join("parser-result.json");
     let failures = [
         vec!["--dry-run", "--", "PROMPT"],
         vec![
@@ -736,7 +756,7 @@ fn assert_dry_parser_and_tail_failures() {
         "--plan-file".to_owned(),
         unreadable_plan.display().to_string(),
     ]);
-    argv.extend(logging_arguments(&unreadable_log));
+    argv.extend(logging_arguments(&unreadable_log, &required_artifact));
     argv.extend(["--dry-run".to_owned(), "--".to_owned(), "PROMPT".to_owned()]);
     let output = harness
         .run(&argv, b"")
@@ -756,7 +776,7 @@ fn assert_dry_parser_and_tail_failures() {
         fs::write(&log_path, tail).expect("write invalid tail");
         let record_root = harness.path().join(format!("{name}-records"));
         let mut argv = prefix.clone();
-        argv.extend(logging_arguments(&log_path));
+        argv.extend(logging_arguments(&log_path, &required_artifact));
         argv.extend(["--dry-run".to_owned(), "--".to_owned(), "PROMPT".to_owned()]);
         let output = harness.run(&argv, b"").expect("run invalid-tail projection");
         assert!(!output.status.success());
@@ -767,7 +787,7 @@ fn assert_dry_parser_and_tail_failures() {
 
     let missing_log = harness.path().join("missing.jsonl");
     let mut argv = prefix;
-    argv.extend(logging_arguments(&missing_log));
+    argv.extend(logging_arguments(&missing_log, &required_artifact));
     argv.extend(["--dry-run".to_owned(), "--".to_owned(), "PROMPT".to_owned()]);
     let output = harness.run(&argv, b"").expect("run missing-log projection");
     assert!(output.status.success());
@@ -778,7 +798,7 @@ fn assert_dry_parser_and_tail_failures() {
     );
 }
 
-fn logging_arguments(log_path: &Path) -> Vec<String> {
+fn logging_arguments(log_path: &Path, required_artifact: &Path) -> Vec<String> {
     vec![
         "--log-file".to_owned(),
         log_path.display().to_string(),
@@ -790,6 +810,8 @@ fn logging_arguments(log_path: &Path) -> Vec<String> {
         "fixture-ref".to_owned(),
         "--evidence".to_owned(),
         "fixture-evidence".to_owned(),
+        "--required-artifact".to_owned(),
+        required_artifact.display().to_string(),
     ]
 }
 
@@ -898,6 +920,8 @@ fn assert_shared_serializer_family(
         role: DispatchRole::new("step-executor"),
         dispatch_ref: DispatchRef::new("fixture-ref"),
         evidence: Evidence::parse("fixture-evidence").expect("evidence"),
+        required_artifact_path: AbsoluteRequiredArtifactPath::parse("/workspace/result.json")
+            .expect("required artifact path"),
     };
     let payload = dispatch_payload(&logging);
     assert_eq!(
@@ -1211,7 +1235,10 @@ fn assert_logged_structured_rejection(fixture: StructuredRejectionFixture) {
         .iter()
         .position(|value| value == "--")
         .expect("delimiter");
-    argv.splice(delimiter..delimiter, logging_arguments(&log_path));
+    argv.splice(
+        delimiter..delimiter,
+        logging_arguments(&log_path, &output_path),
+    );
     let output = harness.run(&argv, b"").expect("run rejection");
     assert!(output.status.success(), "{name} starter failed");
     settle_lifecycle(&log_path);
@@ -1325,7 +1352,10 @@ fn assert_valid_structured_artifact(transcript: &[u8]) {
         .iter()
         .position(|value| value == "--")
         .expect("delimiter");
-    argv.splice(delimiter..delimiter, logging_arguments(&log_path));
+    argv.splice(
+        delimiter..delimiter,
+        logging_arguments(&log_path, &output_path),
+    );
     let output = harness.run(&argv, b"").expect("run positive dispatch");
     assert!(
         output.status.success(),
@@ -1406,6 +1436,14 @@ fn assert_no_jsonl_files(root: &Path) {
             let entry = entry.expect("read harness entry");
             let path = entry.path();
             if path.is_dir() {
+                assert!(
+                    !path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.ends_with(".dispatches")),
+                    "logging-absent dispatch created {}",
+                    path.display()
+                );
                 pending.push(path);
             } else {
                 assert_ne!(
@@ -1579,6 +1617,8 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
             "abc123".to_owned(),
             "--evidence".to_owned(),
             "fixture invocation".to_owned(),
+            "--required-artifact".to_owned(),
+            plan_path.display().to_string(),
         ],
     );
     let wall_started = SystemTime::now();
@@ -1609,6 +1649,43 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
         .map(|line| parse_event_line(line).expect("parse record"))
         .collect::<Vec<_>>();
     assert_eq!(records.len(), 2);
+    assert_eq!(lines.as_bytes().last(), Some(&b'\n'));
+    assert_eq!(
+        lines
+            .as_bytes()
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count(),
+        2
+    );
+    for forbidden in [
+        "process_number",
+        "process_start_identity",
+        "required_artifact_path",
+        "pce.dispatch-process-identity",
+    ] {
+        assert!(!lines.contains(forbidden), "event log leaked {forbidden}");
+    }
+    let mut normalized = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("event JSON"))
+        .collect::<Vec<_>>();
+    for event in &mut normalized {
+        let object = event.as_object_mut().expect("event object");
+        object.remove("sequence");
+        object.remove("timestamp");
+    }
+    normalized[1]["payload"]
+        .as_object_mut()
+        .expect("completion payload")
+        .remove("duration_ms");
+    assert_eq!(
+        normalized,
+        vec![
+            json!({"kind":"dispatch","node":"m3-s1","payload":{"role":"step-executor","ref":"abc123","evidence":"fixture invocation"}}),
+            json!({"kind":"dispatch-completion","node":"m3-s1","payload":{"issuance_sequence":1,"usage":{"availability":"measured","input_tokens":101,"cached_input_tokens":23,"output_tokens":17,"reasoning_output_tokens":5},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated"}}),
+        ]
+    );
     let lower = wall_started
         .duration_since(UNIX_EPOCH)
         .expect("clock after epoch")
@@ -1690,6 +1767,8 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
             "abc123".to_owned(),
             "--evidence".to_owned(),
             "fixture invocation without sleep".to_owned(),
+            "--required-artifact".to_owned(),
+            plan_path.display().to_string(),
         ],
     );
     let fast_started = Instant::now();
@@ -1743,7 +1822,8 @@ fn records_failed_and_absent_terminal_reasons_before_reporting_exit() {
         environment.push(("PCE_CODEX_SKIP_RECORDING".to_owned(), "1".to_owned()));
         let mut argv = dispatch_argv(&cwd, &environment, None, None, "PROMPT");
         let delimiter = argv.len() - 2;
-        argv.splice(delimiter..delimiter, ["--log-file", log_path.to_str().expect("path"), "--node", "m3-s1", "--role", "step-executor", "--ref", "abc", "--evidence", "fixture"].map(str::to_owned));
+        let required_artifact = harness.path().join(format!("{name}-result.json"));
+        argv.splice(delimiter..delimiter, ["--log-file", log_path.to_str().expect("path"), "--node", "m3-s1", "--role", "step-executor", "--ref", "abc", "--evidence", "fixture", "--required-artifact", required_artifact.to_str().expect("required artifact")].map(str::to_owned));
         let started = Instant::now();
         let output = harness.run(&argv, b"").expect("run failed lifecycle");
         assert!(output.status.success());
@@ -1777,6 +1857,7 @@ fn accepts_additive_usage_fields_and_blank_jsonl_lines() {
     let stdout_path = harness.path().join("additive-usage.stdout");
     let stderr_path = harness.path().join("additive-usage.stderr");
     let log_path = harness.path().join("additive-usage.jsonl");
+    let required_artifact = harness.path().join("additive-usage-result.json");
     let fixture = b"{\"type\":\"thread.started\"}\n \t\n{\"type\":\"turn.completed\",\"usage\":{\"total_tokens\":146,\"input_tokens\":101,\"cached_input_tokens\":23,\"output_tokens\":17,\"reasoning_output_tokens\":5}}\n";
     fs::write(&stdout_path, fixture).expect("write stdout");
     fs::write(&stderr_path, []).expect("write stderr");
@@ -1796,6 +1877,8 @@ fn accepts_additive_usage_fields_and_blank_jsonl_lines() {
             "abc",
             "--evidence",
             "fixture",
+            "--required-artifact",
+            required_artifact.to_str().expect("required artifact"),
         ]
         .map(str::to_owned),
     );
@@ -1856,6 +1939,7 @@ fn records_signal_and_no_terminal_usage_without_fabricating_exit_zero() {
     let stdout_path = harness.path().join("signal.stdout");
     let stderr_path = harness.path().join("signal.stderr");
     let log_path = harness.path().join("signal.jsonl");
+    let required_artifact = harness.path().join("signal-result.json");
     fs::write(&stdout_path, b"{}\n").expect("write stdout");
     fs::write(&stderr_path, []).expect("write stderr");
     let mut environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
@@ -1875,6 +1959,8 @@ fn records_signal_and_no_terminal_usage_without_fabricating_exit_zero() {
             "abc",
             "--evidence",
             "fixture",
+            "--required-artifact",
+            required_artifact.to_str().expect("required artifact"),
         ]
         .map(str::to_owned),
     );
@@ -1912,6 +1998,7 @@ fn releases_log_lock_while_child_runs_and_keeps_exact_issuance_identity() {
     let stderr_path = harness.path().join("interleaving.stderr");
     let release_path = harness.path().join("release");
     let log_path = harness.path().join("interleaving.jsonl");
+    let required_artifact = harness.path().join("interleaving-result.json");
     fs::write(&stdout_path, b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":101,\"cached_input_tokens\":23,\"output_tokens\":17,\"reasoning_output_tokens\":5}}\n").expect("write stdout");
     fs::write(&stderr_path, []).expect("write stderr");
     let mut environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
@@ -1934,6 +2021,8 @@ fn releases_log_lock_while_child_runs_and_keeps_exact_issuance_identity() {
             "abc",
             "--evidence",
             "fixture",
+            "--required-artifact",
+            required_artifact.to_str().expect("required artifact"),
         ]
         .map(str::to_owned),
     );
@@ -2026,6 +2115,354 @@ fn wait_for_path(path: &Path) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn independently_observe_darwin_start(pid: u32) -> (u64, u32) {
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let observed = unsafe {
+        libc::proc_pidinfo(
+            i32::try_from(pid).expect("PID fits pid_t"),
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::from_mut(&mut info).cast(),
+            size,
+        )
+    };
+    assert_eq!(observed, size, "independent proc_pidinfo observation");
+    assert_eq!(info.pbi_pid, pid);
+    (
+        info.pbi_start_tvsec,
+        u32::try_from(info.pbi_start_tvusec).expect("microseconds fit u32"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn assert_blocked_identity(target: DispatchTarget) {
+    const SEED: &[u8] = b"{\"sequence\":41,\"timestamp\":\"2026-08-09T12:34:56.000Z\",\"kind\":\"delta\",\"node\":\"m1-s1\",\"payload\":{\"message\":\"seed\"}}\n";
+    match target {
+        DispatchTarget::Codex => {
+            let harness = CliHarness::new().expect("create identity harness");
+            let cwd = fs::canonicalize(harness.path()).expect("canonicalize cwd");
+            let record_root = harness.path().join("identity-codex-records");
+            fs::create_dir(&record_root).expect("create record root");
+            let stdout_path = harness.path().join("identity-codex.stdout");
+            let stderr_path = harness.path().join("identity-codex.stderr");
+            let schema_path = harness.path().join("identity-codex.schema.json");
+            let output_path = harness.path().join("identity-codex.output.json");
+            let artifact_bytes = harness.path().join("identity-codex.artifact");
+            let release = harness.path().join("identity-codex.release");
+            let log = harness.path().join("events.jsonl");
+            fs::write(&stdout_path, SUCCESSFUL_STRUCTURED_TRANSCRIPT).expect("stdout");
+            fs::write(&stderr_path, []).expect("stderr");
+            fs::write(&schema_path, VALID_ARTIFACT_SCHEMA).expect("schema");
+            fs::write(&artifact_bytes, CONFORMING_ARTIFACT).expect("artifact bytes");
+            fs::write(&log, SEED).expect("seed log");
+            let mut environment =
+                child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+            environment.extend([
+                (
+                    "PCE_CODEX_BLOCK_FILE".to_owned(),
+                    release.display().to_string(),
+                ),
+                (
+                    "PCE_CODEX_OUTPUT_BYTES_FILE".to_owned(),
+                    artifact_bytes.display().to_string(),
+                ),
+            ]);
+            let mut argv = dispatch_argv(
+                &cwd,
+                &environment,
+                Some((&schema_path, &output_path)),
+                None,
+                "IDENTITY",
+            );
+            let delimiter = argv
+                .iter()
+                .position(|item| item == "--")
+                .expect("delimiter");
+            argv.splice(delimiter..delimiter, logging_arguments(&log, &output_path));
+            let parent = Command::new(env!("CARGO_BIN_EXE_pce"))
+                .args(&argv)
+                .env_clear()
+                .env("PATH", harness.shim_path())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn pce");
+            let pid_path = record_root.join("invocation/pid");
+            let sidecar = harness.path().join("events.jsonl.dispatches/42.json");
+            wait_for_path(&pid_path);
+            wait_for_path(&sidecar);
+            let pid = fs::read_to_string(&pid_path)
+                .expect("read shim PID")
+                .trim()
+                .parse::<u32>()
+                .expect("parse shim PID");
+            let cat = Command::new("/bin/cat")
+                .arg(&sidecar)
+                .output()
+                .expect("cross-process sidecar read");
+            assert!(cat.status.success());
+            let identity = parse_dispatch_process_identity(&cat.stdout).expect("parse sidecar");
+            let observed = independently_observe_darwin_start(pid);
+            assert_eq!(identity.issuance_sequence().get(), 42);
+            assert_eq!(identity.process_number().get(), pid);
+            assert_eq!(
+                identity.process_start_identity().seconds_since_unix_epoch(),
+                observed.0
+            );
+            assert_eq!(identity.process_start_identity().microseconds(), observed.1);
+            assert_eq!(identity.required_artifact_path().as_path(), output_path);
+            assert_eq!(
+                fs::metadata(&sidecar)
+                    .expect("sidecar metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o444
+            );
+            assert_eq!(
+                fs::metadata(sidecar.parent().expect("sidecar directory"))
+                    .expect("directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            let blocked_log = fs::read_to_string(&log).expect("blocked log");
+            assert_eq!(blocked_log.lines().count(), 2);
+            fs::write(&release, []).expect("release child");
+            let output = parent.wait_with_output().expect("reap pce");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            wait_for_lifecycle_records(&log, 3, Instant::now() + Duration::from_secs(5));
+            assert_eq!(
+                fs::read(&output_path).expect("real artifact"),
+                CONFORMING_ARTIFACT
+            );
+            assert_eq!(
+                fs::read_to_string(&log).expect("final log").lines().count(),
+                3
+            );
+        }
+        DispatchTarget::Gate => {
+            let fixture = GateFixture::new("identity-gate", CLAUDE_SUCCESS);
+            let log = fixture.harness.path().join("events.jsonl");
+            let release = fixture.harness.path().join("identity-gate.release");
+            fs::write(&log, SEED).expect("seed log");
+            let mut environment = fixture.environment(0);
+            environment.push((
+                "PCE_CLAUDE_BLOCK_FILE".to_owned(),
+                release.display().to_string(),
+            ));
+            let mut argv = fixture.argv(&environment, &[]);
+            insert_gate_logging(&mut argv, &log, false);
+            let parent = Command::new(env!("CARGO_BIN_EXE_pce"))
+                .args(&argv)
+                .env_clear()
+                .env("PATH", fixture.harness.shim_path())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn gate pce");
+            let pid_path = fixture.record_root.join("invocation/pid");
+            let sidecar = fixture
+                .harness
+                .path()
+                .join("events.jsonl.dispatches/42.json");
+            wait_for_path(&pid_path);
+            wait_for_path(&sidecar);
+            let pid = fs::read_to_string(&pid_path)
+                .expect("PID")
+                .trim()
+                .parse::<u32>()
+                .expect("parse PID");
+            let cat = Command::new("/bin/cat")
+                .arg(&sidecar)
+                .output()
+                .expect("cat sidecar");
+            assert!(cat.status.success());
+            let identity = parse_dispatch_process_identity(&cat.stdout).expect("parse sidecar");
+            let observed = independently_observe_darwin_start(pid);
+            assert_eq!(identity.issuance_sequence().get(), 42);
+            assert_eq!(identity.process_number().get(), pid);
+            assert_eq!(
+                identity.process_start_identity().seconds_since_unix_epoch(),
+                observed.0
+            );
+            assert_eq!(identity.process_start_identity().microseconds(), observed.1);
+            assert_eq!(
+                identity.required_artifact_path().as_path(),
+                fixture.output_path
+            );
+            assert_eq!(
+                fs::metadata(&sidecar)
+                    .expect("metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o444
+            );
+            assert_eq!(
+                fs::read_to_string(&log)
+                    .expect("blocked log")
+                    .lines()
+                    .count(),
+                2
+            );
+            fs::write(&release, []).expect("release gate");
+            let output = parent.wait_with_output().expect("reap gate");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            wait_for_lifecycle_records(&log, 3, Instant::now() + Duration::from_secs(5));
+            assert_eq!(
+                fs::read_to_string(&log).expect("final log").lines().count(),
+                3
+            );
+        }
+        DispatchTarget::Seatbelt => panic!("not a dispatch identity route"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn logged_codex_publishes_real_darwin_identity_while_child_is_blocked() {
+    let _guard = dispatch_test_guard();
+    assert_blocked_identity(DispatchTarget::Codex);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn logged_gate_publishes_real_darwin_identity_while_child_is_blocked() {
+    let _guard = dispatch_test_guard();
+    assert_blocked_identity(DispatchTarget::Gate);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn concurrent_reader_observes_dispatch_identity_absent_or_complete() {
+    let _guard = dispatch_test_guard();
+    let harness = CliHarness::new().expect("create concurrent-reader harness");
+    let cwd = fs::canonicalize(harness.path()).expect("cwd");
+    let records = harness.path().join("reader-records");
+    fs::create_dir(&records).expect("records");
+    let stdout = harness.path().join("reader.stdout");
+    let stderr = harness.path().join("reader.stderr");
+    let release = harness.path().join("reader.release");
+    let log = harness.path().join("events.jsonl");
+    let artifact = harness.path().join("reader-result.json");
+    fs::write(&stdout, SUCCESSFUL_STRUCTURED_TRANSCRIPT).expect("stdout");
+    fs::write(&stderr, []).expect("stderr");
+    let mut environment = child_environment(&harness, &records, &stdout, &stderr, 0);
+    environment.push((
+        "PCE_CODEX_BLOCK_FILE".to_owned(),
+        release.display().to_string(),
+    ));
+    let mut argv = dispatch_argv(&cwd, &environment, None, None, "READER");
+    let delimiter = argv
+        .iter()
+        .position(|item| item == "--")
+        .expect("delimiter");
+    argv.splice(delimiter..delimiter, logging_arguments(&log, &artifact));
+    let sidecar = harness.path().join("events.jsonl.dispatches/1.json");
+    let reader = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "while :; do if [ -e \"$1\" ]; then /bin/cat \"$1\"; exit; fi; done",
+            "reader",
+        ])
+        .arg(&sidecar)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn independent reader");
+    let mut parent = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(&argv)
+        .env_clear()
+        .env("PATH", harness.shim_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pce");
+    wait_for_path(&records.join("invocation/pid"));
+    let read = reader.wait_with_output().expect("reap reader");
+    assert!(read.status.success());
+    assert!(read.stdout.ends_with(b"\n"));
+    parse_dispatch_process_identity(&read.stdout).expect("reader observed complete document");
+    fs::write(&release, []).expect("release");
+    assert!(parent.wait().expect("reap parent").success());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn existing_dispatch_identity_is_never_overwritten() {
+    let _guard = dispatch_test_guard();
+    let harness = CliHarness::new().expect("create overwrite harness");
+    let cwd = fs::canonicalize(harness.path()).expect("cwd");
+    let records = harness.path().join("overwrite-records");
+    fs::create_dir(&records).expect("records");
+    let stdout = harness.path().join("overwrite.stdout");
+    let stderr = harness.path().join("overwrite.stderr");
+    let release = harness.path().join("never-release");
+    let log = harness.path().join("events.jsonl");
+    let artifact = harness.path().join("overwrite-result.json");
+    fs::write(&stdout, SUCCESSFUL_STRUCTURED_TRANSCRIPT).expect("stdout");
+    fs::write(&stderr, []).expect("stderr");
+    fs::write(&log, b"{\"sequence\":41,\"timestamp\":\"2026-08-09T12:34:56.000Z\",\"kind\":\"delta\",\"node\":\"m1-s1\",\"payload\":{\"message\":\"seed\"}}\n").expect("seed");
+    let directory = harness.path().join("events.jsonl.dispatches");
+    fs::create_dir(&directory).expect("sidecar directory");
+    let sidecar = directory.join("42.json");
+    fs::write(&sidecar, b"attacker-owned\n").expect("attacker sidecar");
+    let mut environment = child_environment(&harness, &records, &stdout, &stderr, 0);
+    environment.push((
+        "PCE_CODEX_BLOCK_FILE".to_owned(),
+        release.display().to_string(),
+    ));
+    let mut argv = dispatch_argv(&cwd, &environment, None, None, "OVERWRITE");
+    let delimiter = argv
+        .iter()
+        .position(|item| item == "--")
+        .expect("delimiter");
+    argv.splice(delimiter..delimiter, logging_arguments(&log, &artifact));
+    let output = harness.run(&argv, b"").expect("run overwrite dispatch");
+    assert!(output.status.success());
+    let continuation_stderr = harness.path().join("events.jsonl.dispatch-000042.stderr");
+    wait_for_path(&continuation_stderr);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let diagnostic = loop {
+        let diagnostic = fs::read_to_string(&continuation_stderr).expect("continuation diagnostic");
+        if diagnostic.contains("dispatch process identity sidecar already exists") {
+            break diagnostic;
+        }
+        assert!(Instant::now() < deadline, "missing continuation diagnostic");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(diagnostic.contains("dispatch process identity sidecar already exists"));
+    let shim_pid = diagnostic
+        .split("child PID ")
+        .nth(1)
+        .and_then(|suffix| suffix.split_whitespace().next())
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("real spawned child PID in setup diagnostic: {diagnostic}"));
+    assert_eq!(fs::read(&sidecar).expect("sidecar"), b"attacker-owned\n");
+    wait_for_lifecycle_records(&log, 3, deadline);
+    assert_eq!(fs::read_to_string(&log).expect("log").lines().count(), 3);
+    let status = Command::new("/bin/kill")
+        .args(["-0", &shim_pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .expect("probe PID");
+    assert!(!status.success(), "setup cleanup left child alive");
+}
+
 struct DetachedCodexFixture {
     harness: CliHarness,
     record_root: PathBuf,
@@ -2074,6 +2511,12 @@ fn detached_codex_fixture(
             "abc123".to_owned(),
             "--evidence".to_owned(),
             "fixture invocation".to_owned(),
+            "--required-artifact".to_owned(),
+            harness
+                .path()
+                .join(format!("{name}-artifact.json"))
+                .display()
+                .to_string(),
         ],
     );
     DetachedCodexFixture {
@@ -2085,6 +2528,25 @@ fn detached_codex_fixture(
     }
 }
 
+#[cfg(target_os = "macos")]
+fn process_start_identity(pid: &str) -> Option<Vec<u8>> {
+    let pid = pid.parse::<u32>().ok()?;
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let observed = unsafe {
+        libc::proc_pidinfo(
+            i32::try_from(pid).ok()?,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::from_mut(&mut info).cast(),
+            size,
+        )
+    };
+    (observed == size && info.pbi_pid == pid)
+        .then(|| format!("{} {}", info.pbi_start_tvsec, info.pbi_start_tvusec).into_bytes())
+}
+
+#[cfg(not(target_os = "macos"))]
 fn process_start_identity(pid: &str) -> Option<Vec<u8>> {
     let output = Command::new("/bin/ps")
         .args(["-o", "lstart=", "-p", pid])
@@ -2193,7 +2655,17 @@ fn logged_dispatch_starter_returns_while_blocked_child_remains_alive_and_later_a
     let shim_pid =
         fs::read_to_string(fixture.record_root.join("invocation/pid")).expect("read shim pid");
     let shim_pid = shim_pid.trim();
-    let identity = process_start_identity(shim_pid).expect("initial child identity");
+    let identity_deadline = Instant::now() + Duration::from_secs(5);
+    let identity = loop {
+        if let Some(identity) = process_start_identity(shim_pid) {
+            break identity;
+        }
+        assert!(
+            Instant::now() < identity_deadline,
+            "child start identity for PID {shim_pid} was not readable within five seconds"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = starter.try_wait().expect("poll starter") {
@@ -2340,6 +2812,136 @@ fn reports_codex_spawn_failure() {
             .expect("read records")
             .is_empty()
     );
+
+    let log = harness.path().join("spawn-events.jsonl");
+    let artifact = harness.path().join("spawn-result.json");
+    let mut logged = dispatch_argv(&cwd, &environment, None, None, "PROMPT");
+    let delimiter = logged
+        .iter()
+        .position(|item| item == "--")
+        .expect("delimiter");
+    logged.splice(delimiter..delimiter, logging_arguments(&log, &artifact));
+    let output = harness.run(&logged, b"").expect("run logged spawn failure");
+    assert!(output.status.success());
+    let continuation_stderr = harness
+        .path()
+        .join("spawn-events.jsonl.dispatch-000001.stderr");
+    wait_for_path(&continuation_stderr);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let diagnostic = fs::read_to_string(&continuation_stderr).expect("continuation stderr");
+        if diagnostic.contains("failed to spawn `codex`") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing spawn failure diagnostic"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        fs::read_to_string(&log)
+            .expect("issuance log")
+            .lines()
+            .count(),
+        1
+    );
+    assert!(
+        !harness
+            .path()
+            .join("spawn-events.jsonl.dispatches")
+            .exists()
+    );
+}
+
+#[test]
+fn logged_dispatch_rejects_missing_relative_or_mismatched_required_artifact_before_spawn() {
+    let _guard = dispatch_test_guard();
+    for (name, structured, logging, expected) in [
+        (
+            "missing",
+            false,
+            vec![
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--node",
+                "m1-s1",
+                "--role",
+                "step-executor",
+                "--ref",
+                "ref",
+                "--evidence",
+                "evidence",
+            ],
+            "dispatch logging options must be supplied together in this order: --log-file, --node, --role, --ref, --evidence, --required-artifact",
+        ),
+        (
+            "relative",
+            false,
+            vec![
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--node",
+                "m1-s1",
+                "--role",
+                "step-executor",
+                "--ref",
+                "ref",
+                "--evidence",
+                "evidence",
+                "--required-artifact",
+                "relative/result.json",
+            ],
+            "required artifact path must be absolute: relative/result.json",
+        ),
+        (
+            "mismatch",
+            true,
+            vec![
+                "--log-file",
+                "/tmp/events.jsonl",
+                "--node",
+                "m1-s1",
+                "--role",
+                "step-executor",
+                "--ref",
+                "ref",
+                "--evidence",
+                "evidence",
+                "--required-artifact",
+                "/tmp/pce/required.json",
+            ],
+            "dispatch required artifact path `/tmp/pce/required.json` does not match output path `/tmp/pce/output.json`",
+        ),
+    ] {
+        let (harness, cwd, record_root, _, environment) = failure_fixture(name, 0);
+        let schema = PathBuf::from("/tmp/pce/schema.json");
+        let output = PathBuf::from("/tmp/pce/output.json");
+        let mut argv = dispatch_argv(
+            &cwd,
+            &environment,
+            structured.then_some((&schema, &output)),
+            None,
+            "PROMPT",
+        );
+        let delimiter = argv
+            .iter()
+            .position(|item| item == "--")
+            .expect("delimiter");
+        argv.splice(delimiter..delimiter, logging.into_iter().map(str::to_owned));
+        let result = harness.run(&argv, b"").expect("run parser boundary");
+        assert!(!result.status.success(), "{name}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(expected),
+            "{name}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!record_root.join("invocation").exists(), "{name}");
+        assert!(
+            !harness.path().join("events.jsonl.dispatches").exists(),
+            "{name}"
+        );
+    }
 }
 
 fn failure_fixture(
@@ -2633,6 +3235,8 @@ fn gate_planning_frame_is_exact_in_dry_run_and_live_child() {
             "fixture-ref",
             "--evidence",
             "fixture-evidence",
+            "--required-artifact",
+            fixture.output_path.to_str().expect("required artifact"),
             "--planning-act",
             "irreversible",
             "--dry-run",
@@ -2719,6 +3323,11 @@ fn insert_gate_logging(argv: &mut Vec<String>, log_path: &Path, dry_run: bool) {
         .iter()
         .position(|value| value == "--")
         .expect("delimiter");
+    let output_flag = argv
+        .iter()
+        .position(|value| value == "-o")
+        .expect("output flag");
+    let required_artifact = argv[output_flag + 1].clone();
     let mut logging = vec![
         "--log-file".to_owned(),
         log_path.display().to_string(),
@@ -2730,6 +3339,8 @@ fn insert_gate_logging(argv: &mut Vec<String>, log_path: &Path, dry_run: bool) {
         "gate-ref".to_owned(),
         "--evidence".to_owned(),
         "gate-evidence".to_owned(),
+        "--required-artifact".to_owned(),
+        required_artifact,
     ];
     if dry_run {
         logging.push("--dry-run".to_owned());
@@ -5256,7 +5867,7 @@ fn gate_parser_rejections_precede_invocation() {
         missing_plan.display()
     )));
 
-    let swaps = [(0, 2), (2, 4), (4, 6), (6, 8)];
+    let swaps = [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)];
     for (case, (left, right)) in swaps.into_iter().enumerate() {
         let log = fixture.harness.path().join(format!("swap-{case}.jsonl"));
         let mut logging = vec![
@@ -5270,6 +5881,8 @@ fn gate_parser_rejections_precede_invocation() {
             "ref".to_owned(),
             "--evidence".to_owned(),
             "evidence".to_owned(),
+            "--required-artifact".to_owned(),
+            fixture.output_path.display().to_string(),
         ];
         logging.swap(left, right);
         logging.swap(left + 1, right + 1);
@@ -5662,6 +6275,7 @@ fn gate_valid_artifact_succeeds_without_logging() {
     );
     assert_eq!(result.stdout, CLAUDE_SUCCESS);
     assert!(!log.exists());
+    assert_no_jsonl_files(fixture.harness.path());
 }
 
 #[test]

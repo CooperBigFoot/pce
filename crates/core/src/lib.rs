@@ -6,7 +6,9 @@ pub mod completion_gate;
 pub mod contract_measurement;
 pub mod criterion_change;
 pub mod dispatch;
+pub mod dispatch_check_in;
 pub mod dispatch_meter;
+pub mod dispatch_process_identity;
 pub mod event_log;
 pub mod gate_execution;
 pub mod gate_replay;
@@ -57,9 +59,20 @@ pub use dispatch::{
     dispatch_completion_payload, dispatch_invocation, dispatch_payload, parse_claude_result,
     render_dispatch_projection, seatbelt_capability_probe,
 };
+pub use dispatch_check_in::{
+    ArtifactProduction, DispatchCheckInEntry, DispatchCheckInError, DispatchCheckInReport,
+    DispatchCompletionAccounting, DispatchIdentityObservation, DispatchLiveness,
+    ProcessIdentityObservation, classify_dispatch_check_in, serialize_dispatch_check_in,
+};
 pub use dispatch_meter::{
     DispatchMeterCompletion, DispatchMeterError, DispatchMeterIssuance, DispatchMeterRecord,
     meter_dispatches,
+};
+pub use dispatch_process_identity::{
+    AbsoluteRequiredArtifactPath, DispatchProcessIdentity, DispatchProcessIdentityError,
+    DispatchProcessIdentityExpectation, ProcessNumber, ProcessStartIdentity,
+    parse_dispatch_process_identity, require_dispatch_process_identity_match,
+    serialize_dispatch_process_identity,
 };
 pub use event_log::{
     AppendError, AppendIntent, AppendableRepositoryContract, ArtifactOutcome, ArtifactPath,
