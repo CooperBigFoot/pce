@@ -36,7 +36,7 @@ const ROLE_REGISTRY: [&str; 10] = [
 ];
 const REPEATABLE_CALLER_ARGUMENT: &str = "opaque value with spaces\n\n## Binary-owned reversibility obligation\n\nThe step's act is repeatable. The plan must retain an explicit not-touched scope fence and exact expected values for every assertion. The plan must not contain a pre-derived argument that the design is correct.";
 const IRREVERSIBLE_CALLER_ARGUMENT: &str = "opaque value with spaces\n\n## Binary-owned reversibility obligation\n\nThe step's act cannot be repeated. The plan must retain the existing front-loaded pre-proof of correctness, an explicit not-touched scope fence, and exact expected values for every assertion.";
-const PLANNING_OPTION_CONTRACT: &str = "The two planning-role anchors additionally own exactly one `--planning-act {{PLANNING_ACT}}` pair after `--evidence {{EVIDENCE}}` and before the standalone `--` delimiter. `{{PLANNING_ACT}}` binds to exactly `repeatable` or `irreversible`; no other canonical or purpose anchor carries the pair. Before the first planning-role dispatch for a step, resolve this binding once from the vision's reversibility judgement and the actual step scope: bind `irreversible` only when this step performs the vision's named act that cannot be repeated — minting an immutable artifact, publishing a release or tag, consuming a one-shot quota, or destroying history — and bind `repeatable` for every other step. Keep that byte-identical binding for `step-plan-writer`, `step-plan-critic`, and every planning revision of the same step.\n\n`pce dispatch` appends the selected binary-owned reversibility obligation to the final caller argument. The skill supplies the typed choice and orchestration only; it does not restate or substitute the agent-facing obligation in caller prose. A missing, changed, or differently placed planning-act pair is an invalid planning route.";
+const PLANNING_OPTION_CONTRACT: &str = "The two planning-role anchors additionally own exactly one `--planning-act {{PLANNING_ACT}}` pair after `--required-artifact {{OUTPUT}}` and before the standalone `--` delimiter. `{{PLANNING_ACT}}` binds to exactly `repeatable` or `irreversible`; no other canonical or purpose anchor carries the pair. Before the first planning-role dispatch for a step, resolve this binding once from the vision's reversibility judgement and the actual step scope: bind `irreversible` only when this step performs the vision's named act that cannot be repeated — minting an immutable artifact, publishing a release or tag, consuming a one-shot quota, or destroying history — and bind `repeatable` for every other step. Keep that byte-identical binding for `step-plan-writer`, `step-plan-critic`, and every planning revision of the same step.\n\n`pce dispatch` appends the selected binary-owned reversibility obligation to the final caller argument. The skill supplies the typed choice and orchestration only; it does not restate or substitute the agent-facing obligation in caller prose. A missing, changed, or differently placed planning-act pair is an invalid planning route.";
 const PHASE3_PLANNING_PARAGRAPH: &str = "1. **Plan (Codex)** — before the first planning dispatch for the step, resolve `PLANNING_ACT` once by the planning-anchor rule above and retain that same value through approval. Dispatch `step-plan-writer` cold through its canonical route with `--sandbox workspace-write`, `-C <repo-abs>`, and `< /dev/null` at the primary root to write the exact step `plan.md` directly; it uses no `--output-schema` and no `-o`. Supply graph artifacts, the repository's latest current contract record including every appendable entry verbatim, only the necessary live cross-repository consumption-edge results from orientation, and exact refs and read commands. Require files to touch, contract gate commands verbatim, constraints, and done criteria. Dispatch `step-plan-critic` against the verdict schema with the same `PLANNING_ACT`. The writer and critic must comply with the binary-owned reversibility obligation appended by `pce dispatch`; a verdict cannot approve a plan that contradicts it. Every planning revision reuses the same `PLANNING_ACT`. Each complete anchored logging envelope records issuance at the actual canonical step node.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -516,7 +516,7 @@ fn base_command(kind: RouteKind) -> String {
             "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write ",
             "--env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} ",
             "--log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} ",
-            "--evidence {{EVIDENCE}} -- {{CALLER_ARG}}"
+            "--evidence {{EVIDENCE}} --required-artifact {{OUTPUT}} -- {{CALLER_ARG}}"
         )
         .to_owned(),
         RouteKind::GateStructured => concat!(
@@ -882,6 +882,16 @@ fn validate_route(route: &AnchoredRoute, argv: &[OsString]) -> Result<(), Review
         value(argv, &mut position, "--role")?;
         value(argv, &mut position, "--ref")?;
         value(argv, &mut position, "--evidence")?;
+        let required_artifact = value(argv, &mut position, "--required-artifact")?;
+        if !Path::new(required_artifact).is_absolute() {
+            return Err(ReviewError::ParentGrammar);
+        }
+        if parent_output
+            .as_deref()
+            .is_some_and(|output| output != required_artifact)
+        {
+            return Err(ReviewError::ParentGrammar);
+        }
         if argv
             .get(position)
             .is_some_and(|token| token == "--planning-act")
@@ -1052,8 +1062,12 @@ fn canonical_semantics(route: &AnchoredRoute) -> Result<(), ReviewError> {
     {
         return Err(ReviewError::RoleSemantics);
     }
-    if !has_complete_logging_group(route) {
+    let planning_role = matches!(role, "step-plan-writer" | "step-plan-critic");
+    if !planning_role && (planning_act_count != 0 || count("{{PLANNING_ACT}}") != 0) {
         return Err(ReviewError::RoleSemantics);
+    }
+    if !has_complete_logging_group(route) {
+        return Err(ReviewError::ParentGrammar);
     }
     if count("--ref") != 1
         || count("{{REF}}") != 1
@@ -1062,7 +1076,6 @@ fn canonical_semantics(route: &AnchoredRoute) -> Result<(), ReviewError> {
     {
         return Err(ReviewError::RoleSemantics);
     }
-    let planning_role = matches!(role, "step-plan-writer" | "step-plan-critic");
     if planning_role {
         let logging = expected_logging_group(route).ok_or(ReviewError::RoleSemantics)?;
         let logging_start = tokens
@@ -1078,8 +1091,6 @@ fn canonical_semantics(route: &AnchoredRoute) -> Result<(), ReviewError> {
         {
             return Err(ReviewError::RoleSemantics);
         }
-    } else if planning_act_count != 0 || count("{{PLANNING_ACT}}") != 0 {
-        return Err(ReviewError::RoleSemantics);
     }
     let structured = count("--output-schema") == 1
         && count("{{SCHEMA}}") == 1
@@ -1128,6 +1139,8 @@ fn expected_logging_group(route: &AnchoredRoute) -> Option<Vec<String>> {
         "{{REF}}".to_owned(),
         "--evidence".to_owned(),
         "{{EVIDENCE}}".to_owned(),
+        "--required-artifact".to_owned(),
+        "{{OUTPUT}}".to_owned(),
     ])
 }
 
@@ -1248,7 +1261,7 @@ fn semantic_output_path(
     Ok(())
 }
 
-const DISPATCH_OPTIONS: [&str; 13] = [
+const DISPATCH_OPTIONS: [&str; 14] = [
     "--cwd",
     "--sandbox",
     "--env",
@@ -1260,6 +1273,7 @@ const DISPATCH_OPTIONS: [&str; 13] = [
     "--role",
     "--ref",
     "--evidence",
+    "--required-artifact",
     "--planning-act",
     "--dry-run",
 ];
@@ -1662,6 +1676,8 @@ fn complete_args(f: &Fixture, target: &str) -> Vec<OsString> {
         "07b85ccd".into(),
         "--evidence".into(),
         "fixture".into(),
+        "--required-artifact".into(),
+        f.bindings.output.as_os_str().to_owned(),
         "--dry-run".into(),
         "--".into(),
         "tail".into(),
@@ -2483,6 +2499,83 @@ fn logging_group_by_anchor() {
 measured={measured:?}, green=1, current={current}"
         );
     }
+}
+
+#[test]
+fn required_artifact_logging_mutations_red_before_child_invocation() {
+    let base = repository_route("step-executor");
+    let pair = base
+        .tokens
+        .iter()
+        .position(|token| token == "--required-artifact")
+        .expect("required artifact flag");
+
+    let mut missing_flag = base.clone();
+    missing_flag.tokens.remove(pair);
+    assert_document_error_before_pce(
+        "required-artifact-missing-flag",
+        &route_document(&missing_flag),
+        ReviewError::ParentGrammar,
+    );
+
+    let mut missing_value = base.clone();
+    missing_value.tokens.remove(pair + 1);
+    assert_document_error_before_pce(
+        "required-artifact-missing-value",
+        &route_document(&missing_value),
+        ReviewError::ParentGrammar,
+    );
+
+    let mut duplicate = base.clone();
+    let delimiter = duplicate
+        .tokens
+        .iter()
+        .position(|token| token == "--")
+        .expect("delimiter");
+    duplicate.tokens.splice(
+        delimiter..delimiter,
+        ["--required-artifact".to_owned(), "{{OUTPUT}}".to_owned()],
+    );
+    assert_document_error_before_pce(
+        "required-artifact-duplicate",
+        &route_document(&duplicate),
+        ReviewError::ParentGrammar,
+    );
+
+    let mut relative = base.clone();
+    relative.tokens[pair + 1] = "relative/result.json".to_owned();
+    assert_document_error_before_pce(
+        "required-artifact-relative",
+        &route_document(&relative),
+        ReviewError::ParentGrammar,
+    );
+
+    let mut after_delimiter = base.clone();
+    let moved = after_delimiter
+        .tokens
+        .drain(pair..pair + 2)
+        .collect::<Vec<_>>();
+    let delimiter = after_delimiter
+        .tokens
+        .iter()
+        .position(|token| token == "--")
+        .expect("delimiter");
+    after_delimiter
+        .tokens
+        .splice(delimiter + 1..delimiter + 1, moved);
+    assert_document_error_before_pce(
+        "required-artifact-after-delimiter",
+        &route_document(&after_delimiter),
+        ReviewError::ParentGrammar,
+    );
+
+    let mut mismatched = base;
+    mismatched.tokens[pair + 1] = "/tmp/other.json".to_owned();
+    assert_document_error_before_pce(
+        "required-artifact-structured-mismatch",
+        &route_document(&mismatched),
+        ReviewError::ParentGrammar,
+    );
 }
 
 #[test]
@@ -4510,7 +4603,7 @@ fn placeholder_cases() {
             ReviewError::UnknownPlaceholder,
         );
     }
-    let logging = "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --plan-file {{PLAN_FILE}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --planning-act {{PLANNING_ACT}} --dry-run -- {{CALLER_ARG}}";
+    let logging = "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --plan-file {{PLAN_FILE}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --required-artifact {{OUTPUT}} --planning-act {{PLANNING_ACT}} --dry-run -- {{CALLER_ARG}}";
     for (name, position) in [
         ("unknown_placeholder_plan_file", "{{PLAN_FILE}}"),
         ("unknown_placeholder_log_file", "{{LOG_FILE}}"),
@@ -4686,8 +4779,8 @@ fn route_shape_tail_and_delimiter_cases() {
         "codex_structured_without_pair_rejected"
     );
 
-    let codex_logged = "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --dry-run -- {{CALLER_ARG}}";
-    let gate_logged = "pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --dry-run -- {{CALLER_ARG}}";
+    let codex_logged = "pce dispatch codex --cwd {{CWD}} --sandbox workspace-write --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --required-artifact {{OUTPUT}} --dry-run -- {{CALLER_ARG}}";
+    let gate_logged = "pce dispatch gate --cwd {{CWD}} --env {{PATH_ENV}} --env {{HOME_ENV}} --env {{USER_ENV}} --output-schema {{SCHEMA}} -o {{OUTPUT}} --log-file {{LOG_FILE}} --node {{NODE}} --role {{ROLE}} --ref {{REF}} --evidence {{EVIDENCE}} --required-artifact {{OUTPUT}} --dry-run -- {{CALLER_ARG}}";
     for (name, kind, command) in [
         (
             "codex_order_dry_run_before_delimiter",
@@ -4910,6 +5003,7 @@ fn parser_trailing_value_matrix() {
                 "--role",
                 "--ref",
                 "--evidence",
+                "--required-artifact",
             ]
         } else {
             &[
@@ -4923,6 +5017,7 @@ fn parser_trailing_value_matrix() {
                 "--role",
                 "--ref",
                 "--evidence",
+                "--required-artifact",
             ]
         };
         for flag in flags {
@@ -4930,7 +5025,7 @@ fn parser_trailing_value_matrix() {
             let args = complete[..=index].to_vec();
             let diagnostic = if matches!(
                 *flag,
-                "--log-file" | "--node" | "--role" | "--ref" | "--evidence"
+                "--log-file" | "--node" | "--role" | "--ref" | "--evidence" | "--required-artifact"
             ) {
                 "dispatch logging options must be supplied together"
             } else {
@@ -4988,7 +5083,7 @@ fn parser_order_logging_paths_and_positive_matrix() {
                 ("env_before_structured", 6, 8),
                 ("structured_before_plan", 8, 12),
                 ("plan_before_logging", 12, 14),
-                ("logging_before_dry_run", 14, 24),
+                ("logging_before_dry_run", 14, 26),
             ]
         } else {
             vec![
@@ -4996,7 +5091,7 @@ fn parser_order_logging_paths_and_positive_matrix() {
                 ("env_before_structured", 4, 6),
                 ("structured_before_plan", 6, 10),
                 ("plan_before_logging", 10, 12),
-                ("logging_before_dry_run", 12, 22),
+                ("logging_before_dry_run", 12, 24),
             ]
         };
         for (suffix, left, right) in groups {
@@ -5007,12 +5102,12 @@ fn parser_order_logging_paths_and_positive_matrix() {
                 | "env_before_structured" => 2,
                 "structured_before_plan" => 4,
                 "plan_before_logging" => 2,
-                "logging_before_dry_run" => 10,
+                "logging_before_dry_run" => 12,
                 _ => unreachable!(),
             };
             let right_len = match suffix {
                 "structured_before_plan" => 2,
-                "plan_before_logging" => 10,
+                "plan_before_logging" => 12,
                 "logging_before_dry_run" => 1,
                 _ => {
                     if suffix.contains("env_before_structured") {
@@ -5040,8 +5135,15 @@ fn parser_order_logging_paths_and_positive_matrix() {
         }
 
         let base = if target == "codex" { 14 } else { 12 };
-        let fields = ["--log-file", "--node", "--role", "--ref", "--evidence"];
-        for supplied in 1..5 {
+        let fields = [
+            "--log-file",
+            "--node",
+            "--role",
+            "--ref",
+            "--evidence",
+            "--required-artifact",
+        ];
+        for supplied in 1..6 {
             let mut args = original[..base + supplied * 2].to_vec();
             args.extend(["--".into(), "tail".into()]);
             let suffix = [
@@ -5049,6 +5151,7 @@ fn parser_order_logging_paths_and_positive_matrix() {
                 "through_node",
                 "through_role",
                 "through_ref",
+                "through_evidence",
             ][supplied - 1];
             assert_parser_red(&format!("{prefix}_logging_prefix_{suffix}"), args, logging);
         }
@@ -5158,6 +5261,11 @@ fn parser_empty_value_matrix() {
         ("codex_empty_role", "codex", "--role"),
         ("codex_empty_ref", "codex", "--ref"),
         ("codex_empty_evidence", "codex", "--evidence"),
+        (
+            "codex_empty_required_artifact",
+            "codex",
+            "--required-artifact",
+        ),
         ("gate_empty_cwd", "gate", "--cwd"),
         ("gate_empty_env", "gate", "--env"),
         ("gate_empty_output_schema", "gate", "--output-schema"),
@@ -5168,6 +5276,11 @@ fn parser_empty_value_matrix() {
         ("gate_empty_role", "gate", "--role"),
         ("gate_empty_ref", "gate", "--ref"),
         ("gate_empty_evidence", "gate", "--evidence"),
+        (
+            "gate_empty_required_artifact",
+            "gate",
+            "--required-artifact",
+        ),
     ] {
         let mut args = complete_args(&f, target);
         let index = args
@@ -5179,7 +5292,7 @@ fn parser_empty_value_matrix() {
             "empty value for `--sandbox`"
         } else if matches!(
             flag,
-            "--log-file" | "--node" | "--role" | "--ref" | "--evidence"
+            "--log-file" | "--node" | "--role" | "--ref" | "--evidence" | "--required-artifact"
         ) {
             "dispatch logging options must be supplied together"
         } else {
@@ -5436,6 +5549,8 @@ fn child_nonzero_completion() {
                 "07b85ccd".into(),
                 "--evidence".into(),
                 "child-nonzero".into(),
+                "--required-artifact".into(),
+                f.bindings.output.as_os_str().to_owned(),
             ],
         );
         let output = run_pce(&args, None);

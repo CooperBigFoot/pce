@@ -28,14 +28,20 @@ While `codex exec` runs, Codex streams progress to `stderr` and prints only the 
 
 `pce dispatch codex` always adds `--json`, so its stdout is instead the byte-preserved live JSONL
 event stream. Stderr remains live progress. Use `-o` with `--output-schema` for the final-message
-file channel. Supplying the complete `--log-file`, `--node`, `--role`, `--ref`, and `--evidence`
-group opts into two durable records: issuance before spawn and measured completion after exit.
+file channel. Supplying the complete ordered `--log-file`, `--node`, `--role`, `--ref`,
+`--evidence`, and `--required-artifact` group opts into two durable records: issuance before spawn
+and measured completion after exit. The log and required artifact paths must be absolute; when `-o`
+is present, it is byte-identical to `--required-artifact`.
+Immediately after a real child spawn, the binary publishes the identity sidecar at
+`<LOG_PATH>.dispatches/<ISSUANCE_SEQUENCE>.json`. Exclusive same-directory atomic publication
+means an independent reader observes either no final path or one complete LF-terminated document,
+never a partial document. The sidecar names the issuance, real Darwin process number and kernel
+start identity, and required artifact without adding an event-log record.
 The completion correlates by the exact issuance sequence and records elapsed milliseconds, terminal
 usage or an explicit absence reason, and normal exit or Unix signal. An unstructured live dispatch
 records `not-validated`; a structured live dispatch records `validated`, `missing`, `truncated`,
 `schema-invalid`, or `schema-violating`. Every structured rejection exits nonzero even without
-logging. Lifecycle recording occurs only when the complete `--log-file`, `--node`, `--role`,
-`--ref`, and `--evidence` group is supplied.
+logging. Lifecycle recording occurs only when the complete six-member group is supplied.
 Place `--dry-run` after that complete logging group and immediately before `--` to print one compact
 JSON projection instead. The projection includes the complete shell-free child invocation and both
 prospective lifecycle records. Process, clock, and structured artifact outcomes are `deferred`;

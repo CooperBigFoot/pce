@@ -10,6 +10,7 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::contract_measurement::ObservedExitStatus;
+use crate::dispatch_process_identity::AbsoluteRequiredArtifactPath;
 use crate::event_log::{
     ArtifactOutcome, CacheCreationInputTokens, CacheReadInputTokens, CachedInputTokens,
     DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef,
@@ -114,6 +115,7 @@ pub struct DispatchLogging {
     pub role: DispatchRole,
     pub dispatch_ref: DispatchRef,
     pub evidence: Evidence,
+    pub required_artifact_path: AbsoluteRequiredArtifactPath,
 }
 
 /// Construct the shared concrete dispatch issuance payload.
@@ -276,7 +278,7 @@ impl<'a> DispatchProjectionInput<'a> {
     /// use pce_core::{AbsoluteWorkingDirectory, DispatchEnvelope, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole, DispatchTarget, EventLogTail, Evidence, NodeId, StdinBinding};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let envelope = DispatchEnvelope::new(DispatchTarget::Codex, AbsoluteWorkingDirectory::parse("/tmp")?, StdinBinding::Null);
-    /// let logging = DispatchLogging { node: NodeId::parse("m3-s2")?, role: DispatchRole::new("step-executor"), dispatch_ref: DispatchRef::new("ref"), evidence: Evidence::parse("fixture")? };
+    /// let logging = DispatchLogging { node: NodeId::parse("m3-s2")?, role: DispatchRole::new("step-executor"), dispatch_ref: DispatchRef::new("ref"), evidence: Evidence::parse("fixture")?, required_artifact_path: pce_core::AbsoluteRequiredArtifactPath::parse("/workspace/result.json")? };
     /// let tail = EventLogTail::Empty;
     /// let _input = DispatchProjectionInput::new(&envelope, &logging, &tail);
     /// # Ok(()) }
@@ -285,7 +287,7 @@ impl<'a> DispatchProjectionInput<'a> {
     /// use pce_core::{AbsoluteWorkingDirectory, DispatchEnvelope, DispatchLogging, DispatchProjectionInput, DispatchRef, DispatchRole, DispatchTarget, EventLogTail, Evidence, NodeId, StdinBinding};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let envelope = DispatchEnvelope::new(DispatchTarget::Codex, AbsoluteWorkingDirectory::parse("/tmp")?, StdinBinding::Null);
-    /// let logging = DispatchLogging { node: NodeId::parse("m3-s2")?, role: DispatchRole::new("step-executor"), dispatch_ref: DispatchRef::new("ref"), evidence: Evidence::parse("fixture")? };
+    /// let logging = DispatchLogging { node: NodeId::parse("m3-s2")?, role: DispatchRole::new("step-executor"), dispatch_ref: DispatchRef::new("ref"), evidence: Evidence::parse("fixture")?, required_artifact_path: pce_core::AbsoluteRequiredArtifactPath::parse("/workspace/result.json")? };
     /// let tail = EventLogTail::Empty;
     /// let _input = DispatchProjectionInput::new(&envelope, &logging, &tail, |_bytes: &[u8]| Ok::<(), std::io::Error>(()));
     /// # Ok(()) }
