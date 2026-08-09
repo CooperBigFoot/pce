@@ -2,6 +2,8 @@ mod support;
 
 use std::ffi::OsString;
 use std::fs;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use pce_core::{
     AcceptanceCriteria, ArtifactOutcome, CachedInputTokens, CriterionExecutionOutcome,
@@ -229,6 +231,23 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
         "dispatch stderr: {}",
         stderr(&dispatched)
     );
+    assert_eq!(dispatched.stdout, b"");
+    assert_eq!(dispatched.stderr, b"");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let settled = fs::read_to_string(&log_path).ok().is_some_and(|contents| {
+            let records = contents
+                .lines()
+                .map(parse_event_line)
+                .collect::<Result<Vec<_>, _>>();
+            records.is_ok_and(|records| records.len() == 2)
+        });
+        if settled {
+            break;
+        }
+        assert!(Instant::now() < deadline, "lifecycle did not settle");
+        thread::sleep(Duration::from_millis(10));
+    }
 
     let read = harness
         .run(

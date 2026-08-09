@@ -8,6 +8,8 @@ use std::io::Write;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -975,6 +977,14 @@ fn execute_route(
     argv: &[OsString],
     bindings: &ReviewBindings,
 ) -> Result<RouteObservation, ReviewError> {
+    let log_path = argv
+        .windows(2)
+        .find(|pair| pair[0] == "--log-file")
+        .map(|pair| PathBuf::from(&pair[1]));
+    let prior_records = log_path
+        .as_ref()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map_or(0, |contents| contents.lines().count());
     bindings
         .pce_invocations
         .set(bindings.pce_invocations.get() + 1);
@@ -989,6 +999,23 @@ fn execute_route(
         return Err(ReviewError::Spawn(
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
+    }
+    if let Some(log_path) = log_path {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let settled = fs::read_to_string(&log_path)
+                .ok()
+                .is_some_and(|contents| contents.lines().count() == prior_records + 2);
+            if settled {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "dispatch lifecycle did not settle for {}",
+                log_path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
     Ok(RouteObservation {
         source_line: 0,
@@ -5439,10 +5466,28 @@ fn child_nonzero_completion() {
             ],
         );
         let output = run_pce(&args, None);
-        assert!(
-            !output.status.success(),
-            "child_nonzero_completion/{target}"
-        );
+        assert!(output.status.success(), "child_nonzero_completion/{target}");
+        assert_eq!(output.stdout, b"", "child_nonzero_completion/{target}");
+        assert_eq!(output.stderr, b"", "child_nonzero_completion/{target}");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let settled = fs::read_to_string(&f.bindings.log_file)
+                .ok()
+                .is_some_and(|contents| {
+                    contents.lines().count() == 2
+                        && contents
+                            .lines()
+                            .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+                });
+            if settled {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "lifecycle did not settle for {target}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
         let completion =
             fs::read_to_string(f.bindings.cwd.join(".review/completion")).expect("shim completion");
         assert_eq!(completion, "42", "child_nonzero_completion/{target}");
@@ -5458,7 +5503,28 @@ fn child_nonzero_completion() {
             completion_record["payload"]["exit_status"]["code"], 42,
             "child_nonzero_completion/{target}"
         );
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr_path = PathBuf::from(format!(
+            "{}.dispatch-000001.stderr",
+            f.bindings.log_file.display()
+        ));
+        let expected = if target == "codex" {
+            "`codex` child exited with status exit status: 42"
+        } else {
+            "claude-exit-envelope-contradiction"
+        };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let stderr = loop {
+            let bytes = fs::read(&stderr_path).expect("continuation stderr sidecar");
+            if String::from_utf8_lossy(&bytes).contains(expected) {
+                break bytes;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "continuation diagnostic did not settle"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        let stderr = String::from_utf8_lossy(&stderr);
         if target == "codex" {
             assert!(
                 stderr.contains("`codex` child exited with status exit status: 42"),
@@ -5468,6 +5534,16 @@ fn child_nonzero_completion() {
             assert!(
                 stderr.contains("claude-exit-envelope-contradiction"),
                 "child_nonzero_completion/gate: {stderr}"
+            );
+        }
+        if target == "codex" {
+            assert_eq!(
+                fs::read(PathBuf::from(format!(
+                    "{}.dispatch-000001.stdout",
+                    f.bindings.log_file.display()
+                )))
+                .expect("Codex stdout sidecar"),
+                b""
             );
         }
     }
