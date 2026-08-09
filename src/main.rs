@@ -41,24 +41,25 @@ use pce_core::{
     ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
     RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
-    RunSnapshot, Sandbox, SeatbeltCapability, Sha256Digest, SignalNumber, SquashCommitOid,
-    StdinBinding, StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName,
-    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason,
-    VersionPolicy, VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
-    admit_recurrent_finding, append_event, classify_claude_result, classify_codex_terminal_usage,
-    classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
-    compose_planning_role_frame, compute_dispatchability, create_vision, derive_merge_status,
-    derive_milestone_merge_status, derive_run_state, dispatch_completion_payload,
-    dispatch_invocation, dispatch_payload, evaluate_completion, evaluate_landing_readiness,
-    event_record_matches, fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot,
-    meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
-    parse_acceptance_criteria, parse_claude_result, parse_event_line,
+    RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest, SignalNumber,
+    SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
+    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
+    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
+    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
+    classify_codex_terminal_usage, classify_replay_pair, classify_seatbelt_capability,
+    compose_gate_arguments, compose_planning_role_frame, compute_dispatchability, create_vision,
+    derive_merge_status, derive_milestone_merge_status, derive_run_state,
+    dispatch_completion_payload, dispatch_invocation, dispatch_payload, evaluate_completion,
+    evaluate_landing_readiness, event_record_matches, fold_paired_execution_proof,
+    fold_replay_runs, measure_contract_snapshot, meter_dispatches, normalize_replay_observation,
+    paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result, parse_event_line,
     parse_gate_execution_evidence, parse_gate_stimulus, parse_paired_falsification_verdict,
     parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
     rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
     seatbelt_capability_probe, serialize_tracked_repository_contract, validate_artifact,
     validate_verdict_references, validate_workflow_coverage, verify_criterion_change,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -169,6 +170,7 @@ const BUILD_BOOTSTRAP_CANDIDATES: &[&str] = &[
 
 #[derive(Debug)]
 enum Command {
+    DispatchContinuation,
     GateExec,
     GateReplay(GateReplayCommand),
     GateReplayWorker,
@@ -247,6 +249,50 @@ enum Command {
     },
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DispatchContinuationRequest {
+    envelope: ContinuationEnvelope,
+    completion: ContinuationCompletion,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContinuationEnvelope {
+    target: DispatchTarget,
+    arguments: Vec<String>,
+    working_directory: PathBuf,
+    environment: BTreeMap<String, String>,
+    stdin: ContinuationStdin,
+    sandbox: Option<String>,
+    schema_path: Option<PathBuf>,
+    output_path: Option<PathBuf>,
+    gate_execution_recorder: Option<ContinuationGateRecorder>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "binding", rename_all = "kebab-case", deny_unknown_fields)]
+enum ContinuationStdin {
+    Null,
+    PlanBytes { bytes: Vec<u8> },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContinuationGateRecorder {
+    client_path: PathBuf,
+    evidence_path: PathBuf,
+    socket_path: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContinuationCompletion {
+    log_path: PathBuf,
+    node: NodeId,
+    issuance_sequence: Sequence,
+}
+
 #[derive(Debug)]
 struct PairedExecutionProofCommand {
     repository_root: PathBuf,
@@ -283,6 +329,12 @@ enum DispatchLoggingMode {
 struct LiveDispatchLog<'a> {
     path: &'a Path,
     metadata: &'a DispatchLogging,
+}
+
+struct LiveDispatchCompletion<'a> {
+    path: &'a Path,
+    node: &'a NodeId,
+    issuance_sequence: Sequence,
 }
 
 enum OwnedFileObservation {
@@ -434,6 +486,7 @@ fn main() -> Result<()> {
 
 fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
     match parse_command(args)? {
+        Command::DispatchContinuation => run_dispatch_continuation(input),
         Command::GateExec => run_gate_exec(input),
         Command::GateReplay(command) => exec_gate_replay_worker(command),
         Command::GateReplayWorker => {
@@ -446,9 +499,9 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
                 run_dispatch_projection(&envelope, path, metadata)
             }
             Some(DispatchLoggingMode::Live { path, metadata }) => {
-                spawn_dispatch(&envelope, Some(LiveDispatchLog { path, metadata }))
+                start_logged_dispatch(&envelope, LiveDispatchLog { path, metadata })
             }
-            None => spawn_dispatch(&envelope, None),
+            None => execute_dispatch(&envelope, None),
         },
         Command::VisionNew { name } => run_vision_new(&name),
         Command::VisionCheck => run_vision_check(input),
@@ -525,6 +578,7 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
 fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
     let args: Vec<String> = args.collect();
     match args.as_slice() {
+        [command] if command == "__dispatch-continuation" => Ok(Command::DispatchContinuation),
         [verb, action] if verb == "gate" && action == "exec" => Ok(Command::GateExec),
         [verb, action, rest @ ..] if verb == "gate" && action == "replay" => {
             parse_gate_replay(rest).with_context(|| USAGE)
@@ -1205,7 +1259,53 @@ fn run_paired_critic(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+    wait_for_paired_critic_completion(log, verdict, deadline)?;
     Ok(())
+}
+
+fn wait_for_paired_critic_completion(log: &Path, verdict: &Path, deadline: Instant) -> Result<()> {
+    let evidence = AbsoluteGateExecutionEvidencePath::from_verdict_path(verdict);
+    loop {
+        match std::fs::read_to_string(log) {
+            Ok(contents) => {
+                let records = contents
+                    .lines()
+                    .map(parse_event_line)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .context("paired critic event log is malformed")?;
+                if records.len() == 2 {
+                    let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) =
+                        records[1].body_ref()
+                    else {
+                        bail!("paired critic second lifecycle record is not a completion")
+                    };
+                    if completion.issuance_sequence != records[0].sequence() {
+                        bail!("paired critic completion does not name its issuance")
+                    }
+                    match std::fs::read(evidence.as_path()) {
+                        Ok(bytes) if parse_gate_execution_evidence(&bytes).is_ok() => return Ok(()),
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error)
+                                .context("failed to read paired critic execution evidence");
+                        }
+                    }
+                }
+                if records.len() > 2 {
+                    bail!("paired critic lifecycle contains more than two records")
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).context("failed to read paired critic event log");
+            }
+        }
+        if Instant::now() >= deadline {
+            bail!("paired execution campaign timed out before critic completion")
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn materialize_paired_probe(checkout: &Path) -> Result<PathBuf> {
@@ -7093,22 +7193,192 @@ fn persist_gate_execution_evidence(
         .context("failed to make gate execution evidence read-only")
 }
 
-fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'_>>) -> Result<()> {
+fn start_logged_dispatch(envelope: &DispatchEnvelope, logging: LiveDispatchLog<'_>) -> Result<()> {
+    let payload = dispatch_payload(logging.metadata);
+    let issuance = append_one(
+        logging.path,
+        WriteKind::Dispatch,
+        logging.metadata.node.clone(),
+        serde_json::to_string(&payload).context("failed to serialize dispatch issuance")?,
+    )?;
+    let request = DispatchContinuationRequest {
+        envelope: ContinuationEnvelope::from(envelope),
+        completion: ContinuationCompletion {
+            log_path: logging.path.to_path_buf(),
+            node: logging.metadata.node.clone(),
+            issuance_sequence: issuance.sequence(),
+        },
+    };
+    let suffix = format!("dispatch-{:06}", issuance.sequence().get());
+    let stdout_path = PathBuf::from(format!("{}.{}.stdout", logging.path.display(), suffix));
+    let stderr_path = PathBuf::from(format!("{}.{}.stderr", logging.path.display(), suffix));
+    launch_dispatch_continuation(&request, &stdout_path, &stderr_path)
+}
+
+impl From<&DispatchEnvelope> for ContinuationEnvelope {
+    fn from(envelope: &DispatchEnvelope) -> Self {
+        let stdin = match envelope.stdin() {
+            StdinBinding::Null => ContinuationStdin::Null,
+            StdinBinding::PlanBytes(bytes) => ContinuationStdin::PlanBytes {
+                bytes: bytes.clone(),
+            },
+        };
+        let gate_execution_recorder =
+            envelope
+                .gate_execution_recorder()
+                .map(|config| ContinuationGateRecorder {
+                    client_path: config.client().as_path().to_path_buf(),
+                    evidence_path: config.evidence().as_path().to_path_buf(),
+                    socket_path: config.socket().as_path().to_path_buf(),
+                });
+        Self {
+            target: envelope.target(),
+            arguments: envelope.arguments().as_slice().to_vec(),
+            working_directory: envelope.working_directory().as_path().to_path_buf(),
+            environment: envelope
+                .environment()
+                .iter()
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
+            stdin,
+            sandbox: envelope
+                .sandbox()
+                .map(|sandbox| sandbox.as_str().to_owned()),
+            schema_path: envelope
+                .schema_path()
+                .map(|path| path.as_path().to_path_buf()),
+            output_path: envelope
+                .output_path()
+                .map(|path| path.as_path().to_path_buf()),
+            gate_execution_recorder,
+        }
+    }
+}
+
+fn launch_dispatch_continuation(
+    request: &DispatchContinuationRequest,
+    stdout_path: &Path,
+    stderr_path: &Path,
+) -> Result<()> {
+    let stdout = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(stdout_path)
+        .with_context(|| format!("failed to create `{}`", stdout_path.display()))?;
+    let stderr = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(stderr_path)
+        .with_context(|| format!("failed to create `{}`", stderr_path.display()))?;
+    let executable = std::env::current_exe().context("failed to resolve current pce executable")?;
+    let mut command = std::process::Command::new(&executable);
+    command.arg("__dispatch-continuation");
+    command.stdin(Stdio::piped());
+    command.stdout(stdout);
+    command.stderr(stderr);
+    command.process_group(0);
+    let mut continuation = command.spawn().with_context(|| {
+        format!(
+            "failed to spawn dispatch continuation `{}`",
+            executable.display()
+        )
+    })?;
+    let request_bytes =
+        serde_json::to_vec(request).context("failed to serialize dispatch continuation request")?;
+    let mut stdin = continuation
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("dispatch continuation stdin was not piped"))?;
+    stdin
+        .write_all(&request_bytes)
+        .context("failed to write dispatch continuation request")?;
+    drop(stdin);
+    Ok(())
+}
+
+fn run_dispatch_continuation(input: &mut dyn Read) -> Result<()> {
+    let mut deserializer = serde_json::Deserializer::from_reader(input);
+    let request = DispatchContinuationRequest::deserialize(&mut deserializer)
+        .context("failed to parse dispatch continuation request")?;
+    deserializer
+        .end()
+        .context("dispatch continuation request has trailing non-whitespace bytes")?;
+    let envelope = reconstruct_dispatch_envelope(request.envelope)?;
+    execute_dispatch(
+        &envelope,
+        Some(LiveDispatchCompletion {
+            path: &request.completion.log_path,
+            node: &request.completion.node,
+            issuance_sequence: request.completion.issuance_sequence,
+        }),
+    )
+}
+
+fn reconstruct_dispatch_envelope(wire: ContinuationEnvelope) -> Result<DispatchEnvelope> {
+    if wire.target == DispatchTarget::Seatbelt {
+        bail!("Seatbelt envelopes must use the contract-measurement process adapter");
+    }
+    let working_directory = AbsoluteWorkingDirectory::parse(wire.working_directory)?;
+    let stdin = match wire.stdin {
+        ContinuationStdin::Null => StdinBinding::Null,
+        ContinuationStdin::PlanBytes { bytes } => StdinBinding::PlanBytes(bytes),
+    };
+    let mut environment = wire.environment;
+    let recorder = wire
+        .gate_execution_recorder
+        .map(|config| -> Result<GateExecutionRecorderConfig> {
+            let expected_client = config.client_path.display().to_string();
+            let expected_socket = config.socket_path.display().to_string();
+            if environment.remove("PCE_GATE_EXEC_CLIENT").as_deref() != Some(&expected_client)
+                || environment.remove("PCE_GATE_EXEC_SOCKET").as_deref() != Some(&expected_socket)
+            {
+                bail!("dispatch continuation gate recorder environment does not match its paths");
+            }
+            let evidence = AbsoluteGateExecutionEvidencePath::from_verdict_path(
+                wire.output_path
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("gate recorder requires an output path"))?,
+            );
+            if evidence.as_path() != config.evidence_path {
+                bail!("dispatch continuation gate recorder evidence path is not derived from its output path");
+            }
+            Ok(GateExecutionRecorderConfig::new(
+                AbsoluteGateExecClientPath::parse(config.client_path)?,
+                evidence,
+                AbsoluteGateExecutionSocketPath::parse(config.socket_path)?,
+            ))
+        })
+        .transpose()?;
+    let mut envelope = DispatchEnvelope::new(wire.target, working_directory, stdin)
+        .with_arguments(ArgumentVector::new(wire.arguments))
+        .with_environment(ChildEnvironment::new(environment));
+    if let Some(sandbox) = wire.sandbox {
+        if sandbox != Sandbox::WorkspaceWrite.as_str() {
+            bail!("unsupported dispatch continuation sandbox `{sandbox}`");
+        }
+        envelope = envelope.with_sandbox(Sandbox::WorkspaceWrite);
+    }
+    if let Some(path) = wire.schema_path {
+        envelope = envelope.with_schema_path(AbsoluteSchemaPath::parse(path)?);
+    }
+    if let Some(path) = wire.output_path {
+        envelope = envelope.with_output_path(AbsoluteOutputPath::parse(path)?);
+    }
+    if let Some(recorder) = recorder {
+        envelope = envelope.with_gate_execution_recorder(recorder)?;
+    }
+    Ok(envelope)
+}
+
+fn execute_dispatch(
+    envelope: &DispatchEnvelope,
+    completion: Option<LiveDispatchCompletion<'_>>,
+) -> Result<()> {
     let recorder = envelope
         .gate_execution_recorder()
         .map(GateRecorderRuntime::start)
-        .transpose()?;
-    let issuance = logging
-        .as_ref()
-        .map(|logging| {
-            let payload = dispatch_payload(logging.metadata);
-            append_one(
-                logging.path,
-                WriteKind::Dispatch,
-                logging.metadata.node.clone(),
-                serde_json::to_string(&payload).context("failed to serialize dispatch issuance")?,
-            )
-        })
         .transpose()?;
     let invocation = dispatch_invocation(envelope);
     let executable = invocation.executable();
@@ -7216,6 +7486,12 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
         .as_ref()
         .map_or_else(Vec::new, |stopped| stopped.records.clone());
     let recorder_error = recorder_stop.and_then(|stopped| stopped.error);
+    let evidence_persistence = match envelope.gate_execution_recorder() {
+        Some(config) => {
+            persist_gate_execution_evidence(config.evidence(), gate_execution_records.clone())
+        }
+        None => Ok(()),
+    };
     let post_stop_result = (|| -> Result<_> {
         let duration_ms = u64::try_from(started.elapsed().as_millis())
             .context("dispatch duration in milliseconds exceeds u64")?;
@@ -7279,21 +7555,21 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
                 .copied()
                 .unwrap_or_else(|error| error.outcome())
         };
-        if let (Some(logging), Some(issuance)) = (logging, issuance) {
+        if let Some(completion_context) = completion.as_ref() {
             let usage = classification
                 .clone()
                 .unwrap_or_else(|reason| DispatchTokenUsage::Absent { reason });
             let completion = dispatch_completion_payload(
-                issuance.sequence(),
+                completion_context.issuance_sequence,
                 DispatchDuration::new(duration_ms),
                 usage,
                 exit_status,
                 artifact_outcome,
             );
             append_one(
-                logging.path,
+                completion_context.path,
                 WriteKind::DispatchCompletion,
-                logging.metadata.node.clone(),
+                completion_context.node.clone(),
                 serde_json::to_string(&completion)
                     .context("failed to serialize dispatch completion")?,
             )
@@ -7301,10 +7577,6 @@ fn spawn_dispatch(envelope: &DispatchEnvelope, logging: Option<LiveDispatchLog<'
         }
         Ok((classification, artifact_validation, reference_validation))
     })();
-    let evidence_persistence = match envelope.gate_execution_recorder() {
-        Some(config) => persist_gate_execution_evidence(config.evidence(), gate_execution_records),
-        None => Ok(()),
-    };
     let (classification, artifact_validation, reference_validation) = match post_stop_result {
         Ok(results) => results,
         Err(error) => {
