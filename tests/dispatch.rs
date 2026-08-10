@@ -18,9 +18,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use pce_core::{
     AbsoluteOutputPath, AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
     ArgumentVector, ArtifactOutcome, ChildEnvironment, Deferred, DispatchDuration,
-    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchRef, DispatchRole,
-    DispatchTarget, DispatchTokenUsage, EventBodyRef, EventRecord, EventTimestamp, Evidence,
-    KnownPayload, NodeId, Sandbox, Sequence, StdinBinding, UsageAbsenceReason, WriteKind,
+    DispatchEnvelope, DispatchExitStatus, DispatchLogging, DispatchProcessIdentity, DispatchRef,
+    DispatchRole, DispatchTarget, DispatchTokenUsage, EventBodyRef, EventRecord, EventTimestamp,
+    Evidence, KnownPayload, NodeId, Sandbox, Sequence, StdinBinding, UsageAbsenceReason, WriteKind,
     dispatch_invocation, dispatch_payload, parse_dispatch_process_identity, parse_event_line,
     serialize_event_line,
 };
@@ -1269,6 +1269,9 @@ fn assert_logged_structured_rejection(fixture: StructuredRejectionFixture) {
     else {
         panic!("{name} completion expected");
     };
+    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+        panic!("reconciled completion")
+    };
     assert_eq!(
         completion.issuance_sequence,
         records[0].sequence(),
@@ -1378,6 +1381,9 @@ fn assert_valid_structured_artifact(transcript: &[u8]) {
     let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref()
     else {
         panic!("positive completion expected");
+    };
+    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+        panic!("reconciled completion")
     };
     assert_eq!(completion.issuance_sequence, records[0].sequence());
     assert_eq!(completion.artifact_outcome, ArtifactOutcome::Validated);
@@ -1710,6 +1716,9 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
     else {
         panic!("second record is not completion")
     };
+    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+        panic!("reconciled completion")
+    };
     let sleeping_duration_ms = completion.duration_ms.get();
     assert_eq!(completion.issuance_sequence, records[0].sequence());
     assert_eq!(
@@ -1786,6 +1795,10 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
     else {
         panic!("second fast record is not completion")
     };
+    let pce_core::DispatchCompletionPayload::ObservedChild(fast_completion) = fast_completion
+    else {
+        panic!("reconciled completion")
+    };
     let fast_duration_ms = fast_completion.duration_ms.get();
     assert!(
         sleeping_duration_ms
@@ -1832,6 +1845,7 @@ fn records_failed_and_absent_terminal_reasons_before_reporting_exit() {
         let records = fs::read_to_string(&log_path).expect("read log").lines().map(|line| parse_event_line(line).expect("parse")).collect::<Vec<_>>();
         assert_eq!(records.len(), 2);
         let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref() else { panic!("missing completion") };
+        let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else { panic!("reconciled completion") };
         assert_eq!(completion.usage, DispatchTokenUsage::Absent { reason });
         assert_eq!(completion.exit_status, DispatchExitStatus::Exited { code: pce_core::ExitCode::new(code as u64) });
         assert!(Duration::from_millis(completion.duration_ms.get()) <= elapsed);
@@ -1904,6 +1918,9 @@ fn accepts_additive_usage_fields_and_blank_jsonl_lines() {
     else {
         panic!("missing completion")
     };
+    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+        panic!("reconciled completion")
+    };
     assert_eq!(
         completion.usage,
         DispatchTokenUsage::Measured {
@@ -1972,6 +1989,9 @@ fn records_signal_and_no_terminal_usage_without_fabricating_exit_zero() {
     let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref()
     else {
         panic!("missing completion")
+    };
+    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+        panic!("reconciled completion")
     };
     assert_eq!(
         completion.exit_status,
@@ -2100,6 +2120,9 @@ fn releases_log_lock_while_child_runs_and_keeps_exact_issuance_identity() {
     else {
         panic!("completion not last")
     };
+    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+        panic!("reconciled completion")
+    };
     assert_eq!(completion.issuance_sequence, records[0].sequence());
 }
 
@@ -2134,6 +2157,31 @@ fn independently_observe_darwin_start(pid: u32) -> (u64, u32) {
         info.pbi_start_tvsec,
         u32::try_from(info.pbi_start_tvusec).expect("microseconds fit u32"),
     )
+}
+
+#[cfg(target_os = "macos")]
+fn assert_live_distinct_continuation_identity(
+    identity: &DispatchProcessIdentity,
+    child_pid: u32,
+    starter_pid: u32,
+) {
+    let continuation = identity
+        .continuation_process_identity()
+        .expect("production sidecar continuation identity");
+    let continuation_pid = continuation.process_number().get();
+    assert_ne!(continuation_pid, child_pid);
+    assert_ne!(continuation_pid, starter_pid);
+    let observed = independently_observe_darwin_start(continuation_pid);
+    assert_eq!(
+        continuation
+            .process_start_identity()
+            .seconds_since_unix_epoch(),
+        observed.0
+    );
+    assert_eq!(
+        continuation.process_start_identity().microseconds(),
+        observed.1
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -2190,6 +2238,7 @@ fn assert_blocked_identity(target: DispatchTarget) {
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("spawn pce");
+            let starter_pid = parent.id();
             let pid_path = record_root.join("invocation/pid");
             let sidecar = harness.path().join("events.jsonl.dispatches/42.json");
             wait_for_path(&pid_path);
@@ -2206,6 +2255,7 @@ fn assert_blocked_identity(target: DispatchTarget) {
             assert!(cat.status.success());
             let identity = parse_dispatch_process_identity(&cat.stdout).expect("parse sidecar");
             let observed = independently_observe_darwin_start(pid);
+            assert_live_distinct_continuation_identity(&identity, pid, starter_pid);
             assert_eq!(identity.issuance_sequence().get(), 42);
             assert_eq!(identity.process_number().get(), pid);
             assert_eq!(
@@ -2270,6 +2320,7 @@ fn assert_blocked_identity(target: DispatchTarget) {
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("spawn gate pce");
+            let starter_pid = parent.id();
             let pid_path = fixture.record_root.join("invocation/pid");
             let sidecar = fixture
                 .harness
@@ -2289,6 +2340,7 @@ fn assert_blocked_identity(target: DispatchTarget) {
             assert!(cat.status.success());
             let identity = parse_dispatch_process_identity(&cat.stdout).expect("parse sidecar");
             let observed = independently_observe_darwin_start(pid);
+            assert_live_distinct_continuation_identity(&identity, pid, starter_pid);
             assert_eq!(identity.issuance_sequence().get(), 42);
             assert_eq!(identity.process_number().get(), pid);
             assert_eq!(
@@ -2614,6 +2666,9 @@ fn assert_exact_detached_lifecycle(records: &[EventRecord], slow: bool) {
     let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref()
     else {
         panic!("second record is not dispatch completion")
+    };
+    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+        panic!("reconciled completion")
     };
     assert_eq!(completion.issuance_sequence, Sequence::first());
     assert_eq!(
@@ -3364,11 +3419,14 @@ fn falsification_mandate(output: &Path, client: &Path) -> String {
     )
 }
 
-fn gate_completion(log_path: &Path) -> pce_core::DispatchCompletionPayload {
+fn gate_completion(log_path: &Path) -> pce_core::ObservedDispatchCompletionPayload {
     let records = settle_lifecycle(log_path);
     let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref()
     else {
         panic!("second gate record is not a completion")
+    };
+    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+        panic!("gate completion was reconciled")
     };
     completion.clone()
 }
@@ -6201,7 +6259,7 @@ fn run_measured_gate(
     name: &str,
     stdout: &[u8],
     sleep: Option<&str>,
-) -> pce_core::DispatchCompletionPayload {
+) -> pce_core::ObservedDispatchCompletionPayload {
     let fixture = GateFixture::new(name, stdout);
     let log = fixture.harness.path().join("events.jsonl");
     let mut environment = fixture.environment(0);
@@ -6351,6 +6409,9 @@ fn gate_records_exact_issuance_correlation() {
     let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[2].body_ref()
     else {
         panic!("completion")
+    };
+    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+        panic!("reconciled completion")
     };
     assert_eq!(completion.issuance_sequence, records[0].sequence());
     assert_ne!(

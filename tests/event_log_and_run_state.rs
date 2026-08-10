@@ -46,7 +46,7 @@ exit 0
 "#;
 
 #[cfg(target_os = "macos")]
-const CHECK_IN_REPORT: &[u8] = b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"finished\",\"completion\":\"recorded\",\"artifact_production\":\"produced\"},{\"issuance_sequence\":3,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":4,\"state\":\"running\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":5,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":6,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n";
+const CHECK_IN_REPORT: &[u8] = b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"accounting\":{\"state\":\"unaccounted\",\"issuance_sequences\":[3,4,5,6]},\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"finished\",\"completion\":\"observed-child\",\"artifact_production\":\"produced\"},{\"issuance_sequence\":3,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":4,\"state\":\"running\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":5,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":6,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n";
 
 #[cfg(target_os = "macos")]
 const CHECK_IN_EVENT: &[u8] = b"{\"sequence\":1,\"timestamp\":\"2026-08-09T12:00:00.000Z\",\"kind\":\"dispatch\",\"node\":\"m1-s2\",\"payload\":{\"role\":\"step-executor\",\"ref\":\"abc123\",\"evidence\":\"fixture\"}}\n";
@@ -189,6 +189,18 @@ fn wait_for_check_in_path(path: &Path, failure: &str) {
 }
 
 #[cfg(target_os = "macos")]
+fn wait_for_check_in_bytes(path: &Path, expected: &[u8], failure: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if fs::read(path).is_ok_and(|bytes| bytes == expected) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{failure}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn read_check_in_identity(path: &Path) -> (Vec<u8>, DispatchProcessIdentity) {
     let bytes = fs::read(path).expect("read dispatch sidecar");
     let identity = parse_dispatch_process_identity(&bytes).expect("parse dispatch sidecar");
@@ -237,13 +249,23 @@ fn wait_for_test_process_exit(process_number: ProcessNumber) {
 
 #[cfg(target_os = "macos")]
 fn stop_child_and_kill_dispatch_parent(parent: &mut Child, identity: &DispatchProcessIdentity) {
-    let parent_pid = i32::try_from(parent.id()).expect("parent PID");
     let child_pid = i32::try_from(identity.process_number().get()).expect("child PID");
-    assert_eq!(unsafe { libc::kill(parent_pid, libc::SIGSTOP) }, 0);
     assert_eq!(unsafe { libc::kill(child_pid, libc::SIGKILL) }, 0);
-    assert_eq!(unsafe { libc::kill(parent_pid, libc::SIGKILL) }, 0);
-    parent.wait().expect("reap killed dispatch parent");
+    let continuation = identity
+        .continuation_process_identity()
+        .expect("new sidecar continuation identity");
+    assert_eq!(
+        unsafe {
+            libc::kill(
+                i32::try_from(continuation.process_number().get()).expect("continuation PID"),
+                libc::SIGKILL,
+            )
+        },
+        0
+    );
+    parent.wait().expect("reap dispatch starter");
     wait_for_test_process_exit(identity.process_number());
+    wait_for_test_process_exit(continuation.process_number());
 }
 
 #[cfg(target_os = "macos")]
@@ -344,11 +366,12 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
         .wait_with_output()
         .expect("complete issuance-1 dispatch");
     assert!(phase_1_output.status.success());
-    assert_eq!(
-        phase_1_output.stdout,
-        b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":2,\"output_tokens\":3,\"reasoning_output_tokens\":4}}\n"
-    );
+    assert_eq!(phase_1_output.stdout, b"");
     assert_eq!(phase_1_output.stderr, b"");
+    wait_for_check_in_path(&phase_1.artifact_file, "timed out waiting for artifact-1");
+    let continuation_stdout =
+        PathBuf::from(format!("{}.dispatch-000001.stdout", log_path.display()));
+    wait_for_check_in_bytes(&continuation_stdout, b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":2,\"output_tokens\":3,\"reasoning_output_tokens\":4}}\n", "timed out waiting for continuation stdout");
     assert_eq!(
         fs::read(&phase_1.artifact_file).expect("read artifact-1"),
         b"{\"artifact\":\"real\"}"
@@ -414,8 +437,24 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
     let phase_6_output = spawn_failing_check_in_dispatch(&cwd, &log_path, &phase_6)
         .wait_with_output()
         .expect("complete issuance-6 failed dispatch");
-    assert!(!phase_6_output.status.success());
-    assert!(String::from_utf8_lossy(&phase_6_output.stderr).contains("failed to spawn `codex`"));
+    assert!(phase_6_output.status.success());
+    assert_eq!(phase_6_output.stdout, b"");
+    assert_eq!(phase_6_output.stderr, b"");
+    let continuation_stderr =
+        PathBuf::from(format!("{}.dispatch-000006.stderr", log_path.display()));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if fs::read(&continuation_stderr)
+            .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains("failed to spawn `codex`"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for failed continuation diagnostic"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let records_after_spawn_failure = fs::read_to_string(&log_path)
         .expect("read event log after spawn failure")
         .lines()
@@ -530,6 +569,7 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
     fs::write(&phase_4.release_file, []).expect("release working issuance-4 child");
     let phase_4_status = wait_for_dispatch_parent(&mut phase_4_parent);
     assert!(phase_4_status.success());
+    wait_for_check_in_path(&phase_4.artifact_file, "timed out waiting for artifact-4");
     assert_eq!(
         fs::read(&phase_4.artifact_file).expect("read artifact-4"),
         b"{\"artifact\":\"real\"}"
@@ -537,20 +577,33 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
     assert!(!phase_3.artifact_file.exists());
     assert!(!phase_5.artifact_file.exists());
 
-    let final_log = fs::read_to_string(&log_path).expect("read completed event log");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let final_log = loop {
+        let log = fs::read_to_string(&log_path).expect("read completed event log");
+        if log.lines().count() == 7 {
+            break log;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for observed completion"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
     let final_records = final_log
         .lines()
         .map(|line| parse_event_line(line).expect("parse final event record"))
         .collect::<Vec<_>>();
     assert_eq!(final_records.len(), 7);
     assert_eq!(final_records[6].sequence().get(), 7);
-    let EventBodyRef::Known(KnownPayload::DispatchCompletion(DispatchCompletionPayload {
-        issuance_sequence,
-        usage,
-        exit_status,
-        artifact_outcome,
-        ..
-    })) = final_records[6].body_ref()
+    let EventBodyRef::Known(KnownPayload::DispatchCompletion(
+        DispatchCompletionPayload::ObservedChild(pce_core::ObservedDispatchCompletionPayload {
+            issuance_sequence,
+            usage,
+            exit_status,
+            artifact_outcome,
+            ..
+        }),
+    )) = final_records[6].body_ref()
     else {
         panic!("sequence 7 must be the real issuance-4 completion")
     };
@@ -575,9 +628,9 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
         !matches!(
             record.body_ref(),
             EventBodyRef::Known(KnownPayload::DispatchCompletion(completion))
-                if completion.issuance_sequence.get() == 3
-                    || completion.issuance_sequence.get() == 5
-                    || completion.issuance_sequence.get() == 6
+                if completion.issuance_sequence().get() == 3
+                    || completion.issuance_sequence().get() == 5
+                    || completion.issuance_sequence().get() == 6
         )
     }));
 
@@ -677,9 +730,138 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
     );
     assert_eq!(
         non_regular_output.stdout,
-        b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n"
+        b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"accounting\":{\"state\":\"unaccounted\",\"issuance_sequences\":[1]},\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n"
     );
     assert_eq!(non_regular_output.stderr, b"");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn pre_upgrade_sidecar_is_observable_and_reconcilable_under_child_guard() {
+    let _guard = check_in_test_guard();
+    let harness = CliHarness::new().expect("create reconcile harness");
+    let log_path = fs::canonicalize(harness.path())
+        .expect("canonical harness")
+        .join("events.jsonl");
+    fs::write(&log_path, CHECK_IN_EVENT).expect("write issuance");
+    let sidecar_directory = PathBuf::from(format!("{}.dispatches", log_path.display()));
+    fs::create_dir(&sidecar_directory).expect("create sidecar directory");
+    fs::write(sidecar_directory.join("1.json"), format!("{{\"schema_id\":\"pce.dispatch-process-identity\",\"schema_version\":1,\"issuance_sequence\":1,\"process_number\":999999,\"process_start_identity\":{{\"seconds_since_unix_epoch\":1723200000,\"microseconds\":123456}},\"required_artifact_path\":\"{}\"}}\n", harness.path().join("result.json").display())).expect("write old sidecar");
+    let path = log_path.to_str().expect("UTF-8 path");
+    let check_in = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["dispatch", "check-in", "--file", path])
+        .output()
+        .expect("check in");
+    assert!(check_in.status.success());
+    assert_eq!(check_in.stdout, b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"accounting\":{\"state\":\"unaccounted\",\"issuance_sequences\":[1]},\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n");
+    let reconcile = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "dispatch",
+            "reconcile",
+            "--file",
+            path,
+            "--issuance",
+            "1",
+            "--node",
+            "m1-s2",
+        ])
+        .output()
+        .expect("reconcile");
+    assert!(
+        reconcile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reconcile.stderr)
+    );
+    assert_eq!(reconcile.stdout, b"");
+    assert_eq!(reconcile.stderr, b"");
+    let records = fs::read_to_string(&log_path)
+        .expect("log")
+        .lines()
+        .map(|line| parse_event_line(line).expect("record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    assert!(matches!(
+        records[1].body_ref(),
+        EventBodyRef::Known(KnownPayload::DispatchCompletion(
+            DispatchCompletionPayload::ReconciledDead(_)
+        ))
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn reconciliation_refuses_live_child_and_every_duplicate_closure() {
+    let _guard = check_in_test_guard();
+    let harness = CliHarness::new().expect("create reconcile harness");
+    let log_path = fs::canonicalize(harness.path())
+        .expect("canonical harness")
+        .join("events.jsonl");
+    fs::write(&log_path, CHECK_IN_EVENT).expect("write issuance");
+    let sidecar_directory = PathBuf::from(format!("{}.dispatches", log_path.display()));
+    fs::create_dir(&sidecar_directory).expect("create sidecar directory");
+    let process_number = ProcessNumber::new(std::process::id()).expect("PID");
+    let start = observe_test_darwin_process(process_number).expect("current process identity");
+    fs::write(sidecar_directory.join("1.json"), format!("{{\"schema_id\":\"pce.dispatch-process-identity\",\"schema_version\":1,\"issuance_sequence\":1,\"process_number\":{},\"process_start_identity\":{{\"seconds_since_unix_epoch\":{},\"microseconds\":{}}},\"required_artifact_path\":\"{}\"}}\n", process_number.get(), start.seconds_since_unix_epoch(), start.microseconds(), harness.path().join("result.json").display())).expect("write sidecar");
+    let path = log_path.to_str().expect("UTF-8 path");
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "dispatch",
+            "reconcile",
+            "--file",
+            path,
+            "--issuance",
+            "1",
+            "--node",
+            "m1-s2",
+        ])
+        .output()
+        .expect("reconcile");
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"");
+    assert_eq!(output.stderr, b"Error: dispatch reconciliation refused for issuance 1: child process identity is still alive\n");
+    assert_eq!(fs::read(&log_path).expect("unchanged log"), CHECK_IN_EVENT);
+    fs::write(sidecar_directory.join("1.json"), format!("{{\"schema_id\":\"pce.dispatch-process-identity\",\"schema_version\":1,\"issuance_sequence\":1,\"process_number\":999999,\"process_start_identity\":{{\"seconds_since_unix_epoch\":1723200000,\"microseconds\":123456}},\"required_artifact_path\":\"{}\"}}\n", harness.path().join("result.json").display())).expect("replace dead sidecar");
+    let closed = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "dispatch",
+            "reconcile",
+            "--file",
+            path,
+            "--issuance",
+            "1",
+            "--node",
+            "m1-s2",
+        ])
+        .output()
+        .expect("close");
+    assert!(
+        closed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&closed.stderr)
+    );
+    let completed_log = fs::read(&log_path).expect("completed log");
+    let duplicate = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "dispatch",
+            "reconcile",
+            "--file",
+            path,
+            "--issuance",
+            "1",
+            "--node",
+            "m1-s2",
+        ])
+        .output()
+        .expect("duplicate");
+    assert!(!duplicate.status.success());
+    assert_eq!(
+        duplicate.stderr,
+        b"Error: dispatch closure issuance 1 already has reconciled-dead completion 2\n"
+    );
+    assert_eq!(
+        fs::read(&log_path).expect("unchanged completed log"),
+        completed_log
+    );
 }
 
 fn ratified_floor() -> AcceptanceCriteria {
@@ -965,6 +1147,9 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
     .expect("fold binary-written lifecycle");
     assert_eq!(state.dispatch_lifecycles().len(), 1);
     let lifecycle = &state.dispatch_lifecycles()[0];
+    let pce_core::DispatchLifecycleObservation::ObservedChild(lifecycle) = lifecycle else {
+        panic!("observed lifecycle")
+    };
     assert_eq!(lifecycle.issuance().sequence().get(), 1);
     assert_eq!(lifecycle.issuance().node().as_str(), "m3-s1");
     assert_eq!(lifecycle.issuance().role().as_str(), "step-executor");
@@ -3636,6 +3821,78 @@ fn check_in_classifies_a_foreign_owned_process_number_without_aborting_the_repor
     assert_eq!(output.stderr, b"");
     assert_eq!(
         output.stdout,
-        b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":2,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n"
+        b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"accounting\":{\"state\":\"unaccounted\",\"issuance_sequences\":[1,2]},\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":2,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn reconciliation_refuses_while_the_owning_continuation_is_alive() {
+    let _guard = check_in_test_guard();
+    let harness = CliHarness::new().expect("create reconcile harness");
+    let log_path = fs::canonicalize(harness.path())
+        .expect("canonical harness")
+        .join("events.jsonl");
+    fs::write(&log_path, CHECK_IN_EVENT).expect("write issuance");
+    let sidecar_directory = PathBuf::from(format!("{}.dispatches", log_path.display()));
+    fs::create_dir(&sidecar_directory).expect("create sidecar directory");
+    let continuation_process_number = ProcessNumber::new(std::process::id()).expect("PID");
+    let continuation_start =
+        observe_test_darwin_process(continuation_process_number).expect("current process identity");
+    fs::write(
+        sidecar_directory.join("1.json"),
+        format!(
+            "{{\"schema_id\":\"pce.dispatch-process-identity\",\"schema_version\":1,\"issuance_sequence\":1,\"process_number\":999999,\"process_start_identity\":{{\"seconds_since_unix_epoch\":1723200000,\"microseconds\":123456}},\"continuation_process_identity\":{{\"process_number\":{},\"process_start_identity\":{{\"seconds_since_unix_epoch\":{},\"microseconds\":{}}}}},\"required_artifact_path\":\"{}\"}}\n",
+            continuation_process_number.get(),
+            continuation_start.seconds_since_unix_epoch(),
+            continuation_start.microseconds(),
+            harness.path().join("result.json").display()
+        ),
+    )
+    .expect("write sidecar");
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "dispatch",
+            "reconcile",
+            "--file",
+            log_path.to_str().expect("UTF-8 path"),
+            "--issuance",
+            "1",
+            "--node",
+            "m1-s2",
+        ])
+        .output()
+        .expect("reconcile");
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"");
+    assert_eq!(output.stderr, b"Error: dispatch reconciliation refused for issuance 1: continuation process identity is still alive\n");
+    assert_eq!(fs::read(&log_path).expect("unchanged log"), CHECK_IN_EVENT);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn reconciliation_refuses_before_the_identity_sidecar_is_published() {
+    let _guard = check_in_test_guard();
+    let harness = CliHarness::new().expect("create reconcile harness");
+    let log_path = fs::canonicalize(harness.path())
+        .expect("canonical harness")
+        .join("events.jsonl");
+    fs::write(&log_path, CHECK_IN_EVENT).expect("write issuance");
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "dispatch",
+            "reconcile",
+            "--file",
+            log_path.to_str().expect("UTF-8 path"),
+            "--issuance",
+            "1",
+            "--node",
+            "m1-s2",
+        ])
+        .output()
+        .expect("reconcile");
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"");
+    assert_eq!(output.stderr, b"Error: dispatch reconciliation refused for issuance 1: dispatch process identity sidecar is absent\n");
+    assert_eq!(fs::read(&log_path).expect("unchanged log"), CHECK_IN_EVENT);
 }
