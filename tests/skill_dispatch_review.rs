@@ -2396,13 +2396,13 @@ fn phase3_falsification_repair_is_bounded_and_mechanical() {
     }
 
     let policies = [
-        "The first falsification is round `1`; at most `3` falsification dispatches may occur for the step.",
+        "the defect-round cap for `(node, falsification-critic)` is `3` validated-production rounds; a productless attempt charges no defect round and remains governed by the `(node, role, required artifact)` consecutive-non-production hold.",
         "If two consecutive schema-valid verdict artifacts have substantially identical blocking issue sets under the existing comparison rule, append/open the existing escalation and stop before another executor dispatch, push, or PR.",
-        "If dispatch count `3` is blocking, escalate and stop before another executor dispatch, push, or PR.",
+        "If validated-production defect round `3` is blocking, escalate and stop before another executor dispatch, push, or PR.",
         "After a successful repair result, resolve the new exact committed step head and reissue `falsification-critic` through the same anchored binary route.",
         "Ground it on that new head, the same approved plan ref, and `git diff <milestone-integration-ref>...<new-step-head>`.",
         "Supply the prior exact verdict path as the finding to verify and ask the critic to verify the executed replacement on the repaired artifact rather than re-derive the finding.",
-        "Successive gate verdicts remain `review-<n>.json`/`review-<n>.md`, indexed by prior `(node, falsification-critic)` dispatch records; add no counter or artifact family.",
+        "Successive gate verdicts remain `review-<n>.json`/`review-<n>.md`, indexed only by the exact `(node, falsification-critic)` issuance ordinal; add no counter or artifact family.",
     ];
     for expected in policies {
         assert_eq!(
@@ -2436,9 +2436,9 @@ fn phase3_falsification_repair_is_bounded_and_mechanical() {
             < routing.find(exception).expect("exception")
     );
     for inherited in [
-        "Plan/critic and PR/fix caps are 3.",
-        "Derive rounds from dispatch records.",
-        "On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the cap.",
+        "Plan/critic and PR/fix caps are 3 validated-production defect rounds per exact `(node, role)`.",
+        "Derive defect rounds only from validated production; productless attempts are exempt and are stopped separately by the `(node, role, required artifact)` consecutive-non-production hold.",
+        "On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the defect cap.",
         "Derive the comparison from review artifacts; do not update separate loop state.",
     ] {
         assert_eq!(routing.matches(inherited).count(), 1, "routing {inherited}");
@@ -4164,8 +4164,8 @@ const BINARY_OWNED_CLAUSES: [(&str, &str); 6] = [
         "`pce dispatch` appends issuance before it spawns the child",
     ),
     (
-        "round-source",
-        "sole source for round counts and dispatch refs",
+        "ref-and-ordinal-source",
+        "sole source for dispatch refs and for the exact `(node, role)` issuance ordinal",
     ),
 ];
 
@@ -5800,7 +5800,7 @@ fn review_preserves_installed_skill_symlink_target() {
     );
 }
 
-const DETACHED_PARAGRAPH: &str = "A detached dispatch uses the anchored `pce dispatch codex` route and must be paired with a registered wait. `pce dispatch` has no detached option and awaits its child. If a recorded dispatch has no required product, append a `delta` at the canonical node to reconcile that fact; never invent a result.";
+const BINARY_OWNED_ORCHESTRATION_PARAGRAPH: &str = "`pce dispatch` appends issuance and returns while the binary-owned continuation retains the child without a runtime or spend ceiling and appends exactly one observed completion when the child exits. The orchestrator observes every issuance with bounded `pce dispatch check-in`, which reports running, finished, or dead state and required-artifact production without signaling or killing a child, appending a completion, reconciling, or closing anything. Only `pce dispatch reconcile` durably closes a dead incomplete issuance, and it refuses wherever a real completion could still land. A missing product alone neither closes a dispatch nor licenses a completion or accounting claim; all-accounted requires the issuance-ordered unaccounted ledger to be empty. Never append a `delta` or invent a result to close a dispatch.";
 
 const COLD_RULES_HEADING: &str = "## Cold-orchestrator falsification rules";
 
@@ -5809,7 +5809,7 @@ const COLD_RULES: [&str; 11] = [
     "2. Falsify a measured quantity by comparing the before and after measurements; an expected literal is not a measurement.",
     "3. After every step merge or milestone merge, refresh the local integration ref from the remote before branching from it.",
     "4. After every post-PR commit, republish `pr-body.md`; measure the repository setting with `gh api repos/{owner}/{repo} --jq .squash_merge_commit_message` and never infer it from `merge_method`.",
-    "5. For detached work, use the anchored `pce dispatch codex` route, pair the dispatch with a registered wait, and reconcile a missing required product with a `delta` at the canonical node instead of inventing a result.",
+    "5. For every issued dispatch, use bounded `pce dispatch check-in` for read-only observation; if an incomplete issuance is dead, close it only with `pce dispatch reconcile`. A missing required product alone neither closes nor accounts for the dispatch; never append a `delta` or invent a result.",
     "6. Enumerate fixtures for every negation, alternative, exception, and ordering branch stated in a specification.",
     "7. Treat any harness option, fixture switch, shim behavior, or injected capability not driven through its production path as a receipt for a missing falsifier: add that falsifier or remove the unused control.",
     "8. Pair every `compile_fail` doctest with a positive twin whose imports and bindings are byte-identical.",
@@ -5840,6 +5840,66 @@ fn real_skill_markdown() -> String {
     fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/pce/SKILL.md"))
         .expect("repository skill")
 }
+
+const PURPOSE_ROUTE_LIFETIME: &str = "After `pce dispatch` appends issuance, the invocation returns; the binary-owned continuation retains the purpose child with no runtime or spend ceiling, and the orchestrator observes the issuance with `pce dispatch check-in` like any other issuance until the continuation appends the existing observed completion or `pce dispatch reconcile` durably closes a dead incomplete issuance.";
+const COMMON_ROLE_ROUTE_LIFETIME: &str = "For every logged purpose or role route, `pce dispatch` returns after issuance while the binary-owned continuation retains the child without a runtime or spend ceiling and appends exactly one observed completion when the child exits.";
+const MANUAL_DISPATCH_LIFECYCLE_BLOCK: &str = "pce dispatch check-in --file <ABSOLUTE_LOG_PATH>\npce dispatch reconcile --file <ABSOLUTE_LOG_PATH> --issuance <ISSUANCE_SEQUENCE> --node <NODE>";
+
+const AUTHORED_REPLACEMENTS: [(&str, &str); 14] = [
+    ("Both children are awaited.", PURPOSE_ROUTE_LIFETIME),
+    (
+        "These binary-owned issuance records are the sole source for round counts and dispatch refs.",
+        "These binary-owned issuance records are the sole source for dispatch refs and for the exact `(node, role)` issuance ordinal; validated-production completion facts alone derive defect rounds, while completion and required-artifact facts derive consecutive non-production.",
+    ),
+    (
+        "Round series are keyed by `(node, role)`, so Phase 1 `(m1-s1, milestone-planner)` cannot collide with Phase 3 `(m1-s1, step-plan-writer)`.",
+        "Issuance-ordinal and defect-round series are keyed by `(node, role)`, while consecutive non-production is keyed by `(node, role, required artifact)`, so Phase 1 `(m1-s1, milestone-planner)` cannot collide with Phase 3 `(m1-s1, step-plan-writer)`.",
+    ),
+    (
+        "3. Iterate cold planner and critic to `APPROVE`, cap 3 with stuck detection. Derive rounds from dispatch records and blocker history from review artifacts. Every revision is a fresh invocation naming the artifact and `review-<n>.md`; never resume a prior Codex session. On approval, digest the approved `milestones.json` bytes and append:",
+        "3. Iterate cold planner and critic to `APPROVE`, capped at 3 validated-production defect rounds per exact `(node, role)`, with stuck detection. Productless attempts charge no defect round and are governed by the separate consecutive-non-production hold. Derive blocker history from review artifacts, whose `review-<n>.md` index is the exact `(node, role)` issuance ordinal and advances for every issuance. Every revision is a fresh invocation; never resume a prior Codex session. On approval, digest the approved `milestones.json` bytes and append:",
+    ),
+    (
+        "Iterate cold invocations to approval, cap 3 with stuck detection; review artifacts supply blocker history. On approval, digest that milestone's `steps.json` bytes and append:",
+        "Iterate cold invocations to approval, capped at 3 validated-production defect rounds per exact `(node, role)`, with stuck detection; productless attempts charge no defect round and are governed by the separate consecutive-non-production hold, while review artifacts indexed by the issuance ordinal supply blocker history. On approval, digest that milestone's `steps.json` bytes and append:",
+    ),
+    (
+        "   Iterate fresh invocations to `APPROVE`, cap 3 with review-artifact stuck detection. At approval, digest the approved bytes and append:",
+        "   Iterate fresh invocations to `APPROVE`, capped at 3 validated-production defect rounds per exact `(node, role)`, with review-artifact stuck detection; productless attempts charge no defect round and are governed by the separate consecutive-non-production hold. At approval, digest the approved bytes and append:",
+    ),
+    (
+        "Use the next exact `(node, falsification-critic)` dispatch count and the existing review-artifact naming rule for the verdict; add no counter or artifact family.",
+        "Use the next exact `(node, falsification-critic)` issuance ordinal only for the existing review-artifact naming rule; defect-round accounting and consecutive-non-production admission remain separate derivations, and no new counter or artifact family is added.",
+    ),
+    (
+        "   Derive the falsification round solely from prior `(node, falsification-critic)` dispatch records. The first falsification is round `1`; at most `3` falsification dispatches may occur for the step. Continue only while the next checked dispatch count is at most `3`. If two consecutive schema-valid verdict artifacts have substantially identical blocking issue sets under the existing comparison rule, append/open the existing escalation and stop before another executor dispatch, push, or PR. If dispatch count `3` is blocking, escalate and stop before another executor dispatch, push, or PR. Successive gate verdicts remain `review-<n>.json`/`review-<n>.md`, indexed by prior `(node, falsification-critic)` dispatch records; add no counter or artifact family.",
+        "   Derive the falsification review-artifact issuance ordinal from every prior exact `(node, falsification-critic)` issuance. Ordinal `1` names the first `review-1.json`/`review-1.md`, and every issuance advances that ordinal even when it produces nothing. Separately, the defect-round cap for `(node, falsification-critic)` is `3` validated-production rounds; a productless attempt charges no defect round and remains governed by the `(node, role, required artifact)` consecutive-non-production hold. Continue only while the derived defect-round count is below `3` and no non-production hold prevents admission. If two consecutive schema-valid verdict artifacts have substantially identical blocking issue sets under the existing comparison rule, append/open the existing escalation and stop before another executor dispatch, push, or PR. If validated-production defect round `3` is blocking, escalate and stop before another executor dispatch, push, or PR. Successive gate verdicts remain `review-<n>.json`/`review-<n>.md`, indexed only by the exact `(node, falsification-critic)` issuance ordinal; add no counter or artifact family.",
+    ),
+    (
+        "Cap 3 with review-artifact stuck detection.",
+        "Cap PR/fix work at 3 validated-production defect rounds per exact `(node, role)`, with review-artifact stuck detection; productless attempts charge no defect round and remain subject to the separate consecutive-non-production hold.",
+    ),
+    (
+        "Immediately before each verdict-producing gate issuance, read the accepted source event log and count only prior `dispatch` records whose node and role byte-match the route. Checked successor `n = prior_count + 1` names both distinct review artifacts in the already designated review directory: `review-<n>.json` is the absolute parent `-o` and gate-tail path, while `review-<n>.md` retains explanatory history. After the gate returns, read the exact JSON path and validate it again against the installed verdict schema. Missing, unreadable, malformed, schema-invalid, or unknown verdict data stops loudly. `APPROVE` proceeds, `REVISE` uses the phase-appropriate planning anchor for plan causes or `step-executor` for execution fixes at the exact current ref, and `BLOCK` escalates. The same prior `(node, role)` dispatch count determines the artifact index and round cap; no separate counter exists.",
+        "Immediately before each verdict-producing gate issuance, read the accepted source event log and derive the exact `(node, role)` issuance ordinal by counting every prior `dispatch` record whose node and role byte-match the route. Checked successor `n = prior_issuance_ordinal + 1` names both distinct review artifacts in the already designated review directory: `review-<n>.json` is the absolute parent `-o` and gate-tail path, while `review-<n>.md` retains explanatory history. The issuance ordinal advances for every issuance and determines artifact naming only. After the gate finishes, read the exact JSON path and validate it again against the installed verdict schema. Missing, unreadable, malformed, schema-invalid, or unknown verdict data stops loudly, but a missing product alone neither closes a dispatch nor licenses a completion or accounting claim. `APPROVE` proceeds, `REVISE` uses the phase-appropriate planning anchor for plan causes or `step-executor` for execution fixes at the exact current ref, and `BLOCK` escalates. Separately, defect-round caps count only validated-production rounds keyed by `(node, role)`, so productless attempts are exempt. Consecutive non-production is keyed by `(node, role, required artifact)`; after two consecutive non-producing completions its typed hold is the separate stop, and the hold closes only through `retry`, `re-plan`, or `abandon`.",
+    ),
+    (
+        "- Plan/critic and PR/fix caps are 3. Derive rounds from dispatch records. On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the cap. Derive the comparison from review artifacts; do not update separate loop state.",
+        "- Plan/critic and PR/fix caps are 3 validated-production defect rounds per exact `(node, role)`. Derive defect rounds only from validated production; productless attempts are exempt and are stopped separately by the `(node, role, required artifact)` consecutive-non-production hold. On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the defect cap. Derive the comparison from review artifacts; do not update separate loop state.",
+    ),
+    (
+        "A detached dispatch uses the anchored `pce dispatch codex` route and must be paired with a registered wait. `pce dispatch` has no detached option and awaits its child. If a recorded dispatch has no required product, append a `delta` at the canonical node to reconcile that fact; never invent a result.",
+        BINARY_OWNED_ORCHESTRATION_PARAGRAPH,
+    ),
+    (
+        "5. For detached work, use the anchored `pce dispatch codex` route, pair the dispatch with a registered wait, and reconcile a missing required product with a `delta` at the canonical node instead of inventing a result.",
+        COLD_RULES[4],
+    ),
+    (
+        "- Unexpected merge conflict dispatches Codex to rebase and resolve from the named base and head refs, supplying `git diff <base>...<head>`; classify the dispatch as REVISE-class for cap accounting, and escalate if unresolved.",
+        "- Unexpected merge conflict dispatches Codex to rebase and resolve from the named base and head refs, supplying `git diff <base>...<head>`; a validated produced REVISE result charges the applicable defect-round cap, while a productless attempt charges no defect round and remains subject to the separate consecutive-non-production hold; escalate if unresolved.",
+    ),
+];
 
 fn cold_rules_section(markdown: &str) -> String {
     let start = markdown
@@ -6101,6 +6161,183 @@ fn purpose_routes_use_complete_logging_envelope() {
 }
 
 #[test]
+fn purpose_routes_return_to_binary_owned_continuation() {
+    let markdown = real_skill_markdown();
+    assert_eq!(markdown.matches(PURPOSE_ROUTE_LIFETIME).count(), 1);
+    assert_eq!(markdown.matches("Both children are awaited.").count(), 0);
+    let reverted = markdown.replacen(PURPOSE_ROUTE_LIFETIME, "Both children are awaited.", 1);
+    assert_eq!(reverted.matches(PURPOSE_ROUTE_LIFETIME).count(), 0);
+    assert_eq!(reverted.matches("Both children are awaited.").count(), 1);
+}
+
+#[test]
+fn manual_dispatch_lifecycle_surface_is_exact() {
+    let markdown = real_skill_markdown();
+    let heading = "the following manual append, read, status, readiness, and contract surfaces in their exact argument order:";
+    let start = markdown.find(heading).expect("manual surface heading");
+    let fenced = &markdown[start..];
+    let block_start = fenced.find("```text\n").expect("manual text fence") + 8;
+    let block_remainder = &fenced[block_start..];
+    let block_end = block_remainder.find("\n```").expect("manual fence end");
+    let block = &block_remainder[..block_end];
+    for command in MANUAL_DISPATCH_LIFECYCLE_BLOCK.lines() {
+        assert_eq!(block.lines().filter(|line| *line == command).count(), 1);
+        assert!(!command.starts_with("<!-- pce-dispatch-route"));
+    }
+    assert_eq!(block.matches(MANUAL_DISPATCH_LIFECYCLE_BLOCK).count(), 1);
+    assert_eq!(EXPECTED_ANCHORED_ROUTE_COUNT, 12);
+}
+
+#[test]
+fn three_dispatch_derivations_are_exact() {
+    let markdown = real_skill_markdown();
+    let sentences = [
+        "These binary-owned issuance records are the sole source for dispatch refs and for the exact `(node, role)` issuance ordinal; validated-production completion facts alone derive defect rounds, while completion and required-artifact facts derive consecutive non-production.",
+        "Issuance-ordinal and defect-round series are keyed by `(node, role)`, while consecutive non-production is keyed by `(node, role, required artifact)`, so Phase 1 `(m1-s1, milestone-planner)` cannot collide with Phase 3 `(m1-s1, step-plan-writer)`.",
+        COMMON_ROLE_ROUTE_LIFETIME,
+        "The issuance ordinal advances for every issuance and determines artifact naming only.",
+        "Separately, defect-round caps count only validated-production rounds keyed by `(node, role)`, so productless attempts are exempt.",
+        "Consecutive non-production is keyed by `(node, role, required artifact)`; after two consecutive non-producing completions its typed hold is the separate stop, and the hold closes only through `retry`, `re-plan`, or `abandon`.",
+        "Use the next exact `(node, falsification-critic)` issuance ordinal only for the existing review-artifact naming rule; defect-round accounting and consecutive-non-production admission remain separate derivations, and no new counter or artifact family is added.",
+        "- Unexpected merge conflict dispatches Codex to rebase and resolve from the named base and head refs, supplying `git diff <base>...<head>`; a validated produced REVISE result charges the applicable defect-round cap, while a productless attempt charges no defect round and remains subject to the separate consecutive-non-production hold; escalate if unresolved.",
+        "Immediately before each verdict-producing gate issuance, read the accepted source event log and derive the exact `(node, role)` issuance ordinal by counting every prior `dispatch` record whose node and role byte-match the route.",
+        "After the gate finishes, read the exact JSON path and validate it again against the installed verdict schema.",
+    ];
+    for sentence in sentences {
+        assert_eq!(markdown.matches(sentence).count(), 1, "{sentence}");
+    }
+    for (_, cap_line) in &AUTHORED_REPLACEMENTS[3..6] {
+        assert_eq!(markdown.matches(cap_line).count(), 1, "{cap_line}");
+    }
+    let review_cap = AUTHORED_REPLACEMENTS[8].1;
+    assert_eq!(markdown.matches(review_cap).count(), 1, "{review_cap}");
+
+    for (old, new) in [AUTHORED_REPLACEMENTS[6], AUTHORED_REPLACEMENTS[13]] {
+        let reverted = markdown.replacen(new, old, 1);
+        assert_eq!(reverted.matches(new).count(), 0);
+        assert_eq!(reverted.matches(old).count(), 1);
+    }
+}
+
+#[test]
+fn binary_owned_check_in_reconcile_contract_is_exact() {
+    let markdown = real_skill_markdown();
+    assert_eq!(
+        markdown
+            .matches(BINARY_OWNED_ORCHESTRATION_PARAGRAPH)
+            .count(),
+        1
+    );
+    for clause in [
+        "reports running, finished, or dead state and required-artifact production",
+        "without signaling or killing a child, appending a completion, reconciling, or closing anything",
+        "Only `pce dispatch reconcile` durably closes a dead incomplete issuance",
+        "it refuses wherever a real completion could still land",
+        "A missing product alone neither closes a dispatch nor licenses a completion or accounting claim",
+        "all-accounted requires the issuance-ordered unaccounted ledger to be empty",
+    ] {
+        assert_eq!(
+            BINARY_OWNED_ORCHESTRATION_PARAGRAPH.matches(clause).count(),
+            1
+        );
+        assert_eq!(markdown.matches(clause).count(), 1);
+        let mutated = markdown.replacen(clause, "inequivalent contract", 1);
+        assert_eq!(mutated.matches(clause).count(), 0);
+    }
+}
+
+#[test]
+fn binary_owned_orchestration_clause_cardinalities_are_exact() {
+    let markdown = real_skill_markdown();
+    let section = cold_rules_section(&markdown);
+    for (arm, clause) in [
+        ("issuance-return", "appends issuance and returns"),
+        (
+            "continuation-retention",
+            "appends issuance and returns while the binary-owned continuation retains the child",
+        ),
+        (
+            "bounded-check-in",
+            "observes every issuance with bounded `pce dispatch check-in`",
+        ),
+        (
+            "read-only-check-in",
+            "without signaling or killing a child, appending a completion, reconciling, or closing anything",
+        ),
+        (
+            "reconcile-only",
+            "Only `pce dispatch reconcile` durably closes a dead incomplete issuance",
+        ),
+        (
+            "reconcile-refusal",
+            "it refuses wherever a real completion could still land",
+        ),
+        (
+            "accounting-ledger",
+            "all-accounted requires the issuance-ordered unaccounted ledger to be empty",
+        ),
+        (
+            "no-delta-result",
+            "never append a `delta` or invent a result",
+        ),
+        (
+            "rule5-check-in",
+            "use bounded `pce dispatch check-in` for read-only observation",
+        ),
+        (
+            "rule5-reconcile",
+            "if an incomplete issuance is dead, close it only with `pce dispatch reconcile`",
+        ),
+        (
+            "rule5-missing-product",
+            "A missing required product alone neither closes nor accounts for the dispatch",
+        ),
+    ] {
+        assert_eq!(section.matches(clause).count(), 1, "section/{arm}");
+        assert_eq!(markdown.matches(clause).count(), 1, "document/{arm}");
+        let mutated = markdown.replacen(clause, "inequivalent contract", 1);
+        assert_eq!(mutated.matches(clause).count(), 0, "mutation/{arm}");
+    }
+}
+
+#[test]
+fn authored_replacement_manifest_is_exact() {
+    let markdown = real_skill_markdown();
+    for (old, new) in AUTHORED_REPLACEMENTS {
+        assert_eq!(markdown.matches(old).count(), 0, "old payload: {old}");
+        assert_eq!(markdown.matches(new).count(), 1, "new payload: {new}");
+        let reverted = markdown.replacen(new, old, 1);
+        assert_eq!(reverted.matches(new).count(), 0, "reverted new: {new}");
+        assert_eq!(reverted.matches(old).count(), 1, "restored old: {old}");
+    }
+    assert_eq!(markdown.matches(MANUAL_DISPATCH_LIFECYCLE_BLOCK).count(), 1);
+    assert_eq!(markdown.matches(COMMON_ROLE_ROUTE_LIFETIME).count(), 1);
+    for removed in [MANUAL_DISPATCH_LIFECYCLE_BLOCK, COMMON_ROLE_ROUTE_LIFETIME] {
+        let mutated = markdown.replacen(removed, "", 1);
+        assert_eq!(mutated.matches(removed).count(), 0);
+    }
+}
+
+#[test]
+fn stale_dispatch_orchestration_claims_are_absent() {
+    let markdown = real_skill_markdown();
+    for stale in [
+        "Both children are awaited.",
+        "must be paired with a registered wait",
+        "awaits its child",
+        "append a `delta` at the canonical node to reconcile that fact",
+        "reconcile a missing required product with a `delta` at the canonical node instead of inventing a result",
+        "The same prior `(node, role)` dispatch count determines the artifact index and round cap; no separate counter exists.",
+        "Derive rounds from dispatch records.",
+        "Use the next exact `(node, falsification-critic)` dispatch count and the existing review-artifact naming rule for the verdict; add no counter or artifact family.",
+        "classify the dispatch as REVISE-class for cap accounting",
+        "After the gate returns,",
+    ] {
+        assert_eq!(markdown.matches(stale).count(), 0, "{stale}");
+    }
+}
+
+#[test]
 fn diagnostics_boundedness_contract_is_exact() {
     let markdown = real_skill_markdown();
     for (arm, clause) in [
@@ -6146,7 +6383,9 @@ fn diagnostics_boundedness_environmental_limit_is_disclosed() {
 #[test]
 fn detached_dispatch_rule_is_exact() {
     let markdown = real_skill_markdown();
-    let paragraphs = markdown.matches(DETACHED_PARAGRAPH).count();
+    let paragraphs = markdown
+        .matches(BINARY_OWNED_ORCHESTRATION_PARAGRAPH)
+        .count();
     let invented = markdown.matches("--detached").count();
     assert_eq!(
         invented, 0,
@@ -6154,34 +6393,41 @@ fn detached_dispatch_rule_is_exact() {
     );
     let section = cold_rules_section(&markdown);
     for (arm, clause) in [
-        ("route-name", "`pce dispatch codex`"),
-        ("registered-wait", "must be paired with a registered wait"),
-        ("awaited-child", "awaits its child"),
+        ("issuance-return", "appends issuance and returns"),
+        (
+            "continuation-retains-child",
+            "appends issuance and returns while the binary-owned continuation retains the child",
+        ),
+        (
+            "bounded-check-in",
+            "observes every issuance with bounded `pce dispatch check-in`",
+        ),
+        (
+            "read-only-observation",
+            "without signaling or killing a child, appending a completion, reconciling, or closing anything",
+        ),
         (
             "reconciliation",
-            "append a `delta` at the canonical node to reconcile that fact",
+            "Only `pce dispatch reconcile` durably closes a dead incomplete issuance",
         ),
-        ("no-invented-result", "never invent a result"),
+        (
+            "reconcile-refusal",
+            "it refuses wherever a real completion could still land",
+        ),
+        (
+            "all-accounted",
+            "all-accounted requires the issuance-ordered unaccounted ledger to be empty",
+        ),
     ] {
         let current = section.matches(clause).count();
-        assert!(
-            current >= 1,
-            "detached_dispatch_rule_is_exact/{arm}: expected >=1, current {current}"
-        );
-    }
-    for (arm, clause) in [
-        ("registered-wait", "must be paired with a registered wait"),
-        ("awaited-child", "awaits its child"),
-        (
-            "reconciliation",
-            "append a `delta` at the canonical node to reconcile that fact",
-        ),
-        ("no-invented-result", "never invent a result"),
-    ] {
-        let current = markdown.matches(clause).count();
         assert_eq!(
             current, 1,
-            "detached_dispatch_rule_is_exact/{arm}: expected 1, current {current}"
+            "detached_dispatch_rule_is_exact/{arm}/section: expected 1, current {current}"
+        );
+        let document_current = markdown.matches(clause).count();
+        assert_eq!(
+            document_current, 1,
+            "detached_dispatch_rule_is_exact/{arm}/document: expected 1, current {document_current}"
         );
     }
     assert_eq!(
@@ -6199,7 +6445,9 @@ fn cold_orchestrator_rules_are_exact() {
         "cold_orchestrator_rules_are_exact/heading: expected 1, current {headings}"
     );
     let section = cold_rules_section(&markdown);
-    let detached = section.matches(DETACHED_PARAGRAPH).count();
+    let detached = section
+        .matches(BINARY_OWNED_ORCHESTRATION_PARAGRAPH)
+        .count();
     assert_eq!(
         detached, 1,
         "cold_orchestrator_rules_are_exact/detached-paragraph: expected 1, current {detached}"
@@ -6220,12 +6468,12 @@ fn cold_orchestrator_rules_are_exact() {
             "`gh api repos/{owner}/{repo} --jq .squash_merge_commit_message`",
         ),
         (
-            "rule5-wait",
-            "pair the dispatch with a registered wait, and ",
+            "rule5-check-in",
+            "use bounded `pce dispatch check-in` for read-only observation",
         ),
         (
-            "rule5-reconciliation",
-            "reconcile a missing required product with a `delta` at the canonical node instead of inventing a result",
+            "rule5-dead-reconciliation",
+            "if an incomplete issuance is dead, close it only with `pce dispatch reconcile`",
         ),
         ("negation", "negation, "),
         ("alternative", "alternative, "),
@@ -6254,7 +6502,9 @@ fn cold_orchestrator_rules_are_exact() {
         offsets, ascending,
         "cold_orchestrator_rules_are_exact/order: measured offsets {offsets:?}"
     );
-    let detached_offset = section.find(DETACHED_PARAGRAPH).expect("detached offset");
+    let detached_offset = section
+        .find(BINARY_OWNED_ORCHESTRATION_PARAGRAPH)
+        .expect("detached offset");
     assert!(
         detached_offset < offsets[0],
         "cold_orchestrator_rules_are_exact/order: detached {detached_offset}, first rule {}",
@@ -6298,13 +6548,13 @@ fn cold_rule_branch_controls() {
             "`merge_method`",
         ),
         (
-            "rule5-wait",
-            "pair the dispatch with a registered wait, and ",
+            "rule5-check-in",
+            "use bounded `pce dispatch check-in` for read-only observation",
             "",
         ),
         (
-            "rule5-reconciliation",
-            "reconcile a missing required product with a `delta` at the canonical node instead of inventing a result",
+            "rule5-dead-reconciliation",
+            "if an incomplete issuance is dead, close it only with `pce dispatch reconcile`",
             "proceed",
         ),
         ("negation", "negation, ", ""),
