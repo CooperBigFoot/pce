@@ -462,6 +462,10 @@ pub enum WriteKind {
     CriterionExecution,
     /// A blocking criterion accepted as a visible change of course.
     CriterionAdded,
+    /// An atomic hold opened after repeated binary-owned non-production.
+    NonProductionHoldOpen,
+    /// A typed resolution of a non-production hold.
+    NonProductionHoldClose,
 }
 
 impl WriteKind {
@@ -483,6 +487,8 @@ impl WriteKind {
             "planning-artifact-approved" => Ok(Self::PlanningArtifactApproved),
             "criterion-execution" => Ok(Self::CriterionExecution),
             "criterion-added" => Ok(Self::CriterionAdded),
+            "non-production-hold-open" => Ok(Self::NonProductionHoldOpen),
+            "non-production-hold-close" => Ok(Self::NonProductionHoldClose),
             _ => Err(EventLogError::UnknownWriteKind {
                 kind: raw.to_owned(),
             }),
@@ -502,6 +508,8 @@ impl WriteKind {
             Self::PlanningArtifactApproved => "planning-artifact-approved",
             Self::CriterionExecution => "criterion-execution",
             Self::CriterionAdded => "criterion-added",
+            Self::NonProductionHoldOpen => "non-production-hold-open",
+            Self::NonProductionHoldClose => "non-production-hold-close",
         }
     }
 
@@ -517,7 +525,9 @@ impl WriteKind {
             | Self::Delta
             | Self::EscalationOpen
             | Self::EscalationClose
-            | Self::CriterionAdded => EvidencePolicy::Absent,
+            | Self::CriterionAdded
+            | Self::NonProductionHoldOpen
+            | Self::NonProductionHoldClose => EvidencePolicy::Absent,
         }
     }
 }
@@ -708,14 +718,36 @@ pub enum ArtifactProduction {
     NotProduced,
 }
 
+/// Whether the binary observed the required artifact as a regular file at child exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RequiredArtifactPresence {
+    Present,
+    Absent,
+}
+
 /// The complete payload for `dispatch-completion`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DispatchCompletionPayload {
+    /// Current observed-child measurements including the child-exit-time presence fact.
+    ObservedChildWithArtifactPresence(ObservedDispatchCompletionWithArtifactPresencePayload),
     /// Measurements observed by the owning continuation after reaping its child.
     ObservedChild(ObservedDispatchCompletionPayload),
     /// Durable closure after both recorded process identities were observed dead.
     ReconciledDead(ReconciledDeadDispatchCompletionPayload),
+}
+
+/// The current observed-child completion payload with binary-owned artifact presence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedDispatchCompletionWithArtifactPresencePayload {
+    pub issuance_sequence: Sequence,
+    pub duration_ms: DispatchDuration,
+    pub usage: DispatchTokenUsage,
+    pub exit_status: DispatchExitStatus,
+    pub artifact_outcome: ArtifactOutcome,
+    pub required_artifact_presence: RequiredArtifactPresence,
 }
 
 /// The legacy, byte-stable observed-child completion payload.
@@ -748,6 +780,7 @@ pub enum ReconciledDispatchOutcome {
 /// A borrowed completion outcome without field-presence inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchCompletionOutcomeRef<'a> {
+    ObservedChildWithArtifactPresence(&'a ObservedDispatchCompletionWithArtifactPresencePayload),
     ObservedChild(&'a ObservedDispatchCompletionPayload),
     ReconciledDead(&'a ReconciledDeadDispatchCompletionPayload),
 }
@@ -755,6 +788,7 @@ pub enum DispatchCompletionOutcomeRef<'a> {
 impl DispatchCompletionPayload {
     pub const fn issuance_sequence(&self) -> Sequence {
         match self {
+            Self::ObservedChildWithArtifactPresence(payload) => payload.issuance_sequence,
             Self::ObservedChild(payload) => payload.issuance_sequence,
             Self::ReconciledDead(payload) => payload.issuance_sequence,
         }
@@ -762,6 +796,9 @@ impl DispatchCompletionPayload {
 
     pub const fn outcome(&self) -> DispatchCompletionOutcomeRef<'_> {
         match self {
+            Self::ObservedChildWithArtifactPresence(payload) => {
+                DispatchCompletionOutcomeRef::ObservedChildWithArtifactPresence(payload)
+            }
             Self::ObservedChild(payload) => DispatchCompletionOutcomeRef::ObservedChild(payload),
             Self::ReconciledDead(payload) => DispatchCompletionOutcomeRef::ReconciledDead(payload),
         }
@@ -794,6 +831,37 @@ pub struct EscalationClosePayload {
     pub key: EscalationKey,
     /// The recorded resolution.
     pub resolution: String,
+}
+
+/// Exact key for a binary-owned consecutive non-production series.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NonProductionKey {
+    pub node: NodeId,
+    pub role: DispatchRole,
+    pub required_artifact_path: crate::dispatch_process_identity::AbsoluteRequiredArtifactPath,
+}
+
+/// Closed typed resolution set for non-production holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NonProductionHoldResolution {
+    Retry,
+    RePlan,
+    Abandon,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NonProductionHoldOpenPayload {
+    pub key: NonProductionKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NonProductionHoldClosePayload {
+    pub key: NonProductionKey,
+    pub resolution: NonProductionHoldResolution,
 }
 
 /// The complete payload for `key-finding`.
@@ -1104,6 +1172,8 @@ pub enum KnownPayload {
     CriterionExecution(CriterionExecutionPayload),
     /// A `criterion-added` payload.
     CriterionAdded(CriterionAddedPayload),
+    NonProductionHoldOpen(NonProductionHoldOpenPayload),
+    NonProductionHoldClose(NonProductionHoldClosePayload),
 }
 
 impl KnownPayload {
@@ -1121,6 +1191,8 @@ impl KnownPayload {
             Self::PlanningArtifactApproved(_) => WriteKind::PlanningArtifactApproved,
             Self::CriterionExecution(_) => WriteKind::CriterionExecution,
             Self::CriterionAdded(_) => WriteKind::CriterionAdded,
+            Self::NonProductionHoldOpen(_) => WriteKind::NonProductionHoldOpen,
+            Self::NonProductionHoldClose(_) => WriteKind::NonProductionHoldClose,
         }
     }
 }
@@ -1143,6 +1215,8 @@ impl Serialize for KnownPayload {
             Self::PlanningArtifactApproved(payload) => payload.serialize(serializer),
             Self::CriterionExecution(payload) => payload.serialize(serializer),
             Self::CriterionAdded(payload) => payload.serialize(serializer),
+            Self::NonProductionHoldOpen(payload) => payload.serialize(serializer),
+            Self::NonProductionHoldClose(payload) => payload.serialize(serializer),
         }
     }
 }
@@ -1553,6 +1627,12 @@ fn decode_known_payload(
         WriteKind::CriterionAdded => {
             serde_json::from_value(payload).map(KnownPayload::CriterionAdded)
         }
+        WriteKind::NonProductionHoldOpen => {
+            serde_json::from_value(payload).map(KnownPayload::NonProductionHoldOpen)
+        }
+        WriteKind::NonProductionHoldClose => {
+            serde_json::from_value(payload).map(KnownPayload::NonProductionHoldClose)
+        }
     };
     decoded.map_err(|source| EventLogError::InvalidKnownPayload {
         kind,
@@ -1719,9 +1799,10 @@ mod tests {
         EventLogTail, EventLogTailError, EventLogTailLine, EventRecord, EventRecordFilter,
         EventTimestamp, Evidence, EvidencePresence, FinishedResult, InputTokens, KnownPayload,
         NodeId, ObservedCriterionResult, OutputTokens, ReadKind, ReadPayload,
-        RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence, Sha256Digest,
-        UnpaidCriterionReason, UnparsedPayload, WriteKind, append_event, event_record_matches,
-        parse_event_line, serialize_event_line, successor_sequence, validate_evidence_policy,
+        RepositoryContractPayload, RepositoryName, RepositoryRoot, RequiredArtifactPresence,
+        Sequence, Sha256Digest, UnpaidCriterionReason, UnparsedPayload, WriteKind, append_event,
+        event_record_matches, parse_event_line, serialize_event_line, successor_sequence,
+        validate_evidence_policy,
     };
     use crate::run_state::VersionPolicy;
     use crate::tracked_contract::{GateKind, parse_tracked_repository_contract};
@@ -1771,7 +1852,7 @@ mod tests {
         ));
     }
 
-    const KNOWN_LINES: [&str; 9] = [
+    const KNOWN_LINES: [&str; 11] = [
         r#"{"sequence":1,"timestamp":"2026-07-27T12:34:56.000Z","kind":"dispatch","node":"m1-s1","payload":{"role":"step-executor","ref":"ca9788ded3daec9b9e9fd7679caa24e7c64a8193","evidence":"git rev-parse HEAD"}}"#,
         r#"{"sequence":2,"timestamp":"2026-07-27T12:34:57.000Z","kind":"delta","node":"m1-s1","payload":{"message":"Require exact UTC timestamp spelling in the event envelope."}}"#,
         r#"{"sequence":3,"timestamp":"2026-07-27T12:34:58.000Z","kind":"escalation-open","node":"m1-s1","payload":{"key":"timestamp-precision","question":"Which RFC 3339 sub-second precision is canonical?"}}"#,
@@ -1781,6 +1862,8 @@ mod tests {
         r#"{"sequence":7,"timestamp":"2026-07-27T12:35:02.000Z","kind":"planning-artifact-approved","node":"m1-s1","payload":{"path":"planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","evidence":"shasum -a 256 planning/2026-07-27-event-log-and-derived-run-state/milestone-1/steps.json"}}"#,
         r#"{"sequence":8,"timestamp":"2026-07-27T12:35:03.000Z","kind":"criterion-execution","node":"m3-s2","payload":{"criterion":{"name":"Runnable criterion","input":"Run the finished command.","observation":"It exits 0."},"finished_result":"main@0123456789abcdef","outcome":{"status":"passed","observed_result":"The command exited 0."},"evidence":"git rev-parse HEAD\n./finished-command"}}"#,
         r#"{"sequence":9,"timestamp":"2026-07-27T12:35:04.000Z","kind":"criterion-added","node":"m2-s1","payload":{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}}"#,
+        r#"{"sequence":9,"timestamp":"2026-08-09T12:00:09.000Z","kind":"non-production-hold-open","node":"m4-s1","payload":{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"}}}"#,
+        r#"{"sequence":10,"timestamp":"2026-08-09T12:00:10.000Z","kind":"non-production-hold-close","node":"m4-s1","payload":{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"},"resolution":"retry"}}"#,
     ];
     const UNKNOWN_LINE: &str = r#"{"sequence":9,"timestamp":"2026-07-27T12:35:04.000Z","kind":"future-kind","node":"m1-s1","payload":{"nested":{"answer":42},"items":[true,null,"kept"]}}"#;
     const CURRENT_REPOSITORY_CONTRACT_LINE: &str = r#"{"sequence":10,"timestamp":"2026-07-27T12:35:05.000Z","kind":"repository-contract","node":"m2-s1","payload":{"repository":"pce","repo_root":"/workspace/pce","stated":{"format":"cargo fmt --check","lint":"cargo clippy --workspace --all-targets","typecheck":"cargo check --workspace --all-targets","test":"cargo test --workspace","build":"cargo build --release","version_policy":"NONE","branch_convention":"pce/<vision-slug>/m<m>-s<s> from pce/<vision-slug>/milestone-<m>","pull_request_convention":"step head targets the matching milestone integration branch"},"observations":{"format":0,"lint":0,"typecheck":0,"test":0,"build":0},"workflow_map":{"ci.yml":"cargo test --workspace","docs.yml":null},"appendable":{"environment_hazards":["stdin is reserved for event payload input"],"gate_orderings":["format before lint before typecheck before test before build"],"lockfile_rules":["Cargo.lock must remain synchronized with Cargo.toml"]},"evidence":"cargo fmt --check\ncargo clippy --workspace --all-targets\ncargo check --workspace --all-targets\ncargo test --workspace\ncargo build --release"}}"#;
@@ -2244,6 +2327,8 @@ mod tests {
             WriteKind::PlanningArtifactApproved,
             WriteKind::CriterionExecution,
             WriteKind::CriterionAdded,
+            WriteKind::NonProductionHoldOpen,
+            WriteKind::NonProductionHoldClose,
         ];
 
         for (index, (line, expected_kind)) in
@@ -2268,6 +2353,14 @@ mod tests {
                     )
                     | (7, ReadPayload::Known(KnownPayload::CriterionExecution(_)))
                     | (8, ReadPayload::Known(KnownPayload::CriterionAdded(_)))
+                    | (
+                        9,
+                        ReadPayload::Known(KnownPayload::NonProductionHoldOpen(_))
+                    )
+                    | (
+                        10,
+                        ReadPayload::Known(KnownPayload::NonProductionHoldClose(_))
+                    )
             );
             assert!(expected_payload);
             assert_eq!(serialize_event_line(&record)?, line);
@@ -2297,6 +2390,14 @@ mod tests {
                     )
                     | (7, EventBodyRef::Known(KnownPayload::CriterionExecution(_)))
                     | (8, EventBodyRef::Known(KnownPayload::CriterionAdded(_)))
+                    | (
+                        9,
+                        EventBodyRef::Known(KnownPayload::NonProductionHoldOpen(_))
+                    )
+                    | (
+                        10,
+                        EventBodyRef::Known(KnownPayload::NonProductionHoldClose(_))
+                    )
             );
             assert!(expected_payload);
         }
@@ -2372,6 +2473,8 @@ mod tests {
             WriteKind::EscalationOpen,
             WriteKind::EscalationClose,
             WriteKind::CriterionAdded,
+            WriteKind::NonProductionHoldOpen,
+            WriteKind::NonProductionHoldClose,
         ];
 
         for kind in required {
@@ -2680,7 +2783,7 @@ mod tests {
             assert!(!encoded.contains('\n'));
             serialized.push(encoded);
         }
-        assert_eq!(serialized.join("\n").lines().count(), 9);
+        assert_eq!(serialized.join("\n").lines().count(), 11);
         Ok(())
     }
 
@@ -2747,6 +2850,28 @@ mod tests {
         assert_eq!(payload.duration_ms.get(), 200);
         assert_eq!(payload.artifact_outcome, ArtifactOutcome::NotValidated);
 
+        for (presence, expected) in [
+            ("present", RequiredArtifactPresence::Present),
+            ("absent", RequiredArtifactPresence::Absent),
+        ] {
+            let current = literal.replace(
+                "\"artifact_outcome\":\"not-validated\"",
+                &format!("\"artifact_outcome\":\"not-validated\",\"required_artifact_presence\":\"{presence}\""),
+            );
+            let current_record = parse_event_line(&current).expect("parse current completion");
+            assert_eq!(
+                serialize_event_line(&current_record).expect("serialize current"),
+                current
+            );
+            let EventBodyRef::Known(KnownPayload::DispatchCompletion(
+                DispatchCompletionPayload::ObservedChildWithArtifactPresence(payload),
+            )) = current_record.body_ref()
+            else {
+                panic!("current completion variant")
+            };
+            assert_eq!(payload.required_artifact_presence, expected);
+        }
+
         let reconciled = r#"{"sequence":2,"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m1-s2","payload":{"issuance_sequence":1,"outcome":"reconciled-dead","artifact_production":"not-produced"}}"#;
         let reconciled_record = parse_event_line(reconciled).expect("parse reconciled completion");
         assert_eq!(
@@ -2799,6 +2924,63 @@ mod tests {
                 kind: WriteKind::DispatchCompletion
             })
         ));
+    }
+
+    #[test]
+    fn non_production_hold_payloads_are_closed_strict_and_exact() {
+        let open = r#"{"sequence":9,"timestamp":"2026-08-09T12:00:09.000Z","kind":"non-production-hold-open","node":"m4-s1","payload":{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"}}}"#;
+        let close = r#"{"sequence":10,"timestamp":"2026-08-09T12:00:10.000Z","kind":"non-production-hold-close","node":"m4-s1","payload":{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"},"resolution":"retry"}}"#;
+        for literal in [open, close] {
+            let record = parse_event_line(literal).expect("parse typed hold");
+            assert_eq!(
+                serialize_event_line(&record).expect("serialize typed hold"),
+                literal
+            );
+        }
+        for resolution in ["retry", "re-plan", "abandon"] {
+            let payload = format!(
+                r#"{{"key":{{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"}},"resolution":"{resolution}"}}"#
+            );
+            let mut calls = 0;
+            append_event::<std::io::Error, _>(
+                WriteKind::NonProductionHoldClose,
+                UnparsedPayload::new(payload),
+                EventLogTail::Empty,
+                NodeId::parse("m4-s1").expect("node"),
+                append_time(),
+                |_| {
+                    calls += 1;
+                    Ok(())
+                },
+            )
+            .expect("valid close");
+            assert_eq!(calls, 1);
+        }
+        for payload in [
+            r#"{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"},"resolution":"replan"}"#,
+            r#"{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"},"resolution":"unpaid"}"#,
+            r#"{"key":{"node":"m4-s1","role":"step-plan-writer"},"resolution":"retry"}"#,
+            r#"{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"relative"},"resolution":"retry"}"#,
+            r#"{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md","extra":true},"resolution":"retry"}"#,
+        ] {
+            let mut called = false;
+            let result = append_event::<std::io::Error, _>(
+                WriteKind::NonProductionHoldClose,
+                UnparsedPayload::new(payload),
+                EventLogTail::Empty,
+                NodeId::parse("m4-s1").expect("node"),
+                append_time(),
+                |_| {
+                    called = true;
+                    Ok(())
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(AppendError::InvalidSubmittedPayload { .. })
+            ));
+            assert!(!called);
+        }
     }
 
     #[test]

@@ -10,7 +10,10 @@
     "steps",
     "dispatches",
     "dispatch_accounting",
+    "issuance_ordinals",
     "rounds",
+    "non_production_streaks",
+    "non_production_holds",
     "holds",
     "provenance",
     "resume",
@@ -44,11 +47,23 @@
     "dispatch_accounting": {
       "$ref": "#/$defs/dispatchAccounting"
     },
+    "issuance_ordinals": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/issuanceOrdinalSeries" }
+    },
     "rounds": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/roundSeries"
       }
+    },
+    "non_production_streaks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonProductionSeries" }
+    },
+    "non_production_holds": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonProductionHold" }
     },
     "holds": {
       "type": "array",
@@ -536,6 +551,12 @@
       }
     },
     "observedDispatchCompletion": {
+      "oneOf": [
+        { "$ref": "#/$defs/legacyObservedDispatchCompletion" },
+        { "$ref": "#/$defs/currentObservedDispatchCompletion" }
+      ]
+    },
+    "legacyObservedDispatchCompletion": {
       "type": "object",
       "additionalProperties": false,
       "required": ["outcome", "sequence", "timestamp", "duration_ms", "usage", "exit_status", "artifact_outcome"],
@@ -547,6 +568,21 @@
         "usage": { "$ref": "#/$defs/dispatchUsage" },
         "exit_status": { "$ref": "#/$defs/dispatchExitStatus" },
         "artifact_outcome": { "enum": ["not-validated", "validated", "missing", "truncated", "schema-invalid", "schema-violating"] }
+      }
+    },
+    "currentObservedDispatchCompletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "sequence", "timestamp", "duration_ms", "usage", "exit_status", "artifact_outcome", "required_artifact_presence"],
+      "properties": {
+        "outcome": { "const": "observed-child" },
+        "sequence": { "$ref": "#/$defs/positiveInteger" },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "usage": { "$ref": "#/$defs/dispatchUsage" },
+        "exit_status": { "$ref": "#/$defs/dispatchExitStatus" },
+        "artifact_outcome": { "enum": ["not-validated", "validated", "missing", "truncated", "schema-invalid", "schema-violating"] },
+        "required_artifact_presence": { "enum": ["present", "absent"] }
       }
     },
     "reconciledDispatchCompletion": {
@@ -579,7 +615,6 @@
       "required": [
         "node",
         "role",
-        "classification",
         "count"
       ],
       "properties": {
@@ -589,18 +624,50 @@
         "role": {
           "$ref": "#/$defs/nonEmptyString"
         },
-        "classification": {
-          "type": "string",
-          "enum": [
-            "plan-producing",
-            "critique-producing",
-            "execution"
-          ]
-        },
         "count": {
           "$ref": "#/$defs/positiveInteger"
         }
       }
+    },
+    "issuanceOrdinalSeries": {
+      "type": "object", "additionalProperties": false,
+      "required": ["node", "role", "ordinal"],
+      "properties": {
+        "node": { "$ref": "#/$defs/nonEmptyString" },
+        "role": { "$ref": "#/$defs/bytePreservedString" },
+        "ordinal": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "nonProductionKey": {
+      "type": "object", "additionalProperties": false,
+      "required": ["node", "role", "required_artifact_path"],
+      "properties": {
+        "node": { "$ref": "#/$defs/nonEmptyString" },
+        "role": { "$ref": "#/$defs/bytePreservedString" },
+        "required_artifact_path": { "type": "string", "pattern": "^/" }
+      }
+    },
+    "nonProductionSeries": {
+      "type": "object", "additionalProperties": false,
+      "required": ["key", "consecutive"],
+      "properties": {
+        "key": { "$ref": "#/$defs/nonProductionKey" },
+        "consecutive": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "nonProductionHold": {
+      "type": "object", "additionalProperties": false,
+      "required": ["key", "status"],
+      "properties": {
+        "key": { "$ref": "#/$defs/nonProductionKey" },
+        "status": { "$ref": "#/$defs/nonProductionHoldStatus" }
+      }
+    },
+    "nonProductionHoldStatus": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["state", "sequence"], "properties": { "state": { "const": "open" }, "sequence": { "$ref": "#/$defs/positiveInteger" } } },
+        { "type": "object", "additionalProperties": false, "required": ["state", "sequence", "resolution"], "properties": { "state": { "const": "closed" }, "sequence": { "$ref": "#/$defs/positiveInteger" }, "resolution": { "enum": ["retry", "re-plan", "abandon"] } } }
+      ]
     },
     "hold": {
       "type": "object",

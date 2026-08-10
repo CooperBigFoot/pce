@@ -8,10 +8,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pce_core::{
-    AcceptanceCriteria, ArtifactOutcome, CachedInputTokens, CriterionExecutionOutcome,
-    DispatchExitStatus, DispatchTokenUsage, ExitCode, InputTokens, OutputTokens,
-    ReasoningOutputTokens, RecoveryLogPath, RunSnapshot, VisionSlug, derive_run_state,
-    parse_acceptance_criteria, parse_event_line,
+    AbsoluteRequiredArtifactPath, AcceptanceCriteria, ArtifactOutcome, CachedInputTokens,
+    CriterionExecutionOutcome, DispatchExitStatus, DispatchRequiredArtifactObservation,
+    DispatchTokenUsage, ExitCode, InputTokens, OutputTokens, ReasoningOutputTokens,
+    RecoveryLogPath, RunSnapshot, VisionSlug, derive_run_state,
+    derive_run_state_with_dispatch_artifacts, parse_acceptance_criteria, parse_event_line,
 };
 #[cfg(target_os = "macos")]
 use pce_core::{
@@ -183,6 +184,21 @@ fn bounded_output(command: &mut Command) -> Output {
 fn wait_for_check_in_path(path: &Path, failure: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !path.exists() {
+        assert!(Instant::now() < deadline, "{failure}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_check_in_non_empty_trimmed(path: &Path, failure: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(contents) = fs::read_to_string(path) {
+            let trimmed = contents.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_owned();
+            }
+        }
         assert!(Instant::now() < deadline, "{failure}");
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -386,15 +402,14 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
 
     let mut phase_3_parent = spawn_check_in_dispatch(&harness, &cwd, &log_path, &phase_3);
     let sidecar_3_path = sidecar_directory.join("3.json");
-    wait_for_check_in_path(&phase_3.pid_file, "timed out waiting for dispatch child");
+    let phase_3_pid = wait_for_check_in_non_empty_trimmed(
+        &phase_3.pid_file,
+        "timed out waiting for non-empty dispatch child PID",
+    );
     wait_for_check_in_path(&sidecar_3_path, "timed out waiting for dispatch sidecar");
     let (sidecar_3_bytes, identity_3) = read_check_in_identity(&sidecar_3_path);
     assert_eq!(
-        fs::read_to_string(&phase_3.pid_file)
-            .expect("read pid-3")
-            .trim()
-            .parse::<u32>()
-            .expect("parse pid-3"),
+        phase_3_pid.parse::<u32>().expect("parse pid-3"),
         identity_3.process_number().get()
     );
     stop_child_and_kill_dispatch_parent(&mut phase_3_parent, &identity_3);
@@ -402,15 +417,14 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
 
     let mut phase_4_parent = spawn_check_in_dispatch(&harness, &cwd, &log_path, &phase_4);
     let sidecar_4_path = sidecar_directory.join("4.json");
-    wait_for_check_in_path(&phase_4.pid_file, "timed out waiting for dispatch child");
+    let phase_4_pid = wait_for_check_in_non_empty_trimmed(
+        &phase_4.pid_file,
+        "timed out waiting for non-empty dispatch child PID",
+    );
     wait_for_check_in_path(&sidecar_4_path, "timed out waiting for dispatch sidecar");
     let (sidecar_4_bytes, identity_4) = read_check_in_identity(&sidecar_4_path);
     assert_eq!(
-        fs::read_to_string(&phase_4.pid_file)
-            .expect("read pid-4")
-            .trim()
-            .parse::<u32>()
-            .expect("parse pid-4"),
+        phase_4_pid.parse::<u32>().expect("parse pid-4"),
         identity_4.process_number().get()
     );
     assert_eq!(
@@ -420,15 +434,14 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
 
     let mut phase_5_parent = spawn_check_in_dispatch(&harness, &cwd, &log_path, &phase_5);
     let sidecar_5_path = sidecar_directory.join("5.json");
-    wait_for_check_in_path(&phase_5.pid_file, "timed out waiting for dispatch child");
+    let phase_5_pid = wait_for_check_in_non_empty_trimmed(
+        &phase_5.pid_file,
+        "timed out waiting for non-empty dispatch child PID",
+    );
     wait_for_check_in_path(&sidecar_5_path, "timed out waiting for dispatch sidecar");
     let (sidecar_5_bytes, identity_5) = read_check_in_identity(&sidecar_5_path);
     assert_eq!(
-        fs::read_to_string(&phase_5.pid_file)
-            .expect("read pid-5")
-            .trim()
-            .parse::<u32>()
-            .expect("parse pid-5"),
+        phase_5_pid.parse::<u32>().expect("parse pid-5"),
         identity_5.process_number().get()
     );
     stop_child_and_kill_dispatch_parent(&mut phase_5_parent, &identity_5);
@@ -1036,6 +1049,7 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
     let stdout_path = harness.path().join("codex.stdout");
     let stderr_path = harness.path().join("codex.stderr");
     let log_path = harness.path().join("events.jsonl");
+    let required_artifact_path = harness.path().join("lifecycle-artifact.json");
     fs::write(
         &stdout_path,
         b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":101,\"cached_input_tokens\":23,\"output_tokens\":17,\"reasoning_output_tokens\":5}}\n",
@@ -1073,11 +1087,7 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
         "--evidence".to_owned(),
         "binary lifecycle fixture".to_owned(),
         "--required-artifact".to_owned(),
-        harness
-            .path()
-            .join("lifecycle-artifact.json")
-            .display()
-            .to_string(),
+        required_artifact_path.display().to_string(),
         "--".to_owned(),
         "PROMPT".to_owned(),
     ];
@@ -1135,8 +1145,12 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
     }
     let vision =
         VisionSlug::parse("2026-07-31-the-binary-owns-every-dispatch").expect("parse vision");
-    let state = derive_run_state(
+    let state = derive_run_state_with_dispatch_artifacts(
         &records,
+        &[DispatchRequiredArtifactObservation::new(
+            pce_core::Sequence::parse(1).expect("issuance"),
+            AbsoluteRequiredArtifactPath::parse(required_artifact_path).expect("absolute path"),
+        )],
         &ratified_floor(),
         &vision,
         &RecoveryLogPath::new(log_path.display().to_string()),
@@ -1173,8 +1187,13 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
         }
     );
     assert_eq!(lifecycle.artifact_outcome(), ArtifactOutcome::NotValidated);
-    assert_eq!(state.rounds().len(), 1);
-    assert_eq!(state.rounds()[0].count().get(), 1);
+    assert_eq!(
+        lifecycle.required_artifact_presence(),
+        Some(pce_core::RequiredArtifactPresence::Absent)
+    );
+    assert_eq!(state.issuance_ordinals()[0].ordinal().get(), 1);
+    assert!(state.rounds().is_empty());
+    assert_eq!(state.non_production_streaks()[0].consecutive().get(), 1);
     let snapshot = serde_json::to_value(RunSnapshot::from(&state)).expect("serialize snapshot");
     assert_eq!(snapshot["schema_id"], "pce.run-snapshot");
     assert_eq!(snapshot["schema_version"], 1);
@@ -2245,14 +2264,12 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
             "/dispatches/1/ref",
             json!("2222222222222222222222222222222222222222"),
         ),
-        ("/rounds/0/node", json!("m1-s1")),
-        ("/rounds/0/role", json!("step-executor")),
-        ("/rounds/0/classification", json!("execution")),
-        ("/rounds/0/count", json!(1)),
-        ("/rounds/1/node", json!("m2-s1")),
-        ("/rounds/1/role", json!("step-plan-writer")),
-        ("/rounds/1/classification", json!("plan-producing")),
-        ("/rounds/1/count", json!(1)),
+        ("/issuance_ordinals/0/node", json!("m1-s1")),
+        ("/issuance_ordinals/0/role", json!("step-executor")),
+        ("/issuance_ordinals/0/ordinal", json!(1)),
+        ("/issuance_ordinals/1/node", json!("m2-s1")),
+        ("/issuance_ordinals/1/role", json!("step-plan-writer")),
+        ("/issuance_ordinals/1/ordinal", json!(1)),
         (
             "/provenance/0/path",
             json!("planning/2026-07-27-cold-resume/milestone-1/steps.json"),
@@ -2359,7 +2376,13 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
         at(&snapshot, "/dispatches").as_array().map(Vec::len),
         Some(2)
     );
-    assert_eq!(at(&snapshot, "/rounds").as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        at(&snapshot, "/issuance_ordinals").as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(at(&snapshot, "/rounds"), &json!([]));
+    assert_eq!(at(&snapshot, "/non_production_streaks"), &json!([]));
+    assert_eq!(at(&snapshot, "/non_production_holds"), &json!([]));
     assert_eq!(at(&snapshot, "/holds"), &json!([]));
     assert_eq!(
         at(&snapshot, "/provenance").as_array().map(Vec::len),
@@ -2836,7 +2859,10 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
     );
     assert_eq!(at(&snapshot, "/steps").as_array().map(Vec::len), Some(1));
     assert_eq!(at(&snapshot, "/dispatches"), &json!([]));
+    assert_eq!(at(&snapshot, "/issuance_ordinals"), &json!([]));
     assert_eq!(at(&snapshot, "/rounds"), &json!([]));
+    assert_eq!(at(&snapshot, "/non_production_streaks"), &json!([]));
+    assert_eq!(at(&snapshot, "/non_production_holds"), &json!([]));
     assert_eq!(at(&snapshot, "/holds"), &json!([]));
     assert_eq!(
         at(&snapshot, "/provenance").as_array().map(Vec::len),
@@ -3211,7 +3237,10 @@ fn authority_disagreement_reports_inconclusive() {
     );
     assert_eq!(at(&snapshot, "/steps").as_array().map(Vec::len), Some(1));
     assert_eq!(at(&snapshot, "/dispatches"), &json!([]));
+    assert_eq!(at(&snapshot, "/issuance_ordinals"), &json!([]));
     assert_eq!(at(&snapshot, "/rounds"), &json!([]));
+    assert_eq!(at(&snapshot, "/non_production_streaks"), &json!([]));
+    assert_eq!(at(&snapshot, "/non_production_holds"), &json!([]));
     assert_eq!(at(&snapshot, "/holds"), &json!([]));
     assert_eq!(at(&snapshot, "/provenance"), &json!([]));
     assert_eq!(at(&snapshot, "/recovery_digest/rounds/entries"), &json!([]));
@@ -3592,7 +3621,10 @@ fn merge_base_failure_reports_inconclusive() {
     );
     assert_eq!(at(&snapshot, "/steps").as_array().map(Vec::len), Some(1));
     assert_eq!(at(&snapshot, "/dispatches"), &json!([]));
+    assert_eq!(at(&snapshot, "/issuance_ordinals"), &json!([]));
     assert_eq!(at(&snapshot, "/rounds"), &json!([]));
+    assert_eq!(at(&snapshot, "/non_production_streaks"), &json!([]));
+    assert_eq!(at(&snapshot, "/non_production_holds"), &json!([]));
     assert_eq!(at(&snapshot, "/holds"), &json!([]));
     assert_eq!(at(&snapshot, "/provenance"), &json!([]));
     assert_eq!(at(&snapshot, "/recovery_digest/rounds/entries"), &json!([]));

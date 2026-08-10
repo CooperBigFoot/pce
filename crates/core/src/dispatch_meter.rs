@@ -185,10 +185,10 @@ pub fn meter_dispatches(
                     } => DispatchMeterCompletion::ObservedChild(ObservedDispatchMeterCompletion {
                         sequence: *sequence,
                         timestamp: *timestamp,
-                        duration_ms: payload.duration_ms,
-                        exit_status: payload.exit_status,
-                        artifact_outcome: payload.artifact_outcome,
-                        usage: project_usage(&payload.usage),
+                        duration_ms: payload.duration_ms(),
+                        exit_status: payload.exit_status(),
+                        artifact_outcome: payload.artifact_outcome(),
+                        usage: project_usage(payload.usage()),
                     }),
                     DispatchLedgerCompletion::ReconciledDead {
                         sequence,

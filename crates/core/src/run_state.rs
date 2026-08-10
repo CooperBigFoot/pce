@@ -1,4 +1,4 @@
-//! run_state : Ordered<EventRecord> × AcceptanceCriteria × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState × Ordered<CriterionExecutionObservation> ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String; compute_dispatchability : ArtifactProvenance × Ordered<DispatchCandidate> × OrderingEdge* × (CanonicalNode → MergeStatus) × (RepositoryName → VersionPolicy) → Ordered<DispatchabilityResult> ∪ RunStateError   (pure, deterministic)
+//! run_state : Ordered<EventRecord> × DispatchRequiredArtifactObservation* × AcceptanceCriteria × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState × Ordered<CriterionExecutionObservation> ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String; compute_dispatchability : ArtifactProvenance × Ordered<DispatchCandidate> × OrderingEdge* × (CanonicalNode → MergeStatus) × (RepositoryName → VersionPolicy) → Ordered<DispatchabilityResult> ∪ RunStateError   (pure, deterministic)
 //! This module performs no I/O.
 
 use chrono::SecondsFormat;
@@ -7,12 +7,14 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::dispatch_ledger::{DispatchAccounting, fold_dispatch_ledger};
+use crate::dispatch_process_identity::AbsoluteRequiredArtifactPath;
 use crate::event_log::DispatchCompletionOutcomeRef;
 use crate::event_log::{
     ArtifactOutcome, ArtifactPath, ArtifactProduction, ChangeOfCourse, CriterionExecutionOutcome,
     DispatchDuration, DispatchExitStatus, DispatchRef, DispatchRole, DispatchTokenUsage,
     EscalationKey, EventBodyRef, EventRecord, EventTimestamp, Evidence, FinishedResult,
-    KnownPayload, NodeId, ReconciledDispatchOutcome, RepositoryName, Sequence, Sha256Digest,
+    KnownPayload, NodeId, NonProductionHoldResolution, NonProductionKey, ReconciledDispatchOutcome,
+    RepositoryName, RequiredArtifactPresence, Sequence, Sha256Digest,
 };
 use crate::{AcceptanceCriteria, AcceptanceCriterion};
 
@@ -1123,6 +1125,7 @@ pub struct ObservedDispatchLifecycleObservation {
     usage: DispatchTokenUsage,
     exit_status: DispatchExitStatus,
     artifact_outcome: ArtifactOutcome,
+    required_artifact_presence: Option<RequiredArtifactPresence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1177,6 +1180,9 @@ impl ObservedDispatchLifecycleObservation {
     pub const fn artifact_outcome(&self) -> ArtifactOutcome {
         self.artifact_outcome
     }
+    pub const fn required_artifact_presence(&self) -> Option<RequiredArtifactPresence> {
+        self.required_artifact_presence
+    }
 }
 
 impl ReconciledDeadDispatchLifecycleObservation {
@@ -1210,50 +1216,168 @@ impl DispatchObservation {
     }
 }
 
-/// A checked count of dispatches in one exact `(node, role)` series.
+/// A checked issuance ordinal for one exact `(node, role)` series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RoundCount(u64);
+pub struct IssuanceOrdinal(u64);
 
-impl RoundCount {
-    /// Return the derived count.
+impl IssuanceOrdinal {
     pub const fn get(self) -> u64 {
         self.0
     }
 }
 
-/// One first-seen-ordered round series keyed by exact node and role.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RoundSeries {
+pub struct IssuanceOrdinalSeries {
     node: NodeId,
     role: DispatchRole,
-    classification: RoundClassification,
-    count: RoundCount,
+    ordinal: IssuanceOrdinal,
 }
 
-impl RoundSeries {
-    /// Return the exact node key.
+impl IssuanceOrdinalSeries {
     pub const fn node(&self) -> &NodeId {
         &self.node
     }
-
-    /// Return the exact role key.
     pub const fn role(&self) -> &DispatchRole {
         &self.role
     }
-
-    /// Return the pinned role classification.
-    pub const fn classification(&self) -> DispatchRoleClass {
-        match self.classification {
-            RoundClassification::PlanProducing => DispatchRoleClass::PlanProducing,
-            RoundClassification::CritiqueProducing => DispatchRoleClass::CritiqueProducing,
-            RoundClassification::Execution => DispatchRoleClass::Execution,
-        }
+    pub const fn ordinal(&self) -> IssuanceOrdinal {
+        self.ordinal
     }
+}
 
-    /// Return the checked dispatch count.
-    pub const fn count(&self) -> RoundCount {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefectRoundCount(u64);
+
+impl DefectRoundCount {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefectRoundSeries {
+    node: NodeId,
+    role: DispatchRole,
+    count: DefectRoundCount,
+}
+
+impl DefectRoundSeries {
+    pub const fn node(&self) -> &NodeId {
+        &self.node
+    }
+    pub const fn role(&self) -> &DispatchRole {
+        &self.role
+    }
+    pub const fn count(&self) -> DefectRoundCount {
         self.count
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsecutiveNonProduction(u64);
+impl ConsecutiveNonProduction {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonProductionSeries {
+    key: NonProductionKey,
+    consecutive: ConsecutiveNonProduction,
+}
+impl NonProductionSeries {
+    pub const fn key(&self) -> &NonProductionKey {
+        &self.key
+    }
+    pub const fn consecutive(&self) -> ConsecutiveNonProduction {
+        self.consecutive
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NonProductionHoldStatus {
+    Open {
+        sequence: Sequence,
+    },
+    Closed {
+        sequence: Sequence,
+        resolution: NonProductionHoldResolution,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonProductionHoldObservation {
+    key: NonProductionKey,
+    status: NonProductionHoldStatus,
+}
+impl NonProductionHoldObservation {
+    pub const fn key(&self) -> &NonProductionKey {
+        &self.key
+    }
+    pub const fn status(&self) -> &NonProductionHoldStatus {
+        &self.status
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchRequiredArtifactObservation {
+    issuance_sequence: Sequence,
+    required_artifact_path: AbsoluteRequiredArtifactPath,
+}
+impl DispatchRequiredArtifactObservation {
+    pub fn new(
+        issuance_sequence: Sequence,
+        required_artifact_path: AbsoluteRequiredArtifactPath,
+    ) -> Self {
+        Self {
+            issuance_sequence,
+            required_artifact_path,
+        }
+    }
+    pub const fn issuance_sequence(&self) -> Sequence {
+        self.issuance_sequence
+    }
+    pub const fn required_artifact_path(&self) -> &AbsoluteRequiredArtifactPath {
+        &self.required_artifact_path
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchOutcomeState {
+    issuance_ordinals: Vec<IssuanceOrdinalSeries>,
+    rounds: Vec<DefectRoundSeries>,
+    non_production_streaks: Vec<NonProductionSeries>,
+    non_production_holds: Vec<NonProductionHoldObservation>,
+}
+impl DispatchOutcomeState {
+    pub fn issuance_ordinals(&self) -> &[IssuanceOrdinalSeries] {
+        &self.issuance_ordinals
+    }
+    pub fn rounds(&self) -> &[DefectRoundSeries] {
+        &self.rounds
+    }
+    pub fn non_production_streaks(&self) -> &[NonProductionSeries] {
+        &self.non_production_streaks
+    }
+    pub fn non_production_holds(&self) -> &[NonProductionHoldObservation] {
+        &self.non_production_holds
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchAdmission {
+    Admit,
+    DefectRoundCapExhausted {
+        count: DefectRoundCount,
+    },
+    OpenNonProductionHold {
+        consecutive: ConsecutiveNonProduction,
+    },
+    NonProductionHoldOpen,
+    NonProductionResolutionClosesAdmission {
+        resolution: NonProductionHoldResolution,
+    },
 }
 
 /// Latest ordered escalation state for one exact key.
@@ -1660,7 +1784,10 @@ pub struct DerivedRunState {
     dispatch_lifecycles: Vec<DispatchLifecycleObservation>,
     dispatch_accounting: DispatchAccounting,
     criterion_executions: Vec<CriterionExecutionObservation>,
-    rounds: Vec<RoundSeries>,
+    issuance_ordinals: Vec<IssuanceOrdinalSeries>,
+    rounds: Vec<DefectRoundSeries>,
+    non_production_streaks: Vec<NonProductionSeries>,
+    non_production_holds: Vec<NonProductionHoldObservation>,
     holds: Vec<HoldObservation>,
     provenance: Vec<ArtifactProvenance>,
     resume: ResumeObservation,
@@ -1701,8 +1828,17 @@ impl DerivedRunState {
     }
 
     /// Return first-seen-ordered exact `(node, role)` round series.
-    pub fn rounds(&self) -> &[RoundSeries] {
+    pub fn issuance_ordinals(&self) -> &[IssuanceOrdinalSeries] {
+        &self.issuance_ordinals
+    }
+    pub fn rounds(&self) -> &[DefectRoundSeries] {
         &self.rounds
+    }
+    pub fn non_production_streaks(&self) -> &[NonProductionSeries] {
+        &self.non_production_streaks
+    }
+    pub fn non_production_holds(&self) -> &[NonProductionHoldObservation] {
+        &self.non_production_holds
     }
 
     /// Return first-seen-ordered escalation keys and their latest status.
@@ -1735,7 +1871,10 @@ pub struct RunSnapshot<'a> {
     steps: Vec<StepSnapshot<'a>>,
     dispatches: Vec<DispatchSnapshot<'a>>,
     dispatch_accounting: DispatchAccountingSnapshot,
-    rounds: Vec<RoundSeriesSnapshot<'a>>,
+    issuance_ordinals: Vec<IssuanceOrdinalSeriesSnapshot<'a>>,
+    rounds: Vec<DefectRoundSeriesSnapshot<'a>>,
+    non_production_streaks: Vec<NonProductionSeriesSnapshot<'a>>,
+    non_production_holds: Vec<NonProductionHoldSnapshot<'a>>,
     holds: Vec<HoldSnapshot<'a>>,
     provenance: Vec<ProvenanceSnapshot<'a>>,
     resume: ResumeSnapshot<'a>,
@@ -1771,10 +1910,25 @@ impl<'a> From<&'a DerivedRunState> for RunSnapshot<'a> {
                 .map(|dispatch| DispatchSnapshot::new(dispatch, state.dispatch_lifecycles()))
                 .collect(),
             dispatch_accounting: DispatchAccountingSnapshot::from(state.dispatch_accounting()),
+            issuance_ordinals: state
+                .issuance_ordinals()
+                .iter()
+                .map(IssuanceOrdinalSeriesSnapshot::from)
+                .collect(),
             rounds: state
                 .rounds()
                 .iter()
-                .map(RoundSeriesSnapshot::from)
+                .map(DefectRoundSeriesSnapshot::from)
+                .collect(),
+            non_production_streaks: state
+                .non_production_streaks()
+                .iter()
+                .map(NonProductionSeriesSnapshot::from)
+                .collect(),
+            non_production_holds: state
+                .non_production_holds()
+                .iter()
+                .map(NonProductionHoldSnapshot::from)
                 .collect(),
             holds: state.holds().iter().map(HoldSnapshot::from).collect(),
             provenance: state
@@ -2149,6 +2303,8 @@ pub enum DispatchCompletionSnapshot<'a> {
         usage: &'a DispatchTokenUsage,
         exit_status: DispatchExitStatus,
         artifact_outcome: ArtifactOutcome,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        required_artifact_presence: Option<RequiredArtifactPresence>,
     },
     ReconciledDead {
         sequence: u64,
@@ -2214,6 +2370,7 @@ impl<'a> DispatchSnapshot<'a> {
                         usage: &observed.usage,
                         exit_status: observed.exit_status,
                         artifact_outcome: observed.artifact_outcome,
+                        required_artifact_presence: observed.required_artifact_presence,
                     }
                 }
                 DispatchLifecycleObservation::ReconciledDead(reconciled) => {
@@ -2234,22 +2391,87 @@ impl<'a> DispatchSnapshot<'a> {
     }
 }
 
-/// Serialized exact round series.
 #[derive(Debug, Serialize)]
-pub struct RoundSeriesSnapshot<'a> {
+pub struct IssuanceOrdinalSeriesSnapshot<'a> {
     node: &'a str,
     role: &'a str,
-    classification: RoundClassification,
-    count: u64,
+    ordinal: u64,
 }
-
-impl<'a> From<&'a RoundSeries> for RoundSeriesSnapshot<'a> {
-    fn from(value: &'a RoundSeries) -> Self {
+impl<'a> From<&'a IssuanceOrdinalSeries> for IssuanceOrdinalSeriesSnapshot<'a> {
+    fn from(value: &'a IssuanceOrdinalSeries) -> Self {
         Self {
             node: value.node().as_str(),
             role: value.role().as_str(),
-            classification: value.classification,
+            ordinal: value.ordinal().get(),
+        }
+    }
+}
+
+/// Serialized exact defect-round series.
+#[derive(Debug, Serialize)]
+pub struct DefectRoundSeriesSnapshot<'a> {
+    node: &'a str,
+    role: &'a str,
+    count: u64,
+}
+
+impl<'a> From<&'a DefectRoundSeries> for DefectRoundSeriesSnapshot<'a> {
+    fn from(value: &'a DefectRoundSeries) -> Self {
+        Self {
+            node: value.node().as_str(),
+            role: value.role().as_str(),
             count: value.count().get(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct NonProductionSeriesSnapshot<'a> {
+    key: &'a NonProductionKey,
+    consecutive: u64,
+}
+impl<'a> From<&'a NonProductionSeries> for NonProductionSeriesSnapshot<'a> {
+    fn from(value: &'a NonProductionSeries) -> Self {
+        Self {
+            key: value.key(),
+            consecutive: value.consecutive().get(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct NonProductionHoldSnapshot<'a> {
+    key: &'a NonProductionKey,
+    status: NonProductionHoldStatusSnapshot,
+}
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum NonProductionHoldStatusSnapshot {
+    Open {
+        sequence: u64,
+    },
+    Closed {
+        sequence: u64,
+        resolution: NonProductionHoldResolution,
+    },
+}
+impl<'a> From<&'a NonProductionHoldObservation> for NonProductionHoldSnapshot<'a> {
+    fn from(value: &'a NonProductionHoldObservation) -> Self {
+        let status = match value.status() {
+            NonProductionHoldStatus::Open { sequence } => NonProductionHoldStatusSnapshot::Open {
+                sequence: sequence.get(),
+            },
+            NonProductionHoldStatus::Closed {
+                sequence,
+                resolution,
+            } => NonProductionHoldStatusSnapshot::Closed {
+                sequence: sequence.get(),
+                resolution: *resolution,
+            },
+        };
+        Self {
+            key: value.key(),
+            status,
         }
     }
 }
@@ -2622,9 +2844,15 @@ pub fn render_human_snapshot(snapshot: &RunSnapshot<'_>) -> String {
                 usage,
                 exit_status,
                 artifact_outcome,
+                required_artifact_presence,
                 ..
             }) => {
-                output.push_str(&format!(" completion=observed-child completion-sequence={} duration-ms={} exit-status={} artifact-outcome={} usage={}", sequence, duration_ms.get(), render_dispatch_exit(*exit_status), render_artifact_outcome(*artifact_outcome), render_dispatch_usage(usage)));
+                let presence = match required_artifact_presence {
+                    Some(RequiredArtifactPresence::Present) => "present",
+                    Some(RequiredArtifactPresence::Absent) => "absent",
+                    None => "unknown",
+                };
+                output.push_str(&format!(" completion=observed-child completion-sequence={} duration-ms={} exit-status={} artifact-outcome={} required-artifact-presence={} usage={}", sequence, duration_ms.get(), render_dispatch_exit(*exit_status), render_artifact_outcome(*artifact_outcome), presence, render_dispatch_usage(usage)));
             }
             Some(DispatchCompletionSnapshot::ReconciledDead {
                 sequence,
@@ -2641,20 +2869,52 @@ pub fn render_human_snapshot(snapshot: &RunSnapshot<'_>) -> String {
         output.push('\n');
     }
 
+    output.push_str(&format!(
+        "issuance-ordinals ({})\n",
+        snapshot.issuance_ordinals.len()
+    ));
+    for (index, series) in snapshot.issuance_ordinals.iter().enumerate() {
+        output.push_str(&format!(
+            "  issuance-ordinal {}: node={} role={} ordinal={}\n",
+            index + 1,
+            quoted(series.node),
+            quoted(series.role),
+            series.ordinal
+        ));
+    }
     output.push_str(&format!("rounds ({})\n", snapshot.rounds.len()));
     for (index, round) in snapshot.rounds.iter().enumerate() {
-        let classification = match round.classification {
-            RoundClassification::PlanProducing => "plan-producing",
-            RoundClassification::CritiqueProducing => "critique-producing",
-            RoundClassification::Execution => "execution",
-        };
         output.push_str(&format!(
-            "  round {}: node={} role={} classification={classification} count={}\n",
+            "  round {}: node={} role={} count={}\n",
             index + 1,
             quoted(round.node),
             quoted(round.role),
             round.count
         ));
+    }
+    output.push_str(&format!(
+        "non-production-streaks ({})\n",
+        snapshot.non_production_streaks.len()
+    ));
+    for (index, series) in snapshot.non_production_streaks.iter().enumerate() {
+        output.push_str(&format!(
+            "  non-production-streak {}: node={} role={} required-artifact={} consecutive={}\n",
+            index + 1,
+            quoted(series.key.node.as_str()),
+            quoted(series.key.role.as_str()),
+            quoted(series.key.required_artifact_path.as_str()),
+            series.consecutive
+        ));
+    }
+    output.push_str(&format!(
+        "non-production-holds ({})\n",
+        snapshot.non_production_holds.len()
+    ));
+    for (index, hold) in snapshot.non_production_holds.iter().enumerate() {
+        match hold.status {
+            NonProductionHoldStatusSnapshot::Open { sequence } => output.push_str(&format!("  non-production-hold {}: node={} role={} required-artifact={} state=open sequence={}\n", index + 1, quoted(hold.key.node.as_str()), quoted(hold.key.role.as_str()), quoted(hold.key.required_artifact_path.as_str()), sequence)),
+            NonProductionHoldStatusSnapshot::Closed { sequence, resolution } => output.push_str(&format!("  non-production-hold {}: node={} role={} required-artifact={} state=closed sequence={} resolution={}\n", index + 1, quoted(hold.key.node.as_str()), quoted(hold.key.role.as_str()), quoted(hold.key.required_artifact_path.as_str()), sequence, match resolution { NonProductionHoldResolution::Retry => "retry", NonProductionHoldResolution::RePlan => "re-plan", NonProductionHoldResolution::Abandon => "abandon" })),
+        }
     }
 
     output.push_str(&format!("holds ({})\n", snapshot.holds.len()));
@@ -3028,6 +3288,278 @@ struct RecoveryCandidate<T> {
     entry: T,
 }
 
+/// Derive only binary-owned dispatch outcome state.
+pub fn derive_dispatch_outcome_state(
+    records: &[EventRecord],
+    dispatch_artifacts: &[DispatchRequiredArtifactObservation],
+) -> Result<DispatchOutcomeState, RunStateError> {
+    let ledger =
+        fold_dispatch_ledger(records).map_err(|source| RunStateError::DispatchLedger { source })?;
+    for (index, observation) in dispatch_artifacts.iter().enumerate() {
+        if dispatch_artifacts[..index]
+            .iter()
+            .any(|candidate| candidate.issuance_sequence == observation.issuance_sequence)
+        {
+            return Err(RunStateError::DuplicateDispatchArtifactObservation {
+                issuance_sequence: observation.issuance_sequence,
+            });
+        }
+        if ledger.issuance(observation.issuance_sequence).is_none() {
+            return Err(RunStateError::DispatchArtifactObservationNamesNonDispatch {
+                issuance_sequence: observation.issuance_sequence,
+            });
+        }
+    }
+
+    let mut state = DispatchOutcomeState {
+        issuance_ordinals: Vec::new(),
+        rounds: Vec::new(),
+        non_production_streaks: Vec::new(),
+        non_production_holds: Vec::new(),
+    };
+    for record in records {
+        match record.body_ref() {
+            EventBodyRef::Known(KnownPayload::Dispatch(payload)) => {
+                increment_issuance_ordinal(
+                    &mut state.issuance_ordinals,
+                    record.node(),
+                    &payload.role,
+                )?;
+            }
+            EventBodyRef::Known(KnownPayload::DispatchCompletion(payload)) => {
+                let Some(entry) = ledger.issuance(payload.issuance_sequence()) else {
+                    continue;
+                };
+                let Some(observation) = dispatch_artifacts
+                    .iter()
+                    .find(|candidate| candidate.issuance_sequence == payload.issuance_sequence())
+                else {
+                    continue;
+                };
+                let key = NonProductionKey {
+                    node: entry.issuance().node().clone(),
+                    role: entry.issuance().role().clone(),
+                    required_artifact_path: observation.required_artifact_path.clone(),
+                };
+                match payload.outcome() {
+                    DispatchCompletionOutcomeRef::ObservedChildWithArtifactPresence(current) => {
+                        match (current.artifact_outcome, current.required_artifact_presence) {
+                            (ArtifactOutcome::Validated, _) => {
+                                increment_defect_round(&mut state.rounds, &key.node, &key.role)?;
+                                set_non_production(&mut state.non_production_streaks, key, 0)?;
+                            }
+                            (ArtifactOutcome::NotValidated, RequiredArtifactPresence::Present) => {
+                                set_non_production(&mut state.non_production_streaks, key, 0)?;
+                            }
+                            (ArtifactOutcome::NotValidated, RequiredArtifactPresence::Absent)
+                            | (
+                                ArtifactOutcome::Missing
+                                | ArtifactOutcome::Truncated
+                                | ArtifactOutcome::SchemaInvalid
+                                | ArtifactOutcome::SchemaViolating,
+                                _,
+                            ) => {
+                                increment_non_production(&mut state.non_production_streaks, key)?;
+                            }
+                        }
+                    }
+                    DispatchCompletionOutcomeRef::ObservedChild(_) => {}
+                    DispatchCompletionOutcomeRef::ReconciledDead(reconciled) => {
+                        match reconciled.artifact_production {
+                            ArtifactProduction::Produced => {
+                                set_non_production(&mut state.non_production_streaks, key, 0)?
+                            }
+                            ArtifactProduction::NotProduced => {
+                                increment_non_production(&mut state.non_production_streaks, key)?
+                            }
+                        }
+                    }
+                }
+            }
+            EventBodyRef::Known(KnownPayload::NonProductionHoldOpen(payload)) => {
+                let status = NonProductionHoldStatus::Open {
+                    sequence: record.sequence(),
+                };
+                if let Some(existing) = state
+                    .non_production_holds
+                    .iter_mut()
+                    .find(|candidate| candidate.key == payload.key)
+                {
+                    if matches!(
+                        existing.status,
+                        NonProductionHoldStatus::Closed {
+                            resolution: NonProductionHoldResolution::Retry,
+                            ..
+                        }
+                    ) {
+                        existing.status = status;
+                    }
+                } else {
+                    state
+                        .non_production_holds
+                        .push(NonProductionHoldObservation {
+                            key: payload.key.clone(),
+                            status,
+                        });
+                }
+            }
+            EventBodyRef::Known(KnownPayload::NonProductionHoldClose(payload)) => {
+                if let Some(existing) = state
+                    .non_production_holds
+                    .iter_mut()
+                    .find(|candidate| candidate.key == payload.key)
+                    && matches!(existing.status, NonProductionHoldStatus::Open { .. })
+                {
+                    existing.status = NonProductionHoldStatus::Closed {
+                        sequence: record.sequence(),
+                        resolution: payload.resolution,
+                    };
+                    if payload.resolution == NonProductionHoldResolution::Retry {
+                        set_non_production(
+                            &mut state.non_production_streaks,
+                            payload.key.clone(),
+                            0,
+                        )?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(state)
+}
+
+pub fn classify_dispatch_admission(
+    state: &DispatchOutcomeState,
+    key: &NonProductionKey,
+) -> DispatchAdmission {
+    let count = state
+        .rounds
+        .iter()
+        .find(|series| series.node == key.node && series.role == key.role)
+        .map(|series| series.count)
+        .unwrap_or(DefectRoundCount(0));
+    let consecutive = state
+        .non_production_streaks
+        .iter()
+        .find(|series| series.key == *key)
+        .map(|series| series.consecutive)
+        .unwrap_or(ConsecutiveNonProduction(0));
+    let status = state
+        .non_production_holds
+        .iter()
+        .find(|hold| hold.key == *key)
+        .map(|hold| &hold.status);
+    if count.get() >= 3 {
+        return DispatchAdmission::DefectRoundCapExhausted { count };
+    }
+    if matches!(status, Some(NonProductionHoldStatus::Open { .. })) {
+        return DispatchAdmission::NonProductionHoldOpen;
+    }
+    if let Some(NonProductionHoldStatus::Closed {
+        resolution:
+            resolution @ (NonProductionHoldResolution::RePlan | NonProductionHoldResolution::Abandon),
+        ..
+    }) = status
+    {
+        return DispatchAdmission::NonProductionResolutionClosesAdmission {
+            resolution: *resolution,
+        };
+    }
+    if consecutive.get() >= 2 {
+        return DispatchAdmission::OpenNonProductionHold { consecutive };
+    }
+    DispatchAdmission::Admit
+}
+
+fn increment_issuance_ordinal(
+    series: &mut Vec<IssuanceOrdinalSeries>,
+    node: &NodeId,
+    role: &DispatchRole,
+) -> Result<IssuanceOrdinal, RunStateError> {
+    if let Some(existing) = series
+        .iter_mut()
+        .find(|item| item.node == *node && item.role == *role)
+    {
+        existing.ordinal = IssuanceOrdinal(existing.ordinal.0.checked_add(1).ok_or_else(|| {
+            RunStateError::IssuanceOrdinalOverflow {
+                node: node.clone(),
+                role: role.clone(),
+            }
+        })?);
+        Ok(existing.ordinal)
+    } else {
+        let value = IssuanceOrdinal(1);
+        series.push(IssuanceOrdinalSeries {
+            node: node.clone(),
+            role: role.clone(),
+            ordinal: value,
+        });
+        Ok(value)
+    }
+}
+
+fn increment_defect_round(
+    series: &mut Vec<DefectRoundSeries>,
+    node: &NodeId,
+    role: &DispatchRole,
+) -> Result<(), RunStateError> {
+    if let Some(existing) = series
+        .iter_mut()
+        .find(|item| item.node == *node && item.role == *role)
+    {
+        existing.count = DefectRoundCount(existing.count.0.checked_add(1).ok_or_else(|| {
+            RunStateError::DefectRoundCountOverflow {
+                node: node.clone(),
+                role: role.clone(),
+            }
+        })?);
+    } else {
+        series.push(DefectRoundSeries {
+            node: node.clone(),
+            role: role.clone(),
+            count: DefectRoundCount(1),
+        });
+    }
+    Ok(())
+}
+
+fn set_non_production(
+    series: &mut Vec<NonProductionSeries>,
+    key: NonProductionKey,
+    value: u64,
+) -> Result<(), RunStateError> {
+    if let Some(existing) = series.iter_mut().find(|item| item.key == key) {
+        existing.consecutive = ConsecutiveNonProduction(value);
+    } else {
+        series.push(NonProductionSeries {
+            key,
+            consecutive: ConsecutiveNonProduction(value),
+        });
+    }
+    Ok(())
+}
+
+fn increment_non_production(
+    series: &mut Vec<NonProductionSeries>,
+    key: NonProductionKey,
+) -> Result<(), RunStateError> {
+    if let Some(existing) = series.iter_mut().find(|item| item.key == key) {
+        existing.consecutive =
+            ConsecutiveNonProduction(
+                existing.consecutive.0.checked_add(1).ok_or_else(|| {
+                    RunStateError::NonProductionStreakOverflow { key: key.clone() }
+                })?,
+            );
+    } else {
+        series.push(NonProductionSeries {
+            key,
+            consecutive: ConsecutiveNonProduction(1),
+        });
+    }
+    Ok(())
+}
+
 /// Fold ordered records and typed authority observations into deterministic run state.
 ///
 /// # Errors
@@ -3053,11 +3585,44 @@ pub fn derive_run_state(
     repositories: &[RepositoryObservation],
     authorities: &[StepAuthorityObservation],
 ) -> Result<DerivedRunState, RunStateError> {
+    derive_run_state_with_dispatch_artifacts(
+        records,
+        &[],
+        ratified_criteria,
+        vision,
+        recovery_log_path,
+        artifacts,
+        repositories,
+        authorities,
+    )
+}
+
+#[instrument(skip(
+    records,
+    dispatch_artifacts,
+    ratified_criteria,
+    vision,
+    recovery_log_path,
+    artifacts,
+    repositories,
+    authorities
+))]
+pub fn derive_run_state_with_dispatch_artifacts(
+    records: &[EventRecord],
+    dispatch_artifacts: &[DispatchRequiredArtifactObservation],
+    ratified_criteria: &AcceptanceCriteria,
+    vision: &VisionSlug,
+    recovery_log_path: &RecoveryLogPath,
+    artifacts: &[CurrentArtifactObservation],
+    repositories: &[RepositoryObservation],
+    authorities: &[StepAuthorityObservation],
+) -> Result<DerivedRunState, RunStateError> {
     validate_repository_inputs(repositories)?;
     validate_artifact_inputs(artifacts)?;
     validate_authority_duplicates(authorities)?;
     let dispatch_ledger =
         fold_dispatch_ledger(records).map_err(|source| RunStateError::DispatchLedger { source })?;
+    let outcome_state = derive_dispatch_outcome_state(records, dispatch_artifacts)?;
 
     let mut blocking_criteria = ratified_criteria
         .as_slice()
@@ -3072,7 +3637,6 @@ pub fn derive_run_state(
     let mut dispatches = Vec::<DispatchObservation>::new();
     let mut dispatch_lifecycles = Vec::<DispatchLifecycleObservation>::new();
     let mut criterion_executions = Vec::<CriterionExecutionObservation>::new();
-    let mut rounds = Vec::<RoundSeries>::new();
     let mut holds = Vec::<HoldObservation>::new();
     let mut approvals = Vec::<LatestApproval>::new();
     let mut recovery_rounds = Vec::<RecoveryCandidate<RecoveryRoundEntry>>::new();
@@ -3101,13 +3665,11 @@ pub fn derive_run_state(
                     dispatch_ref: payload.r#ref.clone(),
                 });
                 let classification = DispatchRoleClass::classify(&payload.role);
-                if let Some(round_classification) = classification.round_classification() {
-                    let round_number = increment_round_series(
-                        &mut rounds,
-                        record.node(),
-                        &payload.role,
-                        round_classification,
-                    )?;
+                let ordinal = records.iter()
+                    .filter(|candidate| candidate.sequence().get() <= record.sequence().get())
+                    .filter(|candidate| matches!(candidate.body_ref(), EventBodyRef::Known(KnownPayload::Dispatch(candidate_payload)) if candidate.node() == record.node() && candidate_payload.role == payload.role))
+                    .count() as u64;
+                if classification.round_classification().is_some() {
                     recovery_rounds.push(RecoveryCandidate {
                         sequence: record.sequence().get(),
                         node: record.node().clone(),
@@ -3116,16 +3678,16 @@ pub fn derive_run_state(
                             sequence: record.sequence().get(),
                             node: record.node().as_str().to_owned(),
                             role: payload.role.as_str().to_owned(),
-                            round_number: round_number.get(),
+                            round_number: ordinal,
                         },
                     });
-                    update_cycle_position(
-                        &mut visible_nodes,
-                        record.node(),
-                        &payload.role,
-                        record.sequence(),
-                    );
                 }
+                update_cycle_position(
+                    &mut visible_nodes,
+                    record.node(),
+                    &payload.role,
+                    record.sequence(),
+                );
                 recovery_facts.push(recovery_fact(record, "dispatch", payload.evidence.as_str()));
             }
             EventBodyRef::Known(KnownPayload::DispatchCompletion(payload)) => {
@@ -3172,6 +3734,22 @@ pub fn derive_run_state(
                     });
                 }
                 dispatch_lifecycles.push(match payload.outcome() {
+                    DispatchCompletionOutcomeRef::ObservedChildWithArtifactPresence(payload) => {
+                        DispatchLifecycleObservation::ObservedChild(
+                            ObservedDispatchLifecycleObservation {
+                                completion_sequence: record.sequence(),
+                                completion_timestamp: *record.timestamp(),
+                                issuance,
+                                duration: payload.duration_ms,
+                                usage: payload.usage.clone(),
+                                exit_status: payload.exit_status,
+                                artifact_outcome: payload.artifact_outcome,
+                                required_artifact_presence: Some(
+                                    payload.required_artifact_presence,
+                                ),
+                            },
+                        )
+                    }
                     DispatchCompletionOutcomeRef::ObservedChild(payload) => {
                         DispatchLifecycleObservation::ObservedChild(
                             ObservedDispatchLifecycleObservation {
@@ -3182,6 +3760,7 @@ pub fn derive_run_state(
                                 usage: payload.usage.clone(),
                                 exit_status: payload.exit_status,
                                 artifact_outcome: payload.artifact_outcome,
+                                required_artifact_presence: None,
                             },
                         )
                     }
@@ -3298,6 +3877,8 @@ pub fn derive_run_state(
                     },
                 });
             }
+            EventBodyRef::Known(KnownPayload::NonProductionHoldOpen(_))
+            | EventBodyRef::Known(KnownPayload::NonProductionHoldClose(_)) => {}
             EventBodyRef::Unknown { .. } => {}
         }
     }
@@ -3343,7 +3924,10 @@ pub fn derive_run_state(
         dispatch_lifecycles,
         dispatch_accounting,
         criterion_executions,
-        rounds,
+        issuance_ordinals: outcome_state.issuance_ordinals,
+        rounds: outcome_state.rounds,
+        non_production_streaks: outcome_state.non_production_streaks,
+        non_production_holds: outcome_state.non_production_holds,
         holds,
         provenance,
         resume,
@@ -3503,45 +4087,6 @@ fn update_cycle_position(
     if let Some(existing) = visible_nodes.iter_mut().find(|item| item.node == *node) {
         existing.cycle_position = position;
     }
-}
-
-fn increment_round_series(
-    rounds: &mut Vec<RoundSeries>,
-    node: &NodeId,
-    role: &DispatchRole,
-    classification: RoundClassification,
-) -> Result<RoundCount, RunStateError> {
-    if let Some(existing) = rounds
-        .iter_mut()
-        .find(|item| item.node == *node && item.role == *role)
-    {
-        existing.count = checked_round_increment(existing.count, node, role)?;
-        Ok(existing.count)
-    } else {
-        let count = RoundCount(1);
-        rounds.push(RoundSeries {
-            node: node.clone(),
-            role: role.clone(),
-            classification,
-            count,
-        });
-        Ok(count)
-    }
-}
-
-fn checked_round_increment(
-    count: RoundCount,
-    node: &NodeId,
-    role: &DispatchRole,
-) -> Result<RoundCount, RunStateError> {
-    count
-        .0
-        .checked_add(1)
-        .map(RoundCount)
-        .ok_or_else(|| RunStateError::RoundCountOverflow {
-            node: node.clone(),
-            role: role.clone(),
-        })
 }
 
 fn derive_provenance(
@@ -3729,9 +4274,21 @@ pub enum RunStateError {
         issuance_node: NodeId,
         completion_node: NodeId,
     },
-    /// Returned when an exact `(node, role)` dispatch count cannot be incremented.
-    #[error("round count overflow for node {node:?} and role {role:?}")]
-    RoundCountOverflow { node: NodeId, role: DispatchRole },
+    /// Returned when an exact `(node, role)` issuance ordinal cannot be incremented.
+    #[error("issuance ordinal overflow for node {node:?} and role {role:?}")]
+    IssuanceOrdinalOverflow { node: NodeId, role: DispatchRole },
+    /// Returned when an exact `(node, role)` defect count cannot be incremented.
+    #[error("defect round count overflow for node {node:?} and role {role:?}")]
+    DefectRoundCountOverflow { node: NodeId, role: DispatchRole },
+    /// Returned when an exact non-production streak cannot be incremented.
+    #[error("non-production streak overflow for key {key:?}")]
+    NonProductionStreakOverflow { key: NonProductionKey },
+    /// Returned when dispatch artifact observations repeat an issuance.
+    #[error("duplicate required-artifact observation for issuance {issuance_sequence:?}")]
+    DuplicateDispatchArtifactObservation { issuance_sequence: Sequence },
+    /// Returned when a dispatch artifact observation names a non-dispatch record.
+    #[error("required-artifact observation names non-dispatch issuance {issuance_sequence:?}")]
+    DispatchArtifactObservationNamesNonDispatch { issuance_sequence: Sequence },
     /// Returned when an escalation close has no earlier open for the exact key.
     #[error("escalation key {key:?} closes at sequence {sequence:?} before any open")]
     EscalationCloseBeforeOpen {
@@ -3793,28 +4350,34 @@ mod tests {
     use std::error::Error;
 
     use crate::acceptance_criteria::{AcceptanceCriteria, parse_acceptance_criteria};
+    use crate::dispatch_process_identity::AbsoluteRequiredArtifactPath;
     use crate::event_log::{
         ArtifactOutcome, ArtifactPath, CachedInputTokens, CriterionExecutionOutcome, DeltaPayload,
         DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload,
         DispatchRef, DispatchRole, DispatchTokenUsage, EscalationClosePayload, EscalationKey,
         EscalationOpenPayload, EventRecord, EventTimestamp, Evidence, ExitCode, InputTokens,
-        KnownPayload, NodeId, OutputTokens, PlanningArtifactApprovedPayload, ReasoningOutputTokens,
-        RepositoryName, Sequence, Sha256Digest, parse_event_line,
+        KnownPayload, NodeId, NonProductionHoldResolution, NonProductionKey, OutputTokens,
+        PlanningArtifactApprovedPayload, ReasoningOutputTokens, RepositoryName, Sequence,
+        Sha256Digest, parse_event_line,
     };
     use crate::run_state::{
         ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BlockingCriterionOrigin,
-        BranchState, CanonicalNode, CriterionExecutionObservation, CurrentArtifactObservation,
-        CurrentArtifactState, CyclePosition, DerivedRunState, DispatchCandidate, DispatchRoleClass,
+        BranchState, CanonicalNode, ConsecutiveNonProduction, CriterionExecutionObservation,
+        CurrentArtifactObservation, CurrentArtifactState, CyclePosition, DefectRoundCount,
+        DefectRoundSeries, DerivedRunState, DispatchAdmission, DispatchCandidate,
+        DispatchOutcomeState, DispatchRequiredArtifactObservation, DispatchRoleClass,
         DispatchabilityResult, ExactPullRequestIdentity, ExactPullRequestState,
         GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
         GitMergeObservation, HoldStatus, MergeStatus, MergeSubject, MilestoneMergeSubject,
-        MilestoneNode, OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
+        MilestoneNode, NonProductionHoldObservation, NonProductionHoldStatus, NonProductionSeries,
+        OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
         RepositoryBranchName, RepositoryFetchObservation, RepositoryObservation,
-        RepositoryObservationFailure, RepositoryObservationRef, ResumeObservation, RoundCount,
-        RunSnapshot, RunStateError, SquashCommitOid, StepAuthorityObservation, StepNode, TagName,
-        TagState, TagTarget, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
-        checked_round_increment, compute_dispatchability, derive_merge_status,
-        derive_milestone_merge_status, derive_run_state, recovery_command, render_human_snapshot,
+        RepositoryObservationFailure, RepositoryObservationRef, ResumeObservation, RunSnapshot,
+        RunStateError, SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState,
+        TagTarget, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
+        classify_dispatch_admission, compute_dispatchability, derive_dispatch_outcome_state,
+        derive_merge_status, derive_milestone_merge_status, derive_run_state, recovery_command,
+        render_human_snapshot,
     };
 
     const RUN_SNAPSHOT_SCHEMA: &str =
@@ -4088,8 +4651,286 @@ None.
             state.dispatch_lifecycles()[0].completion_sequence().get(),
             3
         );
-        assert_eq!(state.rounds().len(), 1);
-        assert_eq!(state.rounds()[0].count().get(), 1);
+        assert_eq!(state.issuance_ordinals()[0].ordinal().get(), 1);
+        assert!(state.rounds().is_empty());
+        assert!(state.non_production_streaks().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn dispatch_outcome_transition_table_is_exhaustive() -> Result<(), Box<dyn Error>> {
+        let outcomes = [
+            ("validated", "present", Some(1), Some(0)),
+            ("validated", "absent", Some(1), Some(0)),
+            ("not-validated", "present", None, Some(0)),
+            ("not-validated", "absent", None, Some(1)),
+            ("missing", "present", None, Some(1)),
+            ("missing", "absent", None, Some(1)),
+            ("truncated", "present", None, Some(1)),
+            ("truncated", "absent", None, Some(1)),
+            ("schema-invalid", "present", None, Some(1)),
+            ("schema-invalid", "absent", None, Some(1)),
+            ("schema-violating", "present", None, Some(1)),
+            ("schema-violating", "absent", None, Some(1)),
+        ];
+        for (outcome, presence, rounds, streak) in outcomes {
+            let records = vec![
+                parse_event_line(
+                    r#"{"sequence":1,"timestamp":"2026-08-09T12:00:00.000Z","kind":"dispatch","node":"m4-s1","payload":{"role":"step-plan-writer","ref":"abc","evidence":"fixture"}}"#,
+                )?,
+                parse_event_line(&format!(
+                    r#"{{"sequence":2,"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{{"issuance_sequence":1,"duration_ms":1,"usage":{{"availability":"absent","reason":"no-terminal-turn"}},"exit_status":{{"kind":"exited","code":0}},"artifact_outcome":"{outcome}","required_artifact_presence":"{presence}"}}}}"#
+                ))?,
+            ];
+            let observations = [DispatchRequiredArtifactObservation::new(
+                Sequence::parse(1)?,
+                AbsoluteRequiredArtifactPath::parse("/workspace/plan.md")?,
+            )];
+            let state = derive_dispatch_outcome_state(&records, &observations)?;
+            assert_eq!(
+                state.rounds().first().map(|series| series.count().get()),
+                rounds,
+                "{outcome}/{presence}"
+            );
+            assert_eq!(
+                state
+                    .non_production_streaks()
+                    .first()
+                    .map(|series| series.consecutive().get()),
+                streak,
+                "{outcome}/{presence}"
+            );
+        }
+        for (payload, streak) in [
+            (
+                r#"{"issuance_sequence":1,"duration_ms":1,"usage":{"availability":"absent","reason":"no-terminal-turn"},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated"}"#,
+                None,
+            ),
+            (
+                r#"{"issuance_sequence":1,"outcome":"reconciled-dead","artifact_production":"produced"}"#,
+                Some(0),
+            ),
+            (
+                r#"{"issuance_sequence":1,"outcome":"reconciled-dead","artifact_production":"not-produced"}"#,
+                Some(1),
+            ),
+        ] {
+            let records = vec![
+                dispatch(1, "m4-s1", "step-plan-writer", "abc")?,
+                parse_event_line(&format!(
+                    r#"{{"sequence":2,"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{payload}}}"#
+                ))?,
+            ];
+            let observations = [DispatchRequiredArtifactObservation::new(
+                Sequence::parse(1)?,
+                AbsoluteRequiredArtifactPath::parse("/workspace/plan.md")?,
+            )];
+            let state = derive_dispatch_outcome_state(&records, &observations)?;
+            assert!(state.rounds().is_empty());
+            assert_eq!(
+                state
+                    .non_production_streaks()
+                    .first()
+                    .map(|series| series.consecutive().get()),
+                streak
+            );
+        }
+        let unresolved = [dispatch(1, "m4-s1", "step-plan-writer", "abc")?];
+        let observations = [DispatchRequiredArtifactObservation::new(
+            Sequence::parse(1)?,
+            AbsoluteRequiredArtifactPath::parse("/workspace/plan.md")?,
+        )];
+        let state = derive_dispatch_outcome_state(&unresolved, &observations)?;
+        assert!(state.rounds().is_empty() && state.non_production_streaks().is_empty());
+        let current_without_observation = vec![
+            unresolved[0].clone(),
+            parse_event_line(
+                r#"{"sequence":2,"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{"issuance_sequence":1,"duration_ms":1,"usage":{"availability":"absent","reason":"no-terminal-turn"},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated","required_artifact_presence":"absent"}}"#,
+            )?,
+        ];
+        let state = derive_dispatch_outcome_state(&current_without_observation, &[])?;
+        assert!(state.rounds().is_empty() && state.non_production_streaks().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn dispatch_admission_classifier_covers_all_45_ordered_cells() -> Result<(), Box<dyn Error>> {
+        let key = NonProductionKey {
+            node: NodeId::parse("m4-s1")?,
+            role: DispatchRole::new("step-plan-writer"),
+            required_artifact_path: AbsoluteRequiredArtifactPath::parse("/workspace/plan.md")?,
+        };
+        for count in [2_u64, 3, 4] {
+            for streak in [1_u64, 2, 3] {
+                for status in [
+                    None,
+                    Some(NonProductionHoldStatus::Open {
+                        sequence: Sequence::parse(9)?,
+                    }),
+                    Some(NonProductionHoldStatus::Closed {
+                        sequence: Sequence::parse(10)?,
+                        resolution: NonProductionHoldResolution::Retry,
+                    }),
+                    Some(NonProductionHoldStatus::Closed {
+                        sequence: Sequence::parse(10)?,
+                        resolution: NonProductionHoldResolution::RePlan,
+                    }),
+                    Some(NonProductionHoldStatus::Closed {
+                        sequence: Sequence::parse(10)?,
+                        resolution: NonProductionHoldResolution::Abandon,
+                    }),
+                ] {
+                    let state = DispatchOutcomeState {
+                        issuance_ordinals: vec![],
+                        rounds: vec![DefectRoundSeries {
+                            node: key.node.clone(),
+                            role: key.role.clone(),
+                            count: DefectRoundCount(count),
+                        }],
+                        non_production_streaks: vec![NonProductionSeries {
+                            key: key.clone(),
+                            consecutive: ConsecutiveNonProduction(streak),
+                        }],
+                        non_production_holds: status
+                            .clone()
+                            .map(|status| NonProductionHoldObservation {
+                                key: key.clone(),
+                                status,
+                            })
+                            .into_iter()
+                            .collect(),
+                    };
+                    let admission = classify_dispatch_admission(&state, &key);
+                    if count >= 3 {
+                        assert_eq!(
+                            admission,
+                            DispatchAdmission::DefectRoundCapExhausted {
+                                count: DefectRoundCount(count)
+                            }
+                        );
+                    } else {
+                        match status {
+                            Some(NonProductionHoldStatus::Open { .. }) => {
+                                assert_eq!(admission, DispatchAdmission::NonProductionHoldOpen)
+                            }
+                            Some(NonProductionHoldStatus::Closed {
+                                resolution: NonProductionHoldResolution::RePlan,
+                                ..
+                            }) => assert_eq!(
+                                admission,
+                                DispatchAdmission::NonProductionResolutionClosesAdmission {
+                                    resolution: NonProductionHoldResolution::RePlan
+                                }
+                            ),
+                            Some(NonProductionHoldStatus::Closed {
+                                resolution: NonProductionHoldResolution::Abandon,
+                                ..
+                            }) => assert_eq!(
+                                admission,
+                                DispatchAdmission::NonProductionResolutionClosesAdmission {
+                                    resolution: NonProductionHoldResolution::Abandon
+                                }
+                            ),
+                            _ if streak >= 2 => assert_eq!(
+                                admission,
+                                DispatchAdmission::OpenNonProductionHold {
+                                    consecutive: ConsecutiveNonProduction(streak)
+                                }
+                            ),
+                            _ => assert_eq!(admission, DispatchAdmission::Admit),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn typed_retry_alone_resets_window_and_free_text_escalations_are_inert()
+    -> Result<(), Box<dyn Error>> {
+        let key = NonProductionKey {
+            node: NodeId::parse("m4-s1")?,
+            role: DispatchRole::new("step-plan-writer"),
+            required_artifact_path: AbsoluteRequiredArtifactPath::parse("/workspace/plan.md")?,
+        };
+        let dispatch_line = |sequence: u64| {
+            parse_event_line(&format!(
+                r#"{{"sequence":{sequence},"timestamp":"2026-08-09T12:00:00.000Z","kind":"dispatch","node":"m4-s1","payload":{{"role":"step-plan-writer","ref":"abc","evidence":"fixture"}}}}"#
+            ))
+        };
+        let completion_line = |sequence: u64, issuance: u64| {
+            parse_event_line(&format!(
+                r#"{{"sequence":{sequence},"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{{"issuance_sequence":{issuance},"duration_ms":1,"usage":{{"availability":"absent","reason":"no-terminal-turn"}},"exit_status":{{"kind":"exited","code":0}},"artifact_outcome":"not-validated","required_artifact_presence":"absent"}}}}"#
+            ))
+        };
+        let mut records = vec![
+            dispatch_line(1)?,
+            completion_line(2, 1)?,
+            dispatch_line(3)?,
+            completion_line(4, 3)?,
+        ];
+        let mut observations = vec![
+            DispatchRequiredArtifactObservation::new(
+                Sequence::parse(1)?,
+                key.required_artifact_path.clone(),
+            ),
+            DispatchRequiredArtifactObservation::new(
+                Sequence::parse(3)?,
+                key.required_artifact_path.clone(),
+            ),
+        ];
+        let state = derive_dispatch_outcome_state(&records, &observations)?;
+        assert_eq!(state.non_production_streaks()[0].consecutive().get(), 2);
+        assert_eq!(
+            classify_dispatch_admission(&state, &key),
+            DispatchAdmission::OpenNonProductionHold {
+                consecutive: ConsecutiveNonProduction(2)
+            }
+        );
+        records.push(parse_event_line(r#"{"sequence":5,"timestamp":"2026-08-09T12:00:05.000Z","kind":"non-production-hold-open","node":"m4-s1","payload":{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"}}}"#)?);
+        let state = derive_dispatch_outcome_state(&records, &observations)?;
+        assert_eq!(
+            classify_dispatch_admission(&state, &key),
+            DispatchAdmission::NonProductionHoldOpen
+        );
+        records.push(parse_event_line(r#"{"sequence":6,"timestamp":"2026-08-09T12:00:06.000Z","kind":"escalation-close","node":"m4-s1","payload":{"key":"review","resolution":"retry"}}"#)?);
+        let state = derive_dispatch_outcome_state(&records, &observations)?;
+        assert_eq!(
+            classify_dispatch_admission(&state, &key),
+            DispatchAdmission::NonProductionHoldOpen
+        );
+        records.push(parse_event_line(r#"{"sequence":7,"timestamp":"2026-08-09T12:00:07.000Z","kind":"non-production-hold-close","node":"m4-s1","payload":{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"},"resolution":"retry"}}"#)?);
+        let state = derive_dispatch_outcome_state(&records, &observations)?;
+        assert_eq!(state.non_production_streaks()[0].consecutive().get(), 0);
+        assert_eq!(
+            classify_dispatch_admission(&state, &key),
+            DispatchAdmission::Admit
+        );
+        records.extend([dispatch_line(8)?, completion_line(9, 8)?]);
+        observations.push(DispatchRequiredArtifactObservation::new(
+            Sequence::parse(8)?,
+            key.required_artifact_path.clone(),
+        ));
+        let state = derive_dispatch_outcome_state(&records, &observations)?;
+        assert_eq!(state.non_production_streaks()[0].consecutive().get(), 1);
+        assert_eq!(
+            classify_dispatch_admission(&state, &key),
+            DispatchAdmission::Admit
+        );
+        records.extend([dispatch_line(10)?, completion_line(11, 10)?]);
+        observations.push(DispatchRequiredArtifactObservation::new(
+            Sequence::parse(10)?,
+            key.required_artifact_path.clone(),
+        ));
+        let state = derive_dispatch_outcome_state(&records, &observations)?;
+        assert_eq!(state.non_production_streaks()[0].consecutive().get(), 2);
+        assert_eq!(
+            classify_dispatch_admission(&state, &key),
+            DispatchAdmission::OpenNonProductionHold {
+                consecutive: ConsecutiveNonProduction(2)
+            }
+        );
         Ok(())
     }
 
@@ -5125,7 +5966,7 @@ None.
     }
 
     #[test]
-    fn round_series_join_exact_node_and_role_and_preserve_all_dispatches()
+    fn issuance_ordinals_join_exact_node_and_role_and_preserve_all_dispatches()
     -> Result<(), Box<dyn Error>> {
         let records = vec![
             dispatch(1, "m2-s1", "step-planner", "plan-1")?,
@@ -5153,21 +5994,14 @@ None.
             state.dispatches()[7].dispatch_ref().as_str(),
             "misspelled-ref"
         );
-        assert_eq!(state.rounds().len(), 4);
-        assert_eq!(state.rounds()[0].node().as_str(), "m2-s1");
-        assert_eq!(state.rounds()[0].role().as_str(), "step-planner");
-        assert_eq!(state.rounds()[0].count().get(), 2);
-        assert_eq!(state.rounds()[1].role().as_str(), "step-critic");
-        assert_eq!(state.rounds()[1].count().get(), 3);
-        assert_eq!(state.rounds()[2].node().as_str(), "m2-s2");
-        assert_eq!(state.rounds()[2].count().get(), 1);
-        assert_eq!(state.rounds()[3].node().as_str(), "m2-s1");
-        assert_eq!(state.rounds()[3].role().as_str(), "falsification-critic");
-        assert_eq!(
-            state.rounds()[3].classification(),
-            DispatchRoleClass::CritiqueProducing
-        );
-        assert_eq!(state.rounds()[3].count().get(), 2);
+        assert_eq!(state.issuance_ordinals().len(), 6);
+        assert_eq!(state.issuance_ordinals()[0].ordinal().get(), 2);
+        assert_eq!(state.issuance_ordinals()[1].ordinal().get(), 3);
+        assert_eq!(state.issuance_ordinals()[2].ordinal().get(), 1);
+        assert_eq!(state.issuance_ordinals()[3].ordinal().get(), 1);
+        assert_eq!(state.issuance_ordinals()[4].ordinal().get(), 1);
+        assert_eq!(state.issuance_ordinals()[5].ordinal().get(), 2);
+        assert!(state.rounds().is_empty());
         Ok(())
     }
 
@@ -5200,19 +6034,9 @@ None.
         }
 
         let state = derive(&records, &[], &[], &[])?;
-        assert_eq!(state.rounds().len(), 9);
+        assert_eq!(state.issuance_ordinals().len(), 11);
+        assert!(state.rounds().is_empty());
         assert_eq!(state.dispatches().len(), 11);
-        Ok(())
-    }
-
-    #[test]
-    fn checked_round_increment_reports_exact_overflow_key() -> Result<(), Box<dyn Error>> {
-        let node = NodeId::parse("m2-s1")?;
-        let role = DispatchRole::new("step-planner");
-        assert_eq!(
-            checked_round_increment(RoundCount(u64::MAX), &node, &role),
-            Err(RunStateError::RoundCountOverflow { node, role })
-        );
         Ok(())
     }
 
@@ -6161,7 +6985,10 @@ None.
                 "steps (0)\n",
                 "dispatch-accounting state=all-accounted issuance-sequences=-\n",
                 "dispatches (0)\n",
+                "issuance-ordinals (0)\n",
                 "rounds (0)\n",
+                "non-production-streaks (0)\n",
+                "non-production-holds (0)\n",
                 "holds (0)\n",
                 "provenance (0)\n",
                 "resume state=no-log-visible-candidate\n",
@@ -6228,9 +7055,12 @@ None.
                 "dispatches (2)\n",
                 "  dispatch 1: sequence=1 node=\"m2-s1\" role=\"step-executor\" ref=\"dispatch-1\" completion=unaccounted\n",
                 "  dispatch 2: sequence=2 node=\"m2-s3\" role=\"pr-reviewer\" ref=\"review-1\" completion=unaccounted\n",
-                "rounds (2)\n",
-                "  round 1: node=\"m2-s1\" role=\"step-executor\" classification=execution count=1\n",
-                "  round 2: node=\"m2-s3\" role=\"pr-reviewer\" classification=critique-producing count=1\n",
+                "issuance-ordinals (2)\n",
+                "  issuance-ordinal 1: node=\"m2-s1\" role=\"step-executor\" ordinal=1\n",
+                "  issuance-ordinal 2: node=\"m2-s3\" role=\"pr-reviewer\" ordinal=1\n",
+                "rounds (0)\n",
+                "non-production-streaks (0)\n",
+                "non-production-holds (0)\n",
                 "holds (2)\n",
                 "  hold 1: key=\"release\" state=closed node=\"m2-s2\" sequence=4 resolution=\"approved\"\n",
                 "  hold 2: key=\"network\" state=open node=\"m2-s3\" sequence=5 question=\"Retry?\"\n",
@@ -6379,21 +7209,17 @@ None.
             assert!(render_human_snapshot(&RunSnapshot::from(&state)).contains(expected));
         }
 
-        for (role, cycle, classification) in [
-            ("step-planner", "plan-dispatched", "plan-producing"),
-            ("step-critic", "critique-dispatched", "critique-producing"),
-            ("step-executor", "execution-dispatched", "execution"),
-            ("pr-reviewer", "review-dispatched", "critique-producing"),
-            (
-                "falsification-critic",
-                "falsification-dispatched",
-                "critique-producing",
-            ),
+        for (role, cycle) in [
+            ("step-planner", "plan-dispatched"),
+            ("step-critic", "critique-dispatched"),
+            ("step-executor", "execution-dispatched"),
+            ("pr-reviewer", "review-dispatched"),
+            ("falsification-critic", "falsification-dispatched"),
         ] {
             let state = derive(&[dispatch(1, "m2-s1", role, "ref")?], &[], &[], &[])?;
             let rendered = render_human_snapshot(&RunSnapshot::from(&state));
             assert!(rendered.contains(&format!("cycle={cycle} cycle-sequence=1")));
-            assert!(rendered.contains(&format!("classification={classification} count=1")));
+            assert!(rendered.contains(&format!("role=\"{role}\" ordinal=1")));
         }
         let state = derive(&[delta(1, "m2-s1")?], &[], &[], &[])?;
         assert!(

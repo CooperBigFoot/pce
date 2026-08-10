@@ -5,9 +5,11 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::event_log::{
-    DispatchCompletionOutcomeRef, DispatchRef, DispatchRole, EventBodyRef, EventRecord,
-    EventTimestamp, Evidence, KnownPayload, NodeId, ObservedDispatchCompletionPayload,
-    ReconciledDeadDispatchCompletionPayload, Sequence,
+    ArtifactOutcome, DispatchCompletionOutcomeRef, DispatchDuration, DispatchExitStatus,
+    DispatchRef, DispatchRole, DispatchTokenUsage, EventBodyRef, EventRecord, EventTimestamp,
+    Evidence, KnownPayload, NodeId, ObservedDispatchCompletionPayload,
+    ObservedDispatchCompletionWithArtifactPresencePayload, ReconciledDeadDispatchCompletionPayload,
+    RequiredArtifactPresence, Sequence,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,13 +38,52 @@ pub enum DispatchLedgerCompletion {
     ObservedChild {
         sequence: Sequence,
         timestamp: EventTimestamp,
-        payload: ObservedDispatchCompletionPayload,
+        payload: ObservedChildCompletion,
     },
     ReconciledDead {
         sequence: Sequence,
         timestamp: EventTimestamp,
         payload: ReconciledDeadDispatchCompletionPayload,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservedChildCompletion {
+    Current(ObservedDispatchCompletionWithArtifactPresencePayload),
+    Legacy(ObservedDispatchCompletionPayload),
+}
+
+impl ObservedChildCompletion {
+    pub const fn duration_ms(&self) -> DispatchDuration {
+        match self {
+            Self::Current(p) => p.duration_ms,
+            Self::Legacy(p) => p.duration_ms,
+        }
+    }
+    pub const fn usage(&self) -> &DispatchTokenUsage {
+        match self {
+            Self::Current(p) => &p.usage,
+            Self::Legacy(p) => &p.usage,
+        }
+    }
+    pub const fn exit_status(&self) -> DispatchExitStatus {
+        match self {
+            Self::Current(p) => p.exit_status,
+            Self::Legacy(p) => p.exit_status,
+        }
+    }
+    pub const fn artifact_outcome(&self) -> ArtifactOutcome {
+        match self {
+            Self::Current(p) => p.artifact_outcome,
+            Self::Legacy(p) => p.artifact_outcome,
+        }
+    }
+    pub const fn required_artifact_presence(&self) -> Option<RequiredArtifactPresence> {
+        match self {
+            Self::Current(p) => Some(p.required_artifact_presence),
+            Self::Legacy(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,11 +295,18 @@ pub fn fold_dispatch_ledger(
                     });
                 }
                 entry.completion = Some(match payload.outcome() {
+                    DispatchCompletionOutcomeRef::ObservedChildWithArtifactPresence(payload) => {
+                        DispatchLedgerCompletion::ObservedChild {
+                            sequence,
+                            timestamp: *record.timestamp(),
+                            payload: ObservedChildCompletion::Current(payload.clone()),
+                        }
+                    }
                     DispatchCompletionOutcomeRef::ObservedChild(payload) => {
                         DispatchLedgerCompletion::ObservedChild {
                             sequence,
                             timestamp: *record.timestamp(),
-                            payload: payload.clone(),
+                            payload: ObservedChildCompletion::Legacy(payload.clone()),
                         }
                     }
                     DispatchCompletionOutcomeRef::ReconciledDead(payload) => {
@@ -314,6 +362,35 @@ mod tests {
                 r#"{{"issuance_sequence":{issuance},"outcome":"reconciled-dead","artifact_production":"not-produced"}}"#
             ),
         )
+    }
+
+    #[test]
+    fn legacy_and_current_observed_completions_share_accounting_without_losing_presence() {
+        let legacy = fold_dispatch_ledger(&[issuance(1), observed(2, 1)]).expect("legacy ledger");
+        let current = event(
+            2,
+            "dispatch-completion",
+            "m1-s2",
+            r#"{"issuance_sequence":1,"duration_ms":200,"usage":{"availability":"measured","input_tokens":101,"cached_input_tokens":23,"output_tokens":17,"reasoning_output_tokens":5},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated","required_artifact_presence":"present"}"#,
+        );
+        let current = fold_dispatch_ledger(&[issuance(1), current]).expect("current ledger");
+        let Some(DispatchLedgerCompletion::ObservedChild {
+            payload: legacy, ..
+        }) = legacy.entries()[0].completion()
+        else {
+            panic!("legacy observed")
+        };
+        let Some(DispatchLedgerCompletion::ObservedChild {
+            payload: current, ..
+        }) = current.entries()[0].completion()
+        else {
+            panic!("current observed")
+        };
+        assert_eq!(legacy.required_artifact_presence(), None);
+        assert_eq!(
+            current.required_artifact_presence(),
+            Some(crate::RequiredArtifactPresence::Present)
+        );
     }
 
     #[test]
