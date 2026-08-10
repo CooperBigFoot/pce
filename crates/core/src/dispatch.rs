@@ -15,8 +15,8 @@ use crate::event_log::{
     ArtifactOutcome, CacheCreationInputTokens, CacheReadInputTokens, CachedInputTokens,
     DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef,
     DispatchRole, DispatchTokenUsage, EventLogTail, EventLogTailError, EventTimestamp, Evidence,
-    InputTokens, NodeId, OutputTokens, ReasoningOutputTokens, Sequence, UsageAbsenceReason,
-    WriteKind, successor_sequence,
+    InputTokens, NodeId, OutputTokens, ReasoningOutputTokens, RequiredArtifactPresence, Sequence,
+    UsageAbsenceReason, WriteKind, successor_sequence,
 };
 use crate::gate_execution::{AbsoluteGateExecClientPath, GateExecutionRecorderConfig};
 
@@ -134,14 +134,18 @@ pub fn dispatch_completion_payload(
     usage: DispatchTokenUsage,
     exit_status: DispatchExitStatus,
     artifact_outcome: ArtifactOutcome,
+    required_artifact_presence: RequiredArtifactPresence,
 ) -> DispatchCompletionPayload {
-    DispatchCompletionPayload::ObservedChild(crate::event_log::ObservedDispatchCompletionPayload {
-        issuance_sequence,
-        duration_ms,
-        usage,
-        exit_status,
-        artifact_outcome,
-    })
+    DispatchCompletionPayload::ObservedChildWithArtifactPresence(
+        crate::event_log::ObservedDispatchCompletionWithArtifactPresencePayload {
+            issuance_sequence,
+            duration_ms,
+            usage,
+            exit_status,
+            artifact_outcome,
+            required_artifact_presence,
+        },
+    )
 }
 
 /// A typed prospective value that cannot carry a fabricated observation.
@@ -337,6 +341,7 @@ struct ProjectedCompletionPayload {
     usage: Deferred<DispatchTokenUsage>,
     exit_status: Deferred<DispatchExitStatus>,
     artifact_outcome: ProjectedArtifactOutcome,
+    required_artifact_presence: Deferred<RequiredArtifactPresence>,
 }
 
 #[derive(Serialize)]
@@ -394,6 +399,7 @@ pub fn render_dispatch_projection(
                 usage: Deferred::default(),
                 exit_status: Deferred::default(),
                 artifact_outcome,
+                required_artifact_presence: Deferred::default(),
             },
         },
     };
@@ -1113,7 +1119,8 @@ mod tests {
     use crate::contract_measurement::ObservedExitStatus;
     use crate::event_log::{
         ArtifactOutcome, DispatchCompletionPayload, DispatchDuration, DispatchExitStatus,
-        DispatchRole, DispatchTokenUsage, ExitCode, Sequence, SignalNumber, UsageAbsenceReason,
+        DispatchRole, DispatchTokenUsage, ExitCode, RequiredArtifactPresence, Sequence,
+        SignalNumber, UsageAbsenceReason,
     };
     use crate::gate_execution::AbsoluteGateExecClientPath;
 
@@ -1195,11 +1202,16 @@ mod tests {
             },
             exited(0),
             ArtifactOutcome::SchemaViolating,
+            RequiredArtifactPresence::Present,
         );
-        let DispatchCompletionPayload::ObservedChild(observed) = payload else {
+        let DispatchCompletionPayload::ObservedChildWithArtifactPresence(observed) = payload else {
             panic!("normal producer returned reconciled completion");
         };
         assert_eq!(observed.artifact_outcome, ArtifactOutcome::SchemaViolating);
+        assert_eq!(
+            observed.required_artifact_presence,
+            RequiredArtifactPresence::Present
+        );
     }
 
     #[test]

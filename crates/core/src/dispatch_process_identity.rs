@@ -101,6 +101,25 @@ impl ProcessStartIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbsoluteRequiredArtifactPath(PathBuf);
 
+impl serde::Serialize for AbsoluteRequiredArtifactPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AbsoluteRequiredArtifactPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
+    }
+}
+
 impl AbsoluteRequiredArtifactPath {
     /// Parse an absolute path without lossy text conversion.
     ///
@@ -123,10 +142,11 @@ impl AbsoluteRequiredArtifactPath {
         &self.0
     }
 
-    fn as_str(&self) -> Result<&str, DispatchProcessIdentityError> {
-        self.0
-            .to_str()
-            .ok_or(DispatchProcessIdentityError::NonUtf8RequiredArtifactPath)
+    pub fn as_str(&self) -> &str {
+        match self.0.to_str() {
+            Some(value) => value,
+            None => unreachable!("constructor guarantees UTF-8"),
+        }
     }
 }
 
@@ -317,7 +337,7 @@ pub fn serialize_dispatch_process_identity(
                 },
             }
         }),
-        required_artifact_path: identity.required_artifact_path.as_str()?,
+        required_artifact_path: identity.required_artifact_path.as_str(),
     };
     let mut bytes = serde_json::to_vec(&authored)
         .map_err(|source| DispatchProcessIdentityError::Serialization { source })?;

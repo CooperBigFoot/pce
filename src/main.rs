@@ -25,9 +25,10 @@ use pce_core::{
     BranchState, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
     CodexTerminalObservation, CodexTerminalUsage, CompletionCriterionStatus, CompletionDecision,
     CreationDate, CriterionChangeDecision, CurrentArtifactObservation, CurrentArtifactState,
-    DispatchCandidate, DispatchCompletionPayload, DispatchDuration, DispatchEnvelope,
-    DispatchExitStatus, DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion,
-    DispatchLogging, DispatchProcessIdentity, DispatchProjectionInput, DispatchRef, DispatchRole,
+    DispatchAdmission, DispatchCandidate, DispatchCompletionPayload, DispatchDuration,
+    DispatchEnvelope, DispatchExitStatus, DispatchIdentityObservation, DispatchLedger,
+    DispatchLedgerCompletion, DispatchLogging, DispatchPayload, DispatchProcessIdentity,
+    DispatchProjectionInput, DispatchRef, DispatchRequiredArtifactObservation, DispatchRole,
     DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef,
     EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
     Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode,
@@ -38,24 +39,26 @@ use pce_core::{
     GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
     LandingReadinessDecision, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
     MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
-    ObservedExitStatus, ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge,
-    PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
-    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity, PullRequestNumber,
-    PullRequestSelector, ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome,
-    RecordedProcessIdentity, RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation,
-    ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
-    RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
-    RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest, SignalNumber,
-    SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
-    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
-    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
-    classify_codex_terminal_usage, classify_dispatch_check_in, classify_replay_pair,
+    NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
+    OracleFailure, OracleStage, OrderingEdge, PairedCampaign, PairedExecutionProofError,
+    PairedReplayClassification, ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
+    PullRequestNumber, PullRequestSelector, ReconciledDeadDispatchCompletionPayload,
+    ReconciledDispatchOutcome, RecordedProcessIdentity, RecoveryLogPath, ReferenceValidation,
+    ReplayArtifactObservation, ReplayClassifications, ReplayObservation, ReplayRefResult,
+    RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation, RepositoryName,
+    RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
+    RepositoryRelativePath, RepositoryRoot, RequiredArtifactPresence, RunSnapshot, Sandbox,
+    SeatbeltCapability, Sequence, Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding,
+    StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName, TagState,
+    TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy,
+    VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
+    append_event, classify_claude_result, classify_codex_terminal_usage,
+    classify_dispatch_admission, classify_dispatch_check_in, classify_replay_pair,
     classify_seatbelt_capability, compose_gate_arguments, compose_planning_role_frame,
-    compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
-    derive_run_state, dispatch_completion_payload, dispatch_invocation, dispatch_payload,
-    evaluate_completion, evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
+    compute_dispatchability, create_vision, derive_dispatch_outcome_state, derive_merge_status,
+    derive_milestone_merge_status, derive_run_state, derive_run_state_with_dispatch_artifacts,
+    dispatch_completion_payload, dispatch_invocation, dispatch_payload, evaluate_completion,
+    evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
     fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot, meter_dispatches,
     normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
     parse_claude_result, parse_dispatch_process_identity, parse_event_line,
@@ -2747,7 +2750,44 @@ fn run_log(path: &Path, kind: WriteKind, node: NodeId, input: &mut dyn Read) -> 
     }
 }
 
-fn append_one(path: &Path, kind: WriteKind, node: NodeId, payload: String) -> Result<EventRecord> {
+fn dispatch_artifact_observations(
+    log_path: &Path,
+    records: &[EventRecord],
+) -> Result<Vec<DispatchRequiredArtifactObservation>> {
+    let directory = dispatch_identity_directory(log_path);
+    let mut observations = Vec::new();
+    for record in records {
+        if !matches!(
+            record.body_ref(),
+            EventBodyRef::Known(KnownPayload::Dispatch(_))
+        ) {
+            continue;
+        }
+        let issuance_sequence = record.sequence();
+        let sidecar = directory.join(format!("{}.json", issuance_sequence.get()));
+        let Some(identity) = read_dispatch_identity_sidecar(&sidecar)? else {
+            continue;
+        };
+        if identity.issuance_sequence() != issuance_sequence {
+            bail!(
+                "dispatch process identity sidecar issuance sequence {} does not match event issuance {}",
+                identity.issuance_sequence().get(),
+                issuance_sequence.get()
+            );
+        }
+        observations.push(DispatchRequiredArtifactObservation::new(
+            issuance_sequence,
+            identity.required_artifact_path().clone(),
+        ));
+    }
+    Ok(observations)
+}
+
+fn admit_and_append_dispatch(
+    path: &Path,
+    metadata: &DispatchLogging,
+    payload: DispatchPayload,
+) -> Result<EventRecord> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -2757,7 +2797,77 @@ fn append_one(path: &Path, kind: WriteKind, node: NodeId, payload: String) -> Re
         .with_context(|| format!("failed to open or create event log {}", path.display()))?;
     file.lock()
         .with_context(|| format!("failed to lock event log {}", path.display()))?;
-    let operation = append_locked_record(&mut file, payload, kind, node, path);
+    let operation = (|| -> Result<EventRecord> {
+        file.seek(SeekFrom::Start(0))
+            .context("failed to seek locked event log")?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .context("failed to read locked event log")?;
+        let mut reader = BufReader::new(bytes.as_slice());
+        let records = read_event_log_lines(&mut reader, path)?
+            .into_iter()
+            .map(|line| line.record)
+            .collect::<Vec<_>>();
+        let observations = dispatch_artifact_observations(path, &records)?;
+        let state = derive_dispatch_outcome_state(&records, &observations)?;
+        let key = NonProductionKey {
+            node: metadata.node.clone(),
+            role: metadata.role.clone(),
+            required_artifact_path: metadata.required_artifact_path.clone(),
+        };
+        match classify_dispatch_admission(&state, &key) {
+            DispatchAdmission::Admit => append_locked_record(
+                &mut file,
+                serde_json::to_string(&payload).context("failed to serialize dispatch issuance")?,
+                WriteKind::Dispatch,
+                metadata.node.clone(),
+                path,
+            ),
+            DispatchAdmission::OpenNonProductionHold { consecutive } => {
+                append_locked_record(
+                    &mut file,
+                    serde_json::to_string(&NonProductionHoldOpenPayload { key: key.clone() })
+                        .context("failed to serialize non-production hold")?,
+                    WriteKind::NonProductionHoldOpen,
+                    metadata.node.clone(),
+                    path,
+                )?;
+                bail!(
+                    "dispatch admission opened non-production hold for node {}, role {}, required artifact {} after {} consecutive non-production completions; resolve with retry, re-plan, or abandon",
+                    key.node.as_str(),
+                    key.role.as_str(),
+                    key.required_artifact_path.as_str(),
+                    consecutive.get()
+                )
+            }
+            DispatchAdmission::NonProductionHoldOpen => bail!(
+                "dispatch admission refused: non-production hold is open for node {}, role {}, required artifact {}; resolve with retry, re-plan, or abandon",
+                key.node.as_str(),
+                key.role.as_str(),
+                key.required_artifact_path.as_str()
+            ),
+            DispatchAdmission::NonProductionResolutionClosesAdmission { resolution } => {
+                let resolution = match resolution {
+                    pce_core::NonProductionHoldResolution::Retry => "retry",
+                    pce_core::NonProductionHoldResolution::RePlan => "re-plan",
+                    pce_core::NonProductionHoldResolution::Abandon => "abandon",
+                };
+                bail!(
+                    "dispatch admission refused: non-production hold for node {}, role {}, required artifact {} was resolved with {}",
+                    key.node.as_str(),
+                    key.role.as_str(),
+                    key.required_artifact_path.as_str(),
+                    resolution
+                )
+            }
+            DispatchAdmission::DefectRoundCapExhausted { count } => bail!(
+                "dispatch admission refused: defect-round cap {} is exhausted for node {} and role {}",
+                count.get(),
+                key.node.as_str(),
+                key.role.as_str()
+            ),
+        }
+    })();
     let unlock = file
         .unlock()
         .with_context(|| format!("failed to unlock event log {}", path.display()));
@@ -2906,8 +3016,9 @@ fn run_dispatch_reconcile(
         if let Some(continuation) = identity.continuation_process_identity() {
             require_dead_identity(issuance_sequence, "continuation", continuation)?;
         }
-        let artifact_production =
-            observe_required_dispatch_artifact(identity.required_artifact_path().as_path())?;
+        let artifact_production = artifact_production(observe_required_artifact_presence(
+            identity.required_artifact_path().as_path(),
+        )?);
         Ok(DispatchCompletionPayload::ReconciledDead(
             ReconciledDeadDispatchCompletionPayload {
                 issuance_sequence,
@@ -2986,8 +3097,10 @@ fn run_status(
         .get(primary_index)
         .context("resolved primary repository index is unavailable")?;
     let authorities = observe_authorities(&canonical_nodes, primary)?;
-    let state = derive_run_state(
+    let dispatch_artifacts = dispatch_artifact_observations(log_path, &records)?;
+    let state = derive_run_state_with_dispatch_artifacts(
         &records,
+        &dispatch_artifacts,
         &ratified_criteria,
         &vision,
         recovery_log_path,
@@ -4590,8 +4703,9 @@ fn run_dispatch_check_in(log_path: &Path, output: &mut dyn Write) -> Result<()> 
             );
         }
         let process_identity = observe_darwin_process_number(identity.process_number())?;
-        let artifact_production =
-            observe_required_dispatch_artifact(identity.required_artifact_path().as_path())?;
+        let artifact_production = artifact_production(observe_required_artifact_presence(
+            identity.required_artifact_path().as_path(),
+        )?);
         observations.push(DispatchIdentityObservation::new(
             issuance_sequence,
             identity.process_start_identity(),
@@ -4645,14 +4759,21 @@ fn read_dispatch_identity_sidecar(path: &Path) -> Result<Option<DispatchProcessI
         .context("failed to parse dispatch process identity sidecar")
 }
 
-fn observe_required_dispatch_artifact(path: &Path) -> Result<ArtifactProduction> {
+fn observe_required_artifact_presence(path: &Path) -> Result<RequiredArtifactPresence> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(ArtifactProduction::Produced),
-        Ok(_) => Ok(ArtifactProduction::NotProduced),
+        Ok(metadata) if metadata.file_type().is_file() => Ok(RequiredArtifactPresence::Present),
+        Ok(_) => Ok(RequiredArtifactPresence::Absent),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(ArtifactProduction::NotProduced)
+            Ok(RequiredArtifactPresence::Absent)
         }
         Err(error) => Err(error).context("failed to inspect required dispatch artifact"),
+    }
+}
+
+const fn artifact_production(presence: RequiredArtifactPresence) -> ArtifactProduction {
+    match presence {
+        RequiredArtifactPresence::Present => ArtifactProduction::Produced,
+        RequiredArtifactPresence::Absent => ArtifactProduction::NotProduced,
     }
 }
 
@@ -7867,6 +7988,7 @@ fn cleanup_failed_dispatch_setup(
                 },
                 dispatch_exit_status(status)?,
                 ArtifactOutcome::NotValidated,
+                observe_required_artifact_presence(completion.required_artifact_path.as_path())?,
             );
             close_dispatch_conditionally(
                 completion.path,
@@ -7895,12 +8017,7 @@ fn cleanup_failed_dispatch_setup(
 
 fn start_logged_dispatch(envelope: &DispatchEnvelope, logging: LiveDispatchLog<'_>) -> Result<()> {
     let payload = dispatch_payload(logging.metadata);
-    let issuance = append_one(
-        logging.path,
-        WriteKind::Dispatch,
-        logging.metadata.node.clone(),
-        serde_json::to_string(&payload).context("failed to serialize dispatch issuance")?,
-    )?;
+    let issuance = admit_and_append_dispatch(logging.path, logging.metadata, payload)?;
     let request = DispatchContinuationRequest {
         envelope: ContinuationEnvelope::from(envelope),
         completion: ContinuationCompletion {
@@ -8318,6 +8435,9 @@ fn execute_dispatch(
                 usage,
                 exit_status,
                 artifact_outcome,
+                observe_required_artifact_presence(
+                    completion_context.required_artifact_path.as_path(),
+                )?,
             );
             close_dispatch_conditionally(
                 completion_context.path,
@@ -9854,7 +9974,7 @@ None.
     }
 
     #[test]
-    fn accepts_all_ten_registered_payload_schemas() {
+    fn accepts_all_twelve_registered_payload_schemas() {
         let directory = tempdir().expect("temporary directory should create");
         let fixtures = [
             (
@@ -9906,6 +10026,16 @@ None.
                 "criterion-added",
                 r#"{"criterion":{"name":"New blocking criterion","input":"Run the new probe.","observation":"The probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}"#,
                 WriteKind::CriterionAdded,
+            ),
+            (
+                "non-production-hold-open",
+                r#"{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"}}"#,
+                WriteKind::NonProductionHoldOpen,
+            ),
+            (
+                "non-production-hold-close",
+                r#"{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"},"resolution":"retry"}"#,
+                WriteKind::NonProductionHoldClose,
             ),
         ];
 
@@ -11479,7 +11609,7 @@ None.
             render_human_snapshot(&snapshot),
             concat!(
                 "pce status (pce.run-snapshot v1)\n",
-                "repositories (0)\nsteps (0)\ndispatch-accounting state=all-accounted issuance-sequences=-\ndispatches (0)\nrounds (0)\nholds (0)\n",
+                "repositories (0)\nsteps (0)\ndispatch-accounting state=all-accounted issuance-sequences=-\ndispatches (0)\nissuance-ordinals (0)\nrounds (0)\nnon-production-streaks (0)\nnon-production-holds (0)\nholds (0)\n",
                 "provenance (0)\nresume state=no-log-visible-candidate\nrecovery-digest\n",
                 "  rounds (entries=0, elisions=0)\n",
                 "  open-holds (entries=0, elisions=0)\n",
@@ -11489,6 +11619,9 @@ None.
         );
         assert_eq!(value["schema_id"], "pce.run-snapshot");
         assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["issuance_ordinals"], serde_json::json!([]));
+        assert_eq!(value["non_production_streaks"], serde_json::json!([]));
+        assert_eq!(value["non_production_holds"], serde_json::json!([]));
         for category in ["rounds", "open_holds", "deltas", "facts"] {
             assert_eq!(
                 value["recovery_digest"][category]["entries"],
