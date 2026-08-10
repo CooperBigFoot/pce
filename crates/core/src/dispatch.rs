@@ -127,7 +127,7 @@ pub fn dispatch_payload(logging: &DispatchLogging) -> DispatchPayload {
     }
 }
 
-/// Construct the shared concrete m3 dispatch completion payload.
+/// Construct the shared observed-child dispatch completion payload.
 pub fn dispatch_completion_payload(
     issuance_sequence: Sequence,
     duration_ms: DispatchDuration,
@@ -135,13 +135,13 @@ pub fn dispatch_completion_payload(
     exit_status: DispatchExitStatus,
     artifact_outcome: ArtifactOutcome,
 ) -> DispatchCompletionPayload {
-    DispatchCompletionPayload {
+    DispatchCompletionPayload::ObservedChild(crate::event_log::ObservedDispatchCompletionPayload {
         issuance_sequence,
         duration_ms,
         usage,
         exit_status,
         artifact_outcome,
-    }
+    })
 }
 
 /// A typed prospective value that cannot carry a fabricated observation.
@@ -1112,8 +1112,8 @@ mod tests {
     };
     use crate::contract_measurement::ObservedExitStatus;
     use crate::event_log::{
-        ArtifactOutcome, DispatchDuration, DispatchExitStatus, DispatchRole, DispatchTokenUsage,
-        ExitCode, Sequence, SignalNumber, UsageAbsenceReason,
+        ArtifactOutcome, DispatchCompletionPayload, DispatchDuration, DispatchExitStatus,
+        DispatchRole, DispatchTokenUsage, ExitCode, Sequence, SignalNumber, UsageAbsenceReason,
     };
     use crate::gate_execution::AbsoluteGateExecClientPath;
 
@@ -1186,7 +1186,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_completion_payload_preserves_artifact_outcome() {
+    fn dispatch_completion_payload_constructs_observed_child_without_wire_change() {
         let payload = dispatch_completion_payload(
             Sequence::parse(7).expect("positive sequence"),
             DispatchDuration::new(12),
@@ -1196,7 +1196,10 @@ mod tests {
             exited(0),
             ArtifactOutcome::SchemaViolating,
         );
-        assert_eq!(payload.artifact_outcome, ArtifactOutcome::SchemaViolating);
+        let DispatchCompletionPayload::ObservedChild(observed) = payload else {
+            panic!("normal producer returned reconciled completion");
+        };
+        assert_eq!(observed.artifact_outcome, ArtifactOutcome::SchemaViolating);
     }
 
     #[test]

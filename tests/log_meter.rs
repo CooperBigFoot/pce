@@ -2071,6 +2071,15 @@ fn meter_cli_accepts_exact_stdin_only_surface() {
 }
 
 #[test]
+fn meter_distinguishes_reconciled_dead_without_fabricated_measurements() {
+    let input = b"{\"sequence\":1,\"timestamp\":\"2026-08-09T12:00:00.000Z\",\"kind\":\"dispatch\",\"node\":\"m1-s2\",\"payload\":{\"role\":\"step-executor\",\"ref\":\"abc123\",\"evidence\":\"fixture\"}}\n{\"sequence\":2,\"timestamp\":\"2026-08-09T12:00:01.000Z\",\"kind\":\"dispatch-completion\",\"node\":\"m1-s2\",\"payload\":{\"issuance_sequence\":1,\"outcome\":\"reconciled-dead\",\"artifact_production\":\"not-produced\"}}\n";
+    let output = run_meter(&["log", "meter"], input);
+    assert!(output.status.success(), "{}", complete_measurement(&output));
+    assert_eq!(output.stderr, b"");
+    assert_eq!(output.stdout, b"{\"issuance\":{\"sequence\":1,\"timestamp\":\"2026-08-09T12:00:00.000Z\",\"node\":\"m1-s2\",\"role\":\"step-executor\",\"ref\":\"abc123\",\"evidence\":\"fixture\"},\"completion\":{\"sequence\":2,\"timestamp\":\"2026-08-09T12:00:01.000Z\",\"outcome\":\"reconciled-dead\",\"artifact_production\":\"not-produced\"}}\n");
+}
+
+#[test]
 fn meter_cli_rejects_all_arguments() {
     let cases: &[(&str, &[&str])] = &[
         ("--file", &["log", "meter", "--file", "poison"]),

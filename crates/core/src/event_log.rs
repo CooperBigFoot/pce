@@ -698,15 +698,74 @@ pub enum ArtifactOutcome {
     SchemaViolating,
 }
 
+/// Whether a dispatch's required artifact currently exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactProduction {
+    /// The required artifact is present.
+    Produced,
+    /// The required artifact is absent.
+    NotProduced,
+}
+
 /// The complete payload for `dispatch-completion`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DispatchCompletionPayload {
+    /// Measurements observed by the owning continuation after reaping its child.
+    ObservedChild(ObservedDispatchCompletionPayload),
+    /// Durable closure after both recorded process identities were observed dead.
+    ReconciledDead(ReconciledDeadDispatchCompletionPayload),
+}
+
+/// The legacy, byte-stable observed-child completion payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DispatchCompletionPayload {
+pub struct ObservedDispatchCompletionPayload {
     pub issuance_sequence: Sequence,
     pub duration_ms: DispatchDuration,
     pub usage: DispatchTokenUsage,
     pub exit_status: DispatchExitStatus,
     pub artifact_outcome: ArtifactOutcome,
+}
+
+/// A completion written by reconciliation after a dispatch is observed dead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconciledDeadDispatchCompletionPayload {
+    pub issuance_sequence: Sequence,
+    pub outcome: ReconciledDispatchOutcome,
+    pub artifact_production: ArtifactProduction,
+}
+
+/// The closed set of reconciliation outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReconciledDispatchOutcome {
+    ReconciledDead,
+}
+
+/// A borrowed completion outcome without field-presence inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchCompletionOutcomeRef<'a> {
+    ObservedChild(&'a ObservedDispatchCompletionPayload),
+    ReconciledDead(&'a ReconciledDeadDispatchCompletionPayload),
+}
+
+impl DispatchCompletionPayload {
+    pub const fn issuance_sequence(&self) -> Sequence {
+        match self {
+            Self::ObservedChild(payload) => payload.issuance_sequence,
+            Self::ReconciledDead(payload) => payload.issuance_sequence,
+        }
+    }
+
+    pub const fn outcome(&self) -> DispatchCompletionOutcomeRef<'_> {
+        match self {
+            Self::ObservedChild(payload) => DispatchCompletionOutcomeRef::ObservedChild(payload),
+            Self::ReconciledDead(payload) => DispatchCompletionOutcomeRef::ReconciledDead(payload),
+        }
+    }
 }
 
 /// The complete payload for `delta`.
@@ -1645,6 +1704,7 @@ pub enum AppendError<E> {
 
 #[cfg(test)]
 mod tests {
+    use super::DispatchCompletionPayload;
     use std::cell::{Cell, RefCell};
     use std::error::Error;
     use std::io;
@@ -2669,7 +2729,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_completion_literal_is_closed_and_byte_stable() {
+    fn dispatch_completion_outcomes_are_closed_and_observed_bytes_stay_stable() {
         let literal = r#"{"sequence":8,"timestamp":"2026-07-27T12:34:56.000Z","kind":"dispatch-completion","node":"m3-s1","payload":{"issuance_sequence":7,"duration_ms":200,"usage":{"availability":"measured","input_tokens":101,"cached_input_tokens":23,"output_tokens":17,"reasoning_output_tokens":5},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated"}}"#;
         let record = parse_event_line(literal).expect("parse literal completion");
         assert_eq!(
@@ -2680,9 +2740,38 @@ mod tests {
         else {
             panic!("completion decoded as another kind");
         };
+        let DispatchCompletionPayload::ObservedChild(payload) = payload else {
+            panic!("legacy payload was not observed-child");
+        };
         assert_eq!(payload.issuance_sequence.get(), 7);
         assert_eq!(payload.duration_ms.get(), 200);
         assert_eq!(payload.artifact_outcome, ArtifactOutcome::NotValidated);
+
+        let reconciled = r#"{"sequence":2,"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m1-s2","payload":{"issuance_sequence":1,"outcome":"reconciled-dead","artifact_production":"not-produced"}}"#;
+        let reconciled_record = parse_event_line(reconciled).expect("parse reconciled completion");
+        assert_eq!(
+            serialize_event_line(&reconciled_record).expect("serialize reconciled"),
+            reconciled
+        );
+
+        for payload in [
+            "{}",
+            r#"{"issuance_sequence":1}"#,
+            r#"{"issuance_sequence":1,"outcome":"reconciled-dead"}"#,
+            r#"{"issuance_sequence":1,"outcome":"reconciled-dead","artifact_production":"not-produced","duration_ms":0}"#,
+            r#"{"issuance_sequence":1,"outcome":"other","artifact_production":"not-produced"}"#,
+        ] {
+            let malformed = format!(
+                r#"{{"sequence":2,"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m1-s2","payload":{payload}}}"#
+            );
+            assert!(matches!(
+                parse_event_line(&malformed),
+                Err(EventLogError::InvalidKnownPayload {
+                    kind: WriteKind::DispatchCompletion,
+                    ..
+                })
+            ));
+        }
 
         for invalid in [
             literal.replace(

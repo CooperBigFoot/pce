@@ -1,13 +1,16 @@
 //! dispatch_check_in : Ordered<EventRecord> × Ordered<DispatchIdentityObservation> → DispatchCheckInReport ∪ DispatchCheckInError   (pure, deterministic)
 //! This module correlates binary-supplied process and artifact observations; it performs no file, process, clock, or environment I/O.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::dispatch_ledger::{
+    DispatchAccounting, DispatchLedgerCompletion, DispatchLedgerError, fold_dispatch_ledger,
+};
 use crate::dispatch_process_identity::ProcessStartIdentity;
-use crate::event_log::{EventBodyRef, EventRecord, KnownPayload, Sequence};
+use crate::event_log::{ArtifactProduction, EventRecord, Sequence};
 
 const SCHEMA_ID: &str = "pce.dispatch-check-in";
 const SCHEMA_VERSION: u32 = 1;
@@ -21,16 +24,6 @@ pub enum ProcessIdentityObservation {
     ForeignPresent,
     /// A process exists and carries this observed Darwin start identity.
     Present(ProcessStartIdentity),
-}
-
-/// Whether the required artifact currently exists as a real regular file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ArtifactProduction {
-    /// The required artifact is present.
-    Produced,
-    /// The required artifact is absent.
-    NotProduced,
 }
 
 /// The binary-supplied observations for one dispatch issuance.
@@ -85,8 +78,10 @@ pub enum DispatchLiveness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DispatchCompletionAccounting {
-    /// A valid completion record exists.
-    Recorded,
+    /// The continuation observed and reaped its child.
+    ObservedChild,
+    /// Reconciliation durably observed the dispatch dead.
+    ReconciledDead,
     /// No completion record exists.
     Unaccounted,
 }
@@ -129,7 +124,21 @@ impl DispatchCheckInEntry {
 pub struct DispatchCheckInReport {
     schema_id: String,
     schema_version: u32,
+    accounting: DispatchAccountingSummary,
     dispatches: Vec<DispatchCheckInEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DispatchAccountingSummary {
+    state: DispatchAccountingState,
+    issuance_sequences: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DispatchAccountingState {
+    AllAccounted,
+    Unaccounted,
 }
 
 /// Correlate event records and binary-supplied observations into a read-only report.
@@ -142,70 +151,12 @@ pub fn classify_dispatch_check_in(
     records: &[EventRecord],
     observations: &[DispatchIdentityObservation],
 ) -> Result<DispatchCheckInReport, DispatchCheckInError> {
-    let dispatches = records
+    let ledger = fold_dispatch_ledger(records).map_err(map_ledger_error)?;
+    let dispatch_sequences = ledger
+        .entries()
         .iter()
-        .filter_map(|record| match record.body_ref() {
-            EventBodyRef::Known(KnownPayload::Dispatch(_)) => {
-                Some((record.sequence(), record.node().as_str()))
-            }
-            _ => None,
-        })
+        .map(|entry| entry.issuance().sequence().get())
         .collect::<Vec<_>>();
-    let dispatch_sequences = dispatches
-        .iter()
-        .map(|(sequence, _)| sequence.get())
-        .collect::<BTreeSet<u64>>();
-    let record_sequences = records
-        .iter()
-        .map(|record| record.sequence().get())
-        .collect::<BTreeSet<u64>>();
-    let mut completed = BTreeSet::<u64>::new();
-
-    for record in records {
-        let EventBodyRef::Known(KnownPayload::DispatchCompletion(payload)) = record.body_ref()
-        else {
-            continue;
-        };
-        let completion_sequence = record.sequence().get();
-        let issuance_sequence = payload.issuance_sequence.get();
-        if issuance_sequence >= completion_sequence {
-            return Err(DispatchCheckInError::CompletionPointsForward {
-                completion_sequence,
-                issuance_sequence,
-            });
-        }
-        if !dispatch_sequences.contains(&issuance_sequence) {
-            if record_sequences.contains(&issuance_sequence) {
-                return Err(DispatchCheckInError::CompletionPointsToNonDispatch {
-                    completion_sequence,
-                    issuance_sequence,
-                });
-            }
-            return Err(DispatchCheckInError::CompletionIssuanceMissing {
-                completion_sequence,
-                issuance_sequence,
-            });
-        }
-        if !completed.insert(issuance_sequence) {
-            return Err(DispatchCheckInError::CompletionRepeatsIssuance {
-                completion_sequence,
-                issuance_sequence,
-            });
-        }
-        let issuance_node = dispatches
-            .iter()
-            .find(|(sequence, _)| *sequence == payload.issuance_sequence)
-            .map(|(_, node)| *node)
-            .unwrap_or_default();
-        if issuance_node != record.node().as_str() {
-            return Err(DispatchCheckInError::CompletionNodeMismatch {
-                completion_sequence,
-                issuance_sequence,
-                completion_node: record.node().as_str().to_owned(),
-                issuance_node: issuance_node.to_owned(),
-            });
-        }
-    }
 
     let mut observations_by_sequence = BTreeMap::<u64, &DispatchIdentityObservation>::new();
     for observation in observations {
@@ -225,18 +176,31 @@ pub fn classify_dispatch_check_in(
         }
     }
 
-    let dispatches = dispatches
-        .into_iter()
-        .map(|(issuance_sequence, _)| {
+    let dispatches = ledger
+        .entries()
+        .iter()
+        .map(|entry| {
+            let issuance_sequence = entry.issuance().sequence();
             let observation = observations_by_sequence
                 .get(&issuance_sequence.get())
                 .ok_or(DispatchCheckInError::ObservationMissingForIssuance {
                     issuance_sequence: issuance_sequence.get(),
                 })?;
-            let (liveness, accounting) = if completed.contains(&issuance_sequence.get()) {
+            let (liveness, accounting) = if matches!(
+                entry.completion(),
+                Some(DispatchLedgerCompletion::ObservedChild { .. })
+            ) {
                 (
                     DispatchLiveness::Finished,
-                    DispatchCompletionAccounting::Recorded,
+                    DispatchCompletionAccounting::ObservedChild,
+                )
+            } else if matches!(
+                entry.completion(),
+                Some(DispatchLedgerCompletion::ReconciledDead { .. })
+            ) {
+                (
+                    DispatchLiveness::Dead,
+                    DispatchCompletionAccounting::ReconciledDead,
                 )
             } else if matches!(
                 (observation.process_identity, observation.recorded_start_identity),
@@ -265,8 +229,26 @@ pub fn classify_dispatch_check_in(
     Ok(DispatchCheckInReport {
         schema_id: SCHEMA_ID.to_owned(),
         schema_version: SCHEMA_VERSION,
+        accounting: match ledger.accounting() {
+            DispatchAccounting::AllAccounted => DispatchAccountingSummary {
+                state: DispatchAccountingState::AllAccounted,
+                issuance_sequences: Vec::new(),
+            },
+            DispatchAccounting::Unaccounted(unaccounted) => DispatchAccountingSummary {
+                state: DispatchAccountingState::Unaccounted,
+                issuance_sequences: unaccounted
+                    .entries()
+                    .iter()
+                    .map(|issuance| issuance.sequence().get())
+                    .collect(),
+            },
+        },
         dispatches,
     })
+}
+
+fn map_ledger_error(error: DispatchLedgerError) -> DispatchCheckInError {
+    DispatchCheckInError::Ledger { source: error }
 }
 
 /// Serialize canonical compact report JSON followed by exactly one LF.
@@ -286,6 +268,9 @@ pub fn serialize_dispatch_check_in(
 /// A dispatch check-in could not be correlated or serialized.
 #[derive(Debug, Error)]
 pub enum DispatchCheckInError {
+    /// The shared dispatch ledger rejected an untrustworthy event relationship.
+    #[error(transparent)]
+    Ledger { source: DispatchLedgerError },
     /// A completion names an issuance absent from the event records.
     #[error(
         "dispatch check-in completion {completion_sequence} points to missing issuance {issuance_sequence}"
@@ -351,7 +336,7 @@ mod tests {
     };
     use crate::{ProcessStartIdentity, Sequence, parse_event_line};
 
-    const CANONICAL: &[u8] = b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"finished\",\"completion\":\"recorded\",\"artifact_production\":\"produced\"},{\"issuance_sequence\":3,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":4,\"state\":\"running\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":5,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":6,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":7,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":8,\"state\":\"finished\",\"completion\":\"recorded\",\"artifact_production\":\"not-produced\"}]}\n";
+    const CANONICAL: &[u8] = b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"accounting\":{\"state\":\"unaccounted\",\"issuance_sequences\":[3,4,5,6,7]},\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"finished\",\"completion\":\"observed-child\",\"artifact_production\":\"produced\"},{\"issuance_sequence\":3,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":4,\"state\":\"running\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":5,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":6,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":7,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":8,\"state\":\"finished\",\"completion\":\"observed-child\",\"artifact_production\":\"not-produced\"}]}\n";
 
     fn record(sequence: u64, kind: &str, node: &str, payload: &str) -> crate::EventRecord {
         parse_event_line(&format!(
@@ -399,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_report_bytes_cover_finished_running_dead_and_reused_identity() {
+    fn canonical_report_bytes_distinguish_observed_reconciled_running_dead_and_unrecorded() {
         let records = [
             dispatch(1, "m1-s2"),
             completion(2, 1, "m1-s2"),
@@ -449,7 +434,7 @@ mod tests {
         assert_eq!(report.dispatches[0].liveness(), DispatchLiveness::Finished);
         assert_eq!(
             report.dispatches[0].accounting(),
-            DispatchCompletionAccounting::Recorded
+            DispatchCompletionAccounting::ObservedChild
         );
         assert_eq!(
             report.dispatches[0].artifact_production(),
@@ -488,7 +473,7 @@ mod tests {
         assert_eq!(report.dispatches[6].liveness(), DispatchLiveness::Finished);
         assert_eq!(
             report.dispatches[6].accounting(),
-            DispatchCompletionAccounting::Recorded
+            DispatchCompletionAccounting::ObservedChild
         );
         assert_eq!(
             report
@@ -505,7 +490,7 @@ mod tests {
                 (
                     1,
                     DispatchLiveness::Finished,
-                    DispatchCompletionAccounting::Recorded,
+                    DispatchCompletionAccounting::ObservedChild,
                     ArtifactProduction::Produced,
                 ),
                 (
@@ -541,7 +526,7 @@ mod tests {
                 (
                     8,
                     DispatchLiveness::Finished,
-                    DispatchCompletionAccounting::Recorded,
+                    DispatchCompletionAccounting::ObservedChild,
                     ArtifactProduction::NotProduced,
                 ),
             ]
@@ -550,6 +535,26 @@ mod tests {
             serialize_dispatch_check_in(&report).expect("serialize"),
             CANONICAL
         );
+        let reconciled_records = [
+            dispatch(1, "m1-s2"),
+            record(
+                2,
+                "dispatch-completion",
+                "m1-s2",
+                r#"{"issuance_sequence":1,"outcome":"reconciled-dead","artifact_production":"not-produced"}"#,
+            ),
+        ];
+        let reconciled = classify_dispatch_check_in(
+            &reconciled_records,
+            &[observation(
+                1,
+                start(1),
+                ProcessIdentityObservation::Absent,
+                ArtifactProduction::NotProduced,
+            )],
+        )
+        .expect("reconciled report");
+        assert_eq!(serialize_dispatch_check_in(&reconciled).expect("serialize"), b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"accounting\":{\"state\":\"all-accounted\",\"issuance_sequences\":[]},\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"dead\",\"completion\":\"reconciled-dead\",\"artifact_production\":\"not-produced\"}]}\n");
     }
 
     #[test]
@@ -592,18 +597,18 @@ mod tests {
         let cases = [
             (
                 vec![dispatch(1, "m1-s2"), completion(3, 2, "m1-s2")],
-                "dispatch check-in completion 3 points to missing issuance 2",
+                "dispatch completion 3 names missing issuance sequence 2",
             ),
             (
                 vec![
                     record(1, "delta", "m1-s2", r#"{"message":"x"}"#),
                     completion(2, 1, "m1-s2"),
                 ],
-                "dispatch check-in completion 2 points to non-dispatch issuance 1",
+                "dispatch completion 2 names non-dispatch sequence 1",
             ),
             (
                 vec![dispatch(1, "m1-s2"), completion(2, 2, "m1-s2")],
-                "dispatch check-in completion 2 points forward to issuance 2",
+                "dispatch completion 2 points forward to issuance 2",
             ),
             (
                 vec![
@@ -611,24 +616,17 @@ mod tests {
                     completion(2, 1, "m1-s2"),
                     completion(3, 1, "m1-s2"),
                 ],
-                "dispatch check-in completion 3 repeats completed issuance 1",
+                "duplicate completion 3 for issuance 1; first completion was 2",
             ),
             (
                 vec![dispatch(1, "m1-s2"), completion(2, 1, "m1-other")],
-                "dispatch check-in completion 2 node m1-other differs from issuance 1 node m1-s2",
+                "completion node m1-other does not match issuance 1 node m1-s2",
             ),
         ];
         for (records, expected) in cases {
             let error = classify_dispatch_check_in(&records, &[]).expect_err("invalid completion");
             assert_eq!(error.to_string(), expected);
-            assert!(matches!(
-                error,
-                DispatchCheckInError::CompletionIssuanceMissing { .. }
-                    | DispatchCheckInError::CompletionPointsToNonDispatch { .. }
-                    | DispatchCheckInError::CompletionPointsForward { .. }
-                    | DispatchCheckInError::CompletionRepeatsIssuance { .. }
-                    | DispatchCheckInError::CompletionNodeMismatch { .. }
-            ));
+            assert!(matches!(error, DispatchCheckInError::Ledger { .. }));
         }
     }
 }
