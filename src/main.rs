@@ -25,27 +25,29 @@ use pce_core::{
     BranchState, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
     CodexTerminalObservation, CodexTerminalUsage, CompletionCriterionStatus, CompletionDecision,
     CreationDate, CriterionChangeDecision, CurrentArtifactObservation, CurrentArtifactState,
-    DispatchCandidate, DispatchDuration, DispatchEnvelope, DispatchExitStatus,
-    DispatchIdentityObservation, DispatchLogging, DispatchProcessIdentity, DispatchProjectionInput,
-    DispatchRef, DispatchRole, DispatchRoleClass, DispatchTarget, DispatchTokenUsage,
-    DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
-    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
-    ExactPullRequestState, Executable, ExitCode, ExpectedVerdictOutcome, FileObservation,
-    FindingAdmission, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
-    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
-    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
-    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, KnownPayload, LandingReadinessDecision,
-    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
-    MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, ObservedExitStatus,
-    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PairedCampaign,
-    PairedExecutionProofError, PairedReplayClassification, ProcessIdentityObservation,
-    ProcessNumber, ProcessStartIdentity, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
-    ReferenceValidation, ReplayArtifactObservation, ReplayClassifications, ReplayObservation,
-    ReplayRefResult, RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation,
-    RepositoryName, RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
-    RepositoryRelativePath, RepositoryRoot, RunSnapshot, Sandbox, SeatbeltCapability, Sequence,
-    Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
+    DispatchCandidate, DispatchCompletionPayload, DispatchDuration, DispatchEnvelope,
+    DispatchExitStatus, DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion,
+    DispatchLogging, DispatchProcessIdentity, DispatchProjectionInput, DispatchRef, DispatchRole,
+    DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef,
+    EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
+    Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode,
+    ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
+    GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef,
+    GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
+    GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
+    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
+    LandingReadinessDecision, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
+    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
+    ObservedExitStatus, ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge,
+    PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
+    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity, PullRequestNumber,
+    PullRequestSelector, ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome,
+    RecordedProcessIdentity, RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation,
+    ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
+    RepositoryContractPayload, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
+    RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest, SignalNumber,
+    SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
     StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
     UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
     WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
@@ -53,7 +55,7 @@ use pce_core::{
     classify_seatbelt_capability, compose_gate_arguments, compose_planning_role_frame,
     compute_dispatchability, create_vision, derive_merge_status, derive_milestone_merge_status,
     derive_run_state, dispatch_completion_payload, dispatch_invocation, dispatch_payload,
-    evaluate_completion, evaluate_landing_readiness, event_record_matches,
+    evaluate_completion, evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
     fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot, meter_dispatches,
     normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
     parse_claude_result, parse_dispatch_process_identity, parse_event_line,
@@ -86,6 +88,7 @@ const USAGE: &str = concat!(
     "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CODEX_ARGUMENT>...\n",
     "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
     "       pce dispatch check-in --file <ABSOLUTE_LOG_PATH>\n",
+    "       pce dispatch reconcile --file <ABSOLUTE_LOG_PATH> --issuance <ISSUANCE_SEQUENCE> --node <NODE>\n",
     "       pce gate exec\n",
     "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>\n",
     "       pce gate execution-subject-probe --output <REPOSITORY_RELATIVE_OUTPUT_PATH>\n",
@@ -190,6 +193,11 @@ enum Command {
     },
     DispatchCheckIn {
         log_path: PathBuf,
+    },
+    DispatchReconcile {
+        log_path: PathBuf,
+        issuance_sequence: Sequence,
+        node: NodeId,
     },
     VisionNew {
         name: VisionName,
@@ -346,6 +354,7 @@ struct LiveDispatchCompletion<'a> {
     node: &'a NodeId,
     issuance_sequence: Sequence,
     required_artifact_path: &'a AbsoluteRequiredArtifactPath,
+    continuation_process_identity: RecordedProcessIdentity,
 }
 
 enum OwnedFileObservation {
@@ -519,6 +528,11 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             let mut output = stdout.lock();
             run_dispatch_check_in(&log_path, &mut output)
         }
+        Command::DispatchReconcile {
+            log_path,
+            issuance_sequence,
+            node,
+        } => run_dispatch_reconcile(&log_path, issuance_sequence, node),
         Command::VisionNew { name } => run_vision_new(&name),
         Command::VisionCheck => run_vision_check(input),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
@@ -629,6 +643,9 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "dispatch" && action == "check-in" => {
             parse_dispatch_check_in(rest)
         }
+        [verb, action, rest @ ..] if verb == "dispatch" && action == "reconcile" => {
+            parse_dispatch_reconcile(rest)
+        }
         [verb, target, rest @ ..] if verb == "dispatch" => match target.as_str() {
             "codex" => parse_codex_dispatch(target, rest),
             "gate" => parse_gate_dispatch(rest),
@@ -637,6 +654,48 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         .with_context(|| USAGE),
         _ => bail!(USAGE),
     }
+}
+
+fn parse_dispatch_reconcile(rest: &[String]) -> Result<Command> {
+    let [
+        file_flag,
+        raw_log_path,
+        issuance_flag,
+        raw_issuance,
+        node_flag,
+        raw_node,
+    ] = rest
+    else {
+        bail!(USAGE);
+    };
+    if file_flag != "--file"
+        || issuance_flag != "--issuance"
+        || node_flag != "--node"
+        || raw_log_path.is_empty()
+        || raw_issuance.is_empty()
+        || raw_node.is_empty()
+    {
+        bail!(USAGE);
+    }
+    let log_path = PathBuf::from(raw_log_path);
+    if !log_path.is_absolute() {
+        bail!(
+            "dispatch reconcile event-log path must be absolute: {}",
+            log_path.display()
+        );
+    }
+    let raw = raw_issuance.parse::<u64>().map_err(|source| {
+        anyhow!("failed to parse dispatch reconciliation issuance sequence: {source}")
+    })?;
+    let issuance_sequence = Sequence::parse(raw).map_err(|source| {
+        anyhow!("failed to parse dispatch reconciliation issuance sequence: {source}")
+    })?;
+    let node = NodeId::parse(raw_node).context("failed to parse dispatch reconciliation node")?;
+    Ok(Command::DispatchReconcile {
+        log_path,
+        issuance_sequence,
+        node,
+    })
 }
 
 fn parse_dispatch_check_in(rest: &[String]) -> Result<Command> {
@@ -1316,7 +1375,7 @@ fn wait_for_paired_critic_completion(log: &Path, verdict: &Path, deadline: Insta
                     else {
                         bail!("paired critic second lifecycle record is not a completion")
                     };
-                    if completion.issuance_sequence != records[0].sequence() {
+                    if completion.issuance_sequence() != records[0].sequence() {
                         bail!("paired critic completion does not name its issuance")
                     }
                     match std::fs::read(evidence.as_path()) {
@@ -2709,6 +2768,179 @@ fn append_one(path: &Path, kind: WriteKind, node: NodeId, payload: String) -> Re
         (Err(primary), Err(error)) => Err(primary.context(format!(
             "additionally, explicit event-log unlock failed: {error:#}"
         ))),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DispatchClosureTarget {
+    issuance_sequence: Sequence,
+    node: NodeId,
+}
+
+fn close_dispatch_conditionally(
+    log_path: &Path,
+    target: DispatchClosureTarget,
+    prepare: impl FnOnce(&DispatchLedger) -> Result<DispatchCompletionPayload>,
+) -> Result<EventRecord> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(false)
+        .open(log_path)
+        .with_context(|| format!("failed to open event log {}", log_path.display()))?;
+    file.lock()
+        .with_context(|| format!("failed to lock event log {}", log_path.display()))?;
+    let operation = (|| -> Result<EventRecord> {
+        file.seek(SeekFrom::Start(0))
+            .context("failed to seek locked event log")?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .context("failed to read locked event log")?;
+        let mut reader = BufReader::new(bytes.as_slice());
+        let parsed = read_event_log_lines(&mut reader, log_path)
+            .context("failed to read locked event log")?;
+        let records = parsed
+            .into_iter()
+            .map(|line| line.record)
+            .collect::<Vec<_>>();
+        let ledger = fold_dispatch_ledger(&records).context("failed to read locked event log")?;
+        let entry = ledger.issuance(target.issuance_sequence).ok_or_else(|| {
+            if records
+                .iter()
+                .any(|record| record.sequence() == target.issuance_sequence)
+            {
+                anyhow!(
+                    "dispatch closure sequence {} is not a dispatch issuance",
+                    target.issuance_sequence.get()
+                )
+            } else {
+                anyhow!(
+                    "dispatch closure issuance {} is absent",
+                    target.issuance_sequence.get()
+                )
+            }
+        })?;
+        if entry.issuance().node() != &target.node {
+            bail!(
+                "dispatch closure node {} does not match issuance {} node {}",
+                target.node.as_str(),
+                target.issuance_sequence.get(),
+                entry.issuance().node().as_str()
+            );
+        }
+        if let Some(completion) = entry.completion() {
+            let (outcome, sequence) = match completion {
+                DispatchLedgerCompletion::ObservedChild { sequence, .. } => {
+                    ("observed-child", sequence)
+                }
+                DispatchLedgerCompletion::ReconciledDead { sequence, .. } => {
+                    ("reconciled-dead", sequence)
+                }
+            };
+            bail!(
+                "dispatch closure issuance {} already has {} completion {}",
+                target.issuance_sequence.get(),
+                outcome,
+                sequence.get()
+            );
+        }
+        let payload = prepare(&ledger)?;
+        if payload.issuance_sequence() != target.issuance_sequence {
+            bail!(
+                "dispatch closure payload names issuance {}; expected {}",
+                payload.issuance_sequence().get(),
+                target.issuance_sequence.get()
+            );
+        }
+        append_locked_record(
+            &mut file,
+            serde_json::to_string(&payload).context("failed to serialize dispatch completion")?,
+            WriteKind::DispatchCompletion,
+            target.node,
+            log_path,
+        )
+    })();
+    let unlock = file
+        .unlock()
+        .with_context(|| format!("failed to unlock event log {}", log_path.display()));
+    match (operation, unlock) {
+        (Ok(record), Ok(())) => Ok(record),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(primary), Err(error)) => Err(primary.context(format!(
+            "additionally, explicit event-log unlock failed: {error:#}"
+        ))),
+    }
+}
+
+fn run_dispatch_reconcile(
+    log_path: &Path,
+    issuance_sequence: Sequence,
+    node: NodeId,
+) -> Result<()> {
+    let target = DispatchClosureTarget {
+        issuance_sequence,
+        node,
+    };
+    close_dispatch_conditionally(log_path, target, |_| {
+        let sidecar_path =
+            dispatch_identity_directory(log_path).join(format!("{}.json", issuance_sequence.get()));
+        let Some(identity) = read_dispatch_identity_sidecar(&sidecar_path)? else {
+            bail!(
+                "dispatch reconciliation refused for issuance {}: dispatch process identity sidecar is absent",
+                issuance_sequence.get()
+            );
+        };
+        if identity.issuance_sequence() != issuance_sequence {
+            bail!(
+                "dispatch process identity sidecar issuance sequence {} does not match event issuance {}",
+                identity.issuance_sequence().get(),
+                issuance_sequence.get()
+            );
+        }
+        require_dead_identity(
+            issuance_sequence,
+            "child",
+            identity.child_process_identity(),
+        )?;
+        if let Some(continuation) = identity.continuation_process_identity() {
+            require_dead_identity(issuance_sequence, "continuation", continuation)?;
+        }
+        let artifact_production =
+            observe_required_dispatch_artifact(identity.required_artifact_path().as_path())?;
+        Ok(DispatchCompletionPayload::ReconciledDead(
+            ReconciledDeadDispatchCompletionPayload {
+                issuance_sequence,
+                outcome: ReconciledDispatchOutcome::ReconciledDead,
+                artifact_production,
+            },
+        ))
+    })?;
+    Ok(())
+}
+
+fn require_dead_identity(
+    issuance_sequence: Sequence,
+    label: &str,
+    identity: RecordedProcessIdentity,
+) -> Result<()> {
+    match observe_darwin_process_number(identity.process_number())? {
+        ProcessIdentityObservation::Absent => Ok(()),
+        ProcessIdentityObservation::Present(observed)
+            if observed != identity.process_start_identity() =>
+        {
+            Ok(())
+        }
+        ProcessIdentityObservation::Present(_) => bail!(
+            "dispatch reconciliation refused for issuance {}: {} process identity is still alive",
+            issuance_sequence.get(),
+            label
+        ),
+        ProcessIdentityObservation::ForeignPresent => bail!(
+            "dispatch reconciliation refused for issuance {}: {} process start identity is unreadable",
+            issuance_sequence.get(),
+            label
+        ),
     }
 }
 
@@ -7636,12 +7868,13 @@ fn cleanup_failed_dispatch_setup(
                 dispatch_exit_status(status)?,
                 ArtifactOutcome::NotValidated,
             );
-            append_one(
+            close_dispatch_conditionally(
                 completion.path,
-                WriteKind::DispatchCompletion,
-                completion.node.clone(),
-                serde_json::to_string(&payload)
-                    .context("failed to serialize dispatch completion")?,
+                DispatchClosureTarget {
+                    issuance_sequence: completion.issuance_sequence,
+                    node: completion.node.clone(),
+                },
+                |_| Ok(payload),
             )?;
             Ok(())
         })();
@@ -7780,6 +8013,7 @@ fn run_dispatch_continuation(input: &mut dyn Read) -> Result<()> {
     let envelope = reconstruct_dispatch_envelope(request.envelope)?;
     let required_artifact_path =
         AbsoluteRequiredArtifactPath::parse(request.completion.required_artifact_path)?;
+    let continuation_process_identity = observe_current_process_identity()?;
     execute_dispatch(
         &envelope,
         Some(LiveDispatchCompletion {
@@ -7787,8 +8021,24 @@ fn run_dispatch_continuation(input: &mut dyn Read) -> Result<()> {
             node: &request.completion.node,
             issuance_sequence: request.completion.issuance_sequence,
             required_artifact_path: &required_artifact_path,
+            continuation_process_identity,
         }),
     )
+}
+
+fn observe_current_process_identity() -> Result<RecordedProcessIdentity> {
+    let process_number = ProcessNumber::new(std::process::id())?;
+    match observe_darwin_process_number(process_number)? {
+        ProcessIdentityObservation::Present(start) => {
+            Ok(RecordedProcessIdentity::new(process_number, start))
+        }
+        ProcessIdentityObservation::Absent => {
+            bail!("failed to observe dispatch continuation process identity: process is absent")
+        }
+        ProcessIdentityObservation::ForeignPresent => bail!(
+            "failed to observe dispatch continuation process identity: process identity is unreadable"
+        ),
+    }
 }
 
 fn reconstruct_dispatch_envelope(wire: ContinuationEnvelope) -> Result<DispatchEnvelope> {
@@ -7882,8 +8132,8 @@ fn execute_dispatch(
             let (process_number, process_start_identity) = observe_darwin_process_identity(&child)?;
             let identity = DispatchProcessIdentity::new(
                 completion.issuance_sequence,
-                process_number,
-                process_start_identity,
+                RecordedProcessIdentity::new(process_number, process_start_identity),
+                completion.continuation_process_identity,
                 completion.required_artifact_path.clone(),
             );
             persist_dispatch_process_identity(completion.path, &identity).with_context(|| {
@@ -8069,12 +8319,13 @@ fn execute_dispatch(
                 exit_status,
                 artifact_outcome,
             );
-            append_one(
+            close_dispatch_conditionally(
                 completion_context.path,
-                WriteKind::DispatchCompletion,
-                completion_context.node.clone(),
-                serde_json::to_string(&completion)
-                    .context("failed to serialize dispatch completion")?,
+                DispatchClosureTarget {
+                    issuance_sequence: completion_context.issuance_sequence,
+                    node: completion_context.node.clone(),
+                },
+                |_| Ok(completion),
             )
             .context("failed to append dispatch completion after child exit")?;
         }
@@ -11228,7 +11479,7 @@ None.
             render_human_snapshot(&snapshot),
             concat!(
                 "pce status (pce.run-snapshot v1)\n",
-                "repositories (0)\nsteps (0)\ndispatches (0)\nrounds (0)\nholds (0)\n",
+                "repositories (0)\nsteps (0)\ndispatch-accounting state=all-accounted issuance-sequences=-\ndispatches (0)\nrounds (0)\nholds (0)\n",
                 "provenance (0)\nresume state=no-log-visible-candidate\nrecovery-digest\n",
                 "  rounds (entries=0, elisions=0)\n",
                 "  open-holds (entries=0, elisions=0)\n",

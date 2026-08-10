@@ -3,16 +3,16 @@
 //! Correlates dispatch issuances with their terminal completions without acquiring any I/O
 //! authority.
 
-use std::collections::BTreeMap;
-
 use serde::Serialize;
 use thiserror::Error;
 use tracing::instrument;
 
 use crate::DispatchRef;
+use crate::dispatch_ledger::{DispatchLedgerCompletion, DispatchLedgerError, fold_dispatch_ledger};
 use crate::event_log::{
-    ArtifactOutcome, DispatchDuration, DispatchExitStatus, DispatchRole, DispatchTokenUsage,
-    EventBodyRef, EventRecord, EventTimestamp, Evidence, KnownPayload, NodeId, Sequence,
+    ArtifactOutcome, ArtifactProduction, DispatchDuration, DispatchExitStatus, DispatchRole,
+    DispatchTokenUsage, EventRecord, EventTimestamp, Evidence, NodeId, ReconciledDispatchOutcome,
+    Sequence,
 };
 
 /// The issuance half of one dispatch lifecycle report.
@@ -28,13 +28,28 @@ pub struct DispatchMeterIssuance {
 
 /// The optional completion half of one dispatch lifecycle report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DispatchMeterCompletion {
+#[serde(untagged)]
+pub enum DispatchMeterCompletion {
+    ObservedChild(ObservedDispatchMeterCompletion),
+    ReconciledDead(ReconciledDeadDispatchMeterCompletion),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ObservedDispatchMeterCompletion {
     pub sequence: Sequence,
     pub timestamp: EventTimestamp,
     pub duration_ms: DispatchDuration,
     pub exit_status: DispatchExitStatus,
     pub artifact_outcome: ArtifactOutcome,
     pub usage: DispatchTokenUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReconciledDeadDispatchMeterCompletion {
+    pub sequence: Sequence,
+    pub timestamp: EventTimestamp,
+    pub outcome: ReconciledDispatchOutcome,
+    pub artifact_production: ArtifactProduction,
 }
 
 /// One dispatch issuance and its correlated completion, when present.
@@ -47,6 +62,9 @@ pub struct DispatchMeterRecord {
 /// A malformed relationship between a dispatch completion and the event stream it names.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DispatchMeterError {
+    /// The shared ledger rejected sequence order before correlation.
+    #[error(transparent)]
+    Ledger { source: DispatchLedgerError },
     /// A completion names its own event sequence or a later event sequence.
     #[error(
         "dispatch completion {completion} points forward to issuance {issuance}",
@@ -103,12 +121,6 @@ pub enum DispatchMeterError {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
-enum SeenTarget {
-    Dispatch { report_index: usize },
-    Other,
-}
-
 fn project_usage(usage: &DispatchTokenUsage) -> DispatchTokenUsage {
     match usage {
         DispatchTokenUsage::Measured {
@@ -150,77 +162,96 @@ fn project_usage(usage: &DispatchTokenUsage) -> DispatchTokenUsage {
 pub fn meter_dispatches(
     records: &[EventRecord],
 ) -> Result<Vec<DispatchMeterRecord>, DispatchMeterError> {
-    let mut seen = BTreeMap::<u64, SeenTarget>::new();
-    let mut report = Vec::<DispatchMeterRecord>::new();
-
-    for record in records {
-        let sequence = record.sequence();
-        match record.body_ref() {
-            EventBodyRef::Known(KnownPayload::Dispatch(payload)) => {
-                let report_index = report.len();
-                report.push(DispatchMeterRecord {
-                    issuance: DispatchMeterIssuance {
+    let ledger = fold_dispatch_ledger(records).map_err(map_ledger_error)?;
+    Ok(ledger
+        .entries()
+        .iter()
+        .map(|entry| {
+            let issuance = entry.issuance();
+            DispatchMeterRecord {
+                issuance: DispatchMeterIssuance {
+                    sequence: issuance.sequence(),
+                    timestamp: issuance.timestamp(),
+                    node: issuance.node().clone(),
+                    role: issuance.role().clone(),
+                    r#ref: issuance.dispatch_ref().clone(),
+                    evidence: issuance.evidence().clone(),
+                },
+                completion: entry.completion().map(|completion| match completion {
+                    DispatchLedgerCompletion::ObservedChild {
                         sequence,
-                        timestamp: *record.timestamp(),
-                        node: record.node().clone(),
-                        role: payload.role.clone(),
-                        r#ref: payload.r#ref.clone(),
-                        evidence: payload.evidence.clone(),
-                    },
-                    completion: None,
-                });
-                seen.insert(sequence.get(), SeenTarget::Dispatch { report_index });
+                        timestamp,
+                        payload,
+                    } => DispatchMeterCompletion::ObservedChild(ObservedDispatchMeterCompletion {
+                        sequence: *sequence,
+                        timestamp: *timestamp,
+                        duration_ms: payload.duration_ms,
+                        exit_status: payload.exit_status,
+                        artifact_outcome: payload.artifact_outcome,
+                        usage: project_usage(&payload.usage),
+                    }),
+                    DispatchLedgerCompletion::ReconciledDead {
+                        sequence,
+                        timestamp,
+                        payload,
+                    } => DispatchMeterCompletion::ReconciledDead(
+                        ReconciledDeadDispatchMeterCompletion {
+                            sequence: *sequence,
+                            timestamp: *timestamp,
+                            outcome: payload.outcome,
+                            artifact_production: payload.artifact_production,
+                        },
+                    ),
+                }),
             }
-            EventBodyRef::Known(KnownPayload::DispatchCompletion(payload)) => {
-                let issuance_sequence = payload.issuance_sequence;
-                if issuance_sequence.get() >= sequence.get() {
-                    return Err(DispatchMeterError::ForwardReference {
-                        completion_sequence: sequence,
-                        issuance_sequence,
-                    });
-                }
-                let target = seen.get(&issuance_sequence.get()).copied().ok_or(
-                    DispatchMeterError::MissingTarget {
-                        completion_sequence: sequence,
-                        issuance_sequence,
-                    },
-                )?;
-                let SeenTarget::Dispatch { report_index } = target else {
-                    return Err(DispatchMeterError::NonDispatchTarget {
-                        completion_sequence: sequence,
-                        issuance_sequence,
-                    });
-                };
-                let issuance = &report[report_index].issuance;
-                if issuance.node != *record.node() {
-                    return Err(DispatchMeterError::NodeMismatch {
-                        issuance_sequence,
-                        issuance_node: issuance.node.clone(),
-                        completion_node: record.node().clone(),
-                    });
-                }
-                if let Some(first) = &report[report_index].completion {
-                    return Err(DispatchMeterError::DuplicateCompletion {
-                        issuance_sequence,
-                        first_completion_sequence: first.sequence,
-                        duplicate_completion_sequence: sequence,
-                    });
-                }
-                report[report_index].completion = Some(DispatchMeterCompletion {
-                    sequence,
-                    timestamp: *record.timestamp(),
-                    duration_ms: payload.duration_ms,
-                    exit_status: payload.exit_status,
-                    artifact_outcome: payload.artifact_outcome,
-                    usage: project_usage(&payload.usage),
-                });
-                seen.insert(sequence.get(), SeenTarget::Other);
-            }
-            EventBodyRef::Known(_) | EventBodyRef::Unknown { .. } => {
-                seen.insert(sequence.get(), SeenTarget::Other);
-            }
+        })
+        .collect())
+}
+
+fn map_ledger_error(error: DispatchLedgerError) -> DispatchMeterError {
+    match error {
+        DispatchLedgerError::ForwardReference {
+            completion_sequence,
+            issuance_sequence,
+        } => DispatchMeterError::ForwardReference {
+            completion_sequence,
+            issuance_sequence,
+        },
+        DispatchLedgerError::MissingTarget {
+            completion_sequence,
+            issuance_sequence,
+        } => DispatchMeterError::MissingTarget {
+            completion_sequence,
+            issuance_sequence,
+        },
+        DispatchLedgerError::NonDispatchTarget {
+            completion_sequence,
+            issuance_sequence,
+        } => DispatchMeterError::NonDispatchTarget {
+            completion_sequence,
+            issuance_sequence,
+        },
+        DispatchLedgerError::DuplicateCompletion {
+            issuance_sequence,
+            first_completion_sequence,
+            duplicate_completion_sequence,
+        } => DispatchMeterError::DuplicateCompletion {
+            issuance_sequence,
+            first_completion_sequence,
+            duplicate_completion_sequence,
+        },
+        DispatchLedgerError::NodeMismatch {
+            completion_sequence: _,
+            issuance_sequence,
+            issuance_node,
+            completion_node,
+        } => DispatchMeterError::NodeMismatch {
+            issuance_sequence,
+            issuance_node,
+            completion_node,
+        },
+        error @ DispatchLedgerError::NonIncreasingSequence { .. } => {
+            DispatchMeterError::Ledger { source: error }
         }
     }
-
-    Ok(report)
 }

@@ -7,6 +7,7 @@ pub mod contract_measurement;
 pub mod criterion_change;
 pub mod dispatch;
 pub mod dispatch_check_in;
+pub mod dispatch_ledger;
 pub mod dispatch_meter;
 pub mod dispatch_process_identity;
 pub mod event_log;
@@ -60,33 +61,39 @@ pub use dispatch::{
     render_dispatch_projection, seatbelt_capability_probe,
 };
 pub use dispatch_check_in::{
-    ArtifactProduction, DispatchCheckInEntry, DispatchCheckInError, DispatchCheckInReport,
+    DispatchCheckInEntry, DispatchCheckInError, DispatchCheckInReport,
     DispatchCompletionAccounting, DispatchIdentityObservation, DispatchLiveness,
     ProcessIdentityObservation, classify_dispatch_check_in, serialize_dispatch_check_in,
 };
+pub use dispatch_ledger::{
+    DispatchAccounting, DispatchLedger, DispatchLedgerCompletion, DispatchLedgerEntry,
+    DispatchLedgerError, DispatchLedgerIssuance, UnaccountedDispatchLedger, fold_dispatch_ledger,
+};
 pub use dispatch_meter::{
     DispatchMeterCompletion, DispatchMeterError, DispatchMeterIssuance, DispatchMeterRecord,
-    meter_dispatches,
+    ObservedDispatchMeterCompletion, ReconciledDeadDispatchMeterCompletion, meter_dispatches,
 };
 pub use dispatch_process_identity::{
     AbsoluteRequiredArtifactPath, DispatchProcessIdentity, DispatchProcessIdentityError,
     DispatchProcessIdentityExpectation, ProcessNumber, ProcessStartIdentity,
-    parse_dispatch_process_identity, require_dispatch_process_identity_match,
-    serialize_dispatch_process_identity,
+    RecordedProcessIdentity, parse_dispatch_process_identity,
+    require_dispatch_process_identity_match, serialize_dispatch_process_identity,
 };
 pub use event_log::{
     AppendError, AppendIntent, AppendableRepositoryContract, ArtifactOutcome, ArtifactPath,
-    CacheCreationInputTokens, CacheReadInputTokens, CachedInputTokens, ChangeOfCourse,
-    CriterionAddedPayload, CriterionExecutionOutcome, CriterionExecutionPayload, DeltaPayload,
-    DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef,
-    DispatchRole, DispatchTokenUsage, EscalationClosePayload, EscalationKey, EscalationOpenPayload,
-    EventBodyRef, EventKindName, EventLogError, EventLogTail, EventLogTailError, EventLogTailLine,
-    EventRecord, EventRecordFilter, EventTimestamp, Evidence, EvidencePolicy, EvidencePresence,
-    ExitCode, FinishedResult, GateObservations, InputTokens, KeyFindingPayload, KnownPayload,
-    LegacyRepositoryContractPayload, NodeId, ObservedCriterionResult, OutputTokens,
-    PlanningArtifactApprovedPayload, ReadKind, ReadPayload, ReasoningOutputTokens,
-    RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence, Sha256Digest,
-    SignalNumber, StatedRepositoryContract, UnpaidCriterionReason, UnparsedPayload,
+    ArtifactProduction, CacheCreationInputTokens, CacheReadInputTokens, CachedInputTokens,
+    ChangeOfCourse, CriterionAddedPayload, CriterionExecutionOutcome, CriterionExecutionPayload,
+    DeltaPayload, DispatchCompletionOutcomeRef, DispatchCompletionPayload, DispatchDuration,
+    DispatchExitStatus, DispatchPayload, DispatchRef, DispatchRole, DispatchTokenUsage,
+    EscalationClosePayload, EscalationKey, EscalationOpenPayload, EventBodyRef, EventKindName,
+    EventLogError, EventLogTail, EventLogTailError, EventLogTailLine, EventRecord,
+    EventRecordFilter, EventTimestamp, Evidence, EvidencePolicy, EvidencePresence, ExitCode,
+    FinishedResult, GateObservations, InputTokens, KeyFindingPayload, KnownPayload,
+    LegacyRepositoryContractPayload, NodeId, ObservedCriterionResult,
+    ObservedDispatchCompletionPayload, OutputTokens, PlanningArtifactApprovedPayload, ReadKind,
+    ReadPayload, ReasoningOutputTokens, ReconciledDeadDispatchCompletionPayload,
+    ReconciledDispatchOutcome, RepositoryContractPayload, RepositoryName, RepositoryRoot, Sequence,
+    Sha256Digest, SignalNumber, StatedRepositoryContract, UnpaidCriterionReason, UnparsedPayload,
     UsageAbsenceReason, WorkflowMap, WriteKind, append_event, event_record_matches,
     parse_event_line, serialize_event_line, successor_sequence, validate_evidence_policy,
 };
@@ -119,8 +126,9 @@ pub use run_state::{
     GitHubPullRequestObservation, GitMergeObservation, GitObservationSnapshot, GitReachableState,
     HeadBranch, HoldObservation, HoldSnapshot, HoldStatus, HoldStatusSnapshot, IntegrationBranch,
     MergeStatus, MergeSubject, MergeSubjectSnapshot, MilestoneMergeSubject, MilestoneNode,
-    MilestoneNumber, OrderingEdge, ProvenanceConditionSnapshot, ProvenanceSnapshot,
-    PullRequestNumber, PullRequestSelector, PullRequestSnapshot, PullRequestStateSnapshot,
+    MilestoneNumber, ObservedDispatchLifecycleObservation, OrderingEdge,
+    ProvenanceConditionSnapshot, ProvenanceSnapshot, PullRequestNumber, PullRequestSelector,
+    PullRequestSnapshot, PullRequestStateSnapshot, ReconciledDeadDispatchLifecycleObservation,
     RecoveryCategory, RecoveryDeltaEntry, RecoveryDigest, RecoveryElision, RecoveryFactEntry,
     RecoveryLogPath, RecoveryOpenHoldEntry, RecoveryRoundEntry, RepositoryBranchName,
     RepositoryFetchObservation, RepositoryFetchSnapshot, RepositoryObservation,

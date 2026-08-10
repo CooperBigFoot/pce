@@ -9,6 +9,7 @@
     "repositories",
     "steps",
     "dispatches",
+    "dispatch_accounting",
     "rounds",
     "holds",
     "provenance",
@@ -39,6 +40,9 @@
       "items": {
         "$ref": "#/$defs/dispatch"
       }
+    },
+    "dispatch_accounting": {
+      "$ref": "#/$defs/dispatchAccounting"
     },
     "rounds": {
       "type": "array",
@@ -497,7 +501,8 @@
         "sequence",
         "node",
         "role",
-        "ref"
+        "ref",
+        "completion"
       ],
       "properties": {
         "sequence": {
@@ -511,8 +516,62 @@
         },
         "ref": {
           "$ref": "#/$defs/bytePreservedString"
+        },
+        "completion": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/observedDispatchCompletion" },
+            { "$ref": "#/$defs/reconciledDispatchCompletion" }
+          ]
         }
       }
+    },
+    "dispatchAccounting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "issuance_sequences"],
+      "properties": {
+        "state": { "enum": ["all-accounted", "unaccounted"] },
+        "issuance_sequences": { "type": "array", "items": { "$ref": "#/$defs/positiveInteger" } }
+      }
+    },
+    "observedDispatchCompletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "sequence", "timestamp", "duration_ms", "usage", "exit_status", "artifact_outcome"],
+      "properties": {
+        "outcome": { "const": "observed-child" },
+        "sequence": { "$ref": "#/$defs/positiveInteger" },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "usage": { "$ref": "#/$defs/dispatchUsage" },
+        "exit_status": { "$ref": "#/$defs/dispatchExitStatus" },
+        "artifact_outcome": { "enum": ["not-validated", "validated", "missing", "truncated", "schema-invalid", "schema-violating"] }
+      }
+    },
+    "reconciledDispatchCompletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "sequence", "timestamp", "artifact_production"],
+      "properties": {
+        "outcome": { "const": "reconciled-dead" },
+        "sequence": { "$ref": "#/$defs/positiveInteger" },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "artifact_production": { "enum": ["produced", "not-produced"] }
+      }
+    },
+    "dispatchExitStatus": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "code"], "properties": { "kind": { "const": "exited" }, "code": { "type": "integer", "minimum": 0 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "signal"], "properties": { "kind": { "const": "signaled" }, "signal": { "type": "integer", "minimum": 0 } } }
+      ]
+    },
+    "dispatchUsage": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["availability", "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"], "properties": { "availability": { "const": "measured" }, "input_tokens": { "type": "integer", "minimum": 0 }, "cached_input_tokens": { "type": "integer", "minimum": 0 }, "output_tokens": { "type": "integer", "minimum": 0 }, "reasoning_output_tokens": { "type": "integer", "minimum": 0 } } },
+        { "type": "object", "additionalProperties": false, "required": ["availability", "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"], "properties": { "availability": { "const": "claude-measured" }, "input_tokens": { "type": "integer", "minimum": 0 }, "output_tokens": { "type": "integer", "minimum": 0 }, "cache_creation_input_tokens": { "type": "integer", "minimum": 0 }, "cache_read_input_tokens": { "type": "integer", "minimum": 0 } } },
+        { "type": "object", "additionalProperties": false, "required": ["availability", "reason"], "properties": { "availability": { "const": "absent" }, "reason": { "type": "string", "minLength": 1 } } }
+      ]
     },
     "roundSeries": {
       "type": "object",

@@ -41,6 +41,31 @@ pub struct ProcessStartIdentity {
     microseconds: u32,
 }
 
+/// One inseparable operating-system process identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordedProcessIdentity {
+    process_number: ProcessNumber,
+    process_start_identity: ProcessStartIdentity,
+}
+
+impl RecordedProcessIdentity {
+    pub const fn new(
+        process_number: ProcessNumber,
+        process_start_identity: ProcessStartIdentity,
+    ) -> Self {
+        Self {
+            process_number,
+            process_start_identity,
+        }
+    }
+    pub const fn process_number(self) -> ProcessNumber {
+        self.process_number
+    }
+    pub const fn process_start_identity(self) -> ProcessStartIdentity {
+        self.process_start_identity
+    }
+}
+
 impl ProcessStartIdentity {
     /// Construct a normalized Darwin start identity.
     ///
@@ -113,6 +138,7 @@ pub struct DispatchProcessIdentity {
     issuance_sequence: Sequence,
     process_number: ProcessNumber,
     process_start_identity: ProcessStartIdentity,
+    continuation_process_identity: Option<RecordedProcessIdentity>,
     required_artifact_path: AbsoluteRequiredArtifactPath,
 }
 
@@ -120,16 +146,34 @@ impl DispatchProcessIdentity {
     /// Author a version-one dispatch identity.
     pub fn new(
         issuance_sequence: Sequence,
-        process_number: ProcessNumber,
-        process_start_identity: ProcessStartIdentity,
+        child: RecordedProcessIdentity,
+        continuation: RecordedProcessIdentity,
         required_artifact_path: AbsoluteRequiredArtifactPath,
     ) -> Self {
         Self {
             schema_id: SCHEMA_ID.to_owned(),
             schema_version: SCHEMA_VERSION,
             issuance_sequence,
-            process_number,
-            process_start_identity,
+            process_number: child.process_number(),
+            process_start_identity: child.process_start_identity(),
+            continuation_process_identity: Some(continuation),
+            required_artifact_path,
+        }
+    }
+
+    /// Construct compatibility data in the pre-upgrade schema-version-one shape.
+    pub fn from_pre_upgrade_sidecar(
+        issuance_sequence: Sequence,
+        child: RecordedProcessIdentity,
+        required_artifact_path: AbsoluteRequiredArtifactPath,
+    ) -> Self {
+        Self {
+            schema_id: SCHEMA_ID.to_owned(),
+            schema_version: SCHEMA_VERSION,
+            issuance_sequence,
+            process_number: child.process_number(),
+            process_start_identity: child.process_start_identity(),
+            continuation_process_identity: None,
             required_artifact_path,
         }
     }
@@ -157,6 +201,14 @@ impl DispatchProcessIdentity {
     /// Return the Darwin process start identity.
     pub const fn process_start_identity(&self) -> ProcessStartIdentity {
         self.process_start_identity
+    }
+
+    pub const fn child_process_identity(&self) -> RecordedProcessIdentity {
+        RecordedProcessIdentity::new(self.process_number, self.process_start_identity)
+    }
+
+    pub const fn continuation_process_identity(&self) -> Option<RecordedProcessIdentity> {
+        self.continuation_process_identity
     }
 
     /// Borrow the required artifact path.
@@ -192,7 +244,15 @@ struct AuthoredIdentity<'a> {
     issuance_sequence: u64,
     process_number: u32,
     process_start_identity: AuthoredStartIdentity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuation_process_identity: Option<AuthoredProcessIdentity>,
     required_artifact_path: &'a str,
+}
+
+#[derive(Serialize)]
+struct AuthoredProcessIdentity {
+    process_number: u32,
+    process_start_identity: AuthoredStartIdentity,
 }
 
 #[derive(Serialize)]
@@ -209,7 +269,16 @@ struct RawIdentity {
     issuance_sequence: u64,
     process_number: u32,
     process_start_identity: RawStartIdentity,
+    #[serde(default)]
+    continuation_process_identity: Option<RawProcessIdentity>,
     required_artifact_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProcessIdentity {
+    process_number: u32,
+    process_start_identity: RawStartIdentity,
 }
 
 #[derive(Deserialize)]
@@ -237,6 +306,17 @@ pub fn serialize_dispatch_process_identity(
             seconds_since_unix_epoch: start.seconds_since_unix_epoch(),
             microseconds: start.microseconds(),
         },
+        continuation_process_identity: identity.continuation_process_identity.map(|recorded| {
+            AuthoredProcessIdentity {
+                process_number: recorded.process_number().get(),
+                process_start_identity: AuthoredStartIdentity {
+                    seconds_since_unix_epoch: recorded
+                        .process_start_identity()
+                        .seconds_since_unix_epoch(),
+                    microseconds: recorded.process_start_identity().microseconds(),
+                },
+            }
+        }),
         required_artifact_path: identity.required_artifact_path.as_str()?,
     };
     let mut bytes = serde_json::to_vec(&authored)
@@ -277,12 +357,25 @@ pub fn parse_dispatch_process_identity(
         raw.process_start_identity.microseconds,
     )?;
     let required_artifact_path = AbsoluteRequiredArtifactPath::parse(raw.required_artifact_path)?;
+    let continuation_process_identity = raw
+        .continuation_process_identity
+        .map(|identity| {
+            Ok(RecordedProcessIdentity::new(
+                ProcessNumber::new(identity.process_number)?,
+                ProcessStartIdentity::new(
+                    identity.process_start_identity.seconds_since_unix_epoch,
+                    identity.process_start_identity.microseconds,
+                )?,
+            ))
+        })
+        .transpose()?;
     Ok(DispatchProcessIdentity {
         schema_id: raw.schema_id,
         schema_version: raw.schema_version,
         issuance_sequence,
         process_number,
         process_start_identity,
+        continuation_process_identity,
         required_artifact_path,
     })
 }
@@ -362,19 +455,27 @@ mod tests {
     use super::{
         AbsoluteRequiredArtifactPath, DispatchProcessIdentity, DispatchProcessIdentityError,
         DispatchProcessIdentityExpectation, ProcessNumber, ProcessStartIdentity,
-        parse_dispatch_process_identity, require_dispatch_process_identity_match,
-        serialize_dispatch_process_identity,
+        RecordedProcessIdentity, parse_dispatch_process_identity,
+        require_dispatch_process_identity_match, serialize_dispatch_process_identity,
     };
     use crate::event_log::Sequence;
 
-    const CANONICAL: &[u8] = b"{\"schema_id\":\"pce.dispatch-process-identity\",\"schema_version\":1,\"issuance_sequence\":42,\"process_number\":4242,\"process_start_identity\":{\"seconds_since_unix_epoch\":1723200000,\"microseconds\":123456},\"required_artifact_path\":\"/tmp/pce/result.json\"}\n";
+    const CANONICAL: &[u8] = b"{\"schema_id\":\"pce.dispatch-process-identity\",\"schema_version\":1,\"issuance_sequence\":42,\"process_number\":4242,\"process_start_identity\":{\"seconds_since_unix_epoch\":1723200000,\"microseconds\":123456},\"continuation_process_identity\":{\"process_number\":4343,\"process_start_identity\":{\"seconds_since_unix_epoch\":1723200001,\"microseconds\":654321}},\"required_artifact_path\":\"/tmp/pce/result.json\"}\n";
+    const PRE_UPGRADE: &[u8] = b"{\"schema_id\":\"pce.dispatch-process-identity\",\"schema_version\":1,\"issuance_sequence\":42,\"process_number\":4242,\"process_start_identity\":{\"seconds_since_unix_epoch\":1723200000,\"microseconds\":123456},\"required_artifact_path\":\"/tmp/pce/result.json\"}\n";
 
     #[test]
-    fn canonical_dispatch_process_identity_bytes_round_trip() {
+    fn new_sidecar_records_both_identities_and_old_sidecar_remains_parseable() {
         let identity = DispatchProcessIdentity::new(
             Sequence::parse(42).expect("sequence"),
-            ProcessNumber::new(4242).expect("process number"),
-            ProcessStartIdentity::new(1_723_200_000, 123_456).expect("start identity"),
+            RecordedProcessIdentity::new(
+                ProcessNumber::new(4242).expect("process number"),
+                ProcessStartIdentity::new(1_723_200_000, 123_456).expect("start identity"),
+            ),
+            RecordedProcessIdentity::new(
+                ProcessNumber::new(4343).expect("continuation process number"),
+                ProcessStartIdentity::new(1_723_200_001, 654_321)
+                    .expect("continuation start identity"),
+            ),
             AbsoluteRequiredArtifactPath::parse("/tmp/pce/result.json").expect("artifact path"),
         );
         assert_eq!(
@@ -385,6 +486,9 @@ mod tests {
         assert_eq!(parsed.schema_id(), "pce.dispatch-process-identity");
         assert_eq!(parsed.schema_version(), 1);
         assert_eq!(parsed.issuance_sequence().get(), 42);
+        assert!(parsed.continuation_process_identity().is_some());
+        let old = parse_dispatch_process_identity(PRE_UPGRADE).expect("parse pre-upgrade");
+        assert_eq!(old.continuation_process_identity(), None);
         assert_eq!(parsed.process_number().get(), 4242);
         assert_eq!(
             parsed.process_start_identity().seconds_since_unix_epoch(),
