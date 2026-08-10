@@ -423,6 +423,7 @@ struct FixtureCompletionPayload {
     usage: FixtureDeferred,
     exit_status: FixtureDeferred,
     artifact_outcome: FixtureArtifactOutcome,
+    required_artifact_presence: FixtureDeferred,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -879,6 +880,7 @@ fn literal_projection(
                     .map_or(FixtureArtifactOutcome::Observed("not-validated"), |_| {
                         FixtureArtifactOutcome::Deferred(deferred)
                     }),
+                required_artifact_presence: deferred,
             },
         },
     };
@@ -1269,7 +1271,9 @@ fn assert_logged_structured_rejection(fixture: StructuredRejectionFixture) {
     else {
         panic!("{name} completion expected");
     };
-    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+    let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion) =
+        completion
+    else {
         panic!("reconciled completion")
     };
     assert_eq!(
@@ -1382,7 +1386,9 @@ fn assert_valid_structured_artifact(transcript: &[u8]) {
     else {
         panic!("positive completion expected");
     };
-    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+    let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion) =
+        completion
+    else {
         panic!("reconciled completion")
     };
     assert_eq!(completion.issuance_sequence, records[0].sequence());
@@ -1689,7 +1695,7 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
         normalized,
         vec![
             json!({"kind":"dispatch","node":"m3-s1","payload":{"role":"step-executor","ref":"abc123","evidence":"fixture invocation"}}),
-            json!({"kind":"dispatch-completion","node":"m3-s1","payload":{"issuance_sequence":1,"usage":{"availability":"measured","input_tokens":101,"cached_input_tokens":23,"output_tokens":17,"reasoning_output_tokens":5},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated"}}),
+            json!({"kind":"dispatch-completion","node":"m3-s1","payload":{"issuance_sequence":1,"usage":{"availability":"measured","input_tokens":101,"cached_input_tokens":23,"output_tokens":17,"reasoning_output_tokens":5},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated","required_artifact_presence":"present"}}),
         ]
     );
     let lower = wall_started
@@ -1716,7 +1722,9 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
     else {
         panic!("second record is not completion")
     };
-    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+    let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion) =
+        completion
+    else {
         panic!("reconciled completion")
     };
     let sleeping_duration_ms = completion.duration_ms.get();
@@ -1795,7 +1803,8 @@ fn records_measured_dispatch_lifecycle_with_exact_correlation() {
     else {
         panic!("second fast record is not completion")
     };
-    let pce_core::DispatchCompletionPayload::ObservedChild(fast_completion) = fast_completion
+    let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(fast_completion) =
+        fast_completion
     else {
         panic!("reconciled completion")
     };
@@ -1845,7 +1854,7 @@ fn records_failed_and_absent_terminal_reasons_before_reporting_exit() {
         let records = fs::read_to_string(&log_path).expect("read log").lines().map(|line| parse_event_line(line).expect("parse")).collect::<Vec<_>>();
         assert_eq!(records.len(), 2);
         let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref() else { panic!("missing completion") };
-        let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else { panic!("reconciled completion") };
+        let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion) = completion else { panic!("reconciled completion") };
         assert_eq!(completion.usage, DispatchTokenUsage::Absent { reason });
         assert_eq!(completion.exit_status, DispatchExitStatus::Exited { code: pce_core::ExitCode::new(code as u64) });
         assert!(Duration::from_millis(completion.duration_ms.get()) <= elapsed);
@@ -1918,7 +1927,9 @@ fn accepts_additive_usage_fields_and_blank_jsonl_lines() {
     else {
         panic!("missing completion")
     };
-    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+    let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion) =
+        completion
+    else {
         panic!("reconciled completion")
     };
     assert_eq!(
@@ -1990,7 +2001,9 @@ fn records_signal_and_no_terminal_usage_without_fabricating_exit_zero() {
     else {
         panic!("missing completion")
     };
-    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+    let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion) =
+        completion
+    else {
         panic!("reconciled completion")
     };
     assert_eq!(
@@ -2120,7 +2133,9 @@ fn releases_log_lock_while_child_runs_and_keeps_exact_issuance_identity() {
     else {
         panic!("completion not last")
     };
-    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+    let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion) =
+        completion
+    else {
         panic!("reconciled completion")
     };
     assert_eq!(completion.issuance_sequence, records[0].sequence());
@@ -2134,6 +2149,20 @@ fn wait_for_path(path: &Path) {
             "timed out waiting for {}",
             path.display()
         );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_non_empty_trimmed_file(path: &Path, failure: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(contents) = fs::read_to_string(path) {
+            let trimmed = contents.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_owned();
+            }
+        }
+        assert!(Instant::now() < deadline, "{failure}");
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -2241,13 +2270,13 @@ fn assert_blocked_identity(target: DispatchTarget) {
             let starter_pid = parent.id();
             let pid_path = record_root.join("invocation/pid");
             let sidecar = harness.path().join("events.jsonl.dispatches/42.json");
-            wait_for_path(&pid_path);
+            let pid = wait_for_non_empty_trimmed_file(
+                &pid_path,
+                "shim PID was not readable within five seconds",
+            )
+            .parse::<u32>()
+            .expect("parse shim PID");
             wait_for_path(&sidecar);
-            let pid = fs::read_to_string(&pid_path)
-                .expect("read shim PID")
-                .trim()
-                .parse::<u32>()
-                .expect("parse shim PID");
             let cat = Command::new("/bin/cat")
                 .arg(&sidecar)
                 .output()
@@ -2326,13 +2355,13 @@ fn assert_blocked_identity(target: DispatchTarget) {
                 .harness
                 .path()
                 .join("events.jsonl.dispatches/42.json");
-            wait_for_path(&pid_path);
+            let pid = wait_for_non_empty_trimmed_file(
+                &pid_path,
+                "gate shim PID was not readable within five seconds",
+            )
+            .parse::<u32>()
+            .expect("parse PID");
             wait_for_path(&sidecar);
-            let pid = fs::read_to_string(&pid_path)
-                .expect("PID")
-                .trim()
-                .parse::<u32>()
-                .expect("parse PID");
             let cat = Command::new("/bin/cat")
                 .arg(&sidecar)
                 .output()
@@ -2667,7 +2696,9 @@ fn assert_exact_detached_lifecycle(records: &[EventRecord], slow: bool) {
     else {
         panic!("second record is not dispatch completion")
     };
-    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+    let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion) =
+        completion
+    else {
         panic!("reconciled completion")
     };
     assert_eq!(completion.issuance_sequence, Sequence::first());
@@ -2706,10 +2737,11 @@ fn logged_dispatch_starter_returns_while_blocked_child_remains_alive_and_later_a
             fs::File::create(&starter_stderr).expect("create starter stderr"),
         ));
     let mut starter = starter.spawn().expect("spawn logged starter");
-    wait_for_path(&fixture.record_root.join("invocation/pid"));
-    let shim_pid =
-        fs::read_to_string(fixture.record_root.join("invocation/pid")).expect("read shim pid");
-    let shim_pid = shim_pid.trim();
+    let shim_pid = wait_for_non_empty_trimmed_file(
+        &fixture.record_root.join("invocation/pid"),
+        "shim PID was not readable within five seconds",
+    );
+    let shim_pid = shim_pid.as_str();
     let identity_deadline = Instant::now() + Duration::from_secs(5);
     let identity = loop {
         if let Some(identity) = process_start_identity(shim_pid) {
@@ -3419,13 +3451,17 @@ fn falsification_mandate(output: &Path, client: &Path) -> String {
     )
 }
 
-fn gate_completion(log_path: &Path) -> pce_core::ObservedDispatchCompletionPayload {
+fn gate_completion(
+    log_path: &Path,
+) -> pce_core::ObservedDispatchCompletionWithArtifactPresencePayload {
     let records = settle_lifecycle(log_path);
     let EventBodyRef::Known(KnownPayload::DispatchCompletion(completion)) = records[1].body_ref()
     else {
         panic!("second gate record is not a completion")
     };
-    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+    let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion) =
+        completion
+    else {
         panic!("gate completion was reconciled")
     };
     completion.clone()
@@ -6255,11 +6291,525 @@ fn gate_artifact_outcomes_cover_all_categories() {
     }
 }
 
+#[test]
+fn two_productless_attempts_atomically_open_hold_and_production_resets_streak() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("non-production-hold", CLAUDE_SUCCESS);
+    let required_artifact = fs::canonicalize(&fixture.output_path).expect("canonical artifact");
+    fs::remove_file(&fixture.output_path).expect("remove required artifact");
+    let log = fixture.harness.path().join("events.jsonl");
+    let environment = fixture.environment(0);
+    let mut argv = fixture.argv(&environment, &[]);
+    insert_gate_logging(&mut argv, &log, false);
+    configure_gate_key(&mut argv, "m4-s1", "step-plan-writer", &required_artifact);
+    for expected in [2, 4] {
+        remove_gate_invocation(&fixture);
+        let output = fixture
+            .harness
+            .run(&argv, b"")
+            .expect("run productless dispatch");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        wait_for_lifecycle_records(&log, expected, Instant::now() + Duration::from_secs(15));
+    }
+    remove_gate_invocation(&fixture);
+    let locked_log = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&log)
+        .expect("open log for concurrency barrier");
+    locked_log.lock().expect("lock concurrency barrier");
+    let first = spawn_gate_dispatch(&fixture, &argv);
+    let second = spawn_gate_dispatch(&fixture, &argv);
+    thread::sleep(Duration::from_millis(500));
+    locked_log.unlock().expect("release concurrency barrier");
+    let outputs = [
+        first.wait_with_output().expect("first concurrent dispatch"),
+        second
+            .wait_with_output()
+            .expect("second concurrent dispatch"),
+    ];
+    let opened = format!(
+        "Error: dispatch admission opened non-production hold for node m4-s1, role step-plan-writer, required artifact {} after 2 consecutive non-production completions; resolve with retry, re-plan, or abandon\n",
+        required_artifact.display()
+    );
+    let already_open = format!(
+        "Error: dispatch admission refused: non-production hold is open for node m4-s1, role step-plan-writer, required artifact {}; resolve with retry, re-plan, or abandon\n",
+        required_artifact.display()
+    );
+    assert!(outputs.iter().all(|output| !output.status.success()));
+    assert!(
+        outputs
+            .iter()
+            .any(|output| output.stderr == opened.as_bytes())
+    );
+    assert!(
+        outputs
+            .iter()
+            .any(|output| output.stderr == already_open.as_bytes())
+    );
+    let records = wait_for_lifecycle_records(&log, 5, Instant::now() + Duration::from_secs(15));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                record.body_ref(),
+                EventBodyRef::Known(KnownPayload::Dispatch(_))
+            ))
+            .count(),
+        2
+    );
+    assert!(matches!(
+        records[4].body_ref(),
+        EventBodyRef::Known(KnownPayload::NonProductionHoldOpen(_))
+    ));
+    assert!(!fixture.record_root.join("invocation").exists());
+
+    append_non_production_hold_close(
+        &fixture,
+        &log,
+        "m4-s1",
+        "step-plan-writer",
+        &required_artifact,
+        "retry",
+    );
+    let retried = fixture
+        .harness
+        .run(&argv, b"")
+        .expect("run first dispatch in retry window");
+    assert!(
+        retried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    wait_for_lifecycle_records(&log, 8, Instant::now() + Duration::from_secs(15));
+    let retry_state = derive_logged_dispatch_state(&log, &required_artifact);
+    assert_eq!(
+        retry_state.non_production_streaks()[0].consecutive().get(),
+        1
+    );
+    let retry_key = non_production_key("m4-s1", "step-plan-writer", &required_artifact);
+    assert_eq!(
+        pce_core::classify_dispatch_admission(&retry_state, &retry_key),
+        pce_core::DispatchAdmission::Admit
+    );
+    remove_gate_invocation(&fixture);
+    let second_retry = fixture
+        .harness
+        .run(&argv, b"")
+        .expect("run second dispatch in retry window");
+    assert!(
+        second_retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second_retry.stderr)
+    );
+    wait_for_lifecycle_records(&log, 10, Instant::now() + Duration::from_secs(15));
+
+    let reset_fixture = GateFixture::new("production-resets-streak", CLAUDE_SUCCESS);
+    let reset_artifact =
+        fs::canonicalize(&reset_fixture.output_path).expect("canonical reset artifact");
+    let reset_log = reset_fixture.harness.path().join("events.jsonl");
+    let reset_environment = reset_fixture.environment(0);
+    let mut reset_argv = reset_fixture.argv(&reset_environment, &[]);
+    insert_gate_logging(&mut reset_argv, &reset_log, false);
+    configure_gate_key(
+        &mut reset_argv,
+        "m4-s2",
+        "step-plan-writer",
+        &reset_artifact,
+    );
+    fs::remove_file(&reset_fixture.output_path).expect("remove reset artifact");
+    run_successful_gate(&reset_fixture, &reset_argv, &reset_log, 2);
+    fs::write(&reset_fixture.output_path, CONFORMING_ARTIFACT).expect("write valid production");
+    run_successful_gate(&reset_fixture, &reset_argv, &reset_log, 4);
+    fs::remove_file(&reset_fixture.output_path).expect("remove reset artifact again");
+    run_successful_gate(&reset_fixture, &reset_argv, &reset_log, 6);
+    let reset_state = derive_logged_dispatch_state(&reset_log, &reset_artifact);
+    assert_eq!(
+        reset_state.non_production_streaks()[0].consecutive().get(),
+        1
+    );
+    assert!(reset_state.non_production_holds().is_empty());
+    let reset_key = non_production_key("m4-s2", "step-plan-writer", &reset_artifact);
+    assert_eq!(
+        pce_core::classify_dispatch_admission(&reset_state, &reset_key),
+        pce_core::DispatchAdmission::Admit
+    );
+    run_successful_gate(&reset_fixture, &reset_argv, &reset_log, 8);
+}
+
+fn configure_gate_key(argv: &mut [String], node: &str, role: &str, artifact: &Path) {
+    for (flag, value) in [
+        ("--node", node),
+        ("--role", role),
+        (
+            "--required-artifact",
+            artifact.to_str().expect("artifact path"),
+        ),
+        ("-o", artifact.to_str().expect("artifact path")),
+    ] {
+        let index = argv
+            .iter()
+            .position(|argument| argument == flag)
+            .unwrap_or_else(|| panic!("missing {flag}"));
+        argv[index + 1] = value.to_owned();
+    }
+}
+
+fn remove_gate_invocation(fixture: &GateFixture) {
+    let invocation = fixture.record_root.join("invocation");
+    if invocation.exists() {
+        fs::remove_dir_all(invocation).expect("remove prior gate invocation");
+    }
+}
+
+fn spawn_gate_dispatch(fixture: &GateFixture, argv: &[String]) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(argv)
+        .env_clear()
+        .env("PATH", fixture.harness.shim_path())
+        .env("PCE_SHIM_ROOT", fixture.harness.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn concurrent dispatch")
+}
+
+fn run_successful_gate(
+    fixture: &GateFixture,
+    argv: &[String],
+    log: &Path,
+    expected_records: usize,
+) {
+    remove_gate_invocation(fixture);
+    let output = fixture.harness.run(argv, b"").expect("run gate dispatch");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_for_lifecycle_records(
+        log,
+        expected_records,
+        Instant::now() + Duration::from_secs(15),
+    );
+}
+
+fn append_non_production_hold_close(
+    fixture: &GateFixture,
+    log: &Path,
+    node: &str,
+    role: &str,
+    artifact: &Path,
+    resolution: &str,
+) {
+    let payload = serde_json::to_vec(&json!({
+        "key": {
+            "node": node,
+            "role": role,
+            "required_artifact_path": artifact,
+        },
+        "resolution": resolution,
+    }))
+    .expect("serialize hold close");
+    let output = fixture
+        .harness
+        .run(
+            [
+                "log",
+                "--file",
+                log.to_str().expect("log path"),
+                "--kind",
+                "non-production-hold-close",
+                "--node",
+                node,
+            ],
+            &payload,
+        )
+        .expect("append hold close");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn non_production_key(node: &str, role: &str, artifact: &Path) -> pce_core::NonProductionKey {
+    pce_core::NonProductionKey {
+        node: NodeId::parse(node).expect("node"),
+        role: DispatchRole::new(role),
+        required_artifact_path: AbsoluteRequiredArtifactPath::parse(artifact).expect("artifact"),
+    }
+}
+
+fn derive_logged_dispatch_state(log: &Path, artifact: &Path) -> pce_core::DispatchOutcomeState {
+    let records = fs::read_to_string(log)
+        .expect("event log")
+        .lines()
+        .map(|line| parse_event_line(line).expect("event record"))
+        .collect::<Vec<_>>();
+    let observations = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.body_ref(),
+                EventBodyRef::Known(KnownPayload::Dispatch(_))
+            )
+        })
+        .map(|record| {
+            pce_core::DispatchRequiredArtifactObservation::new(
+                record.sequence(),
+                AbsoluteRequiredArtifactPath::parse(artifact).expect("artifact"),
+            )
+        })
+        .collect::<Vec<_>>();
+    pce_core::derive_dispatch_outcome_state(&records, &observations).expect("outcome state")
+}
+
+fn derived_fixture(records: &[&str], observed: &[u64]) -> pce_core::DispatchOutcomeState {
+    let records = records
+        .iter()
+        .map(|line| parse_event_line(line).expect("fixture record"))
+        .collect::<Vec<_>>();
+    let observations = observed
+        .iter()
+        .map(|sequence| {
+            pce_core::DispatchRequiredArtifactObservation::new(
+                Sequence::parse(*sequence).expect("sequence"),
+                AbsoluteRequiredArtifactPath::parse("/workspace/plan.md").expect("path"),
+            )
+        })
+        .collect::<Vec<_>>();
+    pce_core::derive_dispatch_outcome_state(&records, &observations).expect("outcome state")
+}
+
+const PRODUCTLESS_DISPATCH: &str = r#"{"sequence":1,"timestamp":"2026-08-09T12:00:00.000Z","kind":"dispatch","node":"m4-s1","payload":{"role":"step-plan-writer","ref":"abc","evidence":"fixture"}}"#;
+const PRODUCTLESS_COMPLETION: &str = r#"{"sequence":2,"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{"issuance_sequence":1,"duration_ms":1,"usage":{"availability":"absent","reason":"no-terminal-turn"},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated","required_artifact_presence":"absent"}}"#;
+
+#[test]
+fn valid_production_resets_the_non_production_streak() {
+    const SECOND_DISPATCH: &str = r#"{"sequence":3,"timestamp":"2026-08-09T12:00:02.000Z","kind":"dispatch","node":"m4-s1","payload":{"role":"step-plan-writer","ref":"abc","evidence":"fixture"}}"#;
+    const VALIDATED_COMPLETION: &str = r#"{"sequence":4,"timestamp":"2026-08-09T12:00:03.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{"issuance_sequence":3,"duration_ms":1,"usage":{"availability":"absent","reason":"no-terminal-turn"},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"validated","required_artifact_presence":"present"}}"#;
+    let state = derived_fixture(
+        &[
+            PRODUCTLESS_DISPATCH,
+            PRODUCTLESS_COMPLETION,
+            SECOND_DISPATCH,
+            VALIDATED_COMPLETION,
+        ],
+        &[1, 3],
+    );
+    assert_eq!(state.rounds()[0].count().get(), 1);
+    assert_eq!(state.non_production_streaks().len(), 1);
+    assert_eq!(state.non_production_streaks()[0].consecutive().get(), 0);
+}
+
+#[test]
+fn productive_rounds_and_productless_retries_are_separate_through_production_cli() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("defect-round-cap", CLAUDE_SUCCESS);
+    let required_artifact = fs::canonicalize(&fixture.output_path).expect("canonical artifact");
+    let log = fixture.harness.path().join("events.jsonl");
+    let environment = fixture.environment(0);
+    let mut argv = fixture.argv(&environment, &[]);
+    insert_gate_logging(&mut argv, &log, false);
+    configure_gate_key(&mut argv, "m4-s1", "step-plan-critic", &required_artifact);
+    for (round, records) in [(1, 2), (2, 4), (3, 6)] {
+        run_successful_gate(&fixture, &argv, &log, records);
+        let state = derive_logged_dispatch_state(&log, &required_artifact);
+        assert_eq!(state.rounds().len(), 1);
+        assert_eq!(state.rounds()[0].count().get(), round);
+    }
+    let state = derive_logged_dispatch_state(&log, &required_artifact);
+    let key = non_production_key("m4-s1", "step-plan-critic", &required_artifact);
+    assert!(matches!(
+        pce_core::classify_dispatch_admission(&state, &key),
+        pce_core::DispatchAdmission::DefectRoundCapExhausted { count }
+            if count.get() == 3
+    ));
+
+    remove_gate_invocation(&fixture);
+    let before = fs::read(&log).expect("log before cap refusal");
+    let refused = fixture
+        .harness
+        .run(&argv, b"")
+        .expect("attempt fourth defect round");
+    assert!(!refused.status.success());
+    assert_eq!(
+        refused.stderr,
+        b"Error: dispatch admission refused: defect-round cap 3 is exhausted for node m4-s1 and role step-plan-critic\n"
+    );
+    assert_eq!(fs::read(&log).expect("log after cap refusal"), before);
+    assert!(!fixture.record_root.join("invocation").exists());
+}
+
+#[test]
+fn admission_resolution_diagnostics_are_byte_exact_through_production_cli() {
+    let _guard = dispatch_test_guard();
+    for resolution in ["re-plan", "abandon"] {
+        let fixture = GateFixture::new(resolution, CLAUDE_SUCCESS);
+        let required_artifact = fs::canonicalize(&fixture.output_path).expect("canonical artifact");
+        fs::remove_file(&fixture.output_path).expect("remove required artifact");
+        let log = fixture.harness.path().join("events.jsonl");
+        let environment = fixture.environment(0);
+        let mut argv = fixture.argv(&environment, &[]);
+        insert_gate_logging(&mut argv, &log, false);
+        configure_gate_key(&mut argv, "m4-s1", "step-plan-writer", &required_artifact);
+        run_successful_gate(&fixture, &argv, &log, 2);
+        run_successful_gate(&fixture, &argv, &log, 4);
+        remove_gate_invocation(&fixture);
+        let opened = fixture
+            .harness
+            .run(&argv, b"")
+            .expect("open non-production hold");
+        assert!(!opened.status.success());
+        assert_eq!(
+            opened.stderr,
+            format!(
+                "Error: dispatch admission opened non-production hold for node m4-s1, role step-plan-writer, required artifact {} after 2 consecutive non-production completions; resolve with retry, re-plan, or abandon\n",
+                required_artifact.display()
+            )
+            .as_bytes()
+        );
+        wait_for_lifecycle_records(&log, 5, Instant::now() + Duration::from_secs(15));
+        append_non_production_hold_close(
+            &fixture,
+            &log,
+            "m4-s1",
+            "step-plan-writer",
+            &required_artifact,
+            resolution,
+        );
+        let before = fs::read(&log).expect("log before closed-hold refusal");
+        let refused = fixture
+            .harness
+            .run(&argv, b"")
+            .expect("attempt dispatch after terminal hold resolution");
+        assert!(!refused.status.success());
+        assert_eq!(
+            refused.stderr,
+            format!(
+                "Error: dispatch admission refused: non-production hold for node m4-s1, role step-plan-writer, required artifact {} was resolved with {resolution}\n",
+                required_artifact.display()
+            )
+            .as_bytes()
+        );
+        assert_eq!(
+            fs::read(&log).expect("log after closed-hold refusal"),
+            before
+        );
+        assert!(!fixture.record_root.join("invocation").exists());
+    }
+}
+
+#[test]
+fn free_text_escalation_close_cannot_resolve_typed_non_production_hold() {
+    let free_text = r#"{"sequence":3,"timestamp":"2026-08-09T12:00:02.000Z","kind":"escalation-close","node":"m4-s1","payload":{"key":"review","resolution":"retry"}}"#;
+    let state = derived_fixture(
+        &[PRODUCTLESS_DISPATCH, PRODUCTLESS_COMPLETION, free_text],
+        &[1],
+    );
+    assert_eq!(state.non_production_streaks()[0].consecutive().get(), 1);
+}
+
+#[test]
+fn unstructured_required_artifact_is_production_without_defect_round() {
+    const SECOND_DISPATCH: &str = r#"{"sequence":3,"timestamp":"2026-08-09T12:00:02.000Z","kind":"dispatch","node":"m4-s1","payload":{"role":"step-plan-writer","ref":"abc","evidence":"fixture"}}"#;
+    let present = PRODUCTLESS_COMPLETION
+        .replace("\"sequence\":2", "\"sequence\":4")
+        .replace("\"issuance_sequence\":1", "\"issuance_sequence\":3")
+        .replace(
+            "\"required_artifact_presence\":\"absent\"",
+            "\"required_artifact_presence\":\"present\"",
+        );
+    let before = derived_fixture(
+        &[
+            PRODUCTLESS_DISPATCH,
+            PRODUCTLESS_COMPLETION,
+            SECOND_DISPATCH,
+        ],
+        &[1, 3],
+    );
+    assert_eq!(before.non_production_streaks()[0].consecutive().get(), 1);
+    assert_eq!(before.issuance_ordinals()[0].ordinal().get(), 2);
+    let state = derived_fixture(
+        &[
+            PRODUCTLESS_DISPATCH,
+            PRODUCTLESS_COMPLETION,
+            SECOND_DISPATCH,
+            &present,
+        ],
+        &[1, 3],
+    );
+    assert!(state.rounds().is_empty());
+    assert_eq!(state.non_production_streaks()[0].consecutive().get(), 0);
+    assert_eq!(state.issuance_ordinals()[0].ordinal().get(), 2);
+}
+
+#[test]
+fn reconciled_produced_resets_productless_streak() {
+    const SECOND_DISPATCH: &str = r#"{"sequence":3,"timestamp":"2026-08-09T12:00:02.000Z","kind":"dispatch","node":"m4-s1","payload":{"role":"step-plan-writer","ref":"abc","evidence":"fixture"}}"#;
+    const PRODUCED_RECONCILIATION: &str = r#"{"sequence":4,"timestamp":"2026-08-09T12:00:03.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{"issuance_sequence":3,"outcome":"reconciled-dead","artifact_production":"produced"}}"#;
+    const THIRD_DISPATCH: &str = r#"{"sequence":5,"timestamp":"2026-08-09T12:00:04.000Z","kind":"dispatch","node":"m4-s1","payload":{"role":"step-plan-writer","ref":"abc","evidence":"fixture"}}"#;
+    const THIRD_PRODUCTLESS: &str = r#"{"sequence":6,"timestamp":"2026-08-09T12:00:05.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{"issuance_sequence":5,"duration_ms":1,"usage":{"availability":"absent","reason":"no-terminal-turn"},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated","required_artifact_presence":"absent"}}"#;
+    let before_third = derived_fixture(
+        &[
+            PRODUCTLESS_DISPATCH,
+            PRODUCTLESS_COMPLETION,
+            SECOND_DISPATCH,
+            PRODUCED_RECONCILIATION,
+        ],
+        &[1, 3],
+    );
+    let key = non_production_key("m4-s1", "step-plan-writer", Path::new("/workspace/plan.md"));
+    assert_eq!(
+        pce_core::classify_dispatch_admission(&before_third, &key),
+        pce_core::DispatchAdmission::Admit
+    );
+    let state = derived_fixture(
+        &[
+            PRODUCTLESS_DISPATCH,
+            PRODUCTLESS_COMPLETION,
+            SECOND_DISPATCH,
+            PRODUCED_RECONCILIATION,
+            THIRD_DISPATCH,
+            THIRD_PRODUCTLESS,
+        ],
+        &[1, 3, 5],
+    );
+    assert!(state.rounds().is_empty());
+    assert_eq!(state.non_production_streaks()[0].consecutive().get(), 1);
+    assert!(state.non_production_holds().is_empty());
+    assert_eq!(
+        pce_core::classify_dispatch_admission(&state, &key),
+        pce_core::DispatchAdmission::Admit
+    );
+}
+
+#[test]
+fn unresolved_issuance_is_neutral_even_when_artifact_exists() {
+    let state = derived_fixture(&[PRODUCTLESS_DISPATCH], &[1]);
+    assert!(state.rounds().is_empty());
+    assert!(state.non_production_streaks().is_empty());
+}
+
+#[test]
+fn pre_m4_observed_completions_are_neutral_not_absent() {
+    let legacy = PRODUCTLESS_COMPLETION.replace(",\"required_artifact_presence\":\"absent\"", "");
+    let state = derived_fixture(&[PRODUCTLESS_DISPATCH, &legacy], &[1]);
+    assert!(state.rounds().is_empty());
+    assert!(state.non_production_streaks().is_empty());
+}
+
 fn run_measured_gate(
     name: &str,
     stdout: &[u8],
     sleep: Option<&str>,
-) -> pce_core::ObservedDispatchCompletionPayload {
+) -> pce_core::ObservedDispatchCompletionWithArtifactPresencePayload {
     let fixture = GateFixture::new(name, stdout);
     let log = fixture.harness.path().join("events.jsonl");
     let mut environment = fixture.environment(0);
@@ -6410,7 +6960,9 @@ fn gate_records_exact_issuance_correlation() {
     else {
         panic!("completion")
     };
-    let pce_core::DispatchCompletionPayload::ObservedChild(completion) = completion else {
+    let pce_core::DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion) =
+        completion
+    else {
         panic!("reconciled completion")
     };
     assert_eq!(completion.issuance_sequence, records[0].sequence());
