@@ -1,4 +1,4 @@
-//! run_state : Ordered<EventRecord> × DispatchRequiredArtifactObservation* × AcceptanceCriteria × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepAuthorityObservation* → DerivedRunState × Ordered<CriterionExecutionObservation> ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String; compute_dispatchability : ArtifactProvenance × Ordered<DispatchCandidate> × OrderingEdge* × (CanonicalNode → MergeStatus) × (RepositoryName → VersionPolicy) → Ordered<DispatchabilityResult> ∪ RunStateError   (pure, deterministic)
+//! run_state : Ordered<EventRecord> × DispatchRequiredArtifactObservation* × AcceptanceCriteria × VisionSlug × RecoveryLogPath × CurrentArtifactObservation* × RepositoryObservation* × StepMergeRouteObservation* → DerivedRunState × Ordered<CriterionExecutionObservation> ∪ RunStateError; snapshot_v1 : DerivedRunState → RunSnapshot; human_status : RunSnapshot → String; compute_dispatchability : ArtifactProvenance × Ordered<DispatchCandidate> × OrderingEdge* × (CanonicalNode → MergeStatus) × (RepositoryName → VersionPolicy) → Ordered<DispatchabilityResult> ∪ RunStateError   (pure, deterministic)
 //! This module performs no I/O.
 
 use chrono::SecondsFormat;
@@ -352,6 +352,42 @@ impl IntegrationBranch {
     }
 }
 
+/// A non-blank integration branch named by an exceptional merge-chain declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeclaredIntegrationBranch(String);
+
+impl DeclaredIntegrationBranch {
+    /// Parse a non-blank declared integration branch without normalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunStateError::BlankDeclaredIntegrationBranch`] when `raw` is empty or whitespace.
+    #[instrument(skip(raw))]
+    pub fn parse(raw: &str) -> Result<Self, RunStateError> {
+        if raw.trim().is_empty() {
+            return Err(RunStateError::BlankDeclaredIntegrationBranch {
+                value: raw.to_owned(),
+            });
+        }
+        Ok(Self(raw.to_owned()))
+    }
+
+    /// Return the declared branch unchanged.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for DeclaredIntegrationBranch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
 /// The exact head/base pair that uniquely selects a pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestSelector {
@@ -463,7 +499,7 @@ impl MilestoneMergeSubject {
 }
 
 /// A positive GitHub pull-request number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PullRequestNumber(u64);
 
 impl PullRequestNumber {
@@ -483,6 +519,145 @@ impl PullRequestNumber {
     /// Return the pull-request number.
     pub const fn get(self) -> u64 {
         self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PullRequestNumber {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::parse(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// The declared selector authority for one exceptional two-hop step merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionalMergeChain {
+    node: StepNode,
+    subject: MergeSubject,
+    integration_branch: DeclaredIntegrationBranch,
+    step_pull_request: ExactPullRequestIdentity,
+    promotion_pull_request: ExactPullRequestIdentity,
+}
+
+impl ExceptionalMergeChain {
+    /// Construct the two exact declared identities while deriving the step head and fixing `main`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunStateError::EqualExceptionalMergeChainPullRequestNumbers`] when both hops name
+    /// the same pull request.
+    pub fn new(
+        vision: &VisionSlug,
+        node: StepNode,
+        integration_branch: DeclaredIntegrationBranch,
+        step_pull_request_number: PullRequestNumber,
+        promotion_pull_request_number: PullRequestNumber,
+    ) -> Result<Self, RunStateError> {
+        if step_pull_request_number == promotion_pull_request_number {
+            return Err(
+                RunStateError::EqualExceptionalMergeChainPullRequestNumbers {
+                    step: step_pull_request_number.get(),
+                    promotion: promotion_pull_request_number.get(),
+                },
+            );
+        }
+        let derived = MergeSubject::derive(vision, node.clone());
+        let step_selector = PullRequestSelector {
+            head: derived.head().clone(),
+            base: IntegrationBranch(integration_branch.as_str().to_owned()),
+        };
+        let subject = MergeSubject {
+            node: node.clone(),
+            selector: step_selector.clone(),
+        };
+        let promotion_selector = PullRequestSelector {
+            head: HeadBranch(integration_branch.as_str().to_owned()),
+            base: IntegrationBranch("main".to_owned()),
+        };
+        Ok(Self {
+            node,
+            subject,
+            integration_branch,
+            step_pull_request: ExactPullRequestIdentity::from_selector(
+                step_pull_request_number,
+                &step_selector,
+            ),
+            promotion_pull_request: ExactPullRequestIdentity::from_selector(
+                promotion_pull_request_number,
+                &promotion_selector,
+            ),
+        })
+    }
+
+    pub const fn node(&self) -> &StepNode {
+        &self.node
+    }
+    pub const fn subject(&self) -> &MergeSubject {
+        &self.subject
+    }
+    pub const fn integration_branch(&self) -> &DeclaredIntegrationBranch {
+        &self.integration_branch
+    }
+    pub const fn step_pull_request(&self) -> &ExactPullRequestIdentity {
+        &self.step_pull_request
+    }
+    pub const fn promotion_pull_request(&self) -> &ExactPullRequestIdentity {
+        &self.promotion_pull_request
+    }
+}
+
+/// The selected merge-proof route for one step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepMergeRoute {
+    /// Use the convention-derived single-hop selector.
+    Derived,
+    /// Use the declared two-hop selector chain.
+    Exceptional(ExceptionalMergeChain),
+}
+
+/// Both fresh authority observations for one pull-request hop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestAuthorityObservation {
+    github: GitHubAuthorityObservation,
+    git: GitAuthorityObservation,
+}
+
+impl PullRequestAuthorityObservation {
+    pub const fn new(github: GitHubAuthorityObservation, git: GitAuthorityObservation) -> Self {
+        Self { github, git }
+    }
+    pub const fn github(&self) -> &GitHubAuthorityObservation {
+        &self.github
+    }
+    pub const fn git(&self) -> &GitAuthorityObservation {
+        &self.git
+    }
+}
+
+/// The two independently observed hops required by an exceptional merge chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionalMergeChainObservation {
+    step_to_integration: PullRequestAuthorityObservation,
+    integration_to_default: PullRequestAuthorityObservation,
+}
+
+impl ExceptionalMergeChainObservation {
+    pub const fn new(
+        step_to_integration: PullRequestAuthorityObservation,
+        integration_to_default: PullRequestAuthorityObservation,
+    ) -> Self {
+        Self {
+            step_to_integration,
+            integration_to_default,
+        }
+    }
+    pub const fn step_to_integration(&self) -> &PullRequestAuthorityObservation {
+        &self.step_to_integration
+    }
+    pub const fn integration_to_default(&self) -> &PullRequestAuthorityObservation {
+        &self.integration_to_default
     }
 }
 
@@ -634,7 +809,11 @@ pub fn derive_merge_status(
     github: &GitHubAuthorityObservation,
     git: &GitAuthorityObservation,
 ) -> MergeStatus {
-    derive_merge_status_for_selector(subject.selector(), github, git)
+    derive_merge_status_for_selector(
+        ExpectedPullRequestIdentity::Selector(subject.selector()),
+        github,
+        git,
+    )
 }
 
 /// Derive three-valued merge status from the exact milestone subject and both authorities.
@@ -643,11 +822,30 @@ pub fn derive_milestone_merge_status(
     github: &GitHubAuthorityObservation,
     git: &GitAuthorityObservation,
 ) -> MergeStatus {
-    derive_merge_status_for_selector(subject.selector(), github, git)
+    derive_merge_status_for_selector(
+        ExpectedPullRequestIdentity::Selector(subject.selector()),
+        github,
+        git,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExpectedPullRequestIdentity<'a> {
+    Selector(&'a PullRequestSelector),
+    Declared(&'a ExactPullRequestIdentity),
+}
+
+impl ExpectedPullRequestIdentity<'_> {
+    fn matches(self, actual: &ExactPullRequestIdentity) -> bool {
+        match self {
+            Self::Selector(selector) => actual.selector() == selector,
+            Self::Declared(identity) => actual == identity,
+        }
+    }
 }
 
 fn derive_merge_status_for_selector(
-    selector: &PullRequestSelector,
+    expected: ExpectedPullRequestIdentity<'_>,
     github: &GitHubAuthorityObservation,
     git: &GitAuthorityObservation,
 ) -> MergeStatus {
@@ -755,7 +953,7 @@ fn derive_merge_status_for_selector(
                 observation: GitMergeObservation::NotMerged,
             },
         ) => {
-            if identity.selector() == selector {
+            if expected.matches(identity) {
                 MergeStatus::NotMerged
             } else {
                 MergeStatus::Inconclusive
@@ -779,12 +977,40 @@ fn derive_merge_status_for_selector(
                     },
             },
         ) => {
-            if identity.selector() == selector && github_oid == git_oid {
+            if expected.matches(identity) && github_oid == git_oid {
                 MergeStatus::Merged
             } else {
                 MergeStatus::Inconclusive
             }
         }
+    }
+}
+
+fn derive_exceptional_merge_status(
+    chain: &ExceptionalMergeChain,
+    observation: &ExceptionalMergeChainObservation,
+) -> (MergeStatus, MergeStatus, MergeStatus) {
+    let step = derive_merge_status_for_selector(
+        ExpectedPullRequestIdentity::Declared(chain.step_pull_request()),
+        observation.step_to_integration().github(),
+        observation.step_to_integration().git(),
+    );
+    let promotion = derive_merge_status_for_selector(
+        ExpectedPullRequestIdentity::Declared(chain.promotion_pull_request()),
+        observation.integration_to_default().github(),
+        observation.integration_to_default().git(),
+    );
+    let aggregate = combine_exceptional_merge_statuses(step, promotion);
+    (step, promotion, aggregate)
+}
+
+fn combine_exceptional_merge_statuses(step: MergeStatus, promotion: MergeStatus) -> MergeStatus {
+    match (step, promotion) {
+        (MergeStatus::Merged, MergeStatus::Merged) => MergeStatus::Merged,
+        (MergeStatus::Inconclusive, _) | (_, MergeStatus::Inconclusive) => {
+            MergeStatus::Inconclusive
+        }
+        _ => MergeStatus::NotMerged,
     }
 }
 
@@ -1637,9 +1863,22 @@ pub fn compute_dispatchability(
 pub struct StepMergeResult {
     node: NodeId,
     subject: MergeSubject,
-    github: GitHubAuthorityObservation,
-    git: GitAuthorityObservation,
+    observation: StepMergeResultObservation,
     status: MergeStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StepMergeResultObservation {
+    Derived(PullRequestAuthorityObservation),
+    Exceptional(ExceptionalStepMergeResult),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExceptionalStepMergeResult {
+    chain: ExceptionalMergeChain,
+    observation: ExceptionalMergeChainObservation,
+    step_to_integration_status: MergeStatus,
+    integration_to_default_status: MergeStatus,
 }
 
 impl StepMergeResult {
@@ -1655,12 +1894,22 @@ impl StepMergeResult {
 
     /// Return the retained GitHub authority observation.
     pub const fn github(&self) -> &GitHubAuthorityObservation {
-        &self.github
+        match &self.observation {
+            StepMergeResultObservation::Derived(observation) => observation.github(),
+            StepMergeResultObservation::Exceptional(result) => {
+                result.observation.step_to_integration().github()
+            }
+        }
     }
 
     /// Return the retained git authority observation.
     pub const fn git(&self) -> &GitAuthorityObservation {
-        &self.git
+        match &self.observation {
+            StepMergeResultObservation::Derived(observation) => observation.git(),
+            StepMergeResultObservation::Exceptional(result) => {
+                result.observation.step_to_integration().git()
+            }
+        }
     }
 
     /// Return the independent merge status.
@@ -2064,9 +2313,72 @@ impl<'a> From<(&'a TagName, &'a TagState)> for TagSnapshot<'a> {
 
 /// Serialized step result and its explanatory observations.
 #[derive(Debug, Serialize)]
-pub struct StepSnapshot<'a> {
-    node: &'a str,
-    subject: MergeSubjectSnapshot<'a>,
+#[serde(untagged)]
+pub enum StepSnapshot<'a> {
+    Derived {
+        node: &'a str,
+        subject: MergeSubjectSnapshot<'a>,
+        github: GitHubObservationSnapshot<'a>,
+        git: GitObservationSnapshot<'a>,
+        merge_status: MergeStatus,
+    },
+    Exceptional {
+        node: &'a str,
+        subject: MergeSubjectSnapshot<'a>,
+        exceptional_merge_chain: ExceptionalMergeChainSnapshot<'a>,
+        merge_status: MergeStatus,
+    },
+}
+
+impl<'a> StepSnapshot<'a> {
+    fn node(&self) -> &'a str {
+        match self {
+            Self::Derived { node, .. } | Self::Exceptional { node, .. } => node,
+        }
+    }
+    fn subject(&self) -> &MergeSubjectSnapshot<'a> {
+        match self {
+            Self::Derived { subject, .. } | Self::Exceptional { subject, .. } => subject,
+        }
+    }
+    fn github(&self) -> &GitHubObservationSnapshot<'a> {
+        match self {
+            Self::Derived { github, .. } => github,
+            Self::Exceptional {
+                exceptional_merge_chain,
+                ..
+            } => &exceptional_merge_chain.step_to_integration.github,
+        }
+    }
+    fn git(&self) -> &GitObservationSnapshot<'a> {
+        match self {
+            Self::Derived { git, .. } => git,
+            Self::Exceptional {
+                exceptional_merge_chain,
+                ..
+            } => &exceptional_merge_chain.step_to_integration.git,
+        }
+    }
+    const fn merge_status(&self) -> MergeStatus {
+        match self {
+            Self::Derived { merge_status, .. } | Self::Exceptional { merge_status, .. } => {
+                *merge_status
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExceptionalMergeChainSnapshot<'a> {
+    step_pull_request_number: u64,
+    promotion_pull_request_number: u64,
+    promotion_selector: SelectorSnapshot<'a>,
+    step_to_integration: ExceptionalMergeHopSnapshot<'a>,
+    integration_to_default: ExceptionalMergeHopSnapshot<'a>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExceptionalMergeHopSnapshot<'a> {
     github: GitHubObservationSnapshot<'a>,
     git: GitObservationSnapshot<'a>,
     merge_status: MergeStatus,
@@ -2074,12 +2386,48 @@ pub struct StepSnapshot<'a> {
 
 impl<'a> From<&'a StepMergeResult> for StepSnapshot<'a> {
     fn from(value: &'a StepMergeResult) -> Self {
-        Self {
-            node: value.node().as_str(),
-            subject: MergeSubjectSnapshot::from(value.subject()),
-            github: GitHubObservationSnapshot::from(value.github()),
-            git: GitObservationSnapshot::from(value.git()),
-            merge_status: value.status(),
+        match &value.observation {
+            StepMergeResultObservation::Derived(observation) => Self::Derived {
+                node: value.node().as_str(),
+                subject: MergeSubjectSnapshot::from(value.subject()),
+                github: GitHubObservationSnapshot::from(observation.github()),
+                git: GitObservationSnapshot::from(observation.git()),
+                merge_status: value.status(),
+            },
+            StepMergeResultObservation::Exceptional(result) => Self::Exceptional {
+                node: value.node().as_str(),
+                subject: MergeSubjectSnapshot::from(value.subject()),
+                exceptional_merge_chain: ExceptionalMergeChainSnapshot {
+                    step_pull_request_number: result.chain.step_pull_request().number().get(),
+                    promotion_pull_request_number: result
+                        .chain
+                        .promotion_pull_request()
+                        .number()
+                        .get(),
+                    promotion_selector: SelectorSnapshot::from(
+                        result.chain.promotion_pull_request().selector(),
+                    ),
+                    step_to_integration: ExceptionalMergeHopSnapshot {
+                        github: GitHubObservationSnapshot::from(
+                            result.observation.step_to_integration().github(),
+                        ),
+                        git: GitObservationSnapshot::from(
+                            result.observation.step_to_integration().git(),
+                        ),
+                        merge_status: result.step_to_integration_status,
+                    },
+                    integration_to_default: ExceptionalMergeHopSnapshot {
+                        github: GitHubObservationSnapshot::from(
+                            result.observation.integration_to_default().github(),
+                        ),
+                        git: GitObservationSnapshot::from(
+                            result.observation.integration_to_default().git(),
+                        ),
+                        merge_status: result.integration_to_default_status,
+                    },
+                },
+                merge_status: value.status(),
+            },
         }
     }
 }
@@ -2783,7 +3131,7 @@ pub fn render_human_snapshot(snapshot: &RunSnapshot<'_>) -> String {
 
     output.push_str(&format!("steps ({})\n", snapshot.steps.len()));
     for (index, step) in snapshot.steps.iter().enumerate() {
-        let merge_status = match step.merge_status {
+        let merge_status = match step.merge_status() {
             MergeStatus::Merged => "merged",
             MergeStatus::NotMerged => "not-merged",
             MergeStatus::Inconclusive => "inconclusive",
@@ -2791,22 +3139,22 @@ pub fn render_human_snapshot(snapshot: &RunSnapshot<'_>) -> String {
         output.push_str(&format!(
             "  step {}: node={} merge-status={merge_status}\n",
             index + 1,
-            quoted(step.node)
+            quoted(step.node())
         ));
         output.push_str(&format!(
             "    subject: milestone={} step={} head={} integration={}\n",
-            step.subject.milestone,
-            step.subject.step,
-            quoted(step.subject.head_branch),
-            quoted(step.subject.integration_branch)
+            step.subject().milestone,
+            step.subject().step,
+            quoted(step.subject().head_branch),
+            quoted(step.subject().integration_branch)
         ));
         output.push_str(&format!(
             "    selector: head={} base={}\n",
-            quoted(step.subject.pull_request_selector.head),
-            quoted(step.subject.pull_request_selector.base)
+            quoted(step.subject().pull_request_selector.head),
+            quoted(step.subject().pull_request_selector.base)
         ));
-        render_github(&mut output, &step.github);
-        render_git(&mut output, &step.git);
+        render_github(&mut output, step.github());
+        render_git(&mut output, step.git());
     }
 
     match &snapshot.dispatch_accounting {
@@ -3617,6 +3965,69 @@ pub fn derive_run_state_with_dispatch_artifacts(
     repositories: &[RepositoryObservation],
     authorities: &[StepAuthorityObservation],
 ) -> Result<DerivedRunState, RunStateError> {
+    derive_run_state_internal(
+        records,
+        dispatch_artifacts,
+        ratified_criteria,
+        vision,
+        recovery_log_path,
+        artifacts,
+        repositories,
+        authorities,
+        None,
+    )
+}
+
+/// Fold run state while requiring complete two-hop observations for every declared exception.
+///
+/// # Errors
+///
+/// Returns the ordinary run-state errors plus exact declaration/observation route-agreement errors.
+#[instrument(skip(
+    records,
+    ratified_criteria,
+    vision,
+    recovery_log_path,
+    artifacts,
+    repositories,
+    authorities,
+    exceptional
+))]
+pub fn derive_run_state_with_exceptional_merge_chains(
+    records: &[EventRecord],
+    ratified_criteria: &AcceptanceCriteria,
+    vision: &VisionSlug,
+    recovery_log_path: &RecoveryLogPath,
+    artifacts: &[CurrentArtifactObservation],
+    repositories: &[RepositoryObservation],
+    authorities: &[StepAuthorityObservation],
+    exceptional: &[(NodeId, ExceptionalMergeChainObservation)],
+) -> Result<DerivedRunState, RunStateError> {
+    derive_run_state_internal(
+        records,
+        &[],
+        ratified_criteria,
+        vision,
+        recovery_log_path,
+        artifacts,
+        repositories,
+        authorities,
+        Some(exceptional),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derive_run_state_internal(
+    records: &[EventRecord],
+    dispatch_artifacts: &[DispatchRequiredArtifactObservation],
+    ratified_criteria: &AcceptanceCriteria,
+    vision: &VisionSlug,
+    recovery_log_path: &RecoveryLogPath,
+    artifacts: &[CurrentArtifactObservation],
+    repositories: &[RepositoryObservation],
+    authorities: &[StepAuthorityObservation],
+    exceptional: Option<&[(NodeId, ExceptionalMergeChainObservation)]>,
+) -> Result<DerivedRunState, RunStateError> {
     validate_repository_inputs(repositories)?;
     validate_artifact_inputs(artifacts)?;
     validate_authority_duplicates(authorities)?;
@@ -3642,6 +4053,7 @@ pub fn derive_run_state_with_dispatch_artifacts(
     let mut recovery_rounds = Vec::<RecoveryCandidate<RecoveryRoundEntry>>::new();
     let mut recovery_deltas = Vec::<RecoveryCandidate<RecoveryDeltaEntry>>::new();
     let mut recovery_facts = Vec::<RecoveryCandidate<RecoveryFactEntry>>::new();
+    let mut exceptional_chains = Vec::<(NodeId, ExceptionalMergeChain)>::new();
     let mut previous = None::<Sequence>;
 
     for record in records {
@@ -3879,12 +4291,47 @@ pub fn derive_run_state_with_dispatch_artifacts(
             }
             EventBodyRef::Known(KnownPayload::NonProductionHoldOpen(_))
             | EventBodyRef::Known(KnownPayload::NonProductionHoldClose(_)) => {}
+            EventBodyRef::Known(KnownPayload::ExceptionalMergeChainDeclared(payload)) => {
+                let step = StepNode::parse(record.node()).map_err(|_| {
+                    RunStateError::ExceptionalMergeChainDeclarationOnNonStepNode {
+                        node: record.node().clone(),
+                    }
+                })?;
+                if exceptional_chains
+                    .iter()
+                    .any(|(node, _)| node == record.node())
+                {
+                    return Err(RunStateError::DuplicateExceptionalMergeChainDeclaration {
+                        node: record.node().clone(),
+                    });
+                }
+                let chain = ExceptionalMergeChain::new(
+                    vision,
+                    step,
+                    payload.integration_branch.clone(),
+                    payload.step_pull_request_number,
+                    payload.promotion_pull_request_number,
+                )?;
+                exceptional_chains.push((record.node().clone(), chain));
+            }
             EventBodyRef::Unknown { .. } => {}
         }
     }
 
     let provenance = derive_provenance(&approvals, artifacts)?;
-    let steps = derive_step_results(&visible_nodes, vision, authorities)?;
+    let steps = match exceptional {
+        Some(observations) => {
+            validate_exceptional_routes(&exceptional_chains, observations)?;
+            derive_step_results_with_exceptional(
+                &visible_nodes,
+                vision,
+                authorities,
+                &exceptional_chains,
+                observations,
+            )?
+        }
+        None => derive_step_results(&visible_nodes, vision, authorities)?,
+    };
     let resume = derive_resume(&visible_nodes, &steps);
     let mut recovery_open_holds = holds
         .iter()
@@ -4142,8 +4589,93 @@ fn derive_step_results(
         steps.push(StepMergeResult {
             node: authority.node.clone(),
             subject,
-            github: authority.github.clone(),
-            git: authority.git.clone(),
+            observation: StepMergeResultObservation::Derived(PullRequestAuthorityObservation::new(
+                authority.github.clone(),
+                authority.git.clone(),
+            )),
+            status,
+        });
+    }
+    Ok(steps)
+}
+
+fn validate_exceptional_routes(
+    chains: &[(NodeId, ExceptionalMergeChain)],
+    observations: &[(NodeId, ExceptionalMergeChainObservation)],
+) -> Result<(), RunStateError> {
+    let missing = chains
+        .iter()
+        .filter(|(node, _)| !observations.iter().any(|(actual, _)| actual == node))
+        .map(|(node, _)| node)
+        .collect::<Vec<_>>();
+    let surplus = observations
+        .iter()
+        .filter(|(node, _)| !chains.iter().any(|(expected, _)| expected == node))
+        .map(|(node, _)| node)
+        .collect::<Vec<_>>();
+    if missing.len() == 1 && surplus.len() == 1 {
+        return Err(
+            RunStateError::ExceptionalMergeChainObservationNodeMismatch {
+                expected: missing[0].clone(),
+                actual: surplus[0].clone(),
+            },
+        );
+    }
+    if let Some(node) = missing.first() {
+        return Err(RunStateError::MissingExceptionalMergeChainObservation {
+            node: (*node).clone(),
+        });
+    }
+    if let Some(node) = surplus.first() {
+        return Err(
+            RunStateError::ExceptionalMergeChainObservationWithoutDeclaration {
+                node: (*node).clone(),
+            },
+        );
+    }
+    for (index, (node, _)) in observations.iter().enumerate() {
+        if observations[..index]
+            .iter()
+            .any(|(earlier, _)| earlier == node)
+        {
+            return Err(RunStateError::SurplusExceptionalMergeChainObservation {
+                node: node.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn derive_step_results_with_exceptional(
+    visible_nodes: &[VisibleNode],
+    vision: &VisionSlug,
+    authorities: &[StepAuthorityObservation],
+    chains: &[(NodeId, ExceptionalMergeChain)],
+    observations: &[(NodeId, ExceptionalMergeChainObservation)],
+) -> Result<Vec<StepMergeResult>, RunStateError> {
+    let mut steps = derive_step_results(visible_nodes, vision, authorities)?;
+    for (node, chain) in chains {
+        if !visible_nodes.iter().any(|item| item.node == *node) {
+            return Err(RunStateError::AuthorityNodeAbsentFromLog { node: node.clone() });
+        }
+        let observation = observations
+            .iter()
+            .find(|(actual, _)| actual == node)
+            .map(|(_, observation)| observation)
+            .ok_or_else(|| RunStateError::MissingExceptionalMergeChainObservation {
+                node: node.clone(),
+            })?;
+        let (step_status, promotion_status, status) =
+            derive_exceptional_merge_status(chain, observation);
+        steps.push(StepMergeResult {
+            node: node.clone(),
+            subject: chain.subject().clone(),
+            observation: StepMergeResultObservation::Exceptional(ExceptionalStepMergeResult {
+                chain: chain.clone(),
+                observation: observation.clone(),
+                step_to_integration_status: step_status,
+                integration_to_default_status: promotion_status,
+            }),
             status,
         });
     }
@@ -4225,6 +4757,34 @@ pub enum RunStateError {
     /// Returned when a GitHub pull-request number is zero.
     #[error("pull-request number must be positive, got {value}")]
     ZeroPullRequestNumber { value: u64 },
+    /// Returned when a declared integration branch is blank.
+    #[error("declared integration branch cannot be blank: {value:?}")]
+    BlankDeclaredIntegrationBranch { value: String },
+    /// Returned when both exceptional hops name the same pull request.
+    #[error(
+        "exceptional merge chain pull-request numbers must differ: step {step}, promotion {promotion}"
+    )]
+    EqualExceptionalMergeChainPullRequestNumbers { step: u64, promotion: u64 },
+    /// Returned when an exceptional declaration is not attached to a canonical step node.
+    #[error("exceptional merge chain declaration requires a canonical step node, got {node:?}")]
+    ExceptionalMergeChainDeclarationOnNonStepNode { node: NodeId },
+    /// Returned when a node has more than one exceptional declaration.
+    #[error("duplicate exceptional merge chain declaration for node {node:?}")]
+    DuplicateExceptionalMergeChainDeclaration { node: NodeId },
+    /// Returned when a declaration has no supplied exceptional observation.
+    #[error("exceptional merge chain declaration has no observation for node {node:?}")]
+    MissingExceptionalMergeChainObservation { node: NodeId },
+    /// Returned for the sole unmatched declaration and observation pair.
+    #[error(
+        "exceptional merge chain observation node mismatch: expected {expected:?}, got {actual:?}"
+    )]
+    ExceptionalMergeChainObservationNodeMismatch { expected: NodeId, actual: NodeId },
+    /// Returned when an exceptional observation has no declaration.
+    #[error("exceptional merge chain observation has no declaration for node {node:?}")]
+    ExceptionalMergeChainObservationWithoutDeclaration { node: NodeId },
+    /// Returned when an exceptional observation key repeats.
+    #[error("surplus exceptional merge chain observation for node {node:?}")]
+    SurplusExceptionalMergeChainObservation { node: NodeId },
     /// Returned when GitHub supplies an empty `mergeCommit.oid`.
     #[error("squash commit OID cannot be empty: {value}")]
     EmptySquashCommitOid { value: String },
@@ -4355,28 +4915,31 @@ mod tests {
         ArtifactOutcome, ArtifactPath, CachedInputTokens, CriterionExecutionOutcome, DeltaPayload,
         DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload,
         DispatchRef, DispatchRole, DispatchTokenUsage, EscalationClosePayload, EscalationKey,
-        EscalationOpenPayload, EventRecord, EventTimestamp, Evidence, ExitCode, InputTokens,
-        KnownPayload, NodeId, NonProductionHoldResolution, NonProductionKey, OutputTokens,
+        EscalationOpenPayload, EventBodyRef, EventRecord, EventTimestamp, Evidence,
+        ExceptionalMergeChainDeclaredPayload, ExitCode, InputTokens, KnownPayload, NodeId,
+        NonProductionHoldResolution, NonProductionKey, OutputTokens,
         PlanningArtifactApprovedPayload, ReasoningOutputTokens, RepositoryName, Sequence,
         Sha256Digest, parse_event_line,
     };
     use crate::run_state::{
         ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BlockingCriterionOrigin,
         BranchState, CanonicalNode, ConsecutiveNonProduction, CriterionExecutionObservation,
-        CurrentArtifactObservation, CurrentArtifactState, CyclePosition, DefectRoundCount,
-        DefectRoundSeries, DerivedRunState, DispatchAdmission, DispatchCandidate,
+        CurrentArtifactObservation, CurrentArtifactState, CyclePosition, DeclaredIntegrationBranch,
+        DefectRoundCount, DefectRoundSeries, DerivedRunState, DispatchAdmission, DispatchCandidate,
         DispatchOutcomeState, DispatchRequiredArtifactObservation, DispatchRoleClass,
         DispatchabilityResult, ExactPullRequestIdentity, ExactPullRequestState,
-        GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
-        GitMergeObservation, HoldStatus, MergeStatus, MergeSubject, MilestoneMergeSubject,
-        MilestoneNode, NonProductionHoldObservation, NonProductionHoldStatus, NonProductionSeries,
-        OrderingEdge, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
+        ExceptionalMergeChain, ExceptionalMergeChainObservation, GitAuthorityObservation,
+        GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, HoldStatus,
+        MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode,
+        NonProductionHoldObservation, NonProductionHoldStatus, NonProductionSeries, OrderingEdge,
+        PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
         RepositoryBranchName, RepositoryFetchObservation, RepositoryObservation,
         RepositoryObservationFailure, RepositoryObservationRef, ResumeObservation, RunSnapshot,
         RunStateError, SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState,
         TagTarget, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
-        classify_dispatch_admission, compute_dispatchability, derive_dispatch_outcome_state,
-        derive_merge_status, derive_milestone_merge_status, derive_run_state, recovery_command,
+        classify_dispatch_admission, combine_exceptional_merge_statuses, compute_dispatchability,
+        derive_dispatch_outcome_state, derive_merge_status, derive_milestone_merge_status,
+        derive_run_state, derive_run_state_with_exceptional_merge_chains, recovery_command,
         render_human_snapshot,
     };
 
@@ -7456,6 +8019,222 @@ None.
             "reconciled-dead"
         );
         assert!(snapshot_validator()?.is_valid(&value));
+        Ok(())
+    }
+
+    fn exceptional_declaration(
+        sequence: u64,
+        node: &str,
+        branch: &str,
+        step: u64,
+        promotion: u64,
+    ) -> Result<EventRecord, Box<dyn Error>> {
+        event(
+            sequence,
+            node,
+            KnownPayload::ExceptionalMergeChainDeclared(ExceptionalMergeChainDeclaredPayload {
+                integration_branch: DeclaredIntegrationBranch::parse(branch)?,
+                step_pull_request_number: PullRequestNumber::parse(step)?,
+                promotion_pull_request_number: PullRequestNumber::parse(promotion)?,
+                evidence: Evidence::parse("declared evidence")?,
+            }),
+        )
+    }
+
+    fn unreachable_hop() -> Result<ExceptionalMergeChainObservation, Box<dyn Error>> {
+        let hop = || -> Result<PullRequestAuthorityObservation, RunStateError> {
+            Ok(PullRequestAuthorityObservation::new(
+                GitHubAuthorityObservation::Unreachable {
+                    failure: AuthorityFailure::parse("gh unavailable")?,
+                },
+                GitAuthorityObservation::Unreachable {
+                    failure: AuthorityFailure::parse("git unavailable")?,
+                },
+            ))
+        };
+        Ok(ExceptionalMergeChainObservation::new(hop()?, hop()?))
+    }
+
+    #[test]
+    fn exceptional_merge_chain_truth_table_is_exhaustive() {
+        for step in [
+            MergeStatus::Merged,
+            MergeStatus::NotMerged,
+            MergeStatus::Inconclusive,
+        ] {
+            for promotion in [
+                MergeStatus::Merged,
+                MergeStatus::NotMerged,
+                MergeStatus::Inconclusive,
+            ] {
+                let actual = combine_exceptional_merge_statuses(step, promotion);
+                let expected = if step == MergeStatus::Merged && promotion == MergeStatus::Merged {
+                    MergeStatus::Merged
+                } else if step == MergeStatus::Inconclusive
+                    || promotion == MergeStatus::Inconclusive
+                {
+                    MergeStatus::Inconclusive
+                } else {
+                    MergeStatus::NotMerged
+                };
+                assert_eq!(actual, expected, "{step:?} + {promotion:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn second_declaration_for_the_same_node_is_an_error() -> Result<(), Box<dyn Error>> {
+        for second in [
+            exceptional_declaration(2, "m1-s3", "branch-a", 179, 180)?,
+            exceptional_declaration(2, "m1-s3", "branch-b", 181, 182)?,
+        ] {
+            let records = [
+                exceptional_declaration(1, "m1-s3", "branch-a", 179, 180)?,
+                second,
+            ];
+            let error = derive(&records, &[], &[], &[]).expect_err("duplicate declaration");
+            let expected = RunStateError::DuplicateExceptionalMergeChainDeclaration {
+                node: NodeId::parse("m1-s3")?,
+            };
+            assert_eq!(error, expected);
+            assert_eq!(
+                error.to_string(),
+                "duplicate exceptional merge chain declaration for node NodeId(\"m1-s3\")"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn declaration_on_a_non_step_node_is_an_error() -> Result<(), Box<dyn Error>> {
+        let records = [exceptional_declaration(1, "m1", "branch-a", 179, 180)?];
+        let error = derive(&records, &[], &[], &[]).expect_err("non-step declaration");
+        assert_eq!(
+            error,
+            RunStateError::ExceptionalMergeChainDeclarationOnNonStepNode {
+                node: NodeId::parse("m1")?
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "exceptional merge chain declaration requires a canonical step node, got NodeId(\"m1\")"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn declaration_bearing_log_derives_unchanged_without_exceptional_observations()
+    -> Result<(), Box<dyn Error>> {
+        let declaration = exceptional_declaration(1, "m1-s3", "branch-a", 179, 180)?;
+        assert!(matches!(
+            declaration.body_ref(),
+            EventBodyRef::Known(KnownPayload::ExceptionalMergeChainDeclared(_))
+        ));
+        let trailing = delta(2, "m1-s3")?;
+        let with = derive(&[declaration, trailing.clone()], &[], &[], &[])?;
+        let without = derive(&[trailing], &[], &[], &[])?;
+        assert_eq!(
+            serde_json::to_vec(&RunSnapshot::from(&with))?,
+            serde_json::to_vec(&RunSnapshot::from(&without))?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn route_and_observation_must_agree() -> Result<(), Box<dyn Error>> {
+        let vision = VisionSlug::parse("2026-07-27-example")?;
+        let criteria = ratified_floor();
+        let recovery = RecoveryLogPath::new("events.jsonl");
+        let node = NodeId::parse("m1-s3")?;
+        let other = NodeId::parse("m1-s4")?;
+        let declaration = exceptional_declaration(1, "m1-s3", "branch-a", 179, 180)?;
+        let derive_exceptional =
+            |records: &[EventRecord],
+             observations: &[(NodeId, ExceptionalMergeChainObservation)]| {
+                derive_run_state_with_exceptional_merge_chains(
+                    records,
+                    &criteria,
+                    &vision,
+                    &recovery,
+                    &[],
+                    &[],
+                    &[],
+                    observations,
+                )
+            };
+        assert_eq!(
+            derive_exceptional(std::slice::from_ref(&declaration), &[]).expect_err("missing"),
+            RunStateError::MissingExceptionalMergeChainObservation { node: node.clone() }
+        );
+        assert_eq!(
+            derive_exceptional(&[], &[(node.clone(), unreachable_hop()?)]).expect_err("undeclared"),
+            RunStateError::ExceptionalMergeChainObservationWithoutDeclaration {
+                node: node.clone()
+            }
+        );
+        assert_eq!(
+            derive_exceptional(
+                std::slice::from_ref(&declaration),
+                &[(other.clone(), unreachable_hop()?)]
+            )
+            .expect_err("mismatch"),
+            RunStateError::ExceptionalMergeChainObservationNodeMismatch {
+                expected: node.clone(),
+                actual: other
+            }
+        );
+        assert_eq!(
+            derive_exceptional(
+                std::slice::from_ref(&declaration),
+                &[
+                    (node.clone(), unreachable_hop()?),
+                    (node.clone(), unreachable_hop()?)
+                ]
+            )
+            .expect_err("surplus"),
+            RunStateError::SurplusExceptionalMergeChainObservation { node }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn declared_hop_rejects_mismatched_github_and_git_squash_oids() -> Result<(), Box<dyn Error>> {
+        let vision = VisionSlug::parse("2026-07-27-example")?;
+        let node = StepNode::parse(&NodeId::parse("m1-s3")?)?;
+        let chain = ExceptionalMergeChain::new(
+            &vision,
+            node,
+            DeclaredIntegrationBranch::parse("branch-a")?,
+            PullRequestNumber::parse(179)?,
+            PullRequestNumber::parse(180)?,
+        )?;
+        let hop = PullRequestAuthorityObservation::new(
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::OneExactMatch {
+                    identity: chain.step_pull_request().clone(),
+                    state: ExactPullRequestState::Merged {
+                        squash_commit: SquashCommitOid::parse("squash-a")?,
+                    },
+                },
+            },
+            GitAuthorityObservation::Reachable {
+                observation: GitMergeObservation::SquashCommitReachable {
+                    squash_commit: SquashCommitOid::parse("squash-b")?,
+                },
+            },
+        );
+        let promotion = PullRequestAuthorityObservation::new(
+            GitHubAuthorityObservation::Reachable {
+                observation: GitHubPullRequestObservation::ZeroExactMatches,
+            },
+            GitAuthorityObservation::Reachable {
+                observation: GitMergeObservation::NotMerged,
+            },
+        );
+        let observation = ExceptionalMergeChainObservation::new(hop, promotion);
+        let (step, _, aggregate) = super::derive_exceptional_merge_status(&chain, &observation);
+        assert_eq!(step, MergeStatus::Inconclusive);
+        assert_eq!(aggregate, MergeStatus::Inconclusive);
         Ok(())
     }
 }
