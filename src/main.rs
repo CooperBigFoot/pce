@@ -31,41 +31,44 @@ use pce_core::{
     DispatchProjectionInput, DispatchRef, DispatchRequiredArtifactObservation, DispatchRole,
     DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef,
     EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
-    Evidence, ExactPullRequestIdentity, ExactPullRequestState, Executable, ExitCode,
-    ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
-    GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef,
-    GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
-    GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
-    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
-    LandingReadinessDecision, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
-    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
-    NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
-    OracleFailure, OracleStage, OrderingEdge, PairedCampaign, PairedExecutionProofError,
-    PairedReplayClassification, ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
-    PullRequestNumber, PullRequestSelector, ReconciledDeadDispatchCompletionPayload,
-    ReconciledDispatchOutcome, RecordedProcessIdentity, RecoveryLogPath, ReferenceValidation,
-    ReplayArtifactObservation, ReplayClassifications, ReplayObservation, ReplayRefResult,
-    RepositoryBranchName, RepositoryContractPayload, RepositoryFetchObservation, RepositoryName,
-    RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
-    RepositoryRelativePath, RepositoryRoot, RequiredArtifactPresence, RunSnapshot, Sandbox,
-    SeatbeltCapability, Sequence, Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding,
-    StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName, TagState,
-    TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy,
-    VisionName, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
-    append_event, classify_claude_result, classify_codex_terminal_usage,
-    classify_dispatch_admission, classify_dispatch_check_in, classify_replay_pair,
-    classify_seatbelt_capability, compose_gate_arguments, compose_planning_role_frame,
-    compute_dispatchability, create_vision, derive_dispatch_outcome_state, derive_merge_status,
-    derive_milestone_merge_status, derive_run_state, derive_run_state_with_dispatch_artifacts,
-    dispatch_completion_payload, dispatch_invocation, dispatch_payload, evaluate_completion,
-    evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
-    fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot, meter_dispatches,
-    normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
-    parse_claude_result, parse_dispatch_process_identity, parse_event_line,
-    parse_gate_execution_evidence, parse_gate_stimulus, parse_paired_falsification_verdict,
-    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
-    rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
-    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    Evidence, ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
+    ExceptionalMergeChainObservation, Executable, ExitCode, ExpectedVerdictOutcome,
+    FileObservation, FindingAdmission, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
+    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
+    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
+    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
+    GitHubPullRequestObservation, GitMergeObservation, KnownPayload, LandingReadinessDecision,
+    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
+    MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, NonProductionHoldOpenPayload,
+    NonProductionKey, ObservedExitStatus, ObservedWorkflowName, OracleFailure, OracleStage,
+    OrderingEdge, PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
+    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
+    PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
+    ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
+    RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation, ReplayClassifications,
+    ReplayObservation, ReplayRefResult, RepositoryBranchName, RepositoryContractPayload,
+    RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
+    RequiredArtifactPresence, RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest,
+    SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
+    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
+    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
+    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
+    classify_codex_terminal_usage, classify_dispatch_admission, classify_dispatch_check_in,
+    classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
+    compose_planning_role_frame, compute_dispatchability, create_vision,
+    derive_dispatch_outcome_state, derive_merge_status, derive_milestone_merge_status,
+    derive_run_state, derive_run_state_with_dispatch_artifacts,
+    derive_run_state_with_exceptional_merge_chains, dispatch_completion_payload,
+    dispatch_invocation, dispatch_payload, evaluate_completion, evaluate_landing_readiness,
+    event_record_matches, fold_dispatch_ledger, fold_paired_execution_proof, fold_replay_runs,
+    measure_contract_snapshot, meter_dispatches, normalize_replay_observation,
+    paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result,
+    parse_dispatch_process_identity, parse_event_line, parse_gate_execution_evidence,
+    parse_gate_stimulus, parse_paired_falsification_verdict, parse_replay_output_path,
+    parse_replay_schema_path, parse_tracked_repository_contract, rebase_gate_stimulus,
+    render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
+    serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_tracked_repository_contract, validate_artifact, validate_verdict_references,
     validate_workflow_coverage, verify_criterion_change,
 };
@@ -3254,9 +3257,11 @@ fn run_landing_check(
     let ratified_criteria = read_ratified_acceptance_criteria(vision_dir)?;
     let (artifacts, _) = current_artifacts(&records, Path::new(contracts[primary_index].root()))?;
     let canonical_nodes = canonical_nodes(&records, &vision)?;
+    let declared_chains = declared_exceptional_merge_chains(&records, &vision)?;
 
     let mut repositories = Vec::new();
     let mut authorities = Vec::new();
+    let mut exceptional = Vec::new();
     if !canonical_nodes.is_empty() {
         let selected_index = canonical_nodes
             .iter()
@@ -3265,14 +3270,26 @@ fn run_landing_check(
             .map(|(index, _)| index)
             .context("event log contains no canonical step node for repository projection")?;
         let selected = &canonical_nodes[selected_index];
-        let integration_branches = integration_branches(&canonical_nodes, selected_index);
+        let selected_chain = declared_chains
+            .iter()
+            .find(|(node, _)| node == &selected.node)
+            .map(|(_, chain)| chain);
+        let selected_selector = selected_chain.map_or_else(
+            || selected.subject.selector(),
+            |chain| chain.step_pull_request().selector(),
+        );
+        let integration_branches = if declared_chains.is_empty() {
+            integration_branches(&canonical_nodes, selected_index)
+        } else {
+            landing_integration_branches(&canonical_nodes, &declared_chains)
+        };
         let mut runtimes = Vec::with_capacity(contracts.len());
         for contract in contracts {
             let (observation, runtime) = observe_repository(
                 contract.name().clone(),
                 PathBuf::from(contract.root()),
                 &integration_branches,
-                selected.subject.selector(),
+                selected_selector,
             )?;
             repositories.push(observation);
             runtimes.push(runtime);
@@ -3280,10 +3297,43 @@ fn run_landing_check(
         let primary = runtimes
             .get(primary_index)
             .context("resolved primary repository index is unavailable")?;
-        authorities = observe_authorities(&canonical_nodes, primary)?;
+        for node in &canonical_nodes {
+            if let Some((_, chain)) = declared_chains
+                .iter()
+                .find(|(declared_node, _)| declared_node == &node.node)
+            {
+                let step_github =
+                    observe_github(&primary.root, chain.step_pull_request().selector())?;
+                let step_git =
+                    observe_git(primary, chain.step_pull_request().selector(), &step_github)?;
+                let promotion_github =
+                    observe_github(&primary.root, chain.promotion_pull_request().selector())?;
+                let promotion_git = observe_git(
+                    primary,
+                    chain.promotion_pull_request().selector(),
+                    &promotion_github,
+                )?;
+                exceptional.push((
+                    node.node.clone(),
+                    ExceptionalMergeChainObservation::new(
+                        PullRequestAuthorityObservation::new(step_github, step_git),
+                        PullRequestAuthorityObservation::new(promotion_github, promotion_git),
+                    ),
+                ));
+            } else {
+                let selector = node.subject.selector();
+                let github = observe_github(&primary.root, selector)?;
+                let git = observe_git(primary, selector, &github)?;
+                authorities.push(StepAuthorityObservation::new(
+                    node.node.clone(),
+                    github,
+                    git,
+                ));
+            }
+        }
     }
 
-    let state = derive_run_state(
+    let state = derive_run_state_with_exceptional_merge_chains(
         &records,
         &ratified_criteria,
         &vision,
@@ -3291,6 +3341,7 @@ fn run_landing_check(
         &artifacts,
         &repositories,
         &authorities,
+        &exceptional,
     )
     .context("failed to derive landing state")?;
     let completion = evaluate_completion(
@@ -5155,6 +5206,63 @@ fn canonical_nodes(records: &[EventRecord], vision: &VisionSlug) -> Result<Vec<C
         }
     }
     Ok(nodes)
+}
+
+fn declared_exceptional_merge_chains(
+    records: &[EventRecord],
+    vision: &VisionSlug,
+) -> Result<Vec<(NodeId, ExceptionalMergeChain)>> {
+    let mut chains = Vec::new();
+    for record in records {
+        let EventBodyRef::Known(KnownPayload::ExceptionalMergeChainDeclared(payload)) =
+            record.body_ref()
+        else {
+            continue;
+        };
+        let Ok(step) = StepNode::parse(record.node()) else {
+            continue;
+        };
+        chains.push((
+            record.node().clone(),
+            ExceptionalMergeChain::new(
+                vision,
+                step,
+                payload.integration_branch.clone(),
+                payload.step_pull_request_number,
+                payload.promotion_pull_request_number,
+            )
+            .context("failed to assemble exceptional merge chain")?,
+        ));
+    }
+    Ok(chains)
+}
+
+fn landing_integration_branches(
+    nodes: &[CanonicalNode],
+    exceptional: &[(NodeId, ExceptionalMergeChain)],
+) -> Vec<String> {
+    let mut branches = Vec::new();
+    for node in nodes {
+        if let Some((_, chain)) = exceptional
+            .iter()
+            .find(|(declared, _)| declared == &node.node)
+        {
+            for branch in [
+                chain.integration_branch().as_str(),
+                chain.promotion_pull_request().selector().base().as_str(),
+            ] {
+                if !branches.iter().any(|existing| existing == branch) {
+                    branches.push(branch.to_owned());
+                }
+            }
+        } else {
+            let branch = node.subject.integration_branch().as_str();
+            if !branches.iter().any(|existing| existing == branch) {
+                branches.push(branch.to_owned());
+            }
+        }
+    }
+    branches
 }
 
 fn integration_branches(nodes: &[CanonicalNode], selected_index: usize) -> Vec<String> {
@@ -8767,16 +8875,19 @@ mod tests {
     use pce_core::{
         AcceptanceCriteria, AppendableFinding, ArtifactPath, BranchState, CachedInputTokens,
         CodexTerminalObservation, CurrentArtifactObservation, CurrentArtifactState,
-        DispatchExitStatus, DispatchTokenUsage, EventKindName, EventRecord, EventRecordFilter,
-        ExitCode, GitAuthorityObservation, GitHubAuthorityObservation,
-        GitHubPullRequestObservation, GitMergeObservation, InputTokens, KnownPayload,
-        MilestoneMergeSubject, MilestoneNode, NESTED_SEATBELT_SKIP_MARKER, NodeId,
-        ObservedExitStatus, OutputTokens, ReadKind, ReadPayload, ReasoningOutputTokens,
-        RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation, RepositoryName,
-        RepositoryObservation, RepositoryObservationFailure, RunSnapshot, SeatbeltCapability,
-        Sha256Digest, StepAuthorityObservation, StepNode, TagName, TagState, VersionPolicy,
+        DispatchExitStatus, DispatchTokenUsage, EventBodyRef, EventKindName, EventRecord,
+        EventRecordFilter, ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
+        ExceptionalMergeChainObservation, ExitCode, GitAuthorityObservation,
+        GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, InputTokens,
+        KnownPayload, MilestoneMergeSubject, MilestoneNode, NESTED_SEATBELT_SKIP_MARKER, NodeId,
+        ObservedExitStatus, OutputTokens, PullRequestAuthorityObservation, PullRequestNumber,
+        ReadKind, ReadPayload, ReasoningOutputTokens, RecoveryLogPath, RepositoryBranchName,
+        RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+        RepositoryObservationFailure, RunSnapshot, SeatbeltCapability, Sha256Digest,
+        SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState, VersionPolicy,
         VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, classify_codex_terminal_usage,
-        derive_run_state, parse_acceptance_criteria, parse_event_line, render_human_snapshot,
+        derive_run_state, derive_run_state_with_exceptional_merge_chains,
+        parse_acceptance_criteria, parse_event_line, render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -13003,5 +13114,95 @@ None.
             .expect("two-ref replay repository should materialize after both critics exit");
         assert!(campaign.repository_root.exists());
         campaign.cleanup().expect("campaign should clean up");
+    }
+
+    #[test]
+    fn exceptional_step_snapshot_variant_is_schema_valid_and_exact() {
+        let declaration = parse_event_line(r#"{"sequence":1,"timestamp":"2026-08-09T12:00:00.000Z","kind":"exceptional-merge-chain-declared","node":"m1-s3","payload":{"integration_branch":"pce/a-dispatch-outlives-the-call-that-started-it/milestone-1b","step_pull_request_number":179,"promotion_pull_request_number":180,"evidence":"gh pr view 179 --json number,headRefName,baseRefName,state,mergeCommit && gh pr view 180 --json number,headRefName,baseRefName,state,mergeCommit"}}"#).expect("typed declaration");
+        assert!(matches!(
+            declaration.body_ref(),
+            EventBodyRef::Known(KnownPayload::ExceptionalMergeChainDeclared(_))
+        ));
+        let vision = VisionSlug::parse("2026-08-09-a-dispatch-outlives-the-call-that-started-it")
+            .expect("vision");
+        let node = NodeId::parse("m1-s3").expect("node");
+        let chain = ExceptionalMergeChain::new(
+            &vision,
+            StepNode::parse(&node).expect("step"),
+            pce_core::DeclaredIntegrationBranch::parse(
+                "pce/a-dispatch-outlives-the-call-that-started-it/milestone-1b",
+            )
+            .expect("branch"),
+            PullRequestNumber::parse(179).expect("step PR"),
+            PullRequestNumber::parse(180).expect("promotion PR"),
+        )
+        .expect("chain");
+        let hop = |identity: ExactPullRequestIdentity, oid: &str| {
+            let squash = SquashCommitOid::parse(oid).expect("squash");
+            PullRequestAuthorityObservation::new(
+                GitHubAuthorityObservation::Reachable {
+                    observation: GitHubPullRequestObservation::OneExactMatch {
+                        identity,
+                        state: ExactPullRequestState::Merged {
+                            squash_commit: squash.clone(),
+                        },
+                    },
+                },
+                GitAuthorityObservation::Reachable {
+                    observation: GitMergeObservation::SquashCommitReachable {
+                        squash_commit: squash,
+                    },
+                },
+            )
+        };
+        let observation = ExceptionalMergeChainObservation::new(
+            hop(
+                chain.step_pull_request().clone(),
+                "798ca422c9576983c8be362481169632952c578b",
+            ),
+            hop(
+                chain.promotion_pull_request().clone(),
+                "e9a3eed73d6852ca9652b1af083127ba11126cc1",
+            ),
+        );
+        let criteria = parse_acceptance_criteria("# Vision\n\n## Acceptance criteria (vision-level \"done\")\n\n```json\n{\"criteria\":[{\"name\":\"x\",\"input\":\"x\",\"observation\":\"x\"}]}\n```\n").expect("criteria");
+        let state = derive_run_state_with_exceptional_merge_chains(
+            &[declaration],
+            &criteria,
+            &vision,
+            &RecoveryLogPath::new("events.jsonl"),
+            &[],
+            &[],
+            &[],
+            &[(node, observation)],
+        )
+        .expect("exceptional state");
+        let snapshot = RunSnapshot::from(&state);
+        let value =
+            validated_snapshot_value(&snapshot).expect("run snapshot failed schema validation");
+        let member = &value["steps"][0];
+        assert_eq!(member["node"], "m1-s3");
+        assert_eq!(
+            member["subject"]["integration_branch"],
+            "pce/a-dispatch-outlives-the-call-that-started-it/milestone-1b"
+        );
+        assert_eq!(
+            member["exceptional_merge_chain"]["step_pull_request_number"],
+            179
+        );
+        assert_eq!(
+            member["exceptional_merge_chain"]["promotion_pull_request_number"],
+            180
+        );
+        assert_eq!(
+            member["exceptional_merge_chain"]["step_to_integration"]["merge_status"],
+            "merged"
+        );
+        assert_eq!(
+            member["exceptional_merge_chain"]["integration_to_default"]["merge_status"],
+            "merged"
+        );
+        assert_eq!(member["merge_status"], "merged");
+        assert_eq!(member.as_object().expect("step object").len(), 4);
     }
 }

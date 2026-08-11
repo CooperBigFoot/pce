@@ -14,7 +14,9 @@ use tracing::instrument;
 use crate::AcceptanceCriterion;
 use crate::contract_measurement::GateMeasurements;
 pub use crate::contract_measurement::ObservedExitStatus;
-use crate::run_state::VersionPolicy;
+use crate::run_state::{
+    DeclaredIntegrationBranch, PullRequestNumber, RunStateError, VersionPolicy,
+};
 use crate::tracked_contract::{
     LocalWorkflowStandIn, MilestonePullRequestBase, PullRequestMergeMethod, StepPullRequestBase,
     TrackedRepositoryContract,
@@ -466,6 +468,8 @@ pub enum WriteKind {
     NonProductionHoldOpen,
     /// A typed resolution of a non-production hold.
     NonProductionHoldClose,
+    /// A node-scoped exceptional two-hop merge selector declaration.
+    ExceptionalMergeChainDeclared,
 }
 
 impl WriteKind {
@@ -489,6 +493,7 @@ impl WriteKind {
             "criterion-added" => Ok(Self::CriterionAdded),
             "non-production-hold-open" => Ok(Self::NonProductionHoldOpen),
             "non-production-hold-close" => Ok(Self::NonProductionHoldClose),
+            "exceptional-merge-chain-declared" => Ok(Self::ExceptionalMergeChainDeclared),
             _ => Err(EventLogError::UnknownWriteKind {
                 kind: raw.to_owned(),
             }),
@@ -510,6 +515,7 @@ impl WriteKind {
             Self::CriterionAdded => "criterion-added",
             Self::NonProductionHoldOpen => "non-production-hold-open",
             Self::NonProductionHoldClose => "non-production-hold-close",
+            Self::ExceptionalMergeChainDeclared => "exceptional-merge-chain-declared",
         }
     }
 
@@ -520,7 +526,8 @@ impl WriteKind {
             | Self::KeyFinding
             | Self::RepositoryContract
             | Self::PlanningArtifactApproved
-            | Self::CriterionExecution => EvidencePolicy::Required,
+            | Self::CriterionExecution
+            | Self::ExceptionalMergeChainDeclared => EvidencePolicy::Required,
             Self::DispatchCompletion
             | Self::Delta
             | Self::EscalationOpen
@@ -1145,6 +1152,49 @@ pub struct CriterionAddedPayload {
     pub change_of_course: ChangeOfCourse,
 }
 
+/// The strict selector-only payload for `exceptional-merge-chain-declared`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    try_from = "RawExceptionalMergeChainDeclaredPayload",
+    deny_unknown_fields
+)]
+pub struct ExceptionalMergeChainDeclaredPayload {
+    pub integration_branch: DeclaredIntegrationBranch,
+    pub step_pull_request_number: PullRequestNumber,
+    pub promotion_pull_request_number: PullRequestNumber,
+    pub evidence: Evidence,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawExceptionalMergeChainDeclaredPayload {
+    integration_branch: DeclaredIntegrationBranch,
+    step_pull_request_number: PullRequestNumber,
+    promotion_pull_request_number: PullRequestNumber,
+    evidence: Evidence,
+}
+
+impl TryFrom<RawExceptionalMergeChainDeclaredPayload> for ExceptionalMergeChainDeclaredPayload {
+    type Error = RunStateError;
+
+    fn try_from(raw: RawExceptionalMergeChainDeclaredPayload) -> Result<Self, Self::Error> {
+        if raw.step_pull_request_number == raw.promotion_pull_request_number {
+            return Err(
+                RunStateError::EqualExceptionalMergeChainPullRequestNumbers {
+                    step: raw.step_pull_request_number.get(),
+                    promotion: raw.promotion_pull_request_number.get(),
+                },
+            );
+        }
+        Ok(Self {
+            integration_branch: raw.integration_branch,
+            step_pull_request_number: raw.step_pull_request_number,
+            promotion_pull_request_number: raw.promotion_pull_request_number,
+            evidence: raw.evidence,
+        })
+    }
+}
+
 /// A typed known payload whose variant determines its write kind.
 // Keeping the schema variants direct preserves the settled public construction API.
 #[allow(clippy::large_enum_variant)]
@@ -1174,6 +1224,8 @@ pub enum KnownPayload {
     CriterionAdded(CriterionAddedPayload),
     NonProductionHoldOpen(NonProductionHoldOpenPayload),
     NonProductionHoldClose(NonProductionHoldClosePayload),
+    /// An `exceptional-merge-chain-declared` payload.
+    ExceptionalMergeChainDeclared(ExceptionalMergeChainDeclaredPayload),
 }
 
 impl KnownPayload {
@@ -1193,6 +1245,7 @@ impl KnownPayload {
             Self::CriterionAdded(_) => WriteKind::CriterionAdded,
             Self::NonProductionHoldOpen(_) => WriteKind::NonProductionHoldOpen,
             Self::NonProductionHoldClose(_) => WriteKind::NonProductionHoldClose,
+            Self::ExceptionalMergeChainDeclared(_) => WriteKind::ExceptionalMergeChainDeclared,
         }
     }
 }
@@ -1217,6 +1270,7 @@ impl Serialize for KnownPayload {
             Self::CriterionAdded(payload) => payload.serialize(serializer),
             Self::NonProductionHoldOpen(payload) => payload.serialize(serializer),
             Self::NonProductionHoldClose(payload) => payload.serialize(serializer),
+            Self::ExceptionalMergeChainDeclared(payload) => payload.serialize(serializer),
         }
     }
 }
@@ -1633,6 +1687,9 @@ fn decode_known_payload(
         WriteKind::NonProductionHoldClose => {
             serde_json::from_value(payload).map(KnownPayload::NonProductionHoldClose)
         }
+        WriteKind::ExceptionalMergeChainDeclared => {
+            serde_json::from_value(payload).map(KnownPayload::ExceptionalMergeChainDeclared)
+        }
     };
     decoded.map_err(|source| EventLogError::InvalidKnownPayload {
         kind,
@@ -1797,14 +1854,16 @@ mod tests {
         AppendError, ArtifactOutcome, CacheCreationInputTokens, CacheReadInputTokens,
         ChangeOfCourse, DispatchTokenUsage, EventBodyRef, EventKindName, EventLogError,
         EventLogTail, EventLogTailError, EventLogTailLine, EventRecord, EventRecordFilter,
-        EventTimestamp, Evidence, EvidencePresence, FinishedResult, InputTokens, KnownPayload,
-        NodeId, ObservedCriterionResult, OutputTokens, ReadKind, ReadPayload,
-        RepositoryContractPayload, RepositoryName, RepositoryRoot, RequiredArtifactPresence,
-        Sequence, Sha256Digest, UnpaidCriterionReason, UnparsedPayload, WriteKind, append_event,
-        event_record_matches, parse_event_line, serialize_event_line, successor_sequence,
-        validate_evidence_policy,
+        EventTimestamp, Evidence, EvidencePresence, ExceptionalMergeChainDeclaredPayload,
+        FinishedResult, InputTokens, KnownPayload, NodeId, ObservedCriterionResult, OutputTokens,
+        ReadKind, ReadPayload, RepositoryContractPayload, RepositoryName, RepositoryRoot,
+        RequiredArtifactPresence, Sequence, Sha256Digest, UnpaidCriterionReason, UnparsedPayload,
+        WriteKind, append_event, event_record_matches, parse_event_line, serialize_event_line,
+        successor_sequence, validate_evidence_policy,
     };
-    use crate::run_state::VersionPolicy;
+    use crate::run_state::{
+        DeclaredIntegrationBranch, PullRequestNumber, RunStateError, VersionPolicy,
+    };
     use crate::tracked_contract::{GateKind, parse_tracked_repository_contract};
 
     const APPEND_TIME_SECONDS: u64 = 1_785_155_696;
@@ -3287,6 +3346,73 @@ mod tests {
                 .count(),
             1
         );
+        Ok(())
+    }
+
+    #[test]
+    fn exceptional_merge_chain_payload_is_strict_typed_and_round_trips()
+    -> Result<(), Box<dyn Error>> {
+        let line = r#"{"sequence":7,"timestamp":"2026-07-27T12:35:03.000Z","kind":"exceptional-merge-chain-declared","node":"m1-s3","payload":{"integration_branch":"pce/a-dispatch-outlives-the-call-that-started-it/milestone-1b","step_pull_request_number":179,"promotion_pull_request_number":180,"evidence":"gh pr view 179 --json number,headRefName,baseRefName,state,mergeCommit && gh pr view 180 --json number,headRefName,baseRefName,state,mergeCommit"}}"#;
+        let record = parse_event_line(line)?;
+        let EventBodyRef::Known(KnownPayload::ExceptionalMergeChainDeclared(payload)) =
+            record.body_ref()
+        else {
+            panic!("expected typed exceptional declaration")
+        };
+        assert_eq!(record.node().as_str(), "m1-s3");
+        assert_eq!(
+            payload.integration_branch.as_str(),
+            "pce/a-dispatch-outlives-the-call-that-started-it/milestone-1b"
+        );
+        assert_eq!(payload.step_pull_request_number.get(), 179);
+        assert_eq!(payload.promotion_pull_request_number.get(), 180);
+        assert_eq!(serialize_event_line(&record)?, line);
+
+        for invalid in [
+            line.replace("\"evidence\":", "\"unknown\":true,\"evidence\":"),
+            line.replace(
+                ",\"evidence\":\"gh pr view",
+                ",\"evidence_removed\":\"gh pr view",
+            ),
+        ] {
+            assert!(parse_event_line(&invalid).is_err());
+        }
+        let missing_evidence = r#"{"sequence":7,"timestamp":"2026-07-27T12:35:03.000Z","kind":"exceptional-merge-chain-declared","node":"m1-s3","payload":{"integration_branch":"branch","step_pull_request_number":179,"promotion_pull_request_number":180}}"#;
+        assert_eq!(
+            parse_event_line(missing_evidence)
+                .expect_err("missing evidence must fail")
+                .to_string(),
+            "event kind exceptional-merge-chain-declared requires an evidence field"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exceptional_merge_chain_domain_values_reject_invalid_declarations()
+    -> Result<(), Box<dyn Error>> {
+        let blank = DeclaredIntegrationBranch::parse("").expect_err("blank branch");
+        assert_eq!(
+            blank,
+            RunStateError::BlankDeclaredIntegrationBranch {
+                value: String::new()
+            }
+        );
+        assert_eq!(
+            blank.to_string(),
+            "declared integration branch cannot be blank: \"\""
+        );
+        let zero = PullRequestNumber::parse(0).expect_err("zero PR");
+        assert_eq!(zero, RunStateError::ZeroPullRequestNumber { value: 0 });
+        assert_eq!(
+            zero.to_string(),
+            "pull-request number must be positive, got 0"
+        );
+        let raw = r#"{"integration_branch":"branch","step_pull_request_number":179,"promotion_pull_request_number":179,"evidence":"e"}"#;
+        let error = serde_json::from_str::<ExceptionalMergeChainDeclaredPayload>(raw)
+            .expect_err("equal PRs must fail");
+        assert!(error.to_string().contains(
+            "exceptional merge chain pull-request numbers must differ: step 179, promotion 179"
+        ));
         Ok(())
     }
 }

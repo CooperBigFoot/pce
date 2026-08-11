@@ -269,35 +269,66 @@
       ]
     },
     "step": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["node", "subject", "github", "git", "merge_status"],
+          "properties": {
+            "node": { "$ref": "#/$defs/nonEmptyString" },
+            "subject": { "$ref": "#/$defs/mergeSubject" },
+            "github": { "$ref": "#/$defs/githubObservation" },
+            "git": { "$ref": "#/$defs/gitObservation" },
+            "merge_status": {
+              "type": "string",
+              "enum": ["merged", "not-merged", "inconclusive"]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["node", "subject", "exceptional_merge_chain", "merge_status"],
+          "properties": {
+            "node": { "$ref": "#/$defs/nonEmptyString" },
+            "subject": { "$ref": "#/$defs/mergeSubject" },
+            "exceptional_merge_chain": { "$ref": "#/$defs/exceptionalMergeChain" },
+            "merge_status": {
+              "type": "string",
+              "enum": ["merged", "not-merged", "inconclusive"]
+            }
+          }
+        }
+      ]
+    },
+    "exceptionalMergeChain": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "node",
-        "subject",
-        "github",
-        "git",
-        "merge_status"
+        "step_pull_request_number",
+        "promotion_pull_request_number",
+        "promotion_selector",
+        "step_to_integration",
+        "integration_to_default"
       ],
       "properties": {
-        "node": {
-          "$ref": "#/$defs/nonEmptyString"
-        },
-        "subject": {
-          "$ref": "#/$defs/mergeSubject"
-        },
-        "github": {
-          "$ref": "#/$defs/githubObservation"
-        },
-        "git": {
-          "$ref": "#/$defs/gitObservation"
-        },
+        "step_pull_request_number": { "$ref": "#/$defs/positiveInteger" },
+        "promotion_pull_request_number": { "$ref": "#/$defs/positiveInteger" },
+        "promotion_selector": { "$ref": "#/$defs/selector" },
+        "step_to_integration": { "$ref": "#/$defs/exceptionalMergeHop" },
+        "integration_to_default": { "$ref": "#/$defs/exceptionalMergeHop" }
+      }
+    },
+    "exceptionalMergeHop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["github", "git", "merge_status"],
+      "properties": {
+        "github": { "$ref": "#/$defs/githubObservation" },
+        "git": { "$ref": "#/$defs/gitObservation" },
         "merge_status": {
           "type": "string",
-          "enum": [
-            "merged",
-            "not-merged",
-            "inconclusive"
-          ]
+          "enum": ["merged", "not-merged", "inconclusive"]
         }
       }
     },
