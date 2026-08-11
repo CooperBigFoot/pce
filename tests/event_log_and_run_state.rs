@@ -50,6 +50,9 @@ exit 0
 const CHECK_IN_REPORT: &[u8] = b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"accounting\":{\"state\":\"unaccounted\",\"issuance_sequences\":[3,4,5,6]},\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"finished\",\"completion\":\"observed-child\",\"artifact_production\":\"produced\"},{\"issuance_sequence\":3,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":4,\"state\":\"running\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":5,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":6,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n";
 
 #[cfg(target_os = "macos")]
+const WORKING_CHECK_IN_REPORT: &[u8] = b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"accounting\":{\"state\":\"unaccounted\",\"issuance_sequences\":[1]},\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"running\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"}]}\n";
+
+#[cfg(target_os = "macos")]
 const CHECK_IN_EVENT: &[u8] = b"{\"sequence\":1,\"timestamp\":\"2026-08-09T12:00:00.000Z\",\"kind\":\"dispatch\",\"node\":\"m1-s2\",\"payload\":{\"role\":\"step-executor\",\"ref\":\"abc123\",\"evidence\":\"fixture\"}}\n";
 
 #[cfg(target_os = "macos")]
@@ -357,6 +360,143 @@ fn force_darwin_pid_reuse(
 
 #[cfg(target_os = "macos")]
 #[test]
+fn production_check_in_leaves_working_child_alive_until_real_completion() {
+    let _guard = check_in_test_guard();
+    let harness = CliHarness::new().expect("create check-in harness");
+    harness
+        .install_shim("codex", CHECK_IN_SHIM)
+        .expect("install exact check-in shim");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize harness path");
+    let log_path = cwd.join("events.jsonl");
+    let phase = CheckInPhase {
+        pid_file: cwd.join("pid-1"),
+        release_file: cwd.join("release-1"),
+        artifact_file: cwd.join("artifact-1.json"),
+    };
+
+    let mut parent = spawn_check_in_dispatch(&harness, &cwd, &log_path, &phase);
+    let pid = wait_for_check_in_non_empty_trimmed(
+        &phase.pid_file,
+        "timed out waiting for non-empty dispatch child PID",
+    );
+    let sidecar_path = PathBuf::from(format!("{}.dispatches/1.json", log_path.display()));
+    wait_for_check_in_path(&sidecar_path, "timed out waiting for dispatch sidecar");
+    let (sidecar_bytes, identity) = read_check_in_identity(&sidecar_path);
+    assert_eq!(identity.issuance_sequence().get(), 1);
+    assert_eq!(
+        pid.parse::<u32>().expect("parse pid-1"),
+        identity.process_number().get()
+    );
+    assert_eq!(
+        observe_test_darwin_process(identity.process_number()),
+        Some(identity.process_start_identity())
+    );
+    assert!(!phase.release_file.exists());
+    assert!(!phase.artifact_file.exists());
+    let event_log_before = fs::read(&log_path).expect("read event log before check-in");
+    let records_before = std::str::from_utf8(&event_log_before)
+        .expect("UTF-8 event log")
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse event before check-in"))
+        .collect::<Vec<_>>();
+    assert_eq!(records_before.len(), 1);
+    assert_eq!(records_before[0].sequence().get(), 1);
+    assert!(matches!(
+        records_before[0].body_ref(),
+        EventBodyRef::Known(KnownPayload::Dispatch(_))
+    ));
+
+    let check_in = bounded_output(
+        Command::new(env!("CARGO_BIN_EXE_pce"))
+            .args([
+                "dispatch",
+                "check-in",
+                "--file",
+                log_path.to_str().expect("absolute UTF-8 log path"),
+            ])
+            .env_clear(),
+    );
+    assert!(
+        check_in.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check_in.stderr)
+    );
+    assert_eq!(check_in.stdout, WORKING_CHECK_IN_REPORT);
+    assert_eq!(check_in.stderr, b"");
+
+    assert_eq!(
+        fs::read(&log_path).expect("read event log after check-in"),
+        event_log_before
+    );
+    assert_eq!(
+        fs::read(&sidecar_path).expect("reread dispatch sidecar"),
+        sidecar_bytes
+    );
+    assert!(!phase.release_file.exists());
+    assert!(!phase.artifact_file.exists());
+    assert_eq!(
+        observe_test_darwin_process(identity.process_number()),
+        Some(identity.process_start_identity())
+    );
+
+    fs::write(&phase.release_file, []).expect("release working issuance-1 child");
+    wait_for_check_in_bytes(
+        &phase.artifact_file,
+        b"{\"artifact\":\"real\"}",
+        "timed out waiting for artifact-1",
+    );
+    let status = wait_for_dispatch_parent(&mut parent);
+    assert!(status.success());
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let final_log = loop {
+        let log = fs::read_to_string(&log_path).expect("read completed event log");
+        if log.lines().count() == 2 {
+            break log;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for observed completion"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let final_records = final_log
+        .lines()
+        .map(|line| parse_event_line(line).expect("parse final event record"))
+        .collect::<Vec<_>>();
+    assert_eq!(final_records.len(), 2);
+    assert_eq!(final_records[1].sequence().get(), 2);
+    let EventBodyRef::Known(KnownPayload::DispatchCompletion(
+        DispatchCompletionPayload::ObservedChildWithArtifactPresence(completion),
+    )) = final_records[1].body_ref()
+    else {
+        panic!("sequence 2 must be the real issuance-1 completion")
+    };
+    assert_eq!(completion.issuance_sequence.get(), 1);
+    assert_eq!(
+        completion.usage,
+        DispatchTokenUsage::Measured {
+            input_tokens: InputTokens::new(1),
+            cached_input_tokens: CachedInputTokens::new(2),
+            output_tokens: OutputTokens::new(3),
+            reasoning_output_tokens: ReasoningOutputTokens::new(4),
+        }
+    );
+    assert_eq!(
+        completion.exit_status,
+        DispatchExitStatus::Exited {
+            code: ExitCode::new(0),
+        }
+    );
+    assert_eq!(completion.artifact_outcome, ArtifactOutcome::NotValidated);
+    assert_eq!(
+        completion.required_artifact_presence,
+        pce_core::RequiredArtifactPresence::Present
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 #[ignore = "slow: forces real Darwin PID wraparound to prove process-number reuse"]
 fn production_check_in_pairs_dead_running_and_reused_process_number() {
     let _guard = check_in_test_guard();
@@ -531,6 +671,12 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
             .count(),
         6
     );
+    if holder.created_by_test {
+        assert_eq!(
+            observe_test_darwin_process(holder.process_number),
+            Some(holder.start_identity)
+        );
+    }
     let check_in = Command::new(env!("CARGO_BIN_EXE_pce"))
         .args([
             "dispatch",
@@ -568,10 +714,6 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
         Some(identity_4.process_start_identity())
     );
     assert_eq!(
-        observe_test_darwin_process(holder.process_number),
-        Some(holder.start_identity)
-    );
-    assert_eq!(
         std::str::from_utf8(&fs::read(&log_path).expect("reread event log"))
             .expect("UTF-8 event log")
             .lines()
@@ -582,7 +724,11 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
     fs::write(&phase_4.release_file, []).expect("release working issuance-4 child");
     let phase_4_status = wait_for_dispatch_parent(&mut phase_4_parent);
     assert!(phase_4_status.success());
-    wait_for_check_in_path(&phase_4.artifact_file, "timed out waiting for artifact-4");
+    wait_for_check_in_bytes(
+        &phase_4.artifact_file,
+        b"{\"artifact\":\"real\"}",
+        "timed out waiting for artifact-4",
+    );
     assert_eq!(
         fs::read(&phase_4.artifact_file).expect("read artifact-4"),
         b"{\"artifact\":\"real\"}"
@@ -609,13 +755,16 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
     assert_eq!(final_records.len(), 7);
     assert_eq!(final_records[6].sequence().get(), 7);
     let EventBodyRef::Known(KnownPayload::DispatchCompletion(
-        DispatchCompletionPayload::ObservedChild(pce_core::ObservedDispatchCompletionPayload {
-            issuance_sequence,
-            usage,
-            exit_status,
-            artifact_outcome,
-            ..
-        }),
+        DispatchCompletionPayload::ObservedChildWithArtifactPresence(
+            pce_core::ObservedDispatchCompletionWithArtifactPresencePayload {
+                issuance_sequence,
+                usage,
+                exit_status,
+                artifact_outcome,
+                required_artifact_presence,
+                ..
+            },
+        ),
     )) = final_records[6].body_ref()
     else {
         panic!("sequence 7 must be the real issuance-4 completion")
@@ -637,6 +786,10 @@ fn production_check_in_pairs_dead_running_and_reused_process_number() {
         }
     );
     assert_eq!(artifact_outcome, &ArtifactOutcome::NotValidated);
+    assert_eq!(
+        required_artifact_presence,
+        &pce_core::RequiredArtifactPresence::Present
+    );
     assert!(final_records.iter().all(|record| {
         !matches!(
             record.body_ref(),
