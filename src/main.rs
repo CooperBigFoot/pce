@@ -49,14 +49,14 @@ use pce_core::{
     ReplayObservation, ReplayRefResult, RepositoryBranchName, RepositoryContractPayload,
     RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
-    RequiredArtifactPresence, RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest,
-    SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
+    RequiredArtifactPresence, RiskOrdering, RunSnapshot, Sandbox, SeatbeltCapability, Sequence,
+    Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
     StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorktreeIdentity,
-    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
-    classify_codex_terminal_usage, classify_dispatch_admission, classify_dispatch_check_in,
-    classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
-    compose_planning_role_frame, compute_dispatchability, create_vision,
+    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorkPackageGraph,
+    WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
+    classify_claude_result, classify_codex_terminal_usage, classify_dispatch_admission,
+    classify_dispatch_check_in, classify_replay_pair, classify_seatbelt_capability,
+    compose_gate_arguments, compose_planning_role_frame, compute_dispatchability, create_vision,
     derive_dispatch_outcome_state, derive_merge_status, derive_milestone_merge_status,
     derive_run_state, derive_run_state_with_dispatch_artifacts,
     derive_run_state_with_exceptional_merge_chains, dispatch_completion_payload,
@@ -66,9 +66,9 @@ use pce_core::{
     paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result,
     parse_dispatch_process_identity, parse_event_line, parse_gate_execution_evidence,
     parse_gate_stimulus, parse_paired_falsification_verdict, parse_replay_output_path,
-    parse_replay_schema_path, parse_tracked_repository_contract, rebase_gate_stimulus,
-    render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
-    serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    parse_replay_schema_path, parse_tracked_repository_contract, parse_work_package_graph,
+    ready_work_packages, rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
+    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_tracked_repository_contract, validate_artifact, validate_verdict_references,
     validate_workflow_coverage, validated_dispatch_completion_payload, verify_criterion_change,
 };
@@ -83,7 +83,9 @@ const USAGE: &str = concat!(
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
     "       pce log meter\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
-    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>]\n",
+    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] [--merged <PACKAGE_ID,...>] [--override-risk-ordering]\n",
+    "       pce graph check --file <GRAPH_PATH>\n",
+    "       pce graph freeze --vision-dir <VISION_DIR>\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
     "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
@@ -100,6 +102,7 @@ const USAGE: &str = concat!(
     "       pce gate execution-subject-probe --output <REPOSITORY_RELATIVE_OUTPUT_PATH>\n",
     "       pce gate paired-execution-proof --repo-root <ABSOLUTE_REPOSITORY_ROOT> --artifacts <ABSOLUTE_EMPTY_DIRECTORY> --env <NAME=VALUE> --env <NAME=VALUE> --env <NAME=VALUE>"
 );
+static GRAPH_FREEZE_NONCE: AtomicU64 = AtomicU64::new(0);
 const GATE_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const GATE_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 // A silent child may make no observable progress for this long before it is terminated.
@@ -209,6 +212,12 @@ enum Command {
         name: VisionName,
     },
     VisionCheck,
+    GraphCheck {
+        path: PathBuf,
+    },
+    GraphFreeze {
+        vision_dir: PathBuf,
+    },
     LogWrite {
         path: PathBuf,
         kind: WriteKind,
@@ -230,6 +239,8 @@ enum Command {
         recovery_log_path: RecoveryLogPath,
         vision_dir: PathBuf,
         graph_path: Option<ArtifactPath>,
+        merged_packages: Vec<String>,
+        risk_ordering: RiskOrdering,
     },
     CriteriaCheck {
         log_path: PathBuf,
@@ -603,6 +614,8 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         } => run_dispatch_reconcile(&log_path, issuance_sequence, node),
         Command::VisionNew { name } => run_vision_new(&name),
         Command::VisionCheck => run_vision_check(input),
+        Command::GraphCheck { path } => run_graph_check(&path),
+        Command::GraphFreeze { vision_dir } => run_graph_freeze(&vision_dir),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
             let stdout = std::io::stdout();
@@ -625,11 +638,15 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             recovery_log_path,
             vision_dir,
             graph_path,
+            merged_packages,
+            risk_ordering,
         } => run_ready(
             &log_path,
             &recovery_log_path,
             &vision_dir,
             graph_path.as_ref(),
+            &merged_packages,
+            risk_ordering,
         ),
         Command::CriteriaCheck {
             log_path,
@@ -701,6 +718,7 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
             let name = VisionName::parse(raw_name).context("failed to parse vision name")?;
             Ok(Command::VisionNew { name })
         }
+        [verb, action, rest @ ..] if verb == "graph" => parse_graph_command(action, rest),
         [verb, action, rest @ ..] if verb == "log" => parse_log_command(action, rest),
         [verb, action, rest @ ..] if verb == "status" => parse_status_command(action, rest),
         [verb, rest @ ..] if verb == "ready" => parse_ready_command(rest),
@@ -2766,25 +2784,62 @@ fn parse_ready_command(args: &[String]) -> Result<Command> {
     {
         bail!(USAGE);
     }
-
-    let graph_path = match trailing {
-        [] => None,
-        [graph_flag, raw_graph_path]
-            if graph_flag == "--graph"
-                && is_value(raw_graph_path)
-                && !raw_graph_path.is_empty() =>
-        {
-            Some(ArtifactPath::new(raw_graph_path))
+    let mut graph_path = None;
+    let mut merged_packages = Vec::new();
+    let mut risk_ordering = RiskOrdering::Honour;
+    let mut index = 0;
+    while index < trailing.len() {
+        match trailing[index].as_str() {
+            "--graph"
+                if graph_path.is_none()
+                    && index + 1 < trailing.len()
+                    && is_value(&trailing[index + 1]) =>
+            {
+                graph_path = Some(ArtifactPath::new(&trailing[index + 1]));
+                index += 2;
+            }
+            "--merged"
+                if merged_packages.is_empty()
+                    && index + 1 < trailing.len()
+                    && is_value(&trailing[index + 1]) =>
+            {
+                merged_packages = trailing[index + 1].split(',').map(str::to_owned).collect();
+                if merged_packages.iter().any(|id| id.is_empty()) {
+                    bail!(USAGE);
+                }
+                index += 2;
+            }
+            "--override-risk-ordering" if risk_ordering == RiskOrdering::Honour => {
+                risk_ordering = RiskOrdering::Override;
+                index += 1;
+            }
+            _ => bail!(USAGE),
         }
-        _ => bail!(USAGE),
-    };
-
+    }
     Ok(Command::Ready {
         log_path: PathBuf::from(raw_path),
         recovery_log_path: RecoveryLogPath::new(raw_path),
         vision_dir: PathBuf::from(raw_vision_dir),
         graph_path,
+        merged_packages,
+        risk_ordering,
     })
+}
+
+fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
+    match (action, args) {
+        ("check", [flag, raw_path]) if flag == "--file" && is_value(raw_path) => {
+            Ok(Command::GraphCheck {
+                path: PathBuf::from(raw_path),
+            })
+        }
+        ("freeze", [flag, raw_dir]) if flag == "--vision-dir" && is_value(raw_dir) => {
+            Ok(Command::GraphFreeze {
+                vision_dir: PathBuf::from(raw_dir),
+            })
+        }
+        _ => bail!(USAGE),
+    }
 }
 
 fn parse_completion_command(action: &str, rest: &[String]) -> Result<Command> {
@@ -2890,6 +2945,165 @@ fn run_vision_check(input: &mut dyn Read) -> Result<()> {
         Ok(())
     })()
     .context("failed to check vision acceptance criteria")
+}
+
+fn run_graph_check(path: &Path) -> Result<()> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read work-package graph {}", path.display()))?;
+    let graph = parse_work_package_graph(&bytes)
+        .with_context(|| format!("failed to validate work-package graph {}", path.display()))?;
+    write_json_stdout(&json!({
+        "valid": true,
+        "vision": graph.vision(),
+        "plan_version": graph.plan_version(),
+        "packages": graph.packages().len(),
+    }))
+}
+
+fn publish_frozen_graph(path: &Path, bytes: &[u8]) -> Result<bool> {
+    match fs::read(path) {
+        Ok(existing) => {
+            if existing == bytes {
+                return Ok(false);
+            }
+            bail!(
+                "frozen plan artifact {} already contains different bytes",
+                path.display()
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read frozen graph {}", path.display()));
+        }
+    }
+    let parent = path
+        .parent()
+        .context("frozen graph must have a parent directory")?;
+    let nonce = GRAPH_FREEZE_NONCE.fetch_add(1, AtomicOrdering::Relaxed);
+    let temporary = parent.join(format!(
+        ".graph.freeze.{}.{}.tmp",
+        std::process::id(),
+        nonce
+    ));
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| {
+                format!(
+                    "failed to create temporary frozen graph {}",
+                    temporary.display()
+                )
+            })?;
+        file.write_all(bytes).with_context(|| {
+            format!(
+                "failed to write temporary frozen graph {}",
+                temporary.display()
+            )
+        })?;
+        file.sync_all().with_context(|| {
+            format!(
+                "failed to synchronize temporary frozen graph {}",
+                temporary.display()
+            )
+        })?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    let linked = match fs::hard_link(&temporary, path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read(path).with_context(|| {
+                format!(
+                    "failed to read concurrently frozen graph {}",
+                    path.display()
+                )
+            })?;
+            if existing != bytes {
+                let _ = fs::remove_file(&temporary);
+                bail!(
+                    "frozen plan artifact {} already contains different bytes",
+                    path.display()
+                );
+            }
+            false
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error)
+                .with_context(|| format!("failed to publish frozen graph {}", path.display()));
+        }
+    };
+    fs::remove_file(&temporary).with_context(|| {
+        format!(
+            "failed to remove temporary frozen graph {}",
+            temporary.display()
+        )
+    })?;
+    if linked {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| {
+                format!(
+                    "failed to synchronize vision directory {}",
+                    parent.display()
+                )
+            })?;
+    }
+    Ok(linked)
+}
+
+fn run_graph_freeze(vision_dir: &Path) -> Result<()> {
+    let source = vision_dir.join("graph.json");
+    let bytes = fs::read(&source)
+        .with_context(|| format!("failed to read work-package graph {}", source.display()))?;
+    let graph = parse_work_package_graph(&bytes)
+        .with_context(|| format!("failed to validate work-package graph {}", source.display()))?;
+    let version = graph.plan_version();
+    let expected_vision = vision_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("vision directory must have a Unicode basename")?;
+    if graph.vision() != expected_vision {
+        bail!(
+            "graph vision {} does not match vision directory {}",
+            graph.vision(),
+            expected_vision
+        );
+    }
+    if version > 1 {
+        let previous = vision_dir.join(format!("graph.v{}.json", version - 1));
+        let previous_bytes = fs::read(&previous).with_context(|| {
+            format!(
+                "cannot freeze plan version {version} before readable version {} at {}",
+                version - 1,
+                previous.display()
+            )
+        })?;
+        let previous_graph = parse_work_package_graph(&previous_bytes)
+            .with_context(|| format!("frozen predecessor {} is invalid", previous.display()))?;
+        if previous_graph.plan_version() != version - 1 || previous_graph.vision() != graph.vision()
+        {
+            bail!(
+                "frozen predecessor {} does not record version {} of vision {}",
+                previous.display(),
+                version - 1,
+                graph.vision()
+            );
+        }
+    }
+    let frozen = vision_dir.join(format!("graph.v{version}.json"));
+    let wrote = publish_frozen_graph(&frozen, &bytes)
+        .with_context(|| format!("frozen plan version {version} is immutable"))?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    write_json_stdout(
+        &json!({ "path": frozen, "plan_version": version, "sha256": digest, "created": wrote }),
+    )
 }
 
 fn run_log(path: &Path, kind: WriteKind, node: NodeId, input: &mut dyn Read) -> Result<()> {
@@ -3553,11 +3767,130 @@ struct DispatchGraphNode {
     repository: RepositoryName,
 }
 
+#[derive(Debug)]
+enum ReadyGraph {
+    Legacy(DispatchGraph),
+    WorkPackages(WorkPackageGraph),
+}
+
+fn frozen_graph_version(path: &ArtifactPath) -> Option<u64> {
+    let name = Path::new(path.as_str()).file_name()?.to_str()?;
+    let version = name.strip_prefix("graph.v")?.strip_suffix(".json")?;
+    if version.is_empty()
+        || version.starts_with('0')
+        || !version.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    version.parse().ok()
+}
+
+fn validate_frozen_graph_identity(
+    graph: &WorkPackageGraph,
+    artifact_path: &ArtifactPath,
+    vision_dir: &Path,
+    primary_root: &Path,
+) -> Result<()> {
+    let path_version = frozen_graph_version(artifact_path).with_context(|| {
+        format!(
+            "work-package readiness requires a frozen graph.v<n>.json artifact, got {}",
+            artifact_path.as_str()
+        )
+    })?;
+    if path_version != graph.plan_version() {
+        bail!(
+            "frozen graph path {} names version {}, but its bytes record plan_version {}",
+            artifact_path.as_str(),
+            path_version,
+            graph.plan_version()
+        );
+    }
+    let recorded = Path::new(artifact_path.as_str());
+    let resolved = if recorded.is_absolute() {
+        recorded.to_path_buf()
+    } else {
+        primary_root.join(recorded)
+    };
+    let frozen_name = recorded
+        .file_name()
+        .context("frozen graph path must have a basename")?;
+    let expected = vision_dir.join(frozen_name);
+    if absolute_path(&resolved)? != absolute_path(&expected)? {
+        bail!(
+            "frozen work-package graph {} is not at vision root {}",
+            resolved.display(),
+            vision_dir.display()
+        );
+    }
+    let expected_vision = vision_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("vision directory must have a Unicode basename")?;
+    if graph.vision() != expected_vision {
+        bail!(
+            "frozen graph vision {} does not match requested vision {}",
+            graph.vision(),
+            expected_vision
+        );
+    }
+    Ok(())
+}
+
+fn parse_ready_graph(bytes: &[u8]) -> Result<ReadyGraph> {
+    match parse_dispatch_graph(bytes) {
+        Ok(graph) => Ok(ReadyGraph::Legacy(graph)),
+        Err(legacy_error) => parse_work_package_graph(bytes)
+            .map(ReadyGraph::WorkPackages)
+            .map_err(|package_error| anyhow!("neither a legacy milestone/step graph ({legacy_error:#}) nor a work-package graph ({package_error})")),
+    }
+}
+
+fn render_work_package_readiness(
+    graph: &WorkPackageGraph,
+    merged_packages: &[String],
+    risk_ordering: RiskOrdering,
+) -> Result<()> {
+    let report = ready_work_packages(
+        graph,
+        merged_packages.iter().map(String::as_str),
+        risk_ordering,
+    )
+    .context("failed to compute work-package readiness")?;
+    let ready = report
+        .ready()
+        .iter()
+        .map(|id| id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let merged = merged_packages
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let results = graph.packages().iter().filter(|package| !merged.contains(package.id().as_str())).map(|package| {
+        let criteria = package.criteria().iter().map(|criterion| json!({
+            "name": criterion.name(), "input": criterion.input(),
+            "observation": criterion.observation(), "command": criterion.command(),
+        })).collect::<Vec<_>>();
+        json!({
+            "classification": if ready.contains(package.id().as_str()) { "ready" } else { "waiting" },
+            "package": package.id().as_str(), "title": package.title(),
+            "repositories": package.repositories(), "criteria": criteria,
+        })
+    }).collect::<Vec<_>>();
+    write_json_stdout(&json!({
+        "plan_version": graph.plan_version(),
+        "risk_ordering": if report.override_applied() { "overridden" } else { "honoured" },
+        "override_applied": report.override_applied(),
+        "results": results,
+    }))
+}
+
 fn run_ready(
     log_path: &Path,
     recovery_log_path: &RecoveryLogPath,
     vision_dir: &Path,
     graph_path: Option<&ArtifactPath>,
+    merged_packages: &[String],
+    risk_ordering: RiskOrdering,
 ) -> Result<()> {
     let parsed_lines = read_event_log(log_path)?;
     let records = parsed_lines
@@ -3619,6 +3952,12 @@ fn run_ready(
                 .find(|artifact| artifact.path == artifact_path)
                 .context("approved artifact has no retained current observation")?;
             let Some(bytes) = retained.bytes.as_deref() else {
+                if frozen_graph_version(&artifact_path).is_some() {
+                    bail!(
+                        "approved frozen graph {} is missing",
+                        artifact_path.as_str()
+                    );
+                }
                 tracing::info!(
                     artifact_path = artifact_path.as_str(),
                     reason = "artifact missing",
@@ -3626,12 +3965,20 @@ fn run_ready(
                 );
                 continue;
             };
-            match parse_dispatch_graph(bytes) {
+            match parse_ready_graph(bytes) {
                 Ok(graph) => {
                     selected = Some((approval_sequence, artifact_path, graph));
                     break;
                 }
                 Err(error) => {
+                    if frozen_graph_version(&artifact_path).is_some() {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "approved frozen graph {} is invalid",
+                                artifact_path.as_str()
+                            )
+                        });
+                    }
                     tracing::info!(
                         artifact_path = artifact_path.as_str(),
                         reason = %format!("{error:#}"),
@@ -3651,7 +3998,7 @@ fn run_ready(
         .context("selected planning-artifact approval has no derived provenance")?;
     compute_dispatchability(provenance, &[], &[], &[], &[])
         .context("selected planning artifact failed preliminary provenance check")?;
-    let graph = match parsed_graph {
+    let ready_graph = match parsed_graph {
         Some(graph) => graph,
         None => {
             let retained = artifact_bytes
@@ -3662,7 +4009,7 @@ fn run_ready(
                 .bytes
                 .as_deref()
                 .context("approved artifact has no retained current observation")?;
-            parse_dispatch_graph(bytes).map_err(|error| {
+            parse_ready_graph(bytes).map_err(|error| {
                 anyhow!(
                     "approved graph path {} is not a conforming graph: {error:#}",
                     artifact_path.as_str()
@@ -3670,6 +4017,22 @@ fn run_ready(
             })?
         }
     };
+    let graph = match ready_graph {
+        ReadyGraph::WorkPackages(graph) => {
+            validate_frozen_graph_identity(
+                &graph,
+                &artifact_path,
+                vision_dir,
+                Path::new(contracts[primary_index].root()),
+            )?;
+            return render_work_package_readiness(&graph, merged_packages, risk_ordering);
+        }
+        ReadyGraph::Legacy(graph) => graph,
+    };
+
+    if !merged_packages.is_empty() || risk_ordering == RiskOrdering::Override {
+        bail!("--merged and --override-risk-ordering apply only to work-package graphs");
+    }
 
     for graph_node in &graph.nodes {
         let matches = contracts
@@ -11519,6 +11882,7 @@ None.
             recovery_log_path,
             vision_dir,
             graph_path,
+            ..
         } = command
         else {
             panic!("typed ready command expected");

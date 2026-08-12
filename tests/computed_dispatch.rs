@@ -158,6 +158,32 @@ impl ReadyFixture {
             .expect("run ready")
     }
 
+    fn run_work_packages(
+        &self,
+        merged: Option<&str>,
+        override_risk_ordering: bool,
+    ) -> std::process::Output {
+        let mut arguments = vec![
+            OsString::from("ready"),
+            OsString::from("--file"),
+            self.log.as_os_str().to_owned(),
+            OsString::from("--vision-dir"),
+            self.vision.as_os_str().to_owned(),
+            OsString::from("--graph"),
+            OsString::from("planning/2026-07-28-computed/graph.v1.json"),
+        ];
+        if let Some(ids) = merged {
+            arguments.push(OsString::from("--merged"));
+            arguments.push(OsString::from(ids));
+        }
+        if override_risk_ordering {
+            arguments.push(OsString::from("--override-risk-ordering"));
+        }
+        self.harness
+            .run(arguments, b"")
+            .expect("run work-package ready")
+    }
+
     fn run_status(&self) -> std::process::Output {
         self.harness
             .run(
@@ -1652,4 +1678,142 @@ fn stdout_json(output: &std::process::Output) -> Value {
 
 fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn work_package_fixture() -> ReadyFixture {
+    let mut graph: Value = serde_json::from_slice(include_bytes!(
+        "../crates/core/tests/data/rivretrieve-work-package-graph.json"
+    ))
+    .expect("work-package fixture");
+    graph["vision"] = Value::from("2026-07-28-computed");
+    let fixture = ReadyFixture::new(&graph, &[]);
+    fs::rename(
+        fixture.primary.join("graph.json"),
+        fixture.vision.join("graph.v1.json"),
+    )
+    .expect("freeze fixture graph");
+    let log = fs::read_to_string(&fixture.log).expect("log fixture");
+    fs::write(
+        &fixture.log,
+        log.replace(
+            r#""path":"graph.json""#,
+            r#""path":"planning/2026-07-28-computed/graph.v1.json""#,
+        ),
+    )
+    .expect("retarget approval");
+    fixture
+}
+
+#[test]
+fn frozen_work_package_graph_computes_ready_set_and_exposes_commands() {
+    let fixture = work_package_fixture();
+    fixture
+        .harness
+        .materialize_responses(&[])
+        .expect("no adapters");
+    let output = fixture.run_work_packages(None, false);
+    assert_success(&output);
+    let value = stdout_json(&output);
+    assert_eq!(value["override_applied"], false);
+    assert_eq!(value["risk_ordering"], "honoured");
+    let ready = value["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .filter(|item| item["classification"] == "ready")
+        .map(|item| item["package"].as_str().expect("package"))
+        .collect::<Vec<_>>();
+    assert_eq!(ready, ["RR1"]);
+    assert_eq!(
+        value["results"][0]["criteria"][0]["command"],
+        "uv run pytest tests/store/test_value_states.py"
+    );
+    assert!(
+        fixture
+            .harness
+            .invocations()
+            .expect("invocations")
+            .is_empty()
+    );
+}
+
+#[test]
+fn work_package_risk_override_is_visible_and_unblocks_rr4() {
+    let fixture = work_package_fixture();
+    fixture
+        .harness
+        .materialize_responses(&[])
+        .expect("no adapters");
+    let output = fixture.run_work_packages(Some("RR1,RR2"), true);
+    assert_success(&output);
+    let value = stdout_json(&output);
+    assert_eq!(value["override_applied"], true);
+    assert_eq!(value["risk_ordering"], "overridden");
+    let rr4 = value["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .find(|item| item["package"] == "RR4")
+        .expect("RR4 result");
+    assert_eq!(rr4["classification"], "ready");
+}
+
+#[test]
+fn work_package_digest_mismatch_fails_before_readiness_output() {
+    let fixture = work_package_fixture();
+    let path = fixture.vision.join("graph.v1.json");
+    let mut changed: Value =
+        serde_json::from_slice(&fs::read(&path).expect("frozen graph")).expect("graph JSON");
+    changed["packages"][0]["title"] = Value::from("mutated after approval");
+    fs::write(&path, serde_json::to_vec(&changed).expect("changed graph")).expect("mutate graph");
+    fixture
+        .harness
+        .materialize_responses(&[])
+        .expect("no adapters");
+    let output = fixture.run_work_packages(None, false);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr(&output).contains("digest"));
+    assert!(
+        fixture
+            .harness
+            .invocations()
+            .expect("invocations")
+            .is_empty()
+    );
+}
+
+#[test]
+fn default_selection_fails_closed_on_invalid_approved_frozen_graph() {
+    let fixture = work_package_fixture();
+    let path = fixture.vision.join("graph.v1.json");
+    let mut graph: Value =
+        serde_json::from_slice(&fs::read(&path).expect("frozen graph")).expect("graph JSON");
+    graph["packages"][1]["depends_on"][0]["id"] = Value::from("MISSING");
+    let bytes = serde_json::to_vec(&graph).expect("malformed graph bytes");
+    fs::write(&path, &bytes).expect("replace graph fixture");
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let records = fs::read_to_string(&fixture.log)
+        .expect("records")
+        .lines()
+        .map(|line| {
+            let mut record: Value = serde_json::from_str(line).expect("record JSON");
+            if record["kind"] == "planning-artifact-approved" {
+                record["payload"]["sha256"] = Value::from(digest.clone());
+            }
+            serde_json::to_string(&record).expect("record serialization")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&fixture.log, records).expect("rewrite approval digest");
+    fixture
+        .harness
+        .materialize_responses(&[])
+        .expect("no adapters");
+    let output = fixture.run();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr(&output).contains("approved frozen graph"));
+    assert!(stderr(&output).contains("unknown dependency MISSING"));
 }

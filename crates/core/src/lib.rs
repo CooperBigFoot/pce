@@ -18,6 +18,7 @@ pub mod paired_execution_proof;
 pub mod run_state;
 pub mod tracked_contract;
 pub mod vision;
+pub mod work_package_graph;
 pub mod workflow_coverage;
 
 pub use acceptance_criteria::{
@@ -169,4 +170,10 @@ pub use vision::{
 pub use workflow_coverage::{
     ObservedWorkflowName, ObservedWorkflowNameError, WorkflowCoverageError,
     validate_workflow_coverage,
+};
+
+pub use work_package_graph::{
+    DependencyKind, ReadyWorkPackages, RiskOrdering, WorkPackage, WorkPackageCriterion,
+    WorkPackageDependency, WorkPackageGraph, WorkPackageGraphError, WorkPackageId,
+    parse_work_package_graph, ready_work_packages,
 };
