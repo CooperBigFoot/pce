@@ -313,7 +313,7 @@ Invoke JSON status successfully and quote the complete emitted snapshot verbatim
 2. Immediately before every step merge and milestone merge.
 3. Immediately before any worktree or branch removal.
 
-Round counts, hold status, per-milestone refs, resume position, merge state, and recovery information are computed from snapshots or filtered records. Never restate or store status in prose, a counter, a map, or another file.
+Issuance ordinals, validated-production spending, hold status, per-milestone refs, resume position, merge state, and recovery information are computed from snapshots or filtered records. The version-2 snapshot retains `rounds` unchanged as a legacy compatibility field, but automation must read `validated_production_spending`: `limit_per_node_role` names the automatic limit, each series uses `spent`, and `state` remains `parked` at the limit while independent `resume` distinguishes `human-decision-required` from `authorized` under an unconsumed typed retry authorization; below the limit the series is `active` with `resume: not-needed`. `resumable_required_artifact_paths` names the exact authorized routes. Never infer resumability merely from a closed hold because advancing the issuance ordinal consumes its retry authorization. Never restate or store status in prose, a counter, a map, or another file.
 
 ## Phase 0 — Orientation and repository contracts
 

@@ -2141,6 +2141,7 @@ pub struct RunSnapshot<'a> {
     dispatch_accounting: DispatchAccountingSnapshot,
     issuance_ordinals: Vec<IssuanceOrdinalSeriesSnapshot<'a>>,
     rounds: Vec<DefectRoundSeriesSnapshot<'a>>,
+    validated_production_spending: ValidatedProductionSpendingSnapshot<'a>,
     non_production_streaks: Vec<NonProductionSeriesSnapshot<'a>>,
     non_production_holds: Vec<NonProductionHoldSnapshot<'a>>,
     holds: Vec<HoldSnapshot<'a>>,
@@ -2165,7 +2166,7 @@ impl<'a> From<&'a DerivedRunState> for RunSnapshot<'a> {
     fn from(state: &'a DerivedRunState) -> Self {
         Self {
             schema_id: "pce.run-snapshot",
-            schema_version: 1,
+            schema_version: 2,
             repositories: state
                 .repositories()
                 .iter()
@@ -2188,6 +2189,7 @@ impl<'a> From<&'a DerivedRunState> for RunSnapshot<'a> {
                 .iter()
                 .map(DefectRoundSeriesSnapshot::from)
                 .collect(),
+            validated_production_spending: ValidatedProductionSpendingSnapshot::from(state),
             non_production_streaks: state
                 .non_production_streaks()
                 .iter()
@@ -2774,7 +2776,7 @@ impl<'a> From<&'a IssuanceOrdinalSeries> for IssuanceOrdinalSeriesSnapshot<'a> {
     }
 }
 
-/// Serialized exact defect-round series.
+/// Serialized legacy defect-round series retained for field compatibility.
 #[derive(Debug, Serialize)]
 pub struct DefectRoundSeriesSnapshot<'a> {
     node: &'a str,
@@ -2790,6 +2792,110 @@ impl<'a> From<&'a ValidatedProductionSeries> for DefectRoundSeriesSnapshot<'a> {
             count: value.count().get(),
         }
     }
+}
+
+/// Machine-readable validated-production spending status.
+#[derive(Debug, Serialize)]
+pub struct ValidatedProductionSpendingSnapshot<'a> {
+    limit_per_node_role: u64,
+    series: Vec<ValidatedProductionSpendingSeriesSnapshot<'a>>,
+}
+
+impl<'a> From<&'a DerivedRunState> for ValidatedProductionSpendingSnapshot<'a> {
+    fn from(state: &'a DerivedRunState) -> Self {
+        Self {
+            limit_per_node_role: VALIDATED_PRODUCTION_SPENDING_LIMIT,
+            series: state
+                .validated_production_counts()
+                .iter()
+                .map(|series| ValidatedProductionSpendingSeriesSnapshot::new(series, state))
+                .collect(),
+        }
+    }
+}
+
+/// Exact `(node, role)` spending series and its current cost-boundary state.
+#[derive(Debug, Serialize)]
+pub struct ValidatedProductionSpendingSeriesSnapshot<'a> {
+    node: &'a str,
+    role: &'a str,
+    spent: u64,
+    state: ValidatedProductionSpendingState,
+    resume: ValidatedProductionResumeState,
+    resumable_required_artifact_paths: Vec<&'a str>,
+}
+
+impl<'a> ValidatedProductionSpendingSeriesSnapshot<'a> {
+    fn new(series: &'a ValidatedProductionSeries, state: &'a DerivedRunState) -> Self {
+        let current_ordinal = state
+            .issuance_ordinals()
+            .iter()
+            .find(|ordinal| ordinal.node() == series.node() && ordinal.role() == series.role())
+            .map_or(IssuanceOrdinal(0), IssuanceOrdinalSeries::ordinal);
+        let exhausted = series.count().get() >= VALIDATED_PRODUCTION_SPENDING_LIMIT;
+        let resumable_required_artifact_paths = if exhausted {
+            state
+                .non_production_holds()
+                .iter()
+                .filter_map(|hold| {
+                    (hold.key().node == *series.node()
+                        && hold.key().role == *series.role()
+                        && matches!(
+                            hold.status(),
+                            NonProductionHoldStatus::Closed {
+                                resolution: NonProductionHoldResolution::Retry,
+                                issuance_ordinal,
+                                ..
+                            } if *issuance_ordinal == current_ordinal
+                        ))
+                    .then_some(hold.key().required_artifact_path.as_str())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let spending_state = if exhausted {
+            ValidatedProductionSpendingState::Parked
+        } else {
+            ValidatedProductionSpendingState::Active
+        };
+        Self {
+            node: series.node().as_str(),
+            role: series.role().as_str(),
+            spent: series.count().get(),
+            state: spending_state,
+            resume: if !exhausted {
+                ValidatedProductionResumeState::NotNeeded
+            } else if resumable_required_artifact_paths.is_empty() {
+                ValidatedProductionResumeState::HumanDecisionRequired
+            } else {
+                ValidatedProductionResumeState::Authorized
+            },
+            resumable_required_artifact_paths,
+        }
+    }
+}
+
+/// Current authorization state of a validated-production spending series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ValidatedProductionSpendingState {
+    /// The series remains below its validated-production spending limit.
+    Active,
+    /// The series reached its limit; a retry may authorize one dispatch through the boundary.
+    Parked,
+}
+
+/// Machine action needed to resume a validated-production spending series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ValidatedProductionResumeState {
+    /// No resume decision is needed below the limit.
+    NotNeeded,
+    /// A human must record a typed retry decision before another dispatch.
+    HumanDecisionRequired,
+    /// An unconsumed typed retry decision authorizes an exact artifact route.
+    Authorized,
 }
 
 #[derive(Debug, Serialize)]
@@ -3091,7 +3197,7 @@ pub struct RecoveryElision {
 #[instrument(skip(snapshot))]
 pub fn render_human_snapshot(snapshot: &RunSnapshot<'_>) -> String {
     let mut output = String::new();
-    output.push_str("pce status (pce.run-snapshot v1)\n");
+    output.push_str("pce status (pce.run-snapshot v2)\n");
     output.push_str(&format!("repositories ({})\n", snapshot.repositories.len()));
     for (index, repository) in snapshot.repositories.iter().enumerate() {
         output.push_str(&format!(
@@ -3258,6 +3364,47 @@ pub fn render_human_snapshot(snapshot: &RunSnapshot<'_>) -> String {
             quoted(round.node),
             quoted(round.role),
             round.count
+        ));
+    }
+    output.push_str(&format!(
+        "validated-production-spending (limit-per-node-role={}, series={})\n",
+        snapshot.validated_production_spending.limit_per_node_role,
+        snapshot.validated_production_spending.series.len()
+    ));
+    for (index, series) in snapshot
+        .validated_production_spending
+        .series
+        .iter()
+        .enumerate()
+    {
+        let spending_state = match series.state {
+            ValidatedProductionSpendingState::Active => "active",
+            ValidatedProductionSpendingState::Parked => "parked",
+        };
+        let resume_state = match series.resume {
+            ValidatedProductionResumeState::NotNeeded => "not-needed",
+            ValidatedProductionResumeState::HumanDecisionRequired => "human-decision-required",
+            ValidatedProductionResumeState::Authorized => "authorized",
+        };
+        let resumable_paths = if series.resumable_required_artifact_paths.is_empty() {
+            "-".to_owned()
+        } else {
+            series
+                .resumable_required_artifact_paths
+                .iter()
+                .map(|path| quoted(path))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        output.push_str(&format!(
+            "  validated-production-spending-series {}: node={} role={} spent={} state={} resume={} resumable-required-artifacts={}\n",
+            index + 1,
+            quoted(series.node),
+            quoted(series.role),
+            series.spent,
+            spending_state,
+            resume_state,
+            resumable_paths
         ));
     }
     output.push_str(&format!(
@@ -7438,6 +7585,114 @@ None.
     }
 
     #[test]
+    fn snapshot_names_validated_production_spending_and_exposes_retry_consumption()
+    -> Result<(), Box<dyn Error>> {
+        let required_artifact_path = AbsoluteRequiredArtifactPath::parse("/workspace/plan.md")?;
+        let mut records = Vec::new();
+        let mut dispatch_artifacts = Vec::new();
+        for ordinal in 1..=12_u64 {
+            let issuance_sequence = ordinal * 2 - 1;
+            records.push(dispatch(
+                issuance_sequence,
+                "m4-s1",
+                "step-plan-writer",
+                &format!("ref-{ordinal}"),
+            )?);
+            records.push(parse_event_line(&format!(
+                r#"{{"sequence":{},"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{{"issuance_sequence":{},"duration_ms":1,"usage":{{"availability":"absent","reason":"no-terminal-turn"}},"exit_status":{{"kind":"exited","code":0}},"artifact_outcome":"validated","required_artifact_presence":"present"}}}}"#,
+                issuance_sequence + 1,
+                issuance_sequence
+            ))?);
+            dispatch_artifacts.push(DispatchRequiredArtifactObservation::new(
+                Sequence::parse(issuance_sequence)?,
+                required_artifact_path.clone(),
+            ));
+        }
+        let derive_status =
+            |records: &[EventRecord],
+             dispatch_artifacts: &[DispatchRequiredArtifactObservation]| {
+                super::derive_run_state_with_dispatch_artifacts(
+                    records,
+                    dispatch_artifacts,
+                    &ratified_floor(),
+                    &VisionSlug::parse("2026-07-27-example")?,
+                    &RecoveryLogPath::new("events.jsonl"),
+                    &[],
+                    &[],
+                    &[],
+                )
+            };
+
+        let state = derive_status(&records, &dispatch_artifacts)?;
+        let parked = serde_json::to_value(RunSnapshot::from(&state))?;
+        assert_eq!(parked["schema_version"], 2);
+        assert_eq!(
+            parked["rounds"],
+            serde_json::json!([{
+                "node": "m4-s1", "role": "step-plan-writer", "count": 12
+            }])
+        );
+        assert_eq!(
+            parked["validated_production_spending"],
+            serde_json::json!({
+                "limit_per_node_role": 12,
+                "series": [{
+                    "node": "m4-s1",
+                    "role": "step-plan-writer",
+                    "spent": 12,
+                    "state": "parked",
+                    "resume": "human-decision-required",
+                    "resumable_required_artifact_paths": []
+                }]
+            })
+        );
+        assert!(render_human_snapshot(&RunSnapshot::from(&state)).contains(
+            "spent=12 state=parked resume=human-decision-required resumable-required-artifacts=-"
+        ));
+
+        records.push(parse_event_line(r#"{"sequence":25,"timestamp":"2026-08-09T12:00:05.000Z","kind":"non-production-hold-open","node":"m4-s1","payload":{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"}}}"#)?);
+        records.push(parse_event_line(r#"{"sequence":26,"timestamp":"2026-08-09T12:00:06.000Z","kind":"non-production-hold-close","node":"m4-s1","payload":{"key":{"node":"m4-s1","role":"step-plan-writer","required_artifact_path":"/workspace/plan.md"},"resolution":"retry"}}"#)?);
+        let state = derive_status(&records, &dispatch_artifacts)?;
+        let resumable = serde_json::to_value(RunSnapshot::from(&state))?;
+        assert_eq!(
+            resumable["validated_production_spending"]["series"][0],
+            serde_json::json!({
+                "node": "m4-s1",
+                "role": "step-plan-writer",
+                "spent": 12,
+                "state": "parked",
+                "resume": "authorized",
+                "resumable_required_artifact_paths": ["/workspace/plan.md"]
+            })
+        );
+        assert!(render_human_snapshot(&RunSnapshot::from(&state)).contains(
+            "spent=12 state=parked resume=authorized resumable-required-artifacts=\"/workspace/plan.md\""
+        ));
+
+        records.push(dispatch(27, "m4-s1", "step-plan-writer", "ref-13")?);
+        dispatch_artifacts.push(DispatchRequiredArtifactObservation::new(
+            Sequence::parse(27)?,
+            required_artifact_path,
+        ));
+        let state = derive_status(&records, &dispatch_artifacts)?;
+        let consumed = serde_json::to_value(RunSnapshot::from(&state))?;
+        assert_eq!(
+            consumed["validated_production_spending"]["series"][0]["state"],
+            "parked"
+        );
+        assert_eq!(
+            consumed["validated_production_spending"]["series"][0]["resume"],
+            "human-decision-required"
+        );
+        assert_eq!(
+            consumed["validated_production_spending"]["series"][0]["resumable_required_artifact_paths"],
+            serde_json::json!([])
+        );
+        assert!(snapshot_validator()?.is_valid(&consumed));
+        Ok(())
+    }
+
+    #[test]
     fn typed_rich_snapshot_conforms_and_pins_identity() -> Result<(), Box<dyn Error>> {
         let vision = VisionSlug::parse("2026-07-27-example")?;
         let records = vec![
@@ -7489,10 +7744,10 @@ None.
 
         let snapshot = RunSnapshot::from(&state);
         assert_eq!(snapshot.schema_id(), "pce.run-snapshot");
-        assert_eq!(snapshot.schema_version(), 1);
+        assert_eq!(snapshot.schema_version(), 2);
         let value = serde_json::to_value(&snapshot)?;
         assert_eq!(value["schema_id"], "pce.run-snapshot");
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert_eq!(
             value["repositories"][0]["fetch"]["fetched_at"],
             "2026-07-27T12:34:56.123Z"
@@ -7604,7 +7859,7 @@ None.
         wrong_id["schema_id"] = serde_json::json!("wrong");
         invalid_values.push(wrong_id);
         let mut wrong_version = valid.clone();
-        wrong_version["schema_version"] = serde_json::json!(2);
+        wrong_version["schema_version"] = serde_json::json!(1);
         invalid_values.push(wrong_version);
         let mut missing = valid.clone();
         missing.as_object_mut().expect("object").remove("steps");
@@ -7716,13 +7971,14 @@ None.
         assert_eq!(
             render_human_snapshot(&snapshot),
             concat!(
-                "pce status (pce.run-snapshot v1)\n",
+                "pce status (pce.run-snapshot v2)\n",
                 "repositories (0)\n",
                 "steps (0)\n",
                 "dispatch-accounting state=all-accounted issuance-sequences=-\n",
                 "dispatches (0)\n",
                 "issuance-ordinals (0)\n",
                 "rounds (0)\n",
+                "validated-production-spending (limit-per-node-role=12, series=0)\n",
                 "non-production-streaks (0)\n",
                 "non-production-holds (0)\n",
                 "holds (0)\n",
@@ -7750,7 +8006,7 @@ None.
         );
         let value: serde_json::Value = serde_json::from_slice(&json)?;
         assert_eq!(value["schema_id"], "pce.run-snapshot");
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert_eq!(value["steps"][0]["merge_status"], "merged");
         assert_eq!(
             value["provenance"][1]["condition"]["state"],
@@ -7759,7 +8015,7 @@ None.
         assert_eq!(
             render_human_snapshot(&snapshot),
             concat!(
-                "pce status (pce.run-snapshot v1)\n",
+                "pce status (pce.run-snapshot v2)\n",
                 "repositories (2)\n",
                 "  repository 1: name=\"pce\"\n",
                 "    fetch observed: ref=\"origin/pce/event-log-and-derived-run-state/milestone-2\" fetched-at=\"2026-07-27T12:34:56.123Z\"\n",
@@ -7795,6 +8051,7 @@ None.
                 "  issuance-ordinal 1: node=\"m2-s1\" role=\"step-executor\" ordinal=1\n",
                 "  issuance-ordinal 2: node=\"m2-s3\" role=\"pr-reviewer\" ordinal=1\n",
                 "rounds (0)\n",
+                "validated-production-spending (limit-per-node-role=12, series=0)\n",
                 "non-production-streaks (0)\n",
                 "non-production-holds (0)\n",
                 "holds (2)\n",

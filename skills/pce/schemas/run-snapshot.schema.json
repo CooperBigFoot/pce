@@ -12,6 +12,7 @@
     "dispatch_accounting",
     "issuance_ordinals",
     "rounds",
+    "validated_production_spending",
     "non_production_streaks",
     "non_production_holds",
     "holds",
@@ -24,7 +25,7 @@
       "const": "pce.run-snapshot"
     },
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "repositories": {
       "type": "array",
@@ -56,6 +57,9 @@
       "items": {
         "$ref": "#/$defs/roundSeries"
       }
+    },
+    "validated_production_spending": {
+      "$ref": "#/$defs/validatedProductionSpending"
     },
     "non_production_streaks": {
       "type": "array",
@@ -659,6 +663,88 @@
           "$ref": "#/$defs/positiveInteger"
         }
       }
+    },
+    "validatedProductionSpending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limit_per_node_role", "series"],
+      "properties": {
+        "limit_per_node_role": { "const": 12 },
+        "series": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/validatedProductionSpendingSeries" }
+        }
+      }
+    },
+    "validatedProductionSpendingSeries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "role",
+        "spent",
+        "state",
+        "resume",
+        "resumable_required_artifact_paths"
+      ],
+      "properties": {
+        "node": { "$ref": "#/$defs/nonEmptyString" },
+        "role": { "$ref": "#/$defs/nonEmptyString" },
+        "spent": { "$ref": "#/$defs/positiveInteger" },
+        "state": { "enum": ["active", "parked"] },
+        "resume": {
+          "enum": ["not-needed", "human-decision-required", "authorized"]
+        },
+        "resumable_required_artifact_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^/" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "active" } } },
+          "then": {
+            "properties": {
+              "resume": { "const": "not-needed" },
+              "resumable_required_artifact_paths": { "maxItems": 0 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "parked" } } },
+          "then": {
+            "properties": {
+              "resume": {
+                "enum": ["human-decision-required", "authorized"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "resume": { "const": "authorized" } }
+          },
+          "then": {
+            "properties": {
+              "state": { "const": "parked" },
+              "resumable_required_artifact_paths": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resume": { "enum": ["not-needed", "human-decision-required"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "resumable_required_artifact_paths": { "maxItems": 0 }
+            }
+          }
+        }
+      ]
     },
     "issuanceOrdinalSeries": {
       "type": "object", "additionalProperties": false,

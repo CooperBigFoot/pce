@@ -12014,8 +12014,8 @@ None.
         assert_eq!(
             render_human_snapshot(&snapshot),
             concat!(
-                "pce status (pce.run-snapshot v1)\n",
-                "repositories (0)\nsteps (0)\ndispatch-accounting state=all-accounted issuance-sequences=-\ndispatches (0)\nissuance-ordinals (0)\nrounds (0)\nnon-production-streaks (0)\nnon-production-holds (0)\nholds (0)\n",
+                "pce status (pce.run-snapshot v2)\n",
+                "repositories (0)\nsteps (0)\ndispatch-accounting state=all-accounted issuance-sequences=-\ndispatches (0)\nissuance-ordinals (0)\nrounds (0)\nvalidated-production-spending (limit-per-node-role=12, series=0)\nnon-production-streaks (0)\nnon-production-holds (0)\nholds (0)\n",
                 "provenance (0)\nresume state=no-log-visible-candidate\nrecovery-digest\n",
                 "  rounds (entries=0, elisions=0)\n",
                 "  open-holds (entries=0, elisions=0)\n",
@@ -12024,7 +12024,7 @@ None.
             )
         );
         assert_eq!(value["schema_id"], "pce.run-snapshot");
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert_eq!(value["issuance_ordinals"], serde_json::json!([]));
         assert_eq!(value["non_production_streaks"], serde_json::json!([]));
         assert_eq!(value["non_production_holds"], serde_json::json!([]));

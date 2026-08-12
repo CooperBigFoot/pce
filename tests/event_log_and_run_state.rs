@@ -1349,7 +1349,7 @@ fn binary_log_read_folds_the_complete_measured_lifecycle() {
     assert_eq!(state.non_production_streaks()[0].consecutive().get(), 1);
     let snapshot = serde_json::to_value(RunSnapshot::from(&state)).expect("serialize snapshot");
     assert_eq!(snapshot["schema_id"], "pce.run-snapshot");
-    assert_eq!(snapshot["schema_version"], 1);
+    assert_eq!(snapshot["schema_version"], 2);
     assert!(snapshot.get("dispatch_lifecycles").is_none());
 }
 
@@ -1746,7 +1746,7 @@ fn status_smoke_uses_every_isolated_adapter_path() {
     let snapshot: Value = serde_json::from_slice(&output.stdout).expect("parse status snapshot");
 
     assert_eq!(at(&snapshot, "/schema_id"), &json!("pce.run-snapshot"));
-    assert_eq!(at(&snapshot, "/schema_version"), &json!(1));
+    assert_eq!(at(&snapshot, "/schema_version"), &json!(2));
     assert_eq!(at(&snapshot, "/repositories/0/repository"), &json!("pce"));
     assert_eq!(
         at(&snapshot, "/repositories/0/fetch/state"),
@@ -2303,7 +2303,7 @@ fn cold_resume_skips_newer_merged_node_across_milestones() {
 
     let exact_fields = [
         ("/schema_id", json!("pce.run-snapshot")),
-        ("/schema_version", json!(1)),
+        ("/schema_version", json!(2)),
         ("/repositories/0/repository", json!("pce")),
         ("/repositories/0/fetch/state", json!("observed")),
         (
@@ -2902,7 +2902,7 @@ fn mutated_approved_artifact_reports_mismatch_without_changing_not_merged_status
 
     let exact_fields = [
         ("/schema_id", json!("pce.run-snapshot")),
-        ("/schema_version", json!(1)),
+        ("/schema_version", json!(2)),
         ("/repositories/0/repository", json!("pce")),
         ("/repositories/0/fetch/state", json!("observed")),
         (
@@ -3307,7 +3307,7 @@ fn authority_disagreement_reports_inconclusive() {
 
     let exact_fields = [
         ("/schema_id", json!("pce.run-snapshot")),
-        ("/schema_version", json!(1)),
+        ("/schema_version", json!(2)),
         ("/repositories/0/repository", json!("pce")),
         ("/repositories/0/fetch/state", json!("observed")),
         (
@@ -3691,7 +3691,7 @@ fn merge_base_failure_reports_inconclusive() {
 
     let exact_fields = [
         ("/schema_id", json!("pce.run-snapshot")),
-        ("/schema_version", json!(1)),
+        ("/schema_version", json!(2)),
         ("/repositories/0/repository", json!("pce")),
         ("/repositories/0/fetch/state", json!("observed")),
         (
