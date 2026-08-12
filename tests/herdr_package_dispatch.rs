@@ -14,7 +14,7 @@ fn herdr_available() -> bool {
 }
 
 #[test]
-fn live_herdr_package_dispatch_spawns_true_and_records_issuance() {
+fn live_herdr_package_dispatch_records_sleep_then_exit_three() {
     if !herdr_available() {
         eprintln!("PCE_TEST_SKIP: live Herdr session unavailable");
         return;
@@ -81,6 +81,8 @@ fn live_herdr_package_dispatch_spawns_true_and_records_issuance() {
     let output = Command::new(env!("CARGO_BIN_EXE_pce"))
         .args(["dispatch", "package", "--file"])
         .arg(&log)
+        .args(["--vision-dir"])
+        .arg(directory.path())
         .args(["--graph"])
         .arg(&graph_path)
         .args(["--package", "WP4", "--required-artifact"])
@@ -102,7 +104,7 @@ fn live_herdr_package_dispatch_spawns_true_and_records_issuance() {
             "USER={}",
             std::env::var("USER").unwrap_or_else(|_| "worker".to_owned())
         ))
-        .args(["--", "/usr/bin/true"])
+        .args(["--", "/bin/sh", "-c", "sleep 2; exit 3"])
         .output()
         .expect("pce package dispatch");
     assert!(
@@ -113,9 +115,45 @@ fn live_herdr_package_dispatch_spawns_true_and_records_issuance() {
     let response: Value = serde_json::from_slice(&output.stdout).expect("dispatch JSON");
     assert_eq!(response["issuance_sequence"], 1);
     assert_eq!(response["agent_start"]["result"]["type"], "agent_started");
+    let result_path =
+        std::path::PathBuf::from(response["result_path"].as_str().expect("result path"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !result_path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        result_path.exists(),
+        "worker result did not appear before deadline"
+    );
+    let result: Value = serde_json::from_slice(&fs::read(&result_path).expect("result bytes"))
+        .expect("result JSON");
+    assert_eq!(result["exit_status"]["kind"], "exited");
+    assert_eq!(result["exit_status"]["code"], 3);
+
+    let collection = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["dispatch", "package-completions", "--file"])
+        .arg(&log)
+        .args(["--vision-dir"])
+        .arg(directory.path())
+        .output()
+        .expect("collect completion");
+    assert!(
+        collection.status.success(),
+        "{}",
+        String::from_utf8_lossy(&collection.stderr)
+    );
+    let report: Value = serde_json::from_slice(&collection.stdout).expect("collection JSON");
+    assert_eq!(report["appended"], serde_json::json!([1]));
+    assert_eq!(report["packages"][0]["state"], "finished");
+    assert_eq!(report["packages"][0]["exit_status"]["code"], 3);
+    eprintln!(
+        "PCE_LIVE_EVIDENCE agent_started={} result={} collection={}",
+        response["agent_start"]["result"]["type"], result, report
+    );
     let records = fs::read_to_string(&log).expect("event log");
-    assert_eq!(records.lines().count(), 1);
-    assert!(records.contains(r#""kind":"dispatch""#));
+    assert_eq!(records.lines().count(), 2);
+    assert!(records.contains(r#""kind":"dispatch-completion""#));
+    assert!(records.contains(r#""code":3"#));
 
     if let Some(workspace) =
         response["worktrees"][0]["response"]["result"]["workspace"]["workspace_id"].as_str()

@@ -44,39 +44,41 @@ use pce_core::{
     LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
     MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, NonProductionHoldOpenPayload,
     NonProductionKey, ObservedExitStatus, ObservedWorkflowName, OracleFailure, OracleStage,
-    OrderingEdge, PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
-    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
-    PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
-    ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
-    RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation, ReplayClassifications,
-    ReplayObservation, ReplayRefResult, RepositoryBranchName, RepositoryContractPayload,
-    RepositoryDispatchInput, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
-    RequiredArtifactPresence, RiskOrdering, RunSnapshot, Sandbox, SeatbeltCapability, Sequence,
-    Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
-    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug,
-    WorkPackageClassification, WorkPackageGraph, WorkPackageMergeObservation,
-    WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment, WorktreeIdentity,
-    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
-    classify_codex_terminal_usage, classify_dispatch_admission, classify_dispatch_check_in,
-    classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
-    compose_herdr_work_package_dispatch, compose_planning_role_frame, compute_dispatchability,
-    create_vision, derive_dispatch_outcome_state, derive_merge_status,
-    derive_milestone_merge_status, derive_run_state, derive_run_state_with_dispatch_artifacts,
+    OrderingEdge, PackageWorkerResult, PackageWorkerStoppedAt, PairedCampaign,
+    PairedExecutionProofError, PairedReplayClassification, ProcessIdentityObservation,
+    ProcessNumber, ProcessStartIdentity, PullRequestAuthorityObservation, PullRequestNumber,
+    PullRequestSelector, ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome,
+    RecordedProcessIdentity, RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation,
+    ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
+    RepositoryContractPayload, RepositoryDispatchInput, RepositoryFetchObservation, RepositoryName,
+    RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
+    RepositoryRelativePath, RepositoryRoot, RequiredArtifactPresence, RiskOrdering, RunSnapshot,
+    Sandbox, SeatbeltCapability, Sequence, Sha256Digest, SignalNumber, SquashCommitOid,
+    StdinBinding, StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName,
+    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason,
+    VersionPolicy, VisionName, VisionSlug, WorkPackageClassification, WorkPackageGraph,
+    WorkPackageMergeObservation, WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment,
+    WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
+    classify_claude_result, classify_codex_terminal_usage, classify_dispatch_admission,
+    classify_dispatch_check_in, classify_replay_pair, classify_seatbelt_capability,
+    compose_gate_arguments, compose_herdr_work_package_dispatch, compose_package_worker_argv,
+    compose_planning_role_frame, compute_dispatchability, create_vision,
+    derive_dispatch_outcome_state, derive_merge_status, derive_milestone_merge_status,
+    derive_package_result_path, derive_run_state, derive_run_state_with_dispatch_artifacts,
     derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
     dispatch_completion_payload, dispatch_invocation, dispatch_payload, evaluate_completion,
     evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
     fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot, meter_dispatches,
     normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
     parse_claude_result, parse_dispatch_process_identity, parse_event_line,
-    parse_gate_execution_evidence, parse_gate_stimulus, parse_paired_falsification_verdict,
-    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
-    parse_work_package_graph, ready_work_packages, rebase_gate_stimulus,
-    render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
-    serialize_dispatch_check_in, serialize_dispatch_process_identity,
-    serialize_tracked_repository_contract, validate_artifact, validate_verdict_references,
-    validate_workflow_coverage, validated_dispatch_completion_payload, verify_criterion_change,
+    parse_gate_execution_evidence, parse_gate_stimulus, parse_package_worker_result,
+    parse_paired_falsification_verdict, parse_replay_output_path, parse_replay_schema_path,
+    parse_tracked_repository_contract, parse_work_package_graph, ready_work_packages,
+    rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
+    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    serialize_package_worker_result, serialize_tracked_repository_contract, validate_artifact,
+    validate_verdict_references, validate_workflow_coverage, validated_dispatch_completion_payload,
+    verify_criterion_change,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -99,7 +101,7 @@ const USAGE: &str = concat!(
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
-    "       pce dispatch package --file <ABSOLUTE_LOG_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --required-artifact <ABSOLUTE_ARTIFACT_PATH> --repository <NAME=ABSOLUTE_ROOT>... --env <NAME=VALUE> --env <NAME=VALUE> --env <NAME=VALUE> -- <WORKER_ARG>...\n",
+    "       pce dispatch package --file <ABSOLUTE_LOG_PATH> --vision-dir <ABSOLUTE_VISION_DIR> --graph <GRAPH_PATH> --package <PACKAGE_ID> --required-artifact <ABSOLUTE_ARTIFACT_PATH> --repository <NAME=ABSOLUTE_ROOT>... --env <NAME=VALUE> --env <NAME=VALUE> --env <NAME=VALUE> -- <WORKER_ARG>...\n",
     "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CODEX_ARGUMENT>...\n",
     "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
     "       pce dispatch check-in --file <LOG_PATH>\n",
@@ -196,6 +198,7 @@ const BUILD_BOOTSTRAP_CANDIDATES: &[&str] = &[
 #[derive(Debug)]
 struct PackageDispatchCommand {
     log_path: PathBuf,
+    vision_dir: PathBuf,
     graph_path: PathBuf,
     package_id: String,
     required_artifact_path: AbsoluteRequiredArtifactPath,
@@ -215,6 +218,15 @@ enum Command {
     },
     PairedExecutionProof(PairedExecutionProofCommand),
     PackageDispatch(PackageDispatchCommand),
+    PackageWorker {
+        result_path: PathBuf,
+        required_artifact_path: PathBuf,
+        worker_arguments: Vec<String>,
+    },
+    PackageCompletions {
+        log_path: PathBuf,
+        vision_dir: PathBuf,
+    },
     Dispatch {
         envelope: DispatchEnvelope,
         logging: Option<DispatchLoggingMode>,
@@ -601,6 +613,15 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::ExecutionSubjectProbe { output } => run_execution_subject_probe(&output),
         Command::PairedExecutionProof(command) => run_paired_execution_proof(command),
         Command::PackageDispatch(command) => run_package_dispatch(command),
+        Command::PackageWorker {
+            result_path,
+            required_artifact_path,
+            worker_arguments,
+        } => run_package_worker(&result_path, &required_artifact_path, &worker_arguments),
+        Command::PackageCompletions {
+            log_path,
+            vision_dir,
+        } => run_package_completions(&log_path, &vision_dir),
         Command::Dispatch { envelope, logging } => {
             if dispatch_invocation(&envelope).target() == DispatchTarget::Codex
                 && let Some(schema) = envelope.schema_path()
@@ -743,6 +764,12 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "completion" => parse_completion_command(action, rest),
         [verb, action, rest @ ..] if verb == "landing" => parse_landing_command(action, rest),
         [verb, action, rest @ ..] if verb == "contract" => parse_contract_command(action, rest),
+        [verb, action, rest @ ..] if verb == "dispatch" && action == "package-worker" => {
+            parse_package_worker(rest)
+        }
+        [verb, action, rest @ ..] if verb == "dispatch" && action == "package-completions" => {
+            parse_package_completions(rest)
+        }
         [verb, action, rest @ ..] if verb == "dispatch" && action == "package" => {
             parse_package_dispatch(rest)
         }
@@ -766,6 +793,8 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
     let [
         file_flag,
         raw_log,
+        vision_flag,
+        raw_vision,
         graph_flag,
         raw_graph,
         package_flag,
@@ -778,20 +807,21 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
         bail!(USAGE);
     };
     if file_flag != "--file"
+        || vision_flag != "--vision-dir"
         || graph_flag != "--graph"
         || package_flag != "--package"
         || artifact_flag != "--required-artifact"
-        || !is_value(raw_log)
-        || !is_value(raw_graph)
-        || !is_value(package_id)
-        || !is_value(raw_artifact)
+        || [raw_log, raw_vision, raw_graph, package_id, raw_artifact]
+            .iter()
+            .any(|value| !is_value(value))
     {
         bail!(USAGE);
     }
     let log_path = PathBuf::from(raw_log);
+    let vision_dir = PathBuf::from(raw_vision);
     let graph_path = PathBuf::from(raw_graph);
-    if !log_path.is_absolute() || !graph_path.is_absolute() {
-        bail!("package dispatch log and graph paths must be absolute");
+    if !log_path.is_absolute() || !vision_dir.is_absolute() || !graph_path.is_absolute() {
+        bail!("package dispatch log, vision, and graph paths must be absolute");
     }
     let required_artifact_path = AbsoluteRequiredArtifactPath::parse(raw_artifact)
         .context("failed to parse package required artifact path")?;
@@ -837,6 +867,7 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
     }
     Ok(Command::PackageDispatch(PackageDispatchCommand {
         log_path,
+        vision_dir,
         graph_path,
         package_id: package_id.clone(),
         required_artifact_path,
@@ -844,6 +875,223 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
         environment,
         worker_arguments,
     }))
+}
+
+fn parse_package_worker(rest: &[String]) -> Result<Command> {
+    let [
+        result_flag,
+        result,
+        artifact_flag,
+        artifact,
+        delimiter,
+        worker @ ..,
+    ] = rest
+    else {
+        bail!(USAGE);
+    };
+    if result_flag != "--result"
+        || artifact_flag != "--required-artifact"
+        || delimiter != "--"
+        || worker.is_empty()
+    {
+        bail!(USAGE);
+    }
+    let result_path = PathBuf::from(result);
+    let required_artifact_path = PathBuf::from(artifact);
+    if !result_path.is_absolute() || !required_artifact_path.is_absolute() {
+        bail!("package worker paths must be absolute");
+    }
+    Ok(Command::PackageWorker {
+        result_path,
+        required_artifact_path,
+        worker_arguments: worker.to_vec(),
+    })
+}
+
+fn parse_package_completions(rest: &[String]) -> Result<Command> {
+    let [file_flag, log, vision_flag, vision] = rest else {
+        bail!(USAGE);
+    };
+    if file_flag != "--file" || vision_flag != "--vision-dir" {
+        bail!(USAGE);
+    }
+    let log_path = PathBuf::from(log);
+    let vision_dir = PathBuf::from(vision);
+    if !log_path.is_absolute() || !vision_dir.is_absolute() {
+        bail!("package completion paths must be absolute");
+    }
+    Ok(Command::PackageCompletions {
+        log_path,
+        vision_dir,
+    })
+}
+
+fn package_result_path(vision_dir: &Path, package: &NodeId, issuance: Sequence) -> Result<PathBuf> {
+    let component = Path::new(package.as_str());
+    if component.components().count() != 1
+        || !matches!(
+            component.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        bail!("package result identity is not one safe path component");
+    }
+    Ok(vision_dir
+        .join(".pce")
+        .join("package-results")
+        .join(component)
+        .join(format!("{}.json", issuance.get())))
+}
+
+fn write_package_result_atomic(path: &Path, result: &PackageWorkerResult) -> Result<()> {
+    let parent = path.parent().context("package result path has no parent")?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create package result directory {}",
+            parent.display()
+        )
+    })?;
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .context("system clock precedes Unix epoch")?
+        .as_nanos();
+    let temporary = path.with_extension(format!("json.tmp.{}.{nonce}", std::process::id()));
+    let bytes = serialize_package_worker_result(result)
+        .context("failed to serialize package worker result")?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .with_context(|| {
+            format!(
+                "failed to create package result temporary file {}",
+                temporary.display()
+            )
+        })?;
+    file.write_all(&bytes)
+        .context("failed to write package worker result")?;
+    file.sync_all()
+        .context("failed to sync package worker result")?;
+    fs::hard_link(&temporary, path)
+        .with_context(|| format!("failed to publish package worker result {}", path.display()))?;
+    fs::remove_file(&temporary).context("failed to remove package result temporary file")?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .context("failed to sync package result directory")?;
+    Ok(())
+}
+
+fn run_package_worker(
+    result_path: &Path,
+    required_artifact_path: &Path,
+    worker_arguments: &[String],
+) -> Result<()> {
+    let (program, arguments) = worker_arguments
+        .split_first()
+        .context("package worker command is empty")?;
+    let started = Instant::now();
+    let status = std::process::Command::new(program)
+        .args(arguments)
+        .status()
+        .with_context(|| format!("failed to spawn package worker `{program}`"))?;
+    let duration_ms = u64::try_from(started.elapsed().as_millis())
+        .context("package worker duration exceeds u64")?;
+    let result = PackageWorkerResult::new(
+        DispatchDuration::new(duration_ms),
+        PackageWorkerStoppedAt::parse(
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        )?,
+        dispatch_exit_status(status)?,
+        observe_required_artifact_presence(required_artifact_path)?,
+    );
+    write_package_result_atomic(result_path, &result)?;
+    match result.exit_status() {
+        DispatchExitStatus::Exited { code } => {
+            let code = i32::try_from(code.get()).context("worker exit code exceeds i32")?;
+            std::process::exit(code);
+        }
+        DispatchExitStatus::Signaled { signal } => {
+            let signal = i32::try_from(signal.get()).context("worker signal exceeds i32")?;
+            std::process::exit(128_i32.saturating_add(signal));
+        }
+    }
+}
+
+fn read_package_result(path: &Path) -> Result<Option<PackageWorkerResult>> {
+    match fs::read(path) {
+        Ok(bytes) => parse_package_worker_result(&bytes)
+            .context("package result file is invalid")
+            .map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn run_package_completions(log_path: &Path, vision_dir: &Path) -> Result<()> {
+    let records = read_event_log(log_path)?
+        .into_iter()
+        .map(|line| line.record)
+        .collect::<Vec<_>>();
+    let ledger =
+        fold_dispatch_ledger(&records).context("failed to derive package dispatch ledger")?;
+    let mut appended = Vec::new();
+    for issuance in ledger.unaccounted().entries() {
+        if issuance.role().as_str() != "work-package-worker" {
+            continue;
+        }
+        let result_path = package_result_path(vision_dir, issuance.node(), issuance.sequence())?;
+        let Some(result) = read_package_result(&result_path)? else {
+            continue;
+        };
+        close_dispatch_conditionally(
+            log_path,
+            DispatchClosureTarget {
+                issuance_sequence: issuance.sequence(),
+                node: issuance.node().clone(),
+            },
+            |_| {
+                Ok(dispatch_completion_payload(
+                    issuance.sequence(),
+                    result.duration_ms(),
+                    DispatchTokenUsage::Absent {
+                        reason: UsageAbsenceReason::NoTerminalTurn,
+                    },
+                    result.exit_status(),
+                    ArtifactOutcome::NotValidated,
+                    result.required_artifact_presence(),
+                ))
+            },
+        )?;
+        appended.push(issuance.sequence().get());
+    }
+    let records = read_event_log(log_path)?
+        .into_iter()
+        .map(|line| line.record)
+        .collect::<Vec<_>>();
+    let ledger =
+        fold_dispatch_ledger(&records).context("failed to rederive package dispatch ledger")?;
+    let packages = ledger
+        .entries()
+        .iter()
+        .filter(|entry| entry.issuance().role().as_str() == "work-package-worker")
+        .map(|entry| {
+            let result_path = package_result_path(
+                vision_dir,
+                entry.issuance().node(),
+                entry.issuance().sequence(),
+            )?;
+            let result = read_package_result(&result_path)?;
+            Ok(json!({
+                "issuance_sequence": entry.issuance().sequence().get(),
+                "package": entry.issuance().node().as_str(),
+                "state": if result.is_some() { "finished" } else { "unaccounted" },
+                "result_path": result_path.display().to_string(),
+                "exit_status": result.map(|result| result.exit_status()),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    write_json_stdout(&json!({ "appended": appended, "packages": packages }))
 }
 
 fn execute_herdr(invocation: &HerdrInvocation) -> Result<Value> {
@@ -887,11 +1135,31 @@ fn run_package_dispatch(command: PackageDispatchCommand) -> Result<()> {
         )
     })?;
     let graph = parse_work_package_graph(&graph_bytes).context("failed to parse package graph")?;
+    if absolute_path(&command.vision_dir)?
+        != absolute_path(
+            command
+                .graph_path
+                .parent()
+                .context("package graph has no parent")?,
+        )?
+    {
+        bail!("package graph must be at the supplied vision directory root");
+    }
     let package = graph
         .packages()
         .iter()
         .find(|package| package.id().as_str() == command.package_id)
         .with_context(|| format!("package {} is absent from graph", command.package_id))?;
+    let node = NodeId::parse(package.id().as_str())?;
+    let metadata = DispatchLogging {
+        node: node.clone(),
+        role: DispatchRole::new("work-package-worker"),
+        dispatch_ref: DispatchRef::new(graph.authored_at_ref()),
+        evidence: Evidence::parse("pce-composed herdr work-package dispatch")?,
+        required_artifact_path: command.required_artifact_path.clone(),
+    };
+    let issuance =
+        admit_and_append_dispatch(&command.log_path, &metadata, dispatch_payload(&metadata))?;
     let vision = DispatchVisionSource::parse(graph.vision().to_owned())?;
     let repository_inputs = command
         .repositories
@@ -910,36 +1178,51 @@ fn run_package_dispatch(command: PackageDispatchCommand) -> Result<()> {
         .join(package.id().as_str());
     fs::create_dir_all(&worktree_root).context("failed to create binary-owned worktree root")?;
     fs::create_dir_all(&temporary_directory).context("failed to create binary-owned TMPDIR")?;
+    let worktree_root = AbsoluteWorktreeRoot::parse(worktree_root)?;
+    let temporary_directory = AbsoluteDispatchTemporaryDirectory::parse(temporary_directory)?;
+    let environment = WorkerEnvironment::parse(command.environment)?;
+    let provisional = compose_herdr_work_package_dispatch(
+        &vision,
+        package,
+        &repository_inputs,
+        &worktree_root,
+        &temporary_directory,
+        environment.clone(),
+        WorkerArgumentVector::parse(command.worker_arguments.clone())?,
+    )?;
+    let worktree_paths = provisional
+        .worktrees()
+        .iter()
+        .map(|worktree| worktree.path().to_path_buf())
+        .collect::<Vec<_>>();
+    let result_path = derive_package_result_path(
+        &command.vision_dir,
+        package.id(),
+        issuance.sequence(),
+        &worktree_paths,
+    )?;
+    if result_path.as_path().exists() {
+        bail!(
+            "package result path already exists: {}",
+            result_path.as_str()
+        );
+    }
+    let wrapper = std::env::current_exe().context("failed to resolve package worker wrapper")?;
+    let wrapped_arguments = compose_package_worker_argv(
+        &wrapper,
+        &result_path,
+        &command.required_artifact_path,
+        &command.worker_arguments,
+    )?;
     let plan = compose_herdr_work_package_dispatch(
         &vision,
         package,
         &repository_inputs,
-        &AbsoluteWorktreeRoot::parse(worktree_root)?,
-        &AbsoluteDispatchTemporaryDirectory::parse(temporary_directory)?,
-        WorkerEnvironment::parse(command.environment)?,
-        WorkerArgumentVector::parse(command.worker_arguments)?,
+        &worktree_root,
+        &temporary_directory,
+        environment,
+        WorkerArgumentVector::parse(wrapped_arguments)?,
     )?;
-    let evidence_text = plan
-        .worktrees()
-        .iter()
-        .map(|worktree| {
-            format!(
-                "{} {}",
-                worktree.invocation().executable(),
-                worktree.invocation().argv().join(" ")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let metadata = DispatchLogging {
-        node: NodeId::parse(package.id().as_str())?,
-        role: DispatchRole::new("work-package-worker"),
-        dispatch_ref: DispatchRef::new(graph.authored_at_ref()),
-        evidence: Evidence::parse(&evidence_text)?,
-        required_artifact_path: command.required_artifact_path,
-    };
-    let issuance =
-        admit_and_append_dispatch(&command.log_path, &metadata, dispatch_payload(&metadata))?;
     let mut first_location = None;
     let mut created = Vec::new();
     for worktree in plan.worktrees() {
@@ -958,6 +1241,7 @@ fn run_package_dispatch(command: PackageDispatchCommand) -> Result<()> {
     write_json_stdout(&json!({
         "agent_name": plan.agent_name().as_str(),
         "issuance_sequence": issuance.sequence().get(),
+        "result_path": result_path.as_str(),
         "worktrees": created,
         "agent_start": start_response,
     }))
@@ -12214,6 +12498,8 @@ None.
                 "package",
                 "--file",
                 "/tmp/events.jsonl",
+                "--vision-dir",
+                "/tmp",
                 "--graph",
                 "/tmp/graph.json",
                 "--package",

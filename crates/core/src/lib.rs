@@ -15,6 +15,7 @@ pub mod gate_execution;
 pub mod gate_replay;
 pub mod herdr_dispatch;
 pub mod landing_readiness;
+pub mod package_completion;
 pub mod paired_execution_proof;
 pub mod run_state;
 pub mod tracked_contract;
@@ -39,6 +40,11 @@ pub use contract_measurement::{
 };
 pub use criterion_change::{
     CriterionChangeDecision, CriterionChangeVerification, verify_criterion_change,
+};
+pub use package_completion::{
+    AbsolutePackageResultPath, PackageCompletionError, PackageWorkerResult, PackageWorkerStoppedAt,
+    compose_package_worker_argv, derive_package_result_path, parse_package_worker_result,
+    serialize_package_worker_result,
 };
 pub use paired_execution_proof::{
     CampaignSide, FalsificationVerdictToken, PairedBlockingIssue, PairedCampaign,
