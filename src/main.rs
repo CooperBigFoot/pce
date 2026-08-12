@@ -18,57 +18,63 @@ use anyhow::{Context, Error, Result, anyhow, bail};
 use pce_core::GateCommand;
 use pce_core::tracked_contract::parse_gate_command;
 use pce_core::{
-    AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
-    AbsoluteOutputPath, AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
-    AcceptanceCriteria, ActReversibility, AppendError, AppendableCategory, AppendableFinding,
-    ArgumentVector, ArtifactOutcome, ArtifactPath, ArtifactProduction, AuthorityFailure,
-    BranchState, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
-    CodexTerminalObservation, CodexTerminalUsage, CompletionCriterionStatus, CompletionDecision,
-    CreationDate, CriterionChangeDecision, CurrentArtifactObservation, CurrentArtifactState,
-    DispatchAdmission, DispatchCandidate, DispatchCompletionPayload, DispatchDuration,
-    DispatchEnvelope, DispatchExitStatus, DispatchIdentityObservation, DispatchLedger,
-    DispatchLedgerCompletion, DispatchLogging, DispatchPayload, DispatchProcessIdentity,
-    DispatchProjectionInput, DispatchRef, DispatchRequiredArtifactObservation, DispatchRole,
-    DispatchRoleClass, DispatchRootCause, DispatchTarget, DispatchTokenUsage,
-    DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
-    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
-    ExactPullRequestState, ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable,
-    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
-    GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef,
-    GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
-    GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
-    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
-    LandingReadinessDecision, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
-    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
-    NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
-    OracleFailure, OracleStage, OrderingEdge, PairedCampaign, PairedExecutionProofError,
-    PairedReplayClassification, ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
+    AbsoluteDispatchTemporaryDirectory, AbsoluteGateExecClientPath,
+    AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath, AbsoluteOutputPath,
+    AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
+    AbsoluteWorktreeRoot, AcceptanceCriteria, ActReversibility, AppendError, AppendableCategory,
+    AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath, ArtifactProduction,
+    AuthorityFailure, BranchState, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage,
+    ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage, CompletionCriterionStatus,
+    CompletionDecision, CreationDate, CriterionChangeDecision, CurrentArtifactObservation,
+    CurrentArtifactState, DispatchAdmission, DispatchCandidate, DispatchCompletionPayload,
+    DispatchDuration, DispatchEnvelope, DispatchExitStatus, DispatchIdentityObservation,
+    DispatchLedger, DispatchLedgerCompletion, DispatchLogging, DispatchPayload,
+    DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
+    DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass, DispatchRootCause,
+    DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchabilityResult, EventBodyRef,
+    EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
+    Evidence, ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
+    ExceptionalMergeChainObservation, Executable, ExitCode, ExpectedVerdictOutcome,
+    FileObservation, FindingAdmission, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
+    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
+    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
+    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
+    GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
+    HerdrTabId, HerdrWorkspaceId, KnownPayload, LandingReadinessDecision,
+    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
+    MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, NonProductionHoldOpenPayload,
+    NonProductionKey, ObservedExitStatus, ObservedWorkflowName, OracleFailure, OracleStage,
+    OrderingEdge, PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
+    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
     PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
     RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation, ReplayClassifications,
     ReplayObservation, ReplayRefResult, RepositoryBranchName, RepositoryContractPayload,
-    RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+    RepositoryDispatchInput, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
     RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
     RequiredArtifactPresence, RiskOrdering, RunSnapshot, Sandbox, SeatbeltCapability, Sequence,
     Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
     StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug, WorkPackageGraph,
-    WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
-    classify_claude_result, classify_codex_terminal_usage, classify_dispatch_admission,
-    classify_dispatch_check_in, classify_replay_pair, classify_seatbelt_capability,
-    compose_gate_arguments, compose_planning_role_frame, compute_dispatchability, create_vision,
-    derive_dispatch_outcome_state, derive_merge_status, derive_milestone_merge_status,
-    derive_run_state, derive_run_state_with_dispatch_artifacts,
-    derive_run_state_with_exceptional_merge_chains, dispatch_completion_payload,
-    dispatch_invocation, dispatch_payload, evaluate_completion, evaluate_landing_readiness,
-    event_record_matches, fold_dispatch_ledger, fold_paired_execution_proof, fold_replay_runs,
-    measure_contract_snapshot, meter_dispatches, normalize_replay_observation,
-    paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result,
-    parse_dispatch_process_identity, parse_event_line, parse_gate_execution_evidence,
-    parse_gate_stimulus, parse_paired_falsification_verdict, parse_replay_output_path,
-    parse_replay_schema_path, parse_tracked_repository_contract, parse_work_package_graph,
-    ready_work_packages, rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
-    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionName, VisionSlug,
+    WorkPackageClassification, WorkPackageGraph, WorkPackageMergeObservation,
+    WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment, WorktreeIdentity,
+    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
+    classify_codex_terminal_usage, classify_dispatch_admission, classify_dispatch_check_in,
+    classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
+    compose_herdr_work_package_dispatch, compose_planning_role_frame, compute_dispatchability,
+    create_vision, derive_dispatch_outcome_state, derive_merge_status,
+    derive_milestone_merge_status, derive_run_state, derive_run_state_with_dispatch_artifacts,
+    derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
+    dispatch_completion_payload, dispatch_invocation, dispatch_payload, evaluate_completion,
+    evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
+    fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot, meter_dispatches,
+    normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
+    parse_claude_result, parse_dispatch_process_identity, parse_event_line,
+    parse_gate_execution_evidence, parse_gate_stimulus, parse_paired_falsification_verdict,
+    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
+    parse_work_package_graph, ready_work_packages, rebase_gate_stimulus,
+    render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
+    serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_tracked_repository_contract, validate_artifact, validate_verdict_references,
     validate_workflow_coverage, validated_dispatch_completion_payload, verify_criterion_change,
 };
@@ -83,7 +89,7 @@ const USAGE: &str = concat!(
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
     "       pce log meter\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
-    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] [--merged <PACKAGE_ID,...>] [--override-risk-ordering]\n",
+    "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] [--override-risk-ordering]\n",
     "       pce graph check --file <GRAPH_PATH>\n",
     "       pce graph freeze --vision-dir <VISION_DIR>\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
@@ -93,6 +99,7 @@ const USAGE: &str = concat!(
     "       pce contract bootstrap --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --repository <REPOSITORY> --node <NODE>\n",
     "       pce contract refresh --file <LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE>\n",
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
+    "       pce dispatch package --file <ABSOLUTE_LOG_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --required-artifact <ABSOLUTE_ARTIFACT_PATH> --repository <NAME=ABSOLUTE_ROOT>... --env <NAME=VALUE> --env <NAME=VALUE> --env <NAME=VALUE> -- <WORKER_ARG>...\n",
     "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CODEX_ARGUMENT>...\n",
     "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
     "       pce dispatch check-in --file <LOG_PATH>\n",
@@ -187,6 +194,17 @@ const BUILD_BOOTSTRAP_CANDIDATES: &[&str] = &[
 ];
 
 #[derive(Debug)]
+struct PackageDispatchCommand {
+    log_path: PathBuf,
+    graph_path: PathBuf,
+    package_id: String,
+    required_artifact_path: AbsoluteRequiredArtifactPath,
+    repositories: Vec<(String, PathBuf)>,
+    environment: BTreeMap<String, String>,
+    worker_arguments: Vec<String>,
+}
+
+#[derive(Debug)]
 enum Command {
     DispatchContinuation,
     GateExec,
@@ -196,6 +214,7 @@ enum Command {
         output: PathBuf,
     },
     PairedExecutionProof(PairedExecutionProofCommand),
+    PackageDispatch(PackageDispatchCommand),
     Dispatch {
         envelope: DispatchEnvelope,
         logging: Option<DispatchLoggingMode>,
@@ -239,7 +258,6 @@ enum Command {
         recovery_log_path: RecoveryLogPath,
         vision_dir: PathBuf,
         graph_path: Option<ArtifactPath>,
-        merged_packages: Vec<String>,
         risk_ordering: RiskOrdering,
     },
     CriteriaCheck {
@@ -582,6 +600,7 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         }
         Command::ExecutionSubjectProbe { output } => run_execution_subject_probe(&output),
         Command::PairedExecutionProof(command) => run_paired_execution_proof(command),
+        Command::PackageDispatch(command) => run_package_dispatch(command),
         Command::Dispatch { envelope, logging } => {
             if dispatch_invocation(&envelope).target() == DispatchTarget::Codex
                 && let Some(schema) = envelope.schema_path()
@@ -638,14 +657,12 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             recovery_log_path,
             vision_dir,
             graph_path,
-            merged_packages,
             risk_ordering,
         } => run_ready(
             &log_path,
             &recovery_log_path,
             &vision_dir,
             graph_path.as_ref(),
-            &merged_packages,
             risk_ordering,
         ),
         Command::CriteriaCheck {
@@ -726,6 +743,9 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "completion" => parse_completion_command(action, rest),
         [verb, action, rest @ ..] if verb == "landing" => parse_landing_command(action, rest),
         [verb, action, rest @ ..] if verb == "contract" => parse_contract_command(action, rest),
+        [verb, action, rest @ ..] if verb == "dispatch" && action == "package" => {
+            parse_package_dispatch(rest)
+        }
         [verb, action, rest @ ..] if verb == "dispatch" && action == "check-in" => {
             parse_dispatch_check_in(rest)
         }
@@ -740,6 +760,207 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         .with_context(|| USAGE),
         _ => bail!(USAGE),
     }
+}
+
+fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
+    let [
+        file_flag,
+        raw_log,
+        graph_flag,
+        raw_graph,
+        package_flag,
+        package_id,
+        artifact_flag,
+        raw_artifact,
+        trailing @ ..,
+    ] = rest
+    else {
+        bail!(USAGE);
+    };
+    if file_flag != "--file"
+        || graph_flag != "--graph"
+        || package_flag != "--package"
+        || artifact_flag != "--required-artifact"
+        || !is_value(raw_log)
+        || !is_value(raw_graph)
+        || !is_value(package_id)
+        || !is_value(raw_artifact)
+    {
+        bail!(USAGE);
+    }
+    let log_path = PathBuf::from(raw_log);
+    let graph_path = PathBuf::from(raw_graph);
+    if !log_path.is_absolute() || !graph_path.is_absolute() {
+        bail!("package dispatch log and graph paths must be absolute");
+    }
+    let required_artifact_path = AbsoluteRequiredArtifactPath::parse(raw_artifact)
+        .context("failed to parse package required artifact path")?;
+    let mut repositories = Vec::new();
+    let mut environment = BTreeMap::new();
+    let mut index = 0;
+    while index < trailing.len() && trailing[index] != "--" {
+        if index + 1 >= trailing.len() {
+            bail!(USAGE);
+        }
+        match trailing[index].as_str() {
+            "--repository" => {
+                let Some((name, root)) = trailing[index + 1].split_once('=') else {
+                    bail!(USAGE);
+                };
+                let root = PathBuf::from(root);
+                if name.is_empty() || !root.is_absolute() {
+                    bail!("package repository mappings require NAME=ABSOLUTE_ROOT");
+                }
+                repositories.push((name.to_owned(), root));
+            }
+            "--env" => {
+                let Some((name, value)) = trailing[index + 1].split_once('=') else {
+                    bail!(USAGE);
+                };
+                if environment
+                    .insert(name.to_owned(), value.to_owned())
+                    .is_some()
+                {
+                    bail!("package dispatch environment names must be unique");
+                }
+            }
+            _ => bail!(USAGE),
+        }
+        index += 2;
+    }
+    if repositories.is_empty() || index >= trailing.len() || trailing[index] != "--" {
+        bail!(USAGE);
+    }
+    let worker_arguments = trailing[index + 1..].to_vec();
+    if worker_arguments.is_empty() {
+        bail!(USAGE);
+    }
+    Ok(Command::PackageDispatch(PackageDispatchCommand {
+        log_path,
+        graph_path,
+        package_id: package_id.clone(),
+        required_artifact_path,
+        repositories,
+        environment,
+        worker_arguments,
+    }))
+}
+
+fn execute_herdr(invocation: &HerdrInvocation) -> Result<Value> {
+    let output = std::process::Command::new(invocation.executable())
+        .args(invocation.argv())
+        .output()
+        .with_context(|| format!("failed to execute {}", invocation.executable()))?;
+    if !output.status.success() {
+        bail!(
+            "herdr command failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("herdr command returned invalid JSON")
+}
+
+fn herdr_location(response: &Value) -> Result<HerdrAgentLocation> {
+    let workspace = response
+        .pointer("/result/workspace/workspace_id")
+        .and_then(Value::as_str)
+        .context("herdr worktree response omitted result.workspace.workspace_id")?;
+    let tab = response
+        .pointer("/result/tab/tab_id")
+        .and_then(Value::as_str)
+        .context("herdr worktree response omitted result.tab.tab_id")?;
+    Ok(HerdrAgentLocation::new(
+        HerdrWorkspaceId::parse(workspace)?,
+        HerdrTabId::parse(tab)?,
+    ))
+}
+
+fn run_package_dispatch(command: PackageDispatchCommand) -> Result<()> {
+    if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
+        bail!("package dispatch requires HERDR_ENV=1 inside a Herdr-managed pane");
+    }
+    let graph_bytes = fs::read(&command.graph_path).with_context(|| {
+        format!(
+            "failed to read package graph {}",
+            command.graph_path.display()
+        )
+    })?;
+    let graph = parse_work_package_graph(&graph_bytes).context("failed to parse package graph")?;
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == command.package_id)
+        .with_context(|| format!("package {} is absent from graph", command.package_id))?;
+    let vision = DispatchVisionSource::parse(graph.vision().to_owned())?;
+    let repository_inputs = command
+        .repositories
+        .iter()
+        .map(|(name, root)| {
+            RepositoryDispatchInput::parse(
+                name.clone(),
+                root.clone(),
+                graph.authored_at_ref().to_owned(),
+            )
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let worktree_root = PathBuf::from("/tmp/pce-work-package-worktrees");
+    let temporary_directory = PathBuf::from("/tmp/pce-work-package-tmp")
+        .join(graph.vision())
+        .join(package.id().as_str());
+    fs::create_dir_all(&worktree_root).context("failed to create binary-owned worktree root")?;
+    fs::create_dir_all(&temporary_directory).context("failed to create binary-owned TMPDIR")?;
+    let plan = compose_herdr_work_package_dispatch(
+        &vision,
+        package,
+        &repository_inputs,
+        &AbsoluteWorktreeRoot::parse(worktree_root)?,
+        &AbsoluteDispatchTemporaryDirectory::parse(temporary_directory)?,
+        WorkerEnvironment::parse(command.environment)?,
+        WorkerArgumentVector::parse(command.worker_arguments)?,
+    )?;
+    let evidence_text = plan
+        .worktrees()
+        .iter()
+        .map(|worktree| {
+            format!(
+                "{} {}",
+                worktree.invocation().executable(),
+                worktree.invocation().argv().join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let metadata = DispatchLogging {
+        node: NodeId::parse(package.id().as_str())?,
+        role: DispatchRole::new("work-package-worker"),
+        dispatch_ref: DispatchRef::new(graph.authored_at_ref()),
+        evidence: Evidence::parse(&evidence_text)?,
+        required_artifact_path: command.required_artifact_path,
+    };
+    let issuance =
+        admit_and_append_dispatch(&command.log_path, &metadata, dispatch_payload(&metadata))?;
+    let mut first_location = None;
+    let mut created = Vec::new();
+    for worktree in plan.worktrees() {
+        let response = execute_herdr(worktree.invocation())?;
+        if first_location.is_none() {
+            first_location = Some(herdr_location(&response)?);
+        }
+        created.push(json!({
+            "repository": worktree.repository(),
+            "path": worktree.path(),
+            "response": response,
+        }));
+    }
+    let location = first_location.context("package dispatch composed no worktree")?;
+    let start_response = execute_herdr(&plan.agent_start(&location))?;
+    write_json_stdout(&json!({
+        "agent_name": plan.agent_name().as_str(),
+        "issuance_sequence": issuance.sequence().get(),
+        "worktrees": created,
+        "agent_start": start_response,
+    }))
 }
 
 fn parse_dispatch_reconcile(rest: &[String]) -> Result<Command> {
@@ -2785,7 +3006,6 @@ fn parse_ready_command(args: &[String]) -> Result<Command> {
         bail!(USAGE);
     }
     let mut graph_path = None;
-    let mut merged_packages = Vec::new();
     let mut risk_ordering = RiskOrdering::Honour;
     let mut index = 0;
     while index < trailing.len() {
@@ -2796,17 +3016,6 @@ fn parse_ready_command(args: &[String]) -> Result<Command> {
                     && is_value(&trailing[index + 1]) =>
             {
                 graph_path = Some(ArtifactPath::new(&trailing[index + 1]));
-                index += 2;
-            }
-            "--merged"
-                if merged_packages.is_empty()
-                    && index + 1 < trailing.len()
-                    && is_value(&trailing[index + 1]) =>
-            {
-                merged_packages = trailing[index + 1].split(',').map(str::to_owned).collect();
-                if merged_packages.iter().any(|id| id.is_empty()) {
-                    bail!(USAGE);
-                }
                 index += 2;
             }
             "--override-risk-ordering" if risk_ordering == RiskOrdering::Honour => {
@@ -2821,7 +3030,6 @@ fn parse_ready_command(args: &[String]) -> Result<Command> {
         recovery_log_path: RecoveryLogPath::new(raw_path),
         vision_dir: PathBuf::from(raw_vision_dir),
         graph_path,
-        merged_packages,
         risk_ordering,
     })
 }
@@ -3845,37 +4053,107 @@ fn parse_ready_graph(bytes: &[u8]) -> Result<ReadyGraph> {
     }
 }
 
+fn merge_status_label(status: MergeStatus) -> &'static str {
+    match status {
+        MergeStatus::Merged => "merged",
+        MergeStatus::NotMerged => "not-merged",
+        MergeStatus::Inconclusive => "inconclusive",
+    }
+}
+
+fn observe_work_package_merges(
+    graph: &WorkPackageGraph,
+    vision: &VisionSlug,
+    contracts: &[RepositoryContract],
+) -> Result<Vec<WorkPackageMergeObservation>> {
+    let mut observations = Vec::new();
+    for package in graph.packages() {
+        let subject = WorkPackageMergeSubject::derive(vision, package.id().clone());
+        for repository in package.repositories() {
+            let matches = contracts
+                .iter()
+                .filter(|contract| contract.name().as_str() == repository)
+                .collect::<Vec<_>>();
+            let [contract] = matches.as_slice() else {
+                bail!(
+                    "expected exactly one repository contract for work package {} repository {}, found {}",
+                    package.id().as_str(),
+                    repository,
+                    matches.len()
+                );
+            };
+            let root = PathBuf::from(contract.root());
+            let base = subject.selector().base().as_str().to_owned();
+            let fetch = match verify_origin(&root) {
+                Ok(()) => fetch_branch(&root, &base),
+                Err(detail) => FetchResult::Unavailable { detail },
+            };
+            let runtime = RepositoryRuntime {
+                name: contract.name().clone(),
+                root,
+                fetches: vec![BranchFetch {
+                    branch: base,
+                    result: fetch,
+                }],
+            };
+            let github = observe_github(&runtime.root, subject.selector())?;
+            let git = observe_git(&runtime, subject.selector(), &github)?;
+            observations.push(WorkPackageMergeObservation::new(
+                package.id().clone(),
+                repository.clone(),
+                derive_work_package_merge_status(&subject, &github, &git),
+            ));
+        }
+    }
+    Ok(observations)
+}
+
 fn render_work_package_readiness(
     graph: &WorkPackageGraph,
-    merged_packages: &[String],
+    observations: &[WorkPackageMergeObservation],
     risk_ordering: RiskOrdering,
 ) -> Result<()> {
-    let report = ready_work_packages(
-        graph,
-        merged_packages.iter().map(String::as_str),
-        risk_ordering,
-    )
-    .context("failed to compute work-package readiness")?;
-    let ready = report
-        .ready()
+    let report = ready_work_packages(graph, observations, risk_ordering)
+        .context("failed to compute work-package readiness")?;
+    let results = graph
+        .packages()
         .iter()
-        .map(|id| id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    let merged = merged_packages
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let results = graph.packages().iter().filter(|package| !merged.contains(package.id().as_str())).map(|package| {
-        let criteria = package.criteria().iter().map(|criterion| json!({
-            "name": criterion.name(), "input": criterion.input(),
-            "observation": criterion.observation(), "command": criterion.command(),
-        })).collect::<Vec<_>>();
-        json!({
-            "classification": if ready.contains(package.id().as_str()) { "ready" } else { "waiting" },
-            "package": package.id().as_str(), "title": package.title(),
-            "repositories": package.repositories(), "criteria": criteria,
+        .zip(report.packages())
+        .map(|(package, result)| {
+            let criteria = package
+                .criteria()
+                .iter()
+                .map(|criterion| {
+                    json!({
+                        "name": criterion.name(), "input": criterion.input(),
+                        "observation": criterion.observation(), "command": criterion.command(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let repositories = observations
+                .iter()
+                .filter(|observation| observation.package() == package.id())
+                .map(|observation| {
+                    json!({
+                        "repository": observation.repository(),
+                        "merge_status": merge_status_label(observation.status()),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let classification = match result.classification() {
+                WorkPackageClassification::Merged => "merged",
+                WorkPackageClassification::Ready => "ready",
+                WorkPackageClassification::Waiting => "waiting",
+                WorkPackageClassification::DependencyInconclusive => "dependency-inconclusive",
+            };
+            json!({
+                "classification": classification,
+                "merge_status": merge_status_label(result.merge_status()),
+                "package": package.id().as_str(), "title": package.title(),
+                "repositories": repositories, "criteria": criteria,
+            })
         })
-    }).collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     write_json_stdout(&json!({
         "plan_version": graph.plan_version(),
         "risk_ordering": if report.override_applied() { "overridden" } else { "honoured" },
@@ -3889,7 +4167,6 @@ fn run_ready(
     recovery_log_path: &RecoveryLogPath,
     vision_dir: &Path,
     graph_path: Option<&ArtifactPath>,
-    merged_packages: &[String],
     risk_ordering: RiskOrdering,
 ) -> Result<()> {
     let parsed_lines = read_event_log(log_path)?;
@@ -4025,13 +4302,14 @@ fn run_ready(
                 vision_dir,
                 Path::new(contracts[primary_index].root()),
             )?;
-            return render_work_package_readiness(&graph, merged_packages, risk_ordering);
+            let observations = observe_work_package_merges(&graph, &vision, &contracts)?;
+            return render_work_package_readiness(&graph, &observations, risk_ordering);
         }
         ReadyGraph::Legacy(graph) => graph,
     };
 
-    if !merged_packages.is_empty() || risk_ordering == RiskOrdering::Override {
-        bail!("--merged and --override-risk-ordering apply only to work-package graphs");
+    if risk_ordering == RiskOrdering::Override {
+        bail!("--override-risk-ordering applies only to work-package graphs");
     }
 
     for graph_node in &graph.nodes {
@@ -11926,6 +12204,76 @@ None.
             graph_path.as_str(),
             "planning/2026-07-28-example/milestone-3/steps.json"
         );
+    }
+
+    #[test]
+    fn package_dispatch_parser_keeps_legacy_routes_additive() {
+        let command = parse_command(
+            [
+                "dispatch",
+                "package",
+                "--file",
+                "/tmp/events.jsonl",
+                "--graph",
+                "/tmp/graph.json",
+                "--package",
+                "WP4",
+                "--required-artifact",
+                "/tmp/result.json",
+                "--repository",
+                "pce=/repos/pce",
+                "--env",
+                "PATH=/usr/bin",
+                "--env",
+                "HOME=/home/worker",
+                "--env",
+                "USER=worker",
+                "--",
+                "/usr/bin/true",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("package dispatch should parse");
+        let Command::PackageDispatch(command) = command else {
+            panic!("package dispatch expected");
+        };
+        assert_eq!(command.package_id, "WP4");
+        assert_eq!(
+            command.repositories,
+            [("pce".to_owned(), PathBuf::from("/repos/pce"))]
+        );
+        assert_eq!(command.worker_arguments, ["/usr/bin/true"]);
+
+        assert!(
+            parse_command(
+                ["dispatch", "codex", "--cwd"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err()
+        );
+        assert!(USAGE.contains("pce dispatch codex"));
+        assert!(USAGE.contains("pce dispatch gate"));
+    }
+
+    #[test]
+    fn ready_parser_rejects_caller_supplied_merge_state() {
+        let error = parse_command(
+            [
+                "ready",
+                "--file",
+                "events.jsonl",
+                "--vision-dir",
+                "planning/2026-07-28-example",
+                "--merged",
+                "WP1",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect_err("ready must derive merge state rather than accept it");
+        assert_eq!(error.to_string(), USAGE);
     }
 
     #[test]

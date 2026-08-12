@@ -13,6 +13,7 @@ pub mod dispatch_process_identity;
 pub mod event_log;
 pub mod gate_execution;
 pub mod gate_replay;
+pub mod herdr_dispatch;
 pub mod landing_readiness;
 pub mod paired_execution_proof;
 pub mod run_state;
@@ -115,6 +116,12 @@ pub use gate_replay::{
     RepositoryRelativePath, classify_replay_pair, fold_replay_runs, normalize_replay_observation,
     parse_replay_output_path, parse_replay_schema_path, rebase_gate_stimulus,
 };
+pub use herdr_dispatch::{
+    AbsoluteDispatchTemporaryDirectory, AbsoluteWorktreeRoot, DispatchVisionSource,
+    HerdrAgentLocation, HerdrAgentName, HerdrDispatchPlanError, HerdrInvocation, HerdrTabId,
+    HerdrWorkPackageDispatchPlan, HerdrWorkspaceId, HerdrWorktreeSpec, RepositoryDispatchInput,
+    WorkerArgumentVector, WorkerEnvironment, compose_herdr_work_package_dispatch,
+};
 pub use landing_readiness::{
     CompletionCriterionIndex, LandingCriterionEvidence, LandingReadinessDecision,
     LandingReadinessProblem, LandingReadinessResult, evaluate_landing_readiness,
@@ -148,11 +155,12 @@ pub use run_state::{
     StepNumber, StepSnapshot, TagName, TagSnapshot, TagState, TagTarget, ValidatedProductionCount,
     ValidatedProductionResumeState, ValidatedProductionSeries,
     ValidatedProductionSpendingSeriesSnapshot, ValidatedProductionSpendingSnapshot,
-    ValidatedProductionSpendingState, VersionPolicy, VisionSlug, WorktreeIdentity,
-    WorktreeSnapshot, WorktreeState, classify_dispatch_admission, compute_dispatchability,
-    derive_dispatch_outcome_state, derive_merge_status, derive_milestone_merge_status,
-    derive_run_state, derive_run_state_with_dispatch_artifacts,
-    derive_run_state_with_exceptional_merge_chains, render_human_snapshot,
+    ValidatedProductionSpendingState, VersionPolicy, VisionSlug, WorkPackageMergeSubject,
+    WorktreeIdentity, WorktreeSnapshot, WorktreeState, classify_dispatch_admission,
+    compute_dispatchability, derive_dispatch_outcome_state, derive_merge_status,
+    derive_milestone_merge_status, derive_run_state, derive_run_state_with_dispatch_artifacts,
+    derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
+    render_human_snapshot,
 };
 pub use tracked_contract::{
     AppendableCategory, AppendableContract, AppendableFinding, BranchConvention, DefaultBranchName,
@@ -173,7 +181,8 @@ pub use workflow_coverage::{
 };
 
 pub use work_package_graph::{
-    DependencyKind, ReadyWorkPackages, RiskOrdering, WorkPackage, WorkPackageCriterion,
-    WorkPackageDependency, WorkPackageGraph, WorkPackageGraphError, WorkPackageId,
-    parse_work_package_graph, ready_work_packages,
+    ClassifiedWorkPackage, DependencyKind, ReadyWorkPackages, RiskOrdering, WorkPackage,
+    WorkPackageClassification, WorkPackageCriterion, WorkPackageDependency, WorkPackageGraph,
+    WorkPackageGraphError, WorkPackageId, WorkPackageMergeObservation, parse_work_package_graph,
+    ready_work_packages,
 };

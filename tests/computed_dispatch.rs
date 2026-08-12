@@ -158,11 +158,7 @@ impl ReadyFixture {
             .expect("run ready")
     }
 
-    fn run_work_packages(
-        &self,
-        merged: Option<&str>,
-        override_risk_ordering: bool,
-    ) -> std::process::Output {
+    fn run_work_packages(&self, override_risk_ordering: bool) -> std::process::Output {
         let mut arguments = vec![
             OsString::from("ready"),
             OsString::from("--file"),
@@ -172,10 +168,6 @@ impl ReadyFixture {
             OsString::from("--graph"),
             OsString::from("planning/2026-07-28-computed/graph.v1.json"),
         ];
-        if let Some(ids) = merged {
-            arguments.push(OsString::from("--merged"));
-            arguments.push(OsString::from(ids));
-        }
         if override_risk_ordering {
             arguments.push(OsString::from("--override-risk-ordering"));
         }
@@ -1680,12 +1672,38 @@ fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn work_package_responses(fixture: &ReadyFixture, merged: &[&str]) -> Vec<ScriptedResponse> {
+    let observations = ["RR1", "RR2", "RR3", "RR4", "RR5", "RR6", "RR7"].map(|package| {
+        (
+            package,
+            "pce",
+            format!("pce/computed/{package}"),
+            "main",
+            if merged.contains(&package) {
+                Authority::Merged
+            } else {
+                Authority::NotMerged
+            },
+        )
+    });
+    let borrowed = observations
+        .iter()
+        .map(|(package, repository, head, base, authority)| {
+            (*package, *repository, head.as_str(), *base, *authority)
+        })
+        .collect::<Vec<_>>();
+    responses(fixture, &borrowed)
+}
+
 fn work_package_fixture() -> ReadyFixture {
     let mut graph: Value = serde_json::from_slice(include_bytes!(
         "../crates/core/tests/data/rivretrieve-work-package-graph.json"
     ))
     .expect("work-package fixture");
     graph["vision"] = Value::from("2026-07-28-computed");
+    for package in graph["packages"].as_array_mut().expect("packages") {
+        package["repositories"] = json!(["pce"]);
+    }
     let fixture = ReadyFixture::new(&graph, &[]);
     fs::rename(
         fixture.primary.join("graph.json"),
@@ -1709,9 +1727,9 @@ fn frozen_work_package_graph_computes_ready_set_and_exposes_commands() {
     let fixture = work_package_fixture();
     fixture
         .harness
-        .materialize_responses(&[])
-        .expect("no adapters");
-    let output = fixture.run_work_packages(None, false);
+        .materialize_responses(&work_package_responses(&fixture, &[]))
+        .expect("work-package observations");
+    let output = fixture.run_work_packages(false);
     assert_success(&output);
     let value = stdout_json(&output);
     assert_eq!(value["override_applied"], false);
@@ -1728,13 +1746,38 @@ fn frozen_work_package_graph_computes_ready_set_and_exposes_commands() {
         value["results"][0]["criteria"][0]["command"],
         "uv run pytest tests/store/test_value_states.py"
     );
+    let invocations = fixture.harness.invocations().expect("invocations");
     assert!(
-        fixture
-            .harness
-            .invocations()
-            .expect("invocations")
-            .is_empty()
+        invocations
+            .iter()
+            .any(|invocation| invocation.program == "gh")
     );
+    assert!(
+        invocations
+            .iter()
+            .any(|invocation| invocation.program == "git")
+    );
+}
+
+#[test]
+fn unreachable_work_package_remote_is_inconclusive_never_not_merged() {
+    let fixture = work_package_fixture();
+    fixture
+        .harness
+        .materialize_responses(&[])
+        .expect("no reachable authorities");
+    let output = fixture.run_work_packages(false);
+    assert_success(&output);
+    let value = stdout_json(&output);
+    let rr1 = value["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .find(|item| item["package"] == "RR1")
+        .expect("RR1 result");
+    assert_eq!(rr1["merge_status"], "inconclusive");
+    assert_eq!(rr1["classification"], "dependency-inconclusive");
+    assert_ne!(rr1["merge_status"], "not-merged");
 }
 
 #[test]
@@ -1742,9 +1785,9 @@ fn work_package_risk_override_is_visible_and_unblocks_rr4() {
     let fixture = work_package_fixture();
     fixture
         .harness
-        .materialize_responses(&[])
-        .expect("no adapters");
-    let output = fixture.run_work_packages(Some("RR1,RR2"), true);
+        .materialize_responses(&work_package_responses(&fixture, &["RR1", "RR2"]))
+        .expect("work-package observations");
+    let output = fixture.run_work_packages(true);
     assert_success(&output);
     let value = stdout_json(&output);
     assert_eq!(value["override_applied"], true);
@@ -1770,7 +1813,7 @@ fn work_package_digest_mismatch_fails_before_readiness_output() {
         .harness
         .materialize_responses(&[])
         .expect("no adapters");
-    let output = fixture.run_work_packages(None, false);
+    let output = fixture.run_work_packages(false);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(stderr(&output).contains("digest"));

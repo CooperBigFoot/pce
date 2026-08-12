@@ -455,6 +455,35 @@ impl MergeSubject {
     }
 }
 
+/// A work package and its convention-derived merge identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkPackageMergeSubject {
+    package: crate::work_package_graph::WorkPackageId,
+    selector: PullRequestSelector,
+}
+
+impl WorkPackageMergeSubject {
+    /// Derive the package contribution selector from the vision and package identities.
+    pub fn derive(vision: &VisionSlug, package: crate::work_package_graph::WorkPackageId) -> Self {
+        let head = HeadBranch(format!("pce/{}/{}", vision.as_str(), package.as_str()));
+        let base = IntegrationBranch("main".to_owned());
+        Self {
+            package,
+            selector: PullRequestSelector { head, base },
+        }
+    }
+
+    /// Return the work-package identity.
+    pub const fn package(&self) -> &crate::work_package_graph::WorkPackageId {
+        &self.package
+    }
+
+    /// Return the convention-derived exact pull-request selector.
+    pub const fn selector(&self) -> &PullRequestSelector {
+        &self.selector
+    }
+}
+
 /// A milestone node and its convention-derived merge identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MilestoneMergeSubject {
@@ -819,6 +848,19 @@ pub fn derive_merge_status(
 /// Derive three-valued merge status from the exact milestone subject and both authorities.
 pub fn derive_milestone_merge_status(
     subject: &MilestoneMergeSubject,
+    github: &GitHubAuthorityObservation,
+    git: &GitAuthorityObservation,
+) -> MergeStatus {
+    derive_merge_status_for_selector(
+        ExpectedPullRequestIdentity::Selector(subject.selector()),
+        github,
+        git,
+    )
+}
+
+/// Derive three-valued merge status for one work-package contribution.
+pub fn derive_work_package_merge_status(
+    subject: &WorkPackageMergeSubject,
     github: &GitHubAuthorityObservation,
     git: &GitAuthorityObservation,
 ) -> MergeStatus {

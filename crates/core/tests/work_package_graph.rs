@@ -1,12 +1,39 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use pce_core::{RiskOrdering, parse_work_package_graph, ready_work_packages};
+use pce_core::{
+    MergeStatus, RiskOrdering, WorkPackageClassification, WorkPackageMergeObservation,
+    parse_work_package_graph, ready_work_packages,
+};
 
 const FIXTURE: &[u8] = include_bytes!("data/rivretrieve-work-package-graph.json");
 
+fn observations(
+    graph: &pce_core::WorkPackageGraph,
+    merged: &[&str],
+) -> Vec<WorkPackageMergeObservation> {
+    graph
+        .packages()
+        .iter()
+        .flat_map(|package| {
+            package.repositories().iter().map(move |repository| {
+                WorkPackageMergeObservation::new(
+                    package.id().clone(),
+                    repository.clone(),
+                    if merged.contains(&package.id().as_str()) {
+                        MergeStatus::Merged
+                    } else {
+                        MergeStatus::NotMerged
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
 fn ids(merged: &[&str], risk: RiskOrdering) -> Vec<String> {
     let graph = parse_work_package_graph(FIXTURE).expect("fixture graph should validate");
-    ready_work_packages(&graph, merged.iter().copied(), risk)
+    let observations = observations(&graph, merged);
+    ready_work_packages(&graph, &observations, risk)
         .expect("ready set should compute")
         .ready()
         .iter()
@@ -35,7 +62,8 @@ fn rivretrieve_ready_sets_follow_binding_and_soft_dependencies() {
 #[test]
 fn risk_override_is_explicit_and_exposes_rr4_after_rr2() {
     let graph = parse_work_package_graph(FIXTURE).expect("fixture graph should validate");
-    let report = ready_work_packages(&graph, ["RR2"], RiskOrdering::Override)
+    let observations = observations(&graph, &["RR2"]);
+    let report = ready_work_packages(&graph, &observations, RiskOrdering::Override)
         .expect("ready set should compute");
     assert!(report.ready().iter().any(|id| id.as_str() == "RR4"));
     assert!(report.override_applied());
@@ -126,4 +154,111 @@ fn soft_then_binding_path_also_requires_a_binding_alternative() {
             .to_string()
             .contains("soft dependency path from A to C")
     );
+}
+
+fn aggregation_graph() -> pce_core::WorkPackageGraph {
+    let graph = serde_json::json!({
+        "vision":"2026-08-12-merge-observations", "plan_version":1, "authored_at_ref":"ref",
+        "packages":[
+            {"id":"A","title":"A","repositories":["one","two"],"criteria":[{"name":"a","input":"a","observation":"a","command":"a"}],"depends_on":[]},
+            {"id":"B","title":"B","repositories":["one"],"criteria":[{"name":"b","input":"b","observation":"b","command":"b"}],"depends_on":[{"id":"A","kind":"buildability","reason":"B imports A"}]}
+        ]
+    });
+    parse_work_package_graph(&serde_json::to_vec(&graph).expect("serialize graph"))
+        .expect("aggregation graph")
+}
+
+fn observation_for(
+    graph: &pce_core::WorkPackageGraph,
+    package_id: &str,
+    repository: &str,
+    status: MergeStatus,
+) -> WorkPackageMergeObservation {
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == package_id)
+        .expect("package fixture");
+    WorkPackageMergeObservation::new(package.id().clone(), repository.to_owned(), status)
+}
+
+#[test]
+fn inconclusive_repository_makes_package_and_dependency_inconclusive() {
+    let graph = aggregation_graph();
+    let observations = [
+        observation_for(&graph, "A", "one", MergeStatus::Merged),
+        observation_for(&graph, "A", "two", MergeStatus::Inconclusive),
+        observation_for(&graph, "B", "one", MergeStatus::NotMerged),
+    ];
+    let report = ready_work_packages(&graph, &observations, RiskOrdering::Honour)
+        .expect("readiness computes");
+    let a = &report.packages()[0];
+    let b = &report.packages()[1];
+    assert_eq!(a.merge_status(), MergeStatus::Inconclusive);
+    assert_eq!(
+        a.classification(),
+        WorkPackageClassification::DependencyInconclusive
+    );
+    assert_eq!(b.merge_status(), MergeStatus::NotMerged);
+    assert_eq!(
+        b.classification(),
+        WorkPackageClassification::DependencyInconclusive
+    );
+}
+
+#[test]
+fn two_repository_aggregation_requires_every_repository_to_merge() {
+    let graph = aggregation_graph();
+    for (left, right, aggregate, dependent) in [
+        (
+            MergeStatus::Merged,
+            MergeStatus::Merged,
+            MergeStatus::Merged,
+            WorkPackageClassification::Ready,
+        ),
+        (
+            MergeStatus::Merged,
+            MergeStatus::NotMerged,
+            MergeStatus::NotMerged,
+            WorkPackageClassification::Waiting,
+        ),
+        (
+            MergeStatus::NotMerged,
+            MergeStatus::Inconclusive,
+            MergeStatus::Inconclusive,
+            WorkPackageClassification::DependencyInconclusive,
+        ),
+    ] {
+        let observations = [
+            observation_for(&graph, "A", "one", left),
+            observation_for(&graph, "A", "two", right),
+            observation_for(&graph, "B", "one", MergeStatus::NotMerged),
+        ];
+        let report = ready_work_packages(&graph, &observations, RiskOrdering::Honour)
+            .expect("readiness computes");
+        assert_eq!(report.packages()[0].merge_status(), aggregate);
+        assert_eq!(report.packages()[1].classification(), dependent);
+    }
+}
+
+#[test]
+fn merge_observations_must_cover_each_exact_package_repository_pair() {
+    let graph = aggregation_graph();
+    let missing = [
+        observation_for(&graph, "A", "one", MergeStatus::Merged),
+        observation_for(&graph, "B", "one", MergeStatus::NotMerged),
+    ];
+    let error = ready_work_packages(&graph, &missing, RiskOrdering::Honour)
+        .expect_err("missing repository observation must fail");
+    assert!(error.to_string().contains("missing merge observation"));
+
+    let duplicate = [
+        observation_for(&graph, "A", "one", MergeStatus::Merged),
+        observation_for(&graph, "A", "one", MergeStatus::Merged),
+        observation_for(&graph, "A", "two", MergeStatus::Merged),
+        observation_for(&graph, "B", "one", MergeStatus::NotMerged),
+    ];
+    let error = ready_work_packages(&graph, &duplicate, RiskOrdering::Honour)
+        .expect_err("duplicate repository observation must fail");
+    assert!(error.to_string().contains("duplicate merge observation"));
 }

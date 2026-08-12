@@ -1,4 +1,4 @@
-//! readiness : WorkPackageGraph × MergedPackages × RiskOrdering → ReadyReport
+//! readiness : WorkPackageGraph × RepositoryMergeObservations × RiskOrdering → ReadyReport
 //!
 //! A validated graph is a finite DAG whose hard ancestry remains connected when advisory edges
 //! are overridden.
@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
+
+use crate::run_state::MergeStatus;
 
 /// One immutable plan version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -224,9 +226,21 @@ pub enum WorkPackageGraphError {
         from_package: String,
         to_package: String,
     },
-    /// Readiness was asked to use an identifier outside this graph.
-    #[error("merged package {package} is unknown")]
-    UnknownMergedPackage { package: String },
+    /// A repository occurs more than once in one package.
+    #[error("package {package} declares repository {repository} more than once")]
+    DuplicateRepository { package: String, repository: String },
+    /// A merge observation names a package outside this graph.
+    #[error("merge observation package {package} is unknown")]
+    UnknownMergeObservationPackage { package: String },
+    /// A merge observation names a repository outside its package.
+    #[error("merge observation repository {repository} is unknown for package {package}")]
+    UnknownMergeObservationRepository { package: String, repository: String },
+    /// The same package/repository merge state was observed more than once.
+    #[error("duplicate merge observation for repository {repository} of package {package}")]
+    DuplicateMergeObservation { package: String, repository: String },
+    /// No merge state was supplied for one repository touched by a package.
+    #[error("missing merge observation for repository {repository} of package {package}")]
+    MissingMergeObservation { package: String, repository: String },
 }
 
 fn nonempty(
@@ -283,8 +297,15 @@ pub fn parse_work_package_graph(bytes: &[u8]) -> Result<WorkPackageGraph, WorkPa
                 location: format!("package {}", package.id),
             });
         }
+        let mut repositories = HashSet::new();
         for repository in &package.repositories {
             nonempty(repository, "repository", format!("package {}", package.id))?;
+            if !repositories.insert(repository.as_str()) {
+                return Err(WorkPackageGraphError::DuplicateRepository {
+                    package: package.id.clone(),
+                    repository: repository.clone(),
+                });
+            }
         }
         if package.criteria.is_empty() {
             return Err(WorkPackageGraphError::NoCriteria {
@@ -485,58 +506,235 @@ pub enum RiskOrdering {
     /// Ignore advisory ordering explicitly.
     Override,
 }
-/// The computed ready set and whether advisory ordering was overridden.
+
+/// One repository's three-valued merge state for one work package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkPackageMergeObservation {
+    package: WorkPackageId,
+    repository: String,
+    status: MergeStatus,
+}
+
+impl WorkPackageMergeObservation {
+    /// Construct an observation using identities obtained from a validated graph.
+    pub fn new(package: WorkPackageId, repository: String, status: MergeStatus) -> Self {
+        Self {
+            package,
+            repository,
+            status,
+        }
+    }
+
+    /// Return the observed package identifier.
+    pub const fn package(&self) -> &WorkPackageId {
+        &self.package
+    }
+
+    /// Return the observed repository name.
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+
+    /// Return the repository's derived merge state.
+    pub const fn status(&self) -> MergeStatus {
+        self.status
+    }
+}
+
+/// The readiness classification of one package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkPackageClassification {
+    /// Every repository touched by this package proves it merged.
+    Merged,
+    /// The package is not merged and every applicable dependency is merged.
+    Ready,
+    /// At least one applicable dependency proves it is not merged.
+    Waiting,
+    /// The package itself or at least one applicable dependency is inconclusive.
+    DependencyInconclusive,
+}
+
+/// One package's aggregate merge state and readiness classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifiedWorkPackage {
+    package: WorkPackageId,
+    merge_status: MergeStatus,
+    classification: WorkPackageClassification,
+}
+
+impl ClassifiedWorkPackage {
+    /// Return the classified package identifier.
+    pub const fn package(&self) -> &WorkPackageId {
+        &self.package
+    }
+
+    /// Return the aggregate state across every repository touched by the package.
+    pub const fn merge_status(&self) -> MergeStatus {
+        self.merge_status
+    }
+
+    /// Return the dependency-aware readiness classification.
+    pub const fn classification(&self) -> WorkPackageClassification {
+        self.classification
+    }
+}
+
+/// The computed package classifications and whether advisory ordering was overridden.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadyWorkPackages {
-    ready: Vec<WorkPackageId>,
+    packages: Vec<ClassifiedWorkPackage>,
     override_applied: bool,
 }
 impl ReadyWorkPackages {
-    /// Return ready package identifiers in graph order.
-    pub fn ready(&self) -> &[WorkPackageId] {
-        &self.ready
+    /// Return package results in graph order.
+    pub fn packages(&self) -> &[ClassifiedWorkPackage] {
+        &self.packages
     }
+
+    /// Return ready package identifiers in graph order.
+    pub fn ready(&self) -> Vec<&WorkPackageId> {
+        self.packages
+            .iter()
+            .filter(|package| package.classification == WorkPackageClassification::Ready)
+            .map(ClassifiedWorkPackage::package)
+            .collect()
+    }
+
     /// Whether risk ordering was explicitly overridden.
     pub const fn override_applied(&self) -> bool {
         self.override_applied
     }
 }
-/// Compute packages whose applicable dependencies have merged.
+
+fn aggregate_merge_status(statuses: impl IntoIterator<Item = MergeStatus>) -> MergeStatus {
+    let mut saw_not_merged = false;
+    for status in statuses {
+        match status {
+            MergeStatus::Inconclusive => return MergeStatus::Inconclusive,
+            MergeStatus::NotMerged => saw_not_merged = true,
+            MergeStatus::Merged => {}
+        }
+    }
+    if saw_not_merged {
+        MergeStatus::NotMerged
+    } else {
+        MergeStatus::Merged
+    }
+}
+
+/// Compute package merge states and dependency-aware readiness.
 ///
 /// # Errors
 ///
-/// Returns [`WorkPackageGraphError::UnknownMergedPackage`] for a merged identifier outside the graph.
-#[instrument(skip(graph, merged))]
-pub fn ready_work_packages<'a>(
+/// Returns [`WorkPackageGraphError`] when observations name an unknown package or repository, repeat
+/// a package/repository pair, or omit any repository touched by the graph.
+#[instrument(skip(graph, observations))]
+pub fn ready_work_packages(
     graph: &WorkPackageGraph,
-    merged: impl IntoIterator<Item = &'a str>,
+    observations: &[WorkPackageMergeObservation],
     risk: RiskOrdering,
 ) -> Result<ReadyWorkPackages, WorkPackageGraphError> {
-    let known = graph
+    let packages = graph
         .packages
         .iter()
-        .map(|p| p.id.as_str())
-        .collect::<HashSet<_>>();
-    let merged = merged.into_iter().collect::<HashSet<_>>();
-    if let Some(id) = merged.iter().find(|id| !known.contains(**id)) {
-        return Err(WorkPackageGraphError::UnknownMergedPackage {
-            package: (**id).to_owned(),
-        });
+        .map(|package| (package.id.as_str(), package))
+        .collect::<HashMap<_, _>>();
+    let mut observed = HashMap::<(&str, &str), MergeStatus>::new();
+    for observation in observations {
+        let Some(package) = packages.get(observation.package.as_str()) else {
+            return Err(WorkPackageGraphError::UnknownMergeObservationPackage {
+                package: observation.package.0.clone(),
+            });
+        };
+        if !package
+            .repositories
+            .iter()
+            .any(|repository| repository == &observation.repository)
+        {
+            return Err(WorkPackageGraphError::UnknownMergeObservationRepository {
+                package: observation.package.0.clone(),
+                repository: observation.repository.clone(),
+            });
+        }
+        let key = (
+            observation.package.as_str(),
+            observation.repository.as_str(),
+        );
+        if observed.insert(key, observation.status).is_some() {
+            return Err(WorkPackageGraphError::DuplicateMergeObservation {
+                package: observation.package.0.clone(),
+                repository: observation.repository.clone(),
+            });
+        }
     }
-    let ready = graph
+    for package in &graph.packages {
+        for repository in &package.repositories {
+            if !observed.contains_key(&(package.id.as_str(), repository.as_str())) {
+                return Err(WorkPackageGraphError::MissingMergeObservation {
+                    package: package.id.0.clone(),
+                    repository: repository.clone(),
+                });
+            }
+        }
+    }
+
+    let merge_statuses = graph
         .packages
         .iter()
-        .filter(|p| {
-            !merged.contains(p.id.as_str())
-                && p.depends_on.iter().all(|d| {
-                    (risk == RiskOrdering::Override && d.kind == DependencyKind::RiskOrdering)
-                        || merged.contains(d.id.as_str())
-                })
+        .map(|package| {
+            let statuses = package
+                .repositories
+                .iter()
+                .map(|repository| observed[&(package.id.as_str(), repository.as_str())]);
+            (package.id.as_str(), aggregate_merge_status(statuses))
         })
-        .map(|p| p.id.clone())
+        .collect::<HashMap<_, _>>();
+
+    let packages = graph
+        .packages
+        .iter()
+        .map(|package| {
+            let merge_status = merge_statuses[package.id.as_str()];
+            let classification = match merge_status {
+                MergeStatus::Merged => WorkPackageClassification::Merged,
+                MergeStatus::Inconclusive => WorkPackageClassification::DependencyInconclusive,
+                MergeStatus::NotMerged => {
+                    let dependency_statuses = package.depends_on.iter().filter_map(|dependency| {
+                        if risk == RiskOrdering::Override
+                            && dependency.kind == DependencyKind::RiskOrdering
+                        {
+                            None
+                        } else {
+                            Some(merge_statuses[dependency.id.as_str()])
+                        }
+                    });
+                    let mut saw_inconclusive = false;
+                    let mut saw_not_merged = false;
+                    for status in dependency_statuses {
+                        match status {
+                            MergeStatus::Merged => {}
+                            MergeStatus::NotMerged => saw_not_merged = true,
+                            MergeStatus::Inconclusive => saw_inconclusive = true,
+                        }
+                    }
+                    if saw_inconclusive {
+                        WorkPackageClassification::DependencyInconclusive
+                    } else if saw_not_merged {
+                        WorkPackageClassification::Waiting
+                    } else {
+                        WorkPackageClassification::Ready
+                    }
+                }
+            };
+            ClassifiedWorkPackage {
+                package: package.id.clone(),
+                merge_status,
+                classification,
+            }
+        })
         .collect();
     Ok(ReadyWorkPackages {
-        ready,
+        packages,
         override_applied: risk == RiskOrdering::Override,
     })
 }
