@@ -745,6 +745,16 @@ pub enum DispatchCompletionPayload {
     ReconciledDead(ReconciledDeadDispatchCompletionPayload),
 }
 
+/// Root-cause altitude durably captured from a validated structured result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchRootCause {
+    Execution,
+    StepPlan,
+    MilestonePlan,
+    Vision,
+}
+
 /// The current observed-child completion payload with binary-owned artifact presence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -755,6 +765,9 @@ pub struct ObservedDispatchCompletionWithArtifactPresencePayload {
     pub exit_status: DispatchExitStatus,
     pub artifact_outcome: ArtifactOutcome,
     pub required_artifact_presence: RequiredArtifactPresence,
+    /// Present only for new structured completions; absent legacy records keep their old meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_cause: Option<DispatchRootCause>,
 }
 
 /// The legacy, byte-stable observed-child completion payload.

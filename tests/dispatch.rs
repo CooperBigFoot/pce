@@ -6591,6 +6591,64 @@ const PRODUCTLESS_DISPATCH: &str = r#"{"sequence":1,"timestamp":"2026-08-09T12:0
 const PRODUCTLESS_COMPLETION: &str = r#"{"sequence":2,"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{"issuance_sequence":1,"duration_ms":1,"usage":{"availability":"absent","reason":"no-terminal-turn"},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"not-validated","required_artifact_presence":"absent"}}"#;
 
 #[test]
+fn recorded_generic_human_escalation_resumes_an_exhausted_exact_dispatch_once() {
+    let mut lines = Vec::new();
+    let mut observed = Vec::new();
+    for round in 0..12_u64 {
+        let issuance = round * 2 + 1;
+        let completion = issuance + 1;
+        lines.push(format!(r#"{{"sequence":{issuance},"timestamp":"2026-08-09T12:00:00.000Z","kind":"dispatch","node":"m1-s2","payload":{{"role":"step-plan-critic","ref":"abc","evidence":"fixture"}}}}"#));
+        lines.push(format!(r#"{{"sequence":{completion},"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m1-s2","payload":{{"issuance_sequence":{issuance},"duration_ms":1,"usage":{{"availability":"absent","reason":"no-terminal-turn"}},"exit_status":{{"kind":"exited","code":0}},"artifact_outcome":"validated","required_artifact_presence":"present"}}}}"#));
+        observed.push(issuance);
+    }
+    lines.push(r#"{"sequence":25,"timestamp":"2026-08-09T12:00:02.000Z","kind":"escalation-open","node":"m1-s2","payload":{"key":"live-cap-recovery","question":"May this exact dispatch resume?"}}"#.to_owned());
+    lines.push(r#"{"sequence":26,"timestamp":"2026-08-09T12:00:03.000Z","kind":"escalation-close","node":"m1-s2","payload":{"key":"live-cap-recovery","resolution":"approved"}}"#.to_owned());
+    let refs = lines.iter().map(String::as_str).collect::<Vec<_>>();
+    let state = derived_fixture(&refs, &observed);
+    let key = non_production_key("m1-s2", "step-plan-critic", Path::new("/workspace/plan.md"));
+    assert_eq!(
+        pce_core::classify_dispatch_admission(&state, &key),
+        pce_core::DispatchAdmission::Admit
+    );
+
+    lines.push(r#"{"sequence":27,"timestamp":"2026-08-09T12:00:04.000Z","kind":"dispatch","node":"m1-s2","payload":{"role":"step-plan-critic","ref":"abc","evidence":"fixture"}}"#.to_owned());
+    observed.push(27);
+    let refs = lines.iter().map(String::as_str).collect::<Vec<_>>();
+    let spent = derived_fixture(&refs, &observed);
+    assert!(matches!(
+        pce_core::classify_dispatch_admission(&spent, &key),
+        pce_core::DispatchAdmission::OpenNonProductionHold { consecutive } if consecutive.get() == 0
+    ));
+}
+
+#[test]
+fn validated_upstream_root_cause_is_durable_and_does_not_charge_reporter() {
+    let upstream = r#"{"sequence":2,"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{"issuance_sequence":1,"duration_ms":1,"usage":{"availability":"absent","reason":"no-terminal-turn"},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"validated","required_artifact_presence":"present","root_cause":"step_plan"}}"#;
+    let reporting_dispatch = PRODUCTLESS_DISPATCH.replace("step-plan-writer", "step-plan-critic");
+    let state = derived_fixture(&[&reporting_dispatch, upstream], &[1]);
+    assert!(state.validated_production_counts().is_empty());
+    let key = non_production_key("m4-s1", "step-plan-critic", Path::new("/workspace/plan.md"));
+    assert_eq!(
+        pce_core::classify_dispatch_admission(&state, &key),
+        pce_core::DispatchAdmission::Admit
+    );
+
+    let parsed = parse_event_line(upstream).expect("parse attributed completion");
+    let serialized = serialize_event_line(&parsed).expect("serialize attributed completion");
+    assert!(serialized.contains(r#""root_cause":"step_plan""#));
+}
+
+#[test]
+fn legacy_validated_completion_keeps_reporting_role_charge() {
+    let legacy = r#"{"sequence":2,"timestamp":"2026-08-09T12:00:01.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{"issuance_sequence":1,"duration_ms":1,"usage":{"availability":"absent","reason":"no-terminal-turn"},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"validated","required_artifact_presence":"present"}}"#;
+    let state = derived_fixture(&[PRODUCTLESS_DISPATCH, legacy], &[1]);
+    assert_eq!(state.validated_production_counts()[0].count().get(), 1);
+    let parsed = parse_event_line(legacy).expect("parse legacy completion");
+    let serialized = serialize_event_line(&parsed).expect("serialize legacy completion");
+    assert!(!serialized.contains("root_cause"));
+}
+
+#[test]
 fn valid_production_resets_the_non_production_streak() {
     const SECOND_DISPATCH: &str = r#"{"sequence":3,"timestamp":"2026-08-09T12:00:02.000Z","kind":"dispatch","node":"m4-s1","payload":{"role":"step-plan-writer","ref":"abc","evidence":"fixture"}}"#;
     const VALIDATED_COMPLETION: &str = r#"{"sequence":4,"timestamp":"2026-08-09T12:00:03.000Z","kind":"dispatch-completion","node":"m4-s1","payload":{"issuance_sequence":3,"duration_ms":1,"usage":{"availability":"absent","reason":"no-terminal-turn"},"exit_status":{"kind":"exited","code":0},"artifact_outcome":"validated","required_artifact_presence":"present"}}"#;
@@ -6609,41 +6667,86 @@ fn valid_production_resets_the_non_production_streak() {
 }
 
 #[test]
-fn productive_rounds_and_productless_retries_are_separate_through_production_cli() {
+fn validated_production_spending_is_environment_independent_and_generous() {
     let _guard = dispatch_test_guard();
-    let fixture = GateFixture::new("defect-round-cap", CLAUDE_SUCCESS);
+    let fixture = GateFixture::new("validated-production-spending", CLAUDE_SUCCESS);
     let required_artifact = fs::canonicalize(&fixture.output_path).expect("canonical artifact");
     let log = fixture.harness.path().join("events.jsonl");
     let environment = fixture.environment(0);
     let mut argv = fixture.argv(&environment, &[]);
     insert_gate_logging(&mut argv, &log, false);
     configure_gate_key(&mut argv, "m4-s1", "step-plan-critic", &required_artifact);
-    for (round, records) in [(1, 2), (2, 4), (3, 6)] {
-        run_successful_gate(&fixture, &argv, &log, records);
-        let state = derive_logged_dispatch_state(&log, &required_artifact);
-        assert_eq!(state.rounds().len(), 1);
-        assert_eq!(state.rounds()[0].count().get(), round);
+
+    for round in 1..=4 {
+        remove_gate_invocation(&fixture);
+        let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+            .args(&argv)
+            .env_clear()
+            .env("PATH", fixture.harness.shim_path())
+            .env("PCE_SHIM_ROOT", fixture.harness.path())
+            .env("PCE_DEFECT_ROUND_CAP", "1")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run environment-independent dispatch");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        wait_for_lifecycle_records(&log, round * 2, Instant::now() + Duration::from_secs(15));
     }
     let state = derive_logged_dispatch_state(&log, &required_artifact);
+    assert_eq!(state.validated_production_counts()[0].count().get(), 4);
     let key = non_production_key("m4-s1", "step-plan-critic", &required_artifact);
-    assert!(matches!(
+    assert_eq!(
         pce_core::classify_dispatch_admission(&state, &key),
-        pce_core::DispatchAdmission::DefectRoundCapExhausted { count }
-            if count.get() == 3
-    ));
+        pce_core::DispatchAdmission::Admit
+    );
+}
+
+#[test]
+fn spending_limit_exhaustion_parks_and_recorded_retry_resumes_once() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("validated-production-parking", CLAUDE_SUCCESS);
+    let required_artifact = fs::canonicalize(&fixture.output_path).expect("canonical artifact");
+    let log = fixture.harness.path().join("events.jsonl");
+    let environment = fixture.environment(0);
+    let mut argv = fixture.argv(&environment, &[]);
+    insert_gate_logging(&mut argv, &log, false);
+    configure_gate_key(&mut argv, "m4-s1", "step-plan-critic", &required_artifact);
+    for round in 1..=12 {
+        run_successful_gate(&fixture, &argv, &log, round * 2);
+    }
 
     remove_gate_invocation(&fixture);
-    let before = fs::read(&log).expect("log before cap refusal");
-    let refused = fixture
+    let parked = fixture
         .harness
         .run(&argv, b"")
-        .expect("attempt fourth defect round");
-    assert!(!refused.status.success());
-    assert_eq!(
-        refused.stderr,
-        b"Error: dispatch admission refused: defect-round cap 3 is exhausted for node m4-s1 and role step-plan-critic\n"
+        .expect("park exhausted series");
+    assert!(!parked.status.success());
+    let records = wait_for_lifecycle_records(&log, 25, Instant::now() + Duration::from_secs(15));
+    assert!(matches!(
+        records[24].body_ref(),
+        EventBodyRef::Known(KnownPayload::NonProductionHoldOpen(_))
+    ));
+
+    append_non_production_hold_close(
+        &fixture,
+        &log,
+        "m4-s1",
+        "step-plan-critic",
+        &required_artifact,
+        "retry",
     );
-    assert_eq!(fs::read(&log).expect("log after cap refusal"), before);
+    run_successful_gate(&fixture, &argv, &log, 28);
+
+    remove_gate_invocation(&fixture);
+    let parked_again = fixture
+        .harness
+        .run(&argv, b"")
+        .expect("re-park spent retry");
+    assert!(!parked_again.status.success());
+    wait_for_lifecycle_records(&log, 29, Instant::now() + Duration::from_secs(15));
     assert!(!fixture.record_root.join("invocation").exists());
 }
 

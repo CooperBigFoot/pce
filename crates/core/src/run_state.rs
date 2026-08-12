@@ -11,10 +11,10 @@ use crate::dispatch_process_identity::AbsoluteRequiredArtifactPath;
 use crate::event_log::DispatchCompletionOutcomeRef;
 use crate::event_log::{
     ArtifactOutcome, ArtifactPath, ArtifactProduction, ChangeOfCourse, CriterionExecutionOutcome,
-    DispatchDuration, DispatchExitStatus, DispatchRef, DispatchRole, DispatchTokenUsage,
-    EscalationKey, EventBodyRef, EventRecord, EventTimestamp, Evidence, FinishedResult,
-    KnownPayload, NodeId, NonProductionHoldResolution, NonProductionKey, ReconciledDispatchOutcome,
-    RepositoryName, RequiredArtifactPresence, Sequence, Sha256Digest,
+    DispatchDuration, DispatchExitStatus, DispatchRef, DispatchRole, DispatchRootCause,
+    DispatchTokenUsage, EscalationKey, EventBodyRef, EventRecord, EventTimestamp, Evidence,
+    FinishedResult, KnownPayload, NodeId, NonProductionHoldResolution, NonProductionKey,
+    ReconciledDispatchOutcome, RepositoryName, RequiredArtifactPresence, Sequence, Sha256Digest,
 };
 use crate::{AcceptanceCriteria, AcceptanceCriterion};
 
@@ -1472,32 +1472,37 @@ impl IssuanceOrdinalSeries {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DefectRoundCount(u64);
+pub struct ValidatedProductionCount(u64);
 
-impl DefectRoundCount {
+impl ValidatedProductionCount {
     pub const fn get(self) -> u64 {
         self.0
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DefectRoundSeries {
+pub struct ValidatedProductionSeries {
     node: NodeId,
     role: DispatchRole,
-    count: DefectRoundCount,
+    count: ValidatedProductionCount,
 }
 
-impl DefectRoundSeries {
+impl ValidatedProductionSeries {
     pub const fn node(&self) -> &NodeId {
         &self.node
     }
     pub const fn role(&self) -> &DispatchRole {
         &self.role
     }
-    pub const fn count(&self) -> DefectRoundCount {
+    pub const fn count(&self) -> ValidatedProductionCount {
         self.count
     }
 }
+
+/// Compatibility name for replays and callers compiled against the former terminology.
+pub type DefectRoundCount = ValidatedProductionCount;
+/// Compatibility name for replays and callers compiled against the former terminology.
+pub type DefectRoundSeries = ValidatedProductionSeries;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConsecutiveNonProduction(u64);
@@ -1529,6 +1534,8 @@ pub enum NonProductionHoldStatus {
     Closed {
         sequence: Sequence,
         resolution: NonProductionHoldResolution,
+        /// Issuance ordinal at authorization time, used to consume one retry.
+        issuance_ordinal: IssuanceOrdinal,
     },
 }
 
@@ -1572,7 +1579,7 @@ impl DispatchRequiredArtifactObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchOutcomeState {
     issuance_ordinals: Vec<IssuanceOrdinalSeries>,
-    rounds: Vec<DefectRoundSeries>,
+    rounds: Vec<ValidatedProductionSeries>,
     non_production_streaks: Vec<NonProductionSeries>,
     non_production_holds: Vec<NonProductionHoldObservation>,
 }
@@ -1580,8 +1587,14 @@ impl DispatchOutcomeState {
     pub fn issuance_ordinals(&self) -> &[IssuanceOrdinalSeries] {
         &self.issuance_ordinals
     }
-    pub fn rounds(&self) -> &[DefectRoundSeries] {
+    /// Return validated production counted against the spending limit.
+    pub fn validated_production_counts(&self) -> &[ValidatedProductionSeries] {
         &self.rounds
+    }
+
+    /// Return validated production under the legacy accessor name.
+    pub fn rounds(&self) -> &[ValidatedProductionSeries] {
+        self.validated_production_counts()
     }
     pub fn non_production_streaks(&self) -> &[NonProductionSeries] {
         &self.non_production_streaks
@@ -1595,7 +1608,7 @@ impl DispatchOutcomeState {
 pub enum DispatchAdmission {
     Admit,
     DefectRoundCapExhausted {
-        count: DefectRoundCount,
+        count: ValidatedProductionCount,
     },
     OpenNonProductionHold {
         consecutive: ConsecutiveNonProduction,
@@ -2034,7 +2047,7 @@ pub struct DerivedRunState {
     dispatch_accounting: DispatchAccounting,
     criterion_executions: Vec<CriterionExecutionObservation>,
     issuance_ordinals: Vec<IssuanceOrdinalSeries>,
-    rounds: Vec<DefectRoundSeries>,
+    rounds: Vec<ValidatedProductionSeries>,
     non_production_streaks: Vec<NonProductionSeries>,
     non_production_holds: Vec<NonProductionHoldObservation>,
     holds: Vec<HoldObservation>,
@@ -2080,8 +2093,14 @@ impl DerivedRunState {
     pub fn issuance_ordinals(&self) -> &[IssuanceOrdinalSeries] {
         &self.issuance_ordinals
     }
-    pub fn rounds(&self) -> &[DefectRoundSeries] {
+    /// Return validated production counted against the spending limit.
+    pub fn validated_production_counts(&self) -> &[ValidatedProductionSeries] {
         &self.rounds
+    }
+
+    /// Return validated production under the legacy accessor name.
+    pub fn rounds(&self) -> &[ValidatedProductionSeries] {
+        self.validated_production_counts()
     }
     pub fn non_production_streaks(&self) -> &[NonProductionSeries] {
         &self.non_production_streaks
@@ -2763,8 +2782,8 @@ pub struct DefectRoundSeriesSnapshot<'a> {
     count: u64,
 }
 
-impl<'a> From<&'a DefectRoundSeries> for DefectRoundSeriesSnapshot<'a> {
-    fn from(value: &'a DefectRoundSeries) -> Self {
+impl<'a> From<&'a ValidatedProductionSeries> for DefectRoundSeriesSnapshot<'a> {
+    fn from(value: &'a ValidatedProductionSeries) -> Self {
         Self {
             node: value.node().as_str(),
             role: value.role().as_str(),
@@ -2812,6 +2831,7 @@ impl<'a> From<&'a NonProductionHoldObservation> for NonProductionHoldSnapshot<'a
             NonProductionHoldStatus::Closed {
                 sequence,
                 resolution,
+                ..
             } => NonProductionHoldStatusSnapshot::Closed {
                 sequence: sequence.get(),
                 resolution: *resolution,
@@ -3637,6 +3657,28 @@ struct RecoveryCandidate<T> {
 }
 
 /// Derive only binary-owned dispatch outcome state.
+fn root_cause_is_upstream(
+    reporting_role: &DispatchRole,
+    root_cause: Option<DispatchRootCause>,
+) -> bool {
+    match (reporting_role.as_str(), root_cause) {
+        (_, None) => false,
+        ("step-executor", Some(DispatchRootCause::Execution))
+        | ("step-plan-writer" | "step-planner", Some(DispatchRootCause::StepPlan))
+        | ("milestone-planner", Some(DispatchRootCause::MilestonePlan)) => false,
+        ("step-executor" | "step-plan-writer" | "step-planner" | "milestone-planner", Some(_))
+        | (
+            "step-plan-critic"
+            | "step-critic"
+            | "milestone-critic"
+            | "falsification-critic"
+            | "pr-reviewer",
+            Some(_),
+        ) => true,
+        (_, Some(_)) => false,
+    }
+}
+
 pub fn derive_dispatch_outcome_state(
     records: &[EventRecord],
     dispatch_artifacts: &[DispatchRequiredArtifactObservation],
@@ -3665,6 +3707,7 @@ pub fn derive_dispatch_outcome_state(
         non_production_streaks: Vec::new(),
         non_production_holds: Vec::new(),
     };
+    let mut open_escalations = Vec::<(EscalationKey, NodeId)>::new();
     for record in records {
         match record.body_ref() {
             EventBodyRef::Known(KnownPayload::Dispatch(payload)) => {
@@ -3693,7 +3736,13 @@ pub fn derive_dispatch_outcome_state(
                     DispatchCompletionOutcomeRef::ObservedChildWithArtifactPresence(current) => {
                         match (current.artifact_outcome, current.required_artifact_presence) {
                             (ArtifactOutcome::Validated, _) => {
-                                increment_defect_round(&mut state.rounds, &key.node, &key.role)?;
+                                if !root_cause_is_upstream(&key.role, current.root_cause) {
+                                    increment_validated_production_count(
+                                        &mut state.rounds,
+                                        &key.node,
+                                        &key.role,
+                                    )?;
+                                }
                                 set_non_production(&mut state.non_production_streaks, key, 0)?;
                             }
                             (ArtifactOutcome::NotValidated, RequiredArtifactPresence::Present) => {
@@ -3720,6 +3769,65 @@ pub fn derive_dispatch_outcome_state(
                             ArtifactProduction::NotProduced => {
                                 increment_non_production(&mut state.non_production_streaks, key)?
                             }
+                        }
+                    }
+                }
+            }
+            EventBodyRef::Known(KnownPayload::EscalationOpen(payload)) => {
+                if let Some(existing) = open_escalations
+                    .iter_mut()
+                    .find(|(key, _)| key == &payload.key)
+                {
+                    *existing = (payload.key.clone(), record.node().clone());
+                } else {
+                    open_escalations.push((payload.key.clone(), record.node().clone()));
+                }
+            }
+            EventBodyRef::Known(KnownPayload::EscalationClose(payload)) => {
+                if let Some(position) = open_escalations
+                    .iter()
+                    .position(|(key, node)| key == &payload.key && node == record.node())
+                {
+                    open_escalations.remove(position);
+                    let matching_keys = dispatch_artifacts
+                        .iter()
+                        .filter_map(|artifact| {
+                            let issuance = ledger.issuance(artifact.issuance_sequence)?;
+                            let exhausted = state.rounds.iter().any(|series| {
+                                series.node == *issuance.issuance().node()
+                                    && series.role == *issuance.issuance().role()
+                                    && series.count.get() >= 12
+                            });
+                            (issuance.issuance().node() == record.node() && exhausted).then(|| {
+                                NonProductionKey {
+                                    node: issuance.issuance().node().clone(),
+                                    role: issuance.issuance().role().clone(),
+                                    required_artifact_path: artifact.required_artifact_path.clone(),
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    for key in matching_keys {
+                        let issuance_ordinal = state
+                            .issuance_ordinals
+                            .iter()
+                            .find(|series| series.node == key.node && series.role == key.role)
+                            .map_or(IssuanceOrdinal(0), |series| series.ordinal);
+                        let status = NonProductionHoldStatus::Closed {
+                            sequence: record.sequence(),
+                            resolution: NonProductionHoldResolution::Retry,
+                            issuance_ordinal,
+                        };
+                        if let Some(existing) = state
+                            .non_production_holds
+                            .iter_mut()
+                            .find(|hold| hold.key == key)
+                        {
+                            existing.status = status;
+                        } else {
+                            state
+                                .non_production_holds
+                                .push(NonProductionHoldObservation { key, status });
                         }
                     }
                 }
@@ -3758,9 +3866,17 @@ pub fn derive_dispatch_outcome_state(
                     .find(|candidate| candidate.key == payload.key)
                     && matches!(existing.status, NonProductionHoldStatus::Open { .. })
                 {
+                    let issuance_ordinal = state
+                        .issuance_ordinals
+                        .iter()
+                        .find(|series| {
+                            series.node == payload.key.node && series.role == payload.key.role
+                        })
+                        .map_or(IssuanceOrdinal(0), |series| series.ordinal);
                     existing.status = NonProductionHoldStatus::Closed {
                         sequence: record.sequence(),
                         resolution: payload.resolution,
+                        issuance_ordinal,
                     };
                     if payload.resolution == NonProductionHoldResolution::Retry {
                         set_non_production(
@@ -3786,7 +3902,7 @@ pub fn classify_dispatch_admission(
         .iter()
         .find(|series| series.node == key.node && series.role == key.role)
         .map(|series| series.count)
-        .unwrap_or(DefectRoundCount(0));
+        .unwrap_or(ValidatedProductionCount(0));
     let consecutive = state
         .non_production_streaks
         .iter()
@@ -3798,8 +3914,36 @@ pub fn classify_dispatch_admission(
         .iter()
         .find(|hold| hold.key == *key)
         .map(|hold| &hold.status);
-    if count.get() >= 3 {
-        return DispatchAdmission::DefectRoundCapExhausted { count };
+    const VALIDATED_PRODUCTION_SPENDING_LIMIT: u64 = 12;
+    if count.get() >= VALIDATED_PRODUCTION_SPENDING_LIMIT {
+        match status {
+            Some(NonProductionHoldStatus::Open { .. }) => {
+                return DispatchAdmission::NonProductionHoldOpen;
+            }
+            Some(NonProductionHoldStatus::Closed {
+                resolution: NonProductionHoldResolution::Retry,
+                issuance_ordinal,
+                ..
+            }) => {
+                let current_ordinal = state
+                    .issuance_ordinals
+                    .iter()
+                    .find(|series| series.node == key.node && series.role == key.role)
+                    .map_or(IssuanceOrdinal(0), |series| series.ordinal);
+                if current_ordinal == *issuance_ordinal {
+                    return DispatchAdmission::Admit;
+                }
+                return DispatchAdmission::OpenNonProductionHold {
+                    consecutive: ConsecutiveNonProduction(0),
+                };
+            }
+            Some(NonProductionHoldStatus::Closed { .. }) => {}
+            None => {
+                return DispatchAdmission::OpenNonProductionHold {
+                    consecutive: ConsecutiveNonProduction(0),
+                };
+            }
+        }
     }
     if matches!(status, Some(NonProductionHoldStatus::Open { .. })) {
         return DispatchAdmission::NonProductionHoldOpen;
@@ -3847,8 +3991,8 @@ fn increment_issuance_ordinal(
     }
 }
 
-fn increment_defect_round(
-    series: &mut Vec<DefectRoundSeries>,
+fn increment_validated_production_count(
+    series: &mut Vec<ValidatedProductionSeries>,
     node: &NodeId,
     role: &DispatchRole,
 ) -> Result<(), RunStateError> {
@@ -3856,17 +4000,18 @@ fn increment_defect_round(
         .iter_mut()
         .find(|item| item.node == *node && item.role == *role)
     {
-        existing.count = DefectRoundCount(existing.count.0.checked_add(1).ok_or_else(|| {
-            RunStateError::DefectRoundCountOverflow {
-                node: node.clone(),
-                role: role.clone(),
-            }
-        })?);
+        existing.count =
+            ValidatedProductionCount(existing.count.0.checked_add(1).ok_or_else(|| {
+                RunStateError::ValidatedProductionCountOverflow {
+                    node: node.clone(),
+                    role: role.clone(),
+                }
+            })?);
     } else {
-        series.push(DefectRoundSeries {
+        series.push(ValidatedProductionSeries {
             node: node.clone(),
             role: role.clone(),
-            count: DefectRoundCount(1),
+            count: ValidatedProductionCount(1),
         });
     }
     Ok(())
@@ -4837,9 +4982,9 @@ pub enum RunStateError {
     /// Returned when an exact `(node, role)` issuance ordinal cannot be incremented.
     #[error("issuance ordinal overflow for node {node:?} and role {role:?}")]
     IssuanceOrdinalOverflow { node: NodeId, role: DispatchRole },
-    /// Returned when an exact `(node, role)` defect count cannot be incremented.
-    #[error("defect round count overflow for node {node:?} and role {role:?}")]
-    DefectRoundCountOverflow { node: NodeId, role: DispatchRole },
+    /// Returned when an exact `(node, role)` validated-production count cannot be incremented.
+    #[error("validated production count overflow for node {node:?} and role {role:?}")]
+    ValidatedProductionCountOverflow { node: NodeId, role: DispatchRole },
     /// Returned when an exact non-production streak cannot be incremented.
     #[error("non-production streak overflow for key {key:?}")]
     NonProductionStreakOverflow { key: NonProductionKey },
@@ -4925,22 +5070,22 @@ mod tests {
         ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BlockingCriterionOrigin,
         BranchState, CanonicalNode, ConsecutiveNonProduction, CriterionExecutionObservation,
         CurrentArtifactObservation, CurrentArtifactState, CyclePosition, DeclaredIntegrationBranch,
-        DefectRoundCount, DefectRoundSeries, DerivedRunState, DispatchAdmission, DispatchCandidate,
-        DispatchOutcomeState, DispatchRequiredArtifactObservation, DispatchRoleClass,
-        DispatchabilityResult, ExactPullRequestIdentity, ExactPullRequestState,
-        ExceptionalMergeChain, ExceptionalMergeChainObservation, GitAuthorityObservation,
-        GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, HoldStatus,
-        MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode,
-        NonProductionHoldObservation, NonProductionHoldStatus, NonProductionSeries, OrderingEdge,
+        DerivedRunState, DispatchAdmission, DispatchCandidate, DispatchOutcomeState,
+        DispatchRequiredArtifactObservation, DispatchRoleClass, DispatchabilityResult,
+        ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
+        ExceptionalMergeChainObservation, GitAuthorityObservation, GitHubAuthorityObservation,
+        GitHubPullRequestObservation, GitMergeObservation, HoldStatus, MergeStatus, MergeSubject,
+        MilestoneMergeSubject, MilestoneNode, NonProductionHoldObservation,
+        NonProductionHoldStatus, NonProductionSeries, OrderingEdge,
         PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector, RecoveryLogPath,
         RepositoryBranchName, RepositoryFetchObservation, RepositoryObservation,
         RepositoryObservationFailure, RepositoryObservationRef, ResumeObservation, RunSnapshot,
         RunStateError, SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState,
-        TagTarget, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState,
-        classify_dispatch_admission, combine_exceptional_merge_statuses, compute_dispatchability,
-        derive_dispatch_outcome_state, derive_merge_status, derive_milestone_merge_status,
-        derive_run_state, derive_run_state_with_exceptional_merge_chains, recovery_command,
-        render_human_snapshot,
+        TagTarget, ValidatedProductionCount, ValidatedProductionSeries, VersionPolicy, VisionSlug,
+        WorktreeIdentity, WorktreeState, classify_dispatch_admission,
+        combine_exceptional_merge_statuses, compute_dispatchability, derive_dispatch_outcome_state,
+        derive_merge_status, derive_milestone_merge_status, derive_run_state,
+        derive_run_state_with_exceptional_merge_chains, recovery_command, render_human_snapshot,
     };
 
     const RUN_SNAPSHOT_SCHEMA: &str =
@@ -5323,7 +5468,7 @@ None.
             role: DispatchRole::new("step-plan-writer"),
             required_artifact_path: AbsoluteRequiredArtifactPath::parse("/workspace/plan.md")?,
         };
-        for count in [2_u64, 3, 4] {
+        for count in [11_u64, 12, 13] {
             for streak in [1_u64, 2, 3] {
                 for status in [
                     None,
@@ -5333,22 +5478,25 @@ None.
                     Some(NonProductionHoldStatus::Closed {
                         sequence: Sequence::parse(10)?,
                         resolution: NonProductionHoldResolution::Retry,
+                        issuance_ordinal: super::IssuanceOrdinal(0),
                     }),
                     Some(NonProductionHoldStatus::Closed {
                         sequence: Sequence::parse(10)?,
                         resolution: NonProductionHoldResolution::RePlan,
+                        issuance_ordinal: super::IssuanceOrdinal(0),
                     }),
                     Some(NonProductionHoldStatus::Closed {
                         sequence: Sequence::parse(10)?,
                         resolution: NonProductionHoldResolution::Abandon,
+                        issuance_ordinal: super::IssuanceOrdinal(0),
                     }),
                 ] {
                     let state = DispatchOutcomeState {
                         issuance_ordinals: vec![],
-                        rounds: vec![DefectRoundSeries {
+                        rounds: vec![ValidatedProductionSeries {
                             node: key.node.clone(),
                             role: key.role.clone(),
-                            count: DefectRoundCount(count),
+                            count: ValidatedProductionCount(count),
                         }],
                         non_production_streaks: vec![NonProductionSeries {
                             key: key.clone(),
@@ -5364,13 +5512,30 @@ None.
                             .collect(),
                     };
                     let admission = classify_dispatch_admission(&state, &key);
-                    if count >= 3 {
-                        assert_eq!(
-                            admission,
-                            DispatchAdmission::DefectRoundCapExhausted {
-                                count: DefectRoundCount(count)
+                    if count >= 12 {
+                        match status {
+                            None => assert_eq!(
+                                admission,
+                                DispatchAdmission::OpenNonProductionHold {
+                                    consecutive: ConsecutiveNonProduction(0)
+                                }
+                            ),
+                            Some(NonProductionHoldStatus::Open { .. }) => {
+                                assert_eq!(admission, DispatchAdmission::NonProductionHoldOpen)
                             }
-                        );
+                            Some(NonProductionHoldStatus::Closed {
+                                resolution: NonProductionHoldResolution::Retry,
+                                ..
+                            }) => assert_eq!(admission, DispatchAdmission::Admit),
+                            Some(NonProductionHoldStatus::Closed { resolution, .. }) => {
+                                assert_eq!(
+                                    admission,
+                                    DispatchAdmission::NonProductionResolutionClosesAdmission {
+                                        resolution
+                                    }
+                                )
+                            }
+                        }
                     } else {
                         match status {
                             Some(NonProductionHoldStatus::Open { .. }) => {
@@ -5852,6 +6017,8 @@ None.
     fn returns_multiple_dispatchable_candidates_when_edges_permit() -> Result<(), Box<dyn Error>> {
         let first = candidate("m2-s1", "pce")?;
         let second = candidate("m2-s2", "pce")?;
+        let third = candidate("m2-s3", "pce")?;
+        let fourth = candidate("m2-s4", "pce")?;
         let provenance = provenance(
             "planning/plan.md",
             digest('a')?,
@@ -5859,11 +6026,13 @@ None.
         )?;
         let results = compute_dispatchability(
             &provenance,
-            &[first.clone(), second.clone()],
+            &[first.clone(), second.clone(), third.clone(), fourth.clone()],
             &[],
             &[
                 (first.node().clone(), MergeStatus::NotMerged),
                 (second.node().clone(), MergeStatus::NotMerged),
+                (third.node().clone(), MergeStatus::NotMerged),
+                (fourth.node().clone(), MergeStatus::NotMerged),
             ],
             &[(RepositoryName::new("pce"), VersionPolicy::None)],
         )?;
@@ -5873,6 +6042,8 @@ None.
             vec![
                 DispatchabilityResult::Dispatchable { candidate: first },
                 DispatchabilityResult::Dispatchable { candidate: second },
+                DispatchabilityResult::Dispatchable { candidate: third },
+                DispatchabilityResult::Dispatchable { candidate: fourth },
             ]
         );
         Ok(())

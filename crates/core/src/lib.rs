@@ -58,7 +58,7 @@ pub use dispatch::{
     SeatbeltCapability, StdinBinding, classify_claude_result, classify_codex_terminal_usage,
     classify_seatbelt_capability, compose_gate_arguments, compose_planning_role_frame,
     dispatch_completion_payload, dispatch_invocation, dispatch_payload, parse_claude_result,
-    render_dispatch_projection, seatbelt_capability_probe,
+    render_dispatch_projection, seatbelt_capability_probe, validated_dispatch_completion_payload,
 };
 pub use dispatch_check_in::{
     DispatchCheckInEntry, DispatchCheckInError, DispatchCheckInReport,
@@ -84,9 +84,9 @@ pub use event_log::{
     ArtifactProduction, CacheCreationInputTokens, CacheReadInputTokens, CachedInputTokens,
     ChangeOfCourse, CriterionAddedPayload, CriterionExecutionOutcome, CriterionExecutionPayload,
     DeltaPayload, DispatchCompletionOutcomeRef, DispatchCompletionPayload, DispatchDuration,
-    DispatchExitStatus, DispatchPayload, DispatchRef, DispatchRole, DispatchTokenUsage,
-    EscalationClosePayload, EscalationKey, EscalationOpenPayload, EventBodyRef, EventKindName,
-    EventLogError, EventLogTail, EventLogTailError, EventLogTailLine, EventRecord,
+    DispatchExitStatus, DispatchPayload, DispatchRef, DispatchRole, DispatchRootCause,
+    DispatchTokenUsage, EscalationClosePayload, EscalationKey, EscalationOpenPayload, EventBodyRef,
+    EventKindName, EventLogError, EventLogTail, EventLogTailError, EventLogTailLine, EventRecord,
     EventRecordFilter, EventTimestamp, Evidence, EvidencePolicy, EvidencePresence,
     ExceptionalMergeChainDeclaredPayload, ExitCode, FinishedResult, GateObservations, InputTokens,
     KeyFindingPayload, KnownPayload, LegacyRepositoryContractPayload, NodeId,
@@ -144,10 +144,11 @@ pub use run_state::{
     RepositoryObservationFailure, RepositoryObservationRef, RepositorySnapshot, ResumeObservation,
     ResumeSnapshot, RoundClassification, RunSnapshot, RunStateError, SelectorSnapshot,
     SquashCommitOid, StepAuthorityObservation, StepMergeResult, StepMergeRoute, StepNode,
-    StepNumber, StepSnapshot, TagName, TagSnapshot, TagState, TagTarget, VersionPolicy, VisionSlug,
-    WorktreeIdentity, WorktreeSnapshot, WorktreeState, classify_dispatch_admission,
-    compute_dispatchability, derive_dispatch_outcome_state, derive_merge_status,
-    derive_milestone_merge_status, derive_run_state, derive_run_state_with_dispatch_artifacts,
+    StepNumber, StepSnapshot, TagName, TagSnapshot, TagState, TagTarget, ValidatedProductionCount,
+    ValidatedProductionSeries, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeSnapshot,
+    WorktreeState, classify_dispatch_admission, compute_dispatchability,
+    derive_dispatch_outcome_state, derive_merge_status, derive_milestone_merge_status,
+    derive_run_state, derive_run_state_with_dispatch_artifacts,
     derive_run_state_with_exceptional_merge_chains, render_human_snapshot,
 };
 pub use tracked_contract::{

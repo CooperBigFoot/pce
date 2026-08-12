@@ -14,9 +14,9 @@ use crate::dispatch_process_identity::AbsoluteRequiredArtifactPath;
 use crate::event_log::{
     ArtifactOutcome, CacheCreationInputTokens, CacheReadInputTokens, CachedInputTokens,
     DispatchCompletionPayload, DispatchDuration, DispatchExitStatus, DispatchPayload, DispatchRef,
-    DispatchRole, DispatchTokenUsage, EventLogTail, EventLogTailError, EventTimestamp, Evidence,
-    InputTokens, NodeId, OutputTokens, ReasoningOutputTokens, RequiredArtifactPresence, Sequence,
-    UsageAbsenceReason, WriteKind, successor_sequence,
+    DispatchRole, DispatchRootCause, DispatchTokenUsage, EventLogTail, EventLogTailError,
+    EventTimestamp, Evidence, InputTokens, NodeId, OutputTokens, ReasoningOutputTokens,
+    RequiredArtifactPresence, Sequence, UsageAbsenceReason, WriteKind, successor_sequence,
 };
 use crate::gate_execution::{AbsoluteGateExecClientPath, GateExecutionRecorderConfig};
 
@@ -144,6 +144,29 @@ pub fn dispatch_completion_payload(
             exit_status,
             artifact_outcome,
             required_artifact_presence,
+            root_cause: None,
+        },
+    )
+}
+
+/// Construct a new completion that durably captures validated verdict attribution.
+pub fn validated_dispatch_completion_payload(
+    issuance_sequence: Sequence,
+    duration_ms: DispatchDuration,
+    usage: DispatchTokenUsage,
+    exit_status: DispatchExitStatus,
+    required_artifact_presence: RequiredArtifactPresence,
+    root_cause: DispatchRootCause,
+) -> DispatchCompletionPayload {
+    DispatchCompletionPayload::ObservedChildWithArtifactPresence(
+        crate::event_log::ObservedDispatchCompletionWithArtifactPresencePayload {
+            issuance_sequence,
+            duration_ms,
+            usage,
+            exit_status,
+            artifact_outcome: ArtifactOutcome::Validated,
+            required_artifact_presence,
+            root_cause: Some(root_cause),
         },
     )
 }
