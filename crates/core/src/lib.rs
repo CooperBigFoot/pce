@@ -16,6 +16,7 @@ pub mod gate_replay;
 pub mod herdr_dispatch;
 pub mod landing_readiness;
 pub mod package_completion;
+pub mod package_worker;
 pub mod paired_execution_proof;
 pub mod run_state;
 pub mod tracked_contract;
@@ -45,6 +46,10 @@ pub use package_completion::{
     AbsolutePackageResultPath, PackageCompletionError, PackageWorkerResult, PackageWorkerStoppedAt,
     compose_package_worker_argv, derive_package_result_path, parse_package_worker_result,
     serialize_package_worker_result,
+};
+pub use package_worker::{
+    MisSpecificationFault, PackageOutcome, PackageWorkerError, RepositoryWorktree, VisionGoal,
+    compose_package_worker_brief, parse_package_outcome,
 };
 pub use paired_execution_proof::{
     CampaignSide, FalsificationVerdictToken, PairedBlockingIssue, PairedCampaign,
