@@ -6990,6 +6990,85 @@ fn gate_valid_artifact_succeeds_without_logging() {
 }
 
 #[test]
+fn gate_schema_violation_exits_nonzero_without_logging() {
+    let _guard = dispatch_test_guard();
+    let fixture = GateFixture::new("no-log-schema-violation", CLAUDE_SUCCESS);
+    fs::write(&fixture.output_path, b"{}").expect("write schema-violating gate artifact");
+    let result = fixture
+        .harness
+        .run(fixture.argv(&fixture.environment(0), &["prompt"]), b"")
+        .expect("run unlogged schema-violating gate");
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("violates schema"),
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn step_executor_output_inside_measured_worktree_is_rejected_before_spawn() {
+    let _guard = dispatch_test_guard();
+    let harness = CliHarness::new().expect("create measured worktree harness");
+    let cwd = fs::canonicalize(harness.path()).expect("canonicalize measured worktree");
+    let initialized = Command::new("git")
+        .arg("-C")
+        .arg(&cwd)
+        .args(["init", "--quiet"])
+        .status()
+        .expect("initialize measured worktree");
+    assert!(initialized.success());
+    let record_root = harness.path().join("records");
+    fs::create_dir(&record_root).expect("create records");
+    let stdout_path = harness.path().join("child.stdout");
+    let stderr_path = harness.path().join("child.stderr");
+    fs::write(&stdout_path, SUCCESSFUL_STRUCTURED_TRANSCRIPT).expect("write stdout");
+    fs::write(&stderr_path, []).expect("write stderr");
+    let environment = child_environment(&harness, &record_root, &stdout_path, &stderr_path, 0);
+    let schema = cwd.join("schema.json");
+    let output_path = cwd.join("executor-result.json");
+    fs::write(&schema, VALID_ARTIFACT_SCHEMA).expect("write schema");
+    let log_path = harness.path().join("events.jsonl");
+    let mut argv = dispatch_argv(
+        &cwd,
+        &environment,
+        Some((&schema, &output_path)),
+        None,
+        "execute",
+    );
+    let delimiter = argv
+        .iter()
+        .position(|value| value == "--")
+        .expect("delimiter");
+    argv.splice(
+        delimiter..delimiter,
+        logging_arguments(&log_path, &output_path),
+    );
+
+    let result = harness
+        .run(&argv, b"")
+        .expect("run rejected executor dispatch");
+
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains(&format!(
+            "step-executor output path must be outside its measured worktree: {}",
+            output_path.display()
+        )),
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!output_path.exists());
+    assert!(
+        harness
+            .codex_invocations(&record_root)
+            .expect("read invocations")
+            .is_empty(),
+        "rejected dispatch must not spawn Codex"
+    );
+}
+
+#[test]
 fn gate_rejects_missing_structured_artifact_without_logging() {
     let _guard = dispatch_test_guard();
     let fixture = GateFixture::new("no-log-missing", CLAUDE_SUCCESS);

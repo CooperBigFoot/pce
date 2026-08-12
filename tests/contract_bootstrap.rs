@@ -312,6 +312,15 @@ esac
     assert_eq!(payloads.len(), 1);
     assert_payload_matches_contract(&payloads[0], &expected);
     assert_no_escalations(&fixture.events);
+    assert_eq!(
+        git_output(
+            Some(&fixture.repository),
+            ["show", "HEAD:.pce/repository-contract.json"],
+        )
+        .stdout,
+        bytes,
+        "bootstrap must commit the generated tracked contract",
+    );
 }
 
 #[test]
@@ -370,23 +379,20 @@ esac
     let cargo_log_bytes = fs::read(&cargo_log).expect("save cargo log");
 
     let second = fixture.invoke(Some(&shim));
-    assert_success(&second);
-    let second_json: Value =
-        serde_json::from_slice(&fs::read(fixture.contract_path()).expect("read second contract"))
-            .expect("parse second contract JSON");
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("use `pce contract refresh`"));
+    let second_json: Value = serde_json::from_slice(
+        &fs::read(fixture.contract_path()).expect("read committed contract"),
+    )
+    .expect("parse committed contract JSON");
     assert_eq!(second_json["stated"], stated);
-    let second_log = fs::read(&cargo_log).expect("reread cargo log");
     assert_eq!(
-        &second_log[..cargo_log_bytes.len()],
-        cargo_log_bytes.as_slice()
-    );
-    assert_eq!(
-        &second_log[cargo_log_bytes.len()..],
-        b"fmt --check\nclippy --workspace --all-targets\ncheck --workspace --all-targets\ntest --workspace\nbuild --workspace\n"
+        fs::read(&cargo_log).expect("reread cargo log"),
+        cargo_log_bytes,
+        "committed bootstrap must not remeasure",
     );
     let payloads = current_payloads(&fixture.events);
-    assert_eq!(payloads.len(), 2);
-    assert_eq!(payloads[0].stated, payloads[1].stated);
+    assert_eq!(payloads.len(), 1);
     for payload in payloads {
         assert_eq!(payload.repository.as_str(), "fixture");
         assert_eq!(payload.repo_root.as_str(), path_text(&fixture.repository));
@@ -604,12 +610,14 @@ fn bootstrap_rejects_ambiguous_duplicate_contract_identity() {
         ),
     );
     assert_success(&fixture.invoke(Some(&shim)));
-    let accepted_baseline = fs::read(&log).expect("first measurement should read");
-    assert_success(&fixture.invoke(Some(&shim)));
-    let accepted = fs::read(&log).expect("second measurement should read");
-    assert!(
-        accepted.len() > accepted_baseline.len(),
-        "exact identity must remeasure"
+    let accepted = fs::read(&log).expect("first measurement should read");
+    let repeated = fixture.invoke(Some(&shim));
+    assert!(!repeated.status.success());
+    assert!(String::from_utf8_lossy(&repeated.stderr).contains("use `pce contract refresh`"));
+    assert_eq!(
+        fs::read(&log).expect("repeated measurement log should read"),
+        accepted,
+        "committed bootstrap must not remeasure",
     );
 
     let event_before = fs::read(&fixture.events).expect("events should read");

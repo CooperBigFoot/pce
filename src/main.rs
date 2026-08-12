@@ -78,7 +78,7 @@ use sha2::{Digest, Sha256};
 
 const USAGE: &str = concat!(
     "usage: pce vision new \"<name>\"\n",
-    "       pce vision check\n",
+    "       pce vision check < vision.md\n",
     "       pce log --file <LOG_PATH> --kind <KIND> --node <NODE>\n",
     "       pce log read --file <LOG_PATH> [--kind <KIND>] [--node <NODE>]\n",
     "       pce log meter\n",
@@ -93,7 +93,7 @@ const USAGE: &str = concat!(
     "       pce contract learn --file <CURRENT_LOG_PATH> --prior-file <PRIOR_LOG_PATH> --repo-root <REPOSITORY_ROOT> --node <NODE> --category <environment-hazard|gate-ordering|lockfile-rule> --finding <FINDING>\n",
     "       pce dispatch codex --cwd <ABSOLUTE_WORKING_DIRECTORY> --sandbox workspace-write [--env <NAME=VALUE>]... [--output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH>] [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CODEX_ARGUMENT>...\n",
     "       pce dispatch gate --cwd <ABSOLUTE_WORKING_DIRECTORY> [--env <NAME=VALUE>]... --output-schema <ABSOLUTE_SCHEMA_PATH> -o <ABSOLUTE_OUTPUT_PATH> [--plan-file <PLAN_PATH>] [--log-file <ABSOLUTE_LOG_PATH> --node <NODE> --role <ROLE> --ref <REF> --evidence <EVIDENCE> --required-artifact <ABSOLUTE_ARTIFACT_PATH> [--planning-act <repeatable|irreversible>] [--dry-run]] -- <CLAUDE_ARGUMENT>...\n",
-    "       pce dispatch check-in --file <ABSOLUTE_LOG_PATH>\n",
+    "       pce dispatch check-in --file <LOG_PATH>\n",
     "       pce dispatch reconcile --file <ABSOLUTE_LOG_PATH> --issuance <ISSUANCE_SEQUENCE> --node <NODE>\n",
     "       pce gate exec\n",
     "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>\n",
@@ -712,12 +712,6 @@ fn parse_dispatch_check_in(rest: &[String]) -> Result<Command> {
         bail!(USAGE);
     }
     let log_path = PathBuf::from(raw_log_path);
-    if !log_path.is_absolute() {
-        bail!(
-            "dispatch check-in event-log path must be absolute: {}",
-            log_path.display()
-        );
-    }
     Ok(Command::DispatchCheckIn { log_path })
 }
 
@@ -2114,15 +2108,27 @@ fn parse_codex_dispatch(target: &str, rest: &[String]) -> Result<Command> {
         .with_environment(ChildEnvironment::new(environment))
         .with_sandbox(Sandbox::WorkspaceWrite);
     if let Some((schema, output)) = structured {
+        let output_path = AbsoluteOutputPath::parse(PathBuf::from(output))
+            .context("failed to parse dispatch output path")?;
+        if logging
+            .as_ref()
+            .is_some_and(|(_, metadata)| metadata.role.as_str() == "step-executor")
+            && output_is_inside_measured_worktree(
+                envelope.working_directory().as_path(),
+                output_path.as_path(),
+            )?
+        {
+            bail!(
+                "step-executor output path must be outside its measured worktree: {}",
+                output_path.as_path().display()
+            );
+        }
         envelope = envelope
             .with_schema_path(
                 AbsoluteSchemaPath::parse(PathBuf::from(schema))
                     .context("failed to parse dispatch schema path")?,
             )
-            .with_output_path(
-                AbsoluteOutputPath::parse(PathBuf::from(output))
-                    .context("failed to parse dispatch output path")?,
-            );
+            .with_output_path(output_path);
     }
     let logging = logging.map(|(path, metadata)| {
         if dry_run {
@@ -2360,6 +2366,24 @@ fn parse_gate_dispatch(rest: &[String]) -> Result<Command> {
         }
     });
     Ok(Command::Dispatch { envelope, logging })
+}
+
+fn output_is_inside_measured_worktree(cwd: &Path, output: &Path) -> Result<bool> {
+    let Some(root) = cwd
+        .ancestors()
+        .find(|candidate| candidate.join(".git").exists())
+    else {
+        return Ok(false);
+    };
+    let root = root
+        .to_str()
+        .ok_or_else(|| anyhow!("measured Git worktree root is not UTF-8"))?;
+    let output = output
+        .to_str()
+        .ok_or_else(|| anyhow!("dispatch output path is not UTF-8"))?;
+    let normalized_root = lexically_normalized_repository_root(root);
+    let normalized_output = lexically_normalized_repository_root(output);
+    Ok(normalized_output.starts_with(normalized_root))
 }
 
 fn required_option<'a>(rest: &'a [String], position: &mut usize, flag: &str) -> Result<&'a str> {
@@ -3887,6 +3911,7 @@ fn bootstrap_locked(
             tracked_path.display()
         )
     })?;
+    commit_bootstrapped_contract(repository_root)?;
     let payload_json = serde_json::to_string(&payload)
         .context("failed to serialize repository contract payload")?;
     append_locked(
@@ -3896,6 +3921,35 @@ fn bootstrap_locked(
         node,
         log_path,
     )
+}
+
+fn commit_bootstrapped_contract(repository_root: &Path) -> Result<()> {
+    for arguments in [
+        vec!["add", "--", TRACKED_REPOSITORY_CONTRACT_PATH],
+        vec![
+            "commit",
+            "--only",
+            "-m",
+            "chore: bootstrap PCE repository contract",
+            "--",
+            TRACKED_REPOSITORY_CONTRACT_PATH,
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository_root)
+            .args(&arguments)
+            .output()
+            .with_context(|| format!("failed to spawn `git {}`", arguments.join(" ")))?;
+        if !output.status.success() {
+            bail!(
+                "failed to commit bootstrapped tracked repository contract with `git {}`: {}",
+                arguments.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn matching_bootstrap_contract(
@@ -4295,6 +4349,9 @@ fn persist_refreshed_contract_locked(
         measured.gates(),
         evidence,
     );
+    if &payload == previous {
+        return Ok(());
+    }
     let payload_json = serde_json::to_string(&payload)
         .context("failed to serialize repository contract payload")?;
     let canonical_bytes = serialize_tracked_repository_contract(tracked)
@@ -5552,7 +5609,7 @@ fn observe_github(
     selector: &PullRequestSelector,
 ) -> Result<GitHubAuthorityObservation> {
     let args = github_pull_request_list_args(selector);
-    let result = match execute_process("gh", &args, Some(root)) {
+    let result = match execute_process_without_force_color("gh", &args, Some(root)) {
         ProcessAttempt::SpawnFailed { detail } => {
             return unreachable_github(&detail);
         }
@@ -8706,8 +8763,30 @@ fn usage_absence_name(reason: UsageAbsenceReason) -> &'static str {
 }
 
 fn execute_process(program: &str, args: &[OsString], current_dir: Option<&Path>) -> ProcessAttempt {
+    execute_process_with_command(program, args, current_dir, |_| {})
+}
+
+fn execute_process_without_force_color(
+    program: &str,
+    args: &[OsString],
+    current_dir: Option<&Path>,
+) -> ProcessAttempt {
+    execute_process_with_command(program, args, current_dir, |command| {
+        for name in ["CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR", "GH_FORCE_TTY"] {
+            command.env_remove(name);
+        }
+    })
+}
+
+fn execute_process_with_command(
+    program: &str,
+    args: &[OsString],
+    current_dir: Option<&Path>,
+    configure: impl FnOnce(&mut std::process::Command),
+) -> ProcessAttempt {
     let mut command = std::process::Command::new(program);
     command.args(args);
+    configure(&mut command);
     if let Some(directory) = current_dir {
         command.current_dir(directory);
     }
@@ -9678,7 +9757,8 @@ None.
             read_event_log(&log_path)
                 .expect("event log should parse")
                 .len(),
-            2
+            1,
+            "semantically unchanged refresh must not append a duplicate contract"
         );
         let changed = [
             format.as_str(),
@@ -9695,7 +9775,7 @@ None.
         invoke_refresh(&log_path, &root).expect("changed refresh should succeed");
 
         let lines = read_event_log(&log_path).expect("event log should parse");
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 2);
         let all_invocations =
             fs::read_to_string(&invocation_log).expect("second invocation log should read");
         let expected_second = [
@@ -11001,6 +11081,7 @@ None.
 
     #[test]
     fn vision_check_parser_rejects_arguments_and_unknown_actions_with_usage() {
+        assert!(USAGE.contains("pce vision check < vision.md"));
         for args in [
             vec!["vision", "check", "extra"],
             vec!["vision", "check", "--file", "vision.md"],
@@ -11816,7 +11897,7 @@ None.
     }
 
     #[test]
-    fn dispatch_check_in_parser_accepts_the_one_absolute_shape() {
+    fn dispatch_check_in_parser_accepts_absolute_and_relative_paths() {
         let command = parse_command(
             ["dispatch", "check-in", "--file", "/tmp/events.jsonl"]
                 .into_iter()
@@ -11827,9 +11908,19 @@ None.
             panic!("parsed another command")
         };
         assert_eq!(log_path, PathBuf::from("/tmp/events.jsonl"));
+        let relative = parse_command(
+            ["dispatch", "check-in", "--file", "planning/events.jsonl"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("relative check-in command");
+        let Command::DispatchCheckIn { log_path } = relative else {
+            panic!("parsed another command")
+        };
+        assert_eq!(log_path, PathBuf::from("planning/events.jsonl"));
         assert_eq!(
             USAGE
-                .matches("pce dispatch check-in --file <ABSOLUTE_LOG_PATH>")
+                .matches("pce dispatch check-in --file <LOG_PATH>")
                 .count(),
             1
         );
@@ -11854,20 +11945,6 @@ None.
                 .expect_err("noncanonical check-in command");
             assert_eq!(error.to_string(), USAGE);
         }
-    }
-
-    #[test]
-    fn dispatch_check_in_parser_rejects_relative_log_before_filesystem_access() {
-        let error = parse_command(
-            ["dispatch", "check-in", "--file", "relative/events.jsonl"]
-                .into_iter()
-                .map(str::to_owned),
-        )
-        .expect_err("relative check-in log path");
-        assert_eq!(
-            error.to_string(),
-            "dispatch check-in event-log path must be absolute: relative/events.jsonl"
-        );
     }
 
     #[test]
