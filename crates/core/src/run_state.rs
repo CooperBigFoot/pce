@@ -3679,6 +3679,9 @@ fn root_cause_is_upstream(
     }
 }
 
+/// Automatic validated-production spending limit per exact `(node, role)`.
+const VALIDATED_PRODUCTION_SPENDING_LIMIT: u64 = 12;
+
 pub fn derive_dispatch_outcome_state(
     records: &[EventRecord],
     dispatch_artifacts: &[DispatchRequiredArtifactObservation],
@@ -3796,7 +3799,7 @@ pub fn derive_dispatch_outcome_state(
                             let exhausted = state.rounds.iter().any(|series| {
                                 series.node == *issuance.issuance().node()
                                     && series.role == *issuance.issuance().role()
-                                    && series.count.get() >= 12
+                                    && series.count.get() >= VALIDATED_PRODUCTION_SPENDING_LIMIT
                             });
                             (issuance.issuance().node() == record.node() && exhausted).then(|| {
                                 NonProductionKey {
@@ -3914,7 +3917,6 @@ pub fn classify_dispatch_admission(
         .iter()
         .find(|hold| hold.key == *key)
         .map(|hold| &hold.status);
-    const VALIDATED_PRODUCTION_SPENDING_LIMIT: u64 = 12;
     if count.get() >= VALIDATED_PRODUCTION_SPENDING_LIMIT {
         match status {
             Some(NonProductionHoldStatus::Open { .. }) => {

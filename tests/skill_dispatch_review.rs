@@ -5964,12 +5964,13 @@ fn validated_production_spending_parks_and_resumes() {
 fn child_tmpdir_and_mutation_gate_authority_are_explicit() {
     let markdown = real_skill_markdown();
     for clause in [
-        "fresh mode-`0700` directory under the platform temporary root",
+        "fresh mode-`0700` directory under its fixed `/tmp` root",
         "overrides `TMPDIR` for that child after applying the caller's forwarded environment",
+        "The operator's shell `TMPDIR` is ignored",
         "is not a fourth forwarded `--env` entry",
-        "Contract-check Seatbelt execution receives the same fresh `TMPDIR` lifecycle",
+        "Contract-check Seatbelt execution permits and receives the same fresh `TMPDIR` lifecycle",
         "Mutation testing has no universal or Rust-specific workflow command",
-        "runs only when the repository's tracked contract declares it",
+        "runs only when the repository's tracked contract declares `stated.gates.mutation`",
     ] {
         assert_eq!(markdown.matches(clause).count(), 1, "{clause}");
     }

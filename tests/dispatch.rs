@@ -6136,19 +6136,35 @@ fn assert_gate_classification(
 fn gate_success_records_claude_usage() {
     let _guard = dispatch_test_guard();
     let fixture = GateFixture::new("usage-success", CLAUDE_SUCCESS);
+    fs::write(
+        &fixture.schema_path,
+        include_bytes!("../skills/pce/schemas/verdict.schema.json"),
+    )
+    .expect("write verdict schema");
+    fs::write(
+        &fixture.output_path,
+        br#"{"verdict":"BLOCK","self_sufficiency":"NOT_APPLICABLE","root_cause":"step_plan","blocking_issues":[],"non_blocking_notes":[],"summary":"PLAN_INFEASIBLE: usage fixture"}"#,
+    )
+    .expect("write attributed verdict");
     let log = fixture.harness.path().join("events.jsonl");
     let mut argv = fixture.argv(&fixture.environment(0), &[]);
     insert_gate_logging(&mut argv, &log, false);
     let result = fixture.harness.run(&argv, b"").expect("run usage gate");
     assert!(result.status.success());
+    let completion = gate_completion(&log);
     assert_eq!(
-        gate_completion(&log).usage,
+        completion.usage,
         DispatchTokenUsage::ClaudeMeasured {
             input_tokens: pce_core::InputTokens::new(11),
             output_tokens: pce_core::OutputTokens::new(13),
             cache_creation_input_tokens: pce_core::CacheCreationInputTokens::new(17),
             cache_read_input_tokens: pce_core::CacheReadInputTokens::new(19)
         }
+    );
+    assert_eq!(
+        completion.root_cause,
+        Some(pce_core::DispatchRootCause::StepPlan),
+        "validated verdict attribution must be durable in the completion event"
     );
 }
 

@@ -29,20 +29,20 @@ use pce_core::{
     DispatchEnvelope, DispatchExitStatus, DispatchIdentityObservation, DispatchLedger,
     DispatchLedgerCompletion, DispatchLogging, DispatchPayload, DispatchProcessIdentity,
     DispatchProjectionInput, DispatchRef, DispatchRequiredArtifactObservation, DispatchRole,
-    DispatchRoleClass, DispatchTarget, DispatchTokenUsage, DispatchabilityResult, EventBodyRef,
-    EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
-    Evidence, ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
-    ExceptionalMergeChainObservation, Executable, ExitCode, ExpectedVerdictOutcome,
-    FileObservation, FindingAdmission, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
-    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
-    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
-    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, KnownPayload, LandingReadinessDecision,
-    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
-    MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, NonProductionHoldOpenPayload,
-    NonProductionKey, ObservedExitStatus, ObservedWorkflowName, OracleFailure, OracleStage,
-    OrderingEdge, PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
-    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
+    DispatchRoleClass, DispatchRootCause, DispatchTarget, DispatchTokenUsage,
+    DispatchabilityResult, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
+    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
+    ExactPullRequestState, ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable,
+    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
+    GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef,
+    GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
+    GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
+    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, KnownPayload,
+    LandingReadinessDecision, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
+    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
+    NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
+    OracleFailure, OracleStage, OrderingEdge, PairedCampaign, PairedExecutionProofError,
+    PairedReplayClassification, ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
     PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
     RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation, ReplayClassifications,
@@ -70,7 +70,7 @@ use pce_core::{
     render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
     serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_tracked_repository_contract, validate_artifact, validate_verdict_references,
-    validate_workflow_coverage, verify_criterion_change,
+    validate_workflow_coverage, validated_dispatch_completion_payload, verify_criterion_change,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -512,7 +512,10 @@ struct SynthesizedTemporaryDirectory(PathBuf);
 
 impl SynthesizedTemporaryDirectory {
     fn create() -> Result<Self> {
-        let parent = std::env::temp_dir();
+        // `/tmp` is an explicit writable root in both dispatched-agent sandboxes and
+        // the contract-measurement profile. Do not inherit the operator's `TMPDIR`:
+        // doing so makes identical routes depend on an unforwarded shell variable.
+        let parent = Path::new("/tmp");
         for attempt in 0..128_u64 {
             let path = parent.join(format!(
                 "pce-{}-{}-{}",
@@ -4647,10 +4650,11 @@ fn execute_sandboxed_gate_text(
             repository_root.display()
         ))
     })?;
-    let canonical_temp = std::fs::canonicalize(std::env::temp_dir()).map_err(|error| {
+    let binary_temp_root = Path::new("/tmp");
+    let canonical_temp = std::fs::canonicalize(binary_temp_root).map_err(|error| {
         std::io::Error::other(format!(
-            "failed to canonicalize platform temporary directory {}: {error}",
-            std::env::temp_dir().display()
+            "failed to canonicalize binary-owned temporary root {}: {error}",
+            binary_temp_root.display()
         ))
     })?;
     let mut temporary_directories = std::collections::BTreeSet::new();
@@ -8759,16 +8763,28 @@ fn execute_dispatch(
             let usage = classification
                 .clone()
                 .unwrap_or_else(|reason| DispatchTokenUsage::Absent { reason });
-            let completion = dispatch_completion_payload(
-                completion_context.issuance_sequence,
-                DispatchDuration::new(duration_ms),
-                usage,
-                exit_status,
-                artifact_outcome,
-                observe_required_artifact_presence(
-                    completion_context.required_artifact_path.as_path(),
-                )?,
-            );
+            let required_artifact_presence = observe_required_artifact_presence(
+                completion_context.required_artifact_path.as_path(),
+            )?;
+            let root_cause = validated_artifact_root_cause(envelope, artifact_outcome)?;
+            let completion = match root_cause {
+                Some(root_cause) => validated_dispatch_completion_payload(
+                    completion_context.issuance_sequence,
+                    DispatchDuration::new(duration_ms),
+                    usage,
+                    exit_status,
+                    required_artifact_presence,
+                    root_cause,
+                ),
+                None => dispatch_completion_payload(
+                    completion_context.issuance_sequence,
+                    DispatchDuration::new(duration_ms),
+                    usage,
+                    exit_status,
+                    artifact_outcome,
+                    required_artifact_presence,
+                ),
+            };
             close_dispatch_conditionally(
                 completion_context.path,
                 DispatchClosureTarget {
@@ -8816,6 +8832,37 @@ fn execute_dispatch(
     artifact_validation.map_err(Error::new)?;
     reference_validation?;
     Ok(())
+}
+
+fn validated_artifact_root_cause(
+    envelope: &DispatchEnvelope,
+    artifact_outcome: ArtifactOutcome,
+) -> Result<Option<DispatchRootCause>> {
+    if artifact_outcome != ArtifactOutcome::Validated {
+        return Ok(None);
+    }
+    let Some(output_path) = envelope.output_path() else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(output_path.as_path()).with_context(|| {
+        format!(
+            "failed to reread validated structured artifact {} for root-cause attribution",
+            output_path.as_path().display()
+        )
+    })?;
+    let value = serde_json::from_slice::<Value>(&bytes).with_context(|| {
+        format!(
+            "validated structured artifact {} became malformed during root-cause attribution",
+            output_path.as_path().display()
+        )
+    })?;
+    Ok(match value.get("root_cause").and_then(Value::as_str) {
+        Some("execution") => Some(DispatchRootCause::Execution),
+        Some("step_plan") => Some(DispatchRootCause::StepPlan),
+        Some("milestone_plan") => Some(DispatchRootCause::MilestonePlan),
+        Some("vision") => Some(DispatchRootCause::Vision),
+        _ => None,
+    })
 }
 
 fn spawn_envelope(envelope: &DispatchEnvelope) -> Result<ObservedExitStatus> {
@@ -13464,6 +13511,23 @@ None.
             crate::validate_codex_output_schema(&path).expect_err("dialect mismatch must fail");
         assert!(
             format!("{error:#}").contains("required must contain every and only property name")
+        );
+    }
+
+    #[test]
+    fn synthesized_tmpdir_uses_binary_owned_fixed_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = crate::SynthesizedTemporaryDirectory::create()
+            .expect("binary-owned TMPDIR should create");
+        assert!(directory.path().starts_with("/tmp"));
+        assert_eq!(
+            fs::metadata(directory.path())
+                .expect("TMPDIR metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
         );
     }
 

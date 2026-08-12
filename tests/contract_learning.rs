@@ -543,7 +543,7 @@ fn duplicate_recurrence_is_idempotent() {
     assert!(tracked.appendable().gate_orderings().is_empty());
     assert_eq!(stated_range(&tracked_bytes), stated_before);
     let payloads = repository_payloads(&fixture.current_log);
-    assert_eq!(payloads.len(), count_before + 1);
+    assert_eq!(payloads.len(), count_before);
     assert_eq!(
         payloads
             .last()
