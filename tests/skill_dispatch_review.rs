@@ -2379,10 +2379,10 @@ fn phase3_falsification_repair_is_bounded_and_mechanical() {
         .expect("falsify stage");
     let pr_start = phase3.find("5. **PR (you)**").expect("PR stage");
     let falsify = &phase3[falsify_start..pr_start];
-    let task = "Repair the committed step artifact at exact head <current-step-head> from the accepted pre-PR falsification verdict at <absolute-review-json-path>. Apply every supplied required_change and replacement_execution mechanically. Do not re-derive, reinterpret, broaden, or re-litigate any supplied finding. Read tracked inputs only with the supplied git show <current-step-head>:<path> commands. Run every acceptance gate from the approved plan. On success, amend the existing single conventional step commit, refresh pr-body.md and leave it untracked, create no tag, and do not push. Emit the normal structured executor result at <worktree-abs>/.codex-result.json. If the repair is infeasible as supplied, do not invent another repair; return the existing structured BLOCK result with the applicable root_cause.";
+    let task = "Repair the committed step artifact at exact head <current-step-head> from the accepted pre-PR falsification verdict at <absolute-review-json-path>. Apply every supplied required_change and replacement_execution mechanically. Do not re-derive, reinterpret, broaden, or re-litigate any supplied finding. Read tracked inputs only with the supplied git show <current-step-head>:<path> commands. Run every acceptance gate from the approved plan. On success, amend the existing single conventional step commit, refresh pr-body.md and leave it untracked, create no tag, and do not push. Emit the normal structured executor result at <absolute-step-audit-dir>/executor-result-<n>.json outside the measured worktree. If the repair is infeasible as supplied, do not invent another repair; return the existing structured BLOCK result with the applicable root_cause.";
     assert_eq!(falsify.matches(task).count(), 1, "complete repair task");
     for expected in [
-        "<worktree-abs>/.codex-result.json",
+        "<absolute-step-audit-dir>/executor-result-<n>.json",
         "refresh pr-body.md and leave it untracked",
         "amend the existing single conventional step commit",
         "create no tag",
@@ -2396,9 +2396,9 @@ fn phase3_falsification_repair_is_bounded_and_mechanical() {
     }
 
     let policies = [
-        "the defect-round cap for `(node, falsification-critic)` is `3` validated-production rounds; a productless attempt charges no defect round and remains governed by the `(node, role, required artifact)` consecutive-non-production hold.",
+        "the validated-production spending limit for `(node, falsification-critic)` is `12` validated-production spends; a productless attempt charges no validated-production spend and remains governed by the `(node, role, required artifact)` consecutive-non-production hold.",
         "If two consecutive schema-valid verdict artifacts have substantially identical blocking issue sets under the existing comparison rule, append/open the existing escalation and stop before another executor dispatch, push, or PR.",
-        "If validated-production defect round `3` is blocking, escalate and stop before another executor dispatch, push, or PR.",
+        "If validated-production spend `12` is blocking, escalate and stop before another executor dispatch, push, or PR.",
         "After a successful repair result, resolve the new exact committed step head and reissue `falsification-critic` through the same anchored binary route.",
         "Ground it on that new head, the same approved plan ref, and `git diff <milestone-integration-ref>...<new-step-head>`.",
         "Supply the prior exact verdict path as the finding to verify and ask the critic to verify the executed replacement on the repaired artifact rather than re-derive the finding.",
@@ -2436,9 +2436,9 @@ fn phase3_falsification_repair_is_bounded_and_mechanical() {
             < routing.find(exception).expect("exception")
     );
     for inherited in [
-        "Plan/critic and PR/fix caps are 3 validated-production defect rounds per exact `(node, role)`.",
-        "Derive defect rounds only from validated production; productless attempts are exempt and are stopped separately by the `(node, role, required artifact)` consecutive-non-production hold.",
-        "On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the defect cap.",
+        "Plan/critic and PR/fix automatic spending limits are 12 validated-production spends per exact `(node, role)`.",
+        "Derive validated-production spends only from validated production; productless attempts are exempt and are stopped separately by the `(node, role, required artifact)` consecutive-non-production hold.",
+        "On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the spending limit.",
         "Derive the comparison from review artifacts; do not update separate loop state.",
     ] {
         assert_eq!(routing.matches(inherited).count(), 1, "routing {inherited}");
@@ -5849,43 +5849,43 @@ const AUTHORED_REPLACEMENTS: [(&str, &str); 14] = [
     ("Both children are awaited.", PURPOSE_ROUTE_LIFETIME),
     (
         "These binary-owned issuance records are the sole source for round counts and dispatch refs.",
-        "These binary-owned issuance records are the sole source for dispatch refs and for the exact `(node, role)` issuance ordinal; validated-production completion facts alone derive defect rounds, while completion and required-artifact facts derive consecutive non-production.",
+        "These binary-owned issuance records are the sole source for dispatch refs and for the exact `(node, role)` issuance ordinal; validated-production completion facts alone derive validated-production spends, while completion and required-artifact facts derive consecutive non-production.",
     ),
     (
         "Round series are keyed by `(node, role)`, so Phase 1 `(m1-s1, milestone-planner)` cannot collide with Phase 3 `(m1-s1, step-plan-writer)`.",
-        "Issuance-ordinal and defect-round series are keyed by `(node, role)`, while consecutive non-production is keyed by `(node, role, required artifact)`, so Phase 1 `(m1-s1, milestone-planner)` cannot collide with Phase 3 `(m1-s1, step-plan-writer)`.",
+        "Issuance-ordinal and validated-production spending series are keyed by `(node, role)`, while consecutive non-production is keyed by `(node, role, required artifact)`, so Phase 1 `(m1-s1, milestone-planner)` cannot collide with Phase 3 `(m1-s1, step-plan-writer)`.",
     ),
     (
         "3. Iterate cold planner and critic to `APPROVE`, cap 3 with stuck detection. Derive rounds from dispatch records and blocker history from review artifacts. Every revision is a fresh invocation naming the artifact and `review-<n>.md`; never resume a prior Codex session. On approval, digest the approved `milestones.json` bytes and append:",
-        "3. Iterate cold planner and critic to `APPROVE`, capped at 3 validated-production defect rounds per exact `(node, role)`, with stuck detection. Productless attempts charge no defect round and are governed by the separate consecutive-non-production hold. Derive blocker history from review artifacts, whose `review-<n>.md` index is the exact `(node, role)` issuance ordinal and advances for every issuance. Every revision is a fresh invocation; never resume a prior Codex session. On approval, digest the approved `milestones.json` bytes and append:",
+        "3. Iterate cold planner and critic to `APPROVE`, subject to an automatic limit of 12 validated-production spends per exact `(node, role)`, with stuck detection. Productless attempts charge no validated-production spend and are governed by the separate consecutive-non-production hold. Derive blocker history from review artifacts, whose `review-<n>.md` index is the exact `(node, role)` issuance ordinal and advances for every issuance. Every revision is a fresh invocation; never resume a prior Codex session. On approval, digest the approved `milestones.json` bytes and append:",
     ),
     (
         "Iterate cold invocations to approval, cap 3 with stuck detection; review artifacts supply blocker history. On approval, digest that milestone's `steps.json` bytes and append:",
-        "Iterate cold invocations to approval, capped at 3 validated-production defect rounds per exact `(node, role)`, with stuck detection; productless attempts charge no defect round and are governed by the separate consecutive-non-production hold, while review artifacts indexed by the issuance ordinal supply blocker history. On approval, digest that milestone's `steps.json` bytes and append:",
+        "Iterate cold invocations to approval, subject to an automatic limit of 12 validated-production spends per exact `(node, role)`, with stuck detection; productless attempts charge no validated-production spend and are governed by the separate consecutive-non-production hold, while review artifacts indexed by the issuance ordinal supply blocker history. On approval, digest that milestone's `steps.json` bytes and append:",
     ),
     (
         "   Iterate fresh invocations to `APPROVE`, cap 3 with review-artifact stuck detection. At approval, digest the approved bytes and append:",
-        "   Iterate fresh invocations to `APPROVE`, capped at 3 validated-production defect rounds per exact `(node, role)`, with review-artifact stuck detection; productless attempts charge no defect round and are governed by the separate consecutive-non-production hold. At approval, digest the approved bytes and append:",
+        "   Iterate fresh invocations to `APPROVE`, subject to an automatic limit of 12 validated-production spends per exact `(node, role)`, with review-artifact stuck detection; productless attempts charge no validated-production spend and are governed by the separate consecutive-non-production hold. At approval, digest the approved bytes and append:",
     ),
     (
         "Use the next exact `(node, falsification-critic)` dispatch count and the existing review-artifact naming rule for the verdict; add no counter or artifact family.",
-        "Use the next exact `(node, falsification-critic)` issuance ordinal only for the existing review-artifact naming rule; defect-round accounting and consecutive-non-production admission remain separate derivations, and no new counter or artifact family is added.",
+        "Use the next exact `(node, falsification-critic)` issuance ordinal only for the existing review-artifact naming rule; validated-production spending accounting and consecutive-non-production admission remain separate derivations, and no new counter or artifact family is added.",
     ),
     (
         "   Derive the falsification round solely from prior `(node, falsification-critic)` dispatch records. The first falsification is round `1`; at most `3` falsification dispatches may occur for the step. Continue only while the next checked dispatch count is at most `3`. If two consecutive schema-valid verdict artifacts have substantially identical blocking issue sets under the existing comparison rule, append/open the existing escalation and stop before another executor dispatch, push, or PR. If dispatch count `3` is blocking, escalate and stop before another executor dispatch, push, or PR. Successive gate verdicts remain `review-<n>.json`/`review-<n>.md`, indexed by prior `(node, falsification-critic)` dispatch records; add no counter or artifact family.",
-        "   Derive the falsification review-artifact issuance ordinal from every prior exact `(node, falsification-critic)` issuance. Ordinal `1` names the first `review-1.json`/`review-1.md`, and every issuance advances that ordinal even when it produces nothing. Separately, the defect-round cap for `(node, falsification-critic)` is `3` validated-production rounds; a productless attempt charges no defect round and remains governed by the `(node, role, required artifact)` consecutive-non-production hold. Continue only while the derived defect-round count is below `3` and no non-production hold prevents admission. If two consecutive schema-valid verdict artifacts have substantially identical blocking issue sets under the existing comparison rule, append/open the existing escalation and stop before another executor dispatch, push, or PR. If validated-production defect round `3` is blocking, escalate and stop before another executor dispatch, push, or PR. Successive gate verdicts remain `review-<n>.json`/`review-<n>.md`, indexed only by the exact `(node, falsification-critic)` issuance ordinal; add no counter or artifact family.",
+        "   Derive the falsification review-artifact issuance ordinal from every prior exact `(node, falsification-critic)` issuance. Ordinal `1` names the first `review-1.json`/`review-1.md`, and every issuance advances that ordinal even when it produces nothing. Separately, the validated-production spending limit for `(node, falsification-critic)` is `12` validated-production spends; a productless attempt charges no validated-production spend and remains governed by the `(node, role, required artifact)` consecutive-non-production hold. Continue only while the derived validated-production spend count is below `12` and no non-production hold prevents admission. If two consecutive schema-valid verdict artifacts have substantially identical blocking issue sets under the existing comparison rule, append/open the existing escalation and stop before another executor dispatch, push, or PR. If validated-production spend `12` is blocking, escalate and stop before another executor dispatch, push, or PR. Successive gate verdicts remain `review-<n>.json`/`review-<n>.md`, indexed only by the exact `(node, falsification-critic)` issuance ordinal; add no counter or artifact family.",
     ),
     (
         "Cap 3 with review-artifact stuck detection.",
-        "Cap PR/fix work at 3 validated-production defect rounds per exact `(node, role)`, with review-artifact stuck detection; productless attempts charge no defect round and remain subject to the separate consecutive-non-production hold.",
+        "Limit PR/fix work to 12 validated-production spends per exact `(node, role)`, with review-artifact stuck detection; productless attempts charge no validated-production spend and remain subject to the separate consecutive-non-production hold.",
     ),
     (
         "Immediately before each verdict-producing gate issuance, read the accepted source event log and count only prior `dispatch` records whose node and role byte-match the route. Checked successor `n = prior_count + 1` names both distinct review artifacts in the already designated review directory: `review-<n>.json` is the absolute parent `-o` and gate-tail path, while `review-<n>.md` retains explanatory history. After the gate returns, read the exact JSON path and validate it again against the installed verdict schema. Missing, unreadable, malformed, schema-invalid, or unknown verdict data stops loudly. `APPROVE` proceeds, `REVISE` uses the phase-appropriate planning anchor for plan causes or `step-executor` for execution fixes at the exact current ref, and `BLOCK` escalates. The same prior `(node, role)` dispatch count determines the artifact index and round cap; no separate counter exists.",
-        "Immediately before each verdict-producing gate issuance, read the accepted source event log and derive the exact `(node, role)` issuance ordinal by counting every prior `dispatch` record whose node and role byte-match the route. Checked successor `n = prior_issuance_ordinal + 1` names both distinct review artifacts in the already designated review directory: `review-<n>.json` is the absolute parent `-o` and gate-tail path, while `review-<n>.md` retains explanatory history. The issuance ordinal advances for every issuance and determines artifact naming only. After the gate finishes, read the exact JSON path and validate it again against the installed verdict schema. Missing, unreadable, malformed, schema-invalid, or unknown verdict data stops loudly, but a missing product alone neither closes a dispatch nor licenses a completion or accounting claim. `APPROVE` proceeds, `REVISE` uses the phase-appropriate planning anchor for plan causes or `step-executor` for execution fixes at the exact current ref, and `BLOCK` escalates. Separately, defect-round caps count only validated-production rounds keyed by `(node, role)`, so productless attempts are exempt. Consecutive non-production is keyed by `(node, role, required artifact)`; after two consecutive non-producing completions its typed hold is the separate stop, and the hold closes only through `retry`, `re-plan`, or `abandon`.",
+        "Immediately before each verdict-producing gate issuance, read the accepted source event log and derive the exact `(node, role)` issuance ordinal by counting every prior `dispatch` record whose node and role byte-match the route. Checked successor `n = prior_issuance_ordinal + 1` names both distinct artifacts in the already designated review directory. For `pr-reviewer`, ordinal `n` names `pr-review-<n>.json` and `pr-review-<n>.md`; for every other verdict-producing gate, it names `review-<n>.json` and `review-<n>.md`. The JSON artifact is the absolute parent `-o` and gate-tail path, while the Markdown artifact retains explanatory history. The issuance ordinal advances for every issuance and determines artifact naming only. After the gate finishes, read the exact JSON path and validate it again against the installed verdict schema. Missing, unreadable, malformed, schema-invalid, or unknown verdict data stops loudly, but a missing product alone neither closes a dispatch nor licenses a completion or accounting claim. `APPROVE` proceeds, `REVISE` uses the phase-appropriate planning anchor for plan causes or `step-executor` for execution fixes at the exact current ref, and `BLOCK` escalates. Separately, validated-production spending limits count only validated-production spends keyed by `(node, role)`, so productless attempts are exempt. Consecutive non-production is keyed by `(node, role, required artifact)`; after two consecutive non-producing completions its typed hold is the separate stop, and the hold closes only through `retry`, `re-plan`, or `abandon`.",
     ),
     (
         "- Plan/critic and PR/fix caps are 3. Derive rounds from dispatch records. On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the cap. Derive the comparison from review artifacts; do not update separate loop state.",
-        "- Plan/critic and PR/fix caps are 3 validated-production defect rounds per exact `(node, role)`. Derive defect rounds only from validated production; productless attempts are exempt and are stopped separately by the `(node, role, required artifact)` consecutive-non-production hold. On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the defect cap. Derive the comparison from review artifacts; do not update separate loop state.",
+        "- Plan/critic and PR/fix automatic spending limits are 12 validated-production spends per exact `(node, role)`. Derive validated-production spends only from validated production; productless attempts are exempt and are stopped separately by the `(node, role, required artifact)` consecutive-non-production hold. On two consecutive verdicts with substantially identical blocking issue sets, short-circuit the loop before the spending limit. Derive the comparison from review artifacts; do not update separate loop state.",
     ),
     (
         "A detached dispatch uses the anchored `pce dispatch codex` route and must be paired with a registered wait. `pce dispatch` has no detached option and awaits its child. If a recorded dispatch has no required product, append a `delta` at the canonical node to reconcile that fact; never invent a result.",
@@ -5897,7 +5897,7 @@ const AUTHORED_REPLACEMENTS: [(&str, &str); 14] = [
     ),
     (
         "- Unexpected merge conflict dispatches Codex to rebase and resolve from the named base and head refs, supplying `git diff <base>...<head>`; classify the dispatch as REVISE-class for cap accounting, and escalate if unresolved.",
-        "- Unexpected merge conflict dispatches Codex to rebase and resolve from the named base and head refs, supplying `git diff <base>...<head>`; a validated produced REVISE result charges the applicable defect-round cap, while a productless attempt charges no defect round and remains subject to the separate consecutive-non-production hold; escalate if unresolved.",
+        "- Unexpected merge conflict dispatches Codex to rebase and resolve from the named base and head refs, supplying `git diff <base>...<head>`; a validated produced REVISE result charges the applicable validated-production spending limit, while a productless attempt charges no validated-production spend and remains subject to the separate consecutive-non-production hold; escalate if unresolved.",
     ),
 ];
 
@@ -5917,6 +5917,82 @@ fn purpose_route(kind: RouteKind) -> AnchoredRoute {
         .into_iter()
         .find(|route| route.kind == kind)
         .unwrap_or_else(|| panic!("missing purpose anchor {kind:?}"))
+}
+
+#[test]
+fn pr_review_repair_route_and_artifacts_are_unambiguous() {
+    let markdown = real_skill_markdown();
+    for clause in [
+        "Stage 6 always repairs the committed artifact through `step-executor` at the exact current PR head, regardless of `root_cause`.",
+        "Stage 6 does not re-dispatch `step-plan-writer`; there, `root_cause` is diagnostic and cannot override the code-repair route.",
+        "For `pr-reviewer`, ordinal `n` names `pr-review-<n>.json` and `pr-review-<n>.md`",
+    ] {
+        assert_eq!(markdown.matches(clause).count(), 1, "{clause}");
+    }
+    assert!(!markdown.contains("`step_plan` re-dispatches `step-plan-writer` cold"));
+}
+
+#[test]
+fn integration_branches_are_remote_and_retained_run_authority() {
+    let markdown = real_skill_markdown();
+    for clause in [
+        "push it to `origin` immediately when it is created and before the first step-readiness query",
+        "Retain both the local and remote integration branch while any active or resumable PCE run refers to it",
+        "Never remove either ref merely because one milestone has merged",
+    ] {
+        assert_eq!(markdown.matches(clause).count(), 1, "{clause}");
+    }
+}
+
+#[test]
+fn validated_production_spending_parks_and_resumes() {
+    let markdown = real_skill_markdown();
+    for clause in [
+        "The automatic validated-production spending limit is 12 per exact `(node, role)`.",
+        "Reaching it parks the series by opening the exact typed non-production hold",
+        "A human-recorded typed `retry` close records the current issuance ordinal and grants exactly the next dispatch",
+        "advancing the issuance ordinal consumes that one-use authority",
+        "Generic free-text escalation closure grants nothing",
+        "does not charge the reporting role's spending series",
+    ] {
+        assert_eq!(markdown.matches(clause).count(), 1, "{clause}");
+    }
+    assert!(!markdown.contains("validated-production defect round"));
+}
+
+#[test]
+fn child_tmpdir_and_mutation_gate_authority_are_explicit() {
+    let markdown = real_skill_markdown();
+    for clause in [
+        "fresh mode-`0700` directory under the platform temporary root",
+        "overrides `TMPDIR` for that child after applying the caller's forwarded environment",
+        "is not a fourth forwarded `--env` entry",
+        "Contract-check Seatbelt execution receives the same fresh `TMPDIR` lifecycle",
+        "Mutation testing has no universal or Rust-specific workflow command",
+        "runs only when the repository's tracked contract declares it",
+    ] {
+        assert_eq!(markdown.matches(clause).count(), 1, "{clause}");
+    }
+}
+
+#[test]
+fn codex_non_interactive_documents_detached_derived_lifecycle() {
+    let markdown = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/codex-non-interactive.md"
+    ))
+    .expect("codex non-interactive documentation");
+    for clause in [
+        "returns after issuance while a binary-owned continuation retains the child",
+        "No lifecycle tally or round counter is stored",
+        "Validated-production completions alone charge the validated-production spending limit",
+        "two consecutive non-producing completions for the same `(node, role, required artifact)` open the separate typed hold",
+        "`pce dispatch check-in` observes without closing",
+        "`pce dispatch reconcile` is the only way to close a dead incomplete issuance",
+    ] {
+        assert_eq!(markdown.matches(clause).count(), 1, "{clause}");
+    }
+    assert!(!markdown.contains("stdout is instead the byte-preserved live JSONL event stream"));
 }
 
 #[test]
@@ -6192,14 +6268,14 @@ fn manual_dispatch_lifecycle_surface_is_exact() {
 fn three_dispatch_derivations_are_exact() {
     let markdown = real_skill_markdown();
     let sentences = [
-        "These binary-owned issuance records are the sole source for dispatch refs and for the exact `(node, role)` issuance ordinal; validated-production completion facts alone derive defect rounds, while completion and required-artifact facts derive consecutive non-production.",
-        "Issuance-ordinal and defect-round series are keyed by `(node, role)`, while consecutive non-production is keyed by `(node, role, required artifact)`, so Phase 1 `(m1-s1, milestone-planner)` cannot collide with Phase 3 `(m1-s1, step-plan-writer)`.",
+        "These binary-owned issuance records are the sole source for dispatch refs and for the exact `(node, role)` issuance ordinal; validated-production completion facts alone derive validated-production spends, while completion and required-artifact facts derive consecutive non-production.",
+        "Issuance-ordinal and validated-production spending series are keyed by `(node, role)`, while consecutive non-production is keyed by `(node, role, required artifact)`, so Phase 1 `(m1-s1, milestone-planner)` cannot collide with Phase 3 `(m1-s1, step-plan-writer)`.",
         COMMON_ROLE_ROUTE_LIFETIME,
         "The issuance ordinal advances for every issuance and determines artifact naming only.",
-        "Separately, defect-round caps count only validated-production rounds keyed by `(node, role)`, so productless attempts are exempt.",
+        "Separately, validated-production spending limits count only validated-production spends keyed by `(node, role)`, so productless attempts are exempt.",
         "Consecutive non-production is keyed by `(node, role, required artifact)`; after two consecutive non-producing completions its typed hold is the separate stop, and the hold closes only through `retry`, `re-plan`, or `abandon`.",
-        "Use the next exact `(node, falsification-critic)` issuance ordinal only for the existing review-artifact naming rule; defect-round accounting and consecutive-non-production admission remain separate derivations, and no new counter or artifact family is added.",
-        "- Unexpected merge conflict dispatches Codex to rebase and resolve from the named base and head refs, supplying `git diff <base>...<head>`; a validated produced REVISE result charges the applicable defect-round cap, while a productless attempt charges no defect round and remains subject to the separate consecutive-non-production hold; escalate if unresolved.",
+        "Use the next exact `(node, falsification-critic)` issuance ordinal only for the existing review-artifact naming rule; validated-production spending accounting and consecutive-non-production admission remain separate derivations, and no new counter or artifact family is added.",
+        "- Unexpected merge conflict dispatches Codex to rebase and resolve from the named base and head refs, supplying `git diff <base>...<head>`; a validated produced REVISE result charges the applicable validated-production spending limit, while a productless attempt charges no validated-production spend and remains subject to the separate consecutive-non-production hold; escalate if unresolved.",
         "Immediately before each verdict-producing gate issuance, read the accepted source event log and derive the exact `(node, role)` issuance ordinal by counting every prior `dispatch` record whose node and role byte-match the route.",
         "After the gate finishes, read the exact JSON path and validate it again against the installed verdict schema.",
     ];

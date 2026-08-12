@@ -26,31 +26,21 @@ codex exec "summarize the repository structure and list the top 5 risky areas"
 
 While `codex exec` runs, Codex streams progress to `stderr` and prints only the final agent message to `stdout`. This makes it straightforward to redirect or pipe the final result:
 
-`pce dispatch codex` always adds `--json`, so its stdout is instead the byte-preserved live JSONL
-event stream. Stderr remains live progress. Use `-o` with `--output-schema` for the final-message
-file channel. Supplying the complete ordered `--log-file`, `--node`, `--role`, `--ref`,
-`--evidence`, and `--required-artifact` group opts into two durable records: issuance before spawn
-and measured completion after exit. The log and required artifact paths must be absolute; when `-o`
-is present, it is byte-identical to `--required-artifact`.
-Immediately after a real child spawn, the binary publishes the identity sidecar at
-`<LOG_PATH>.dispatches/<ISSUANCE_SEQUENCE>.json`. Exclusive same-directory atomic publication
-means an independent reader observes either no final path or one complete LF-terminated document,
-never a partial document. The sidecar names the issuance, real Darwin process number and kernel
-start identity, and required artifact without adding an event-log record.
-The completion correlates by the exact issuance sequence and records elapsed milliseconds, terminal
-usage or an explicit absence reason, and normal exit or Unix signal. An unstructured live dispatch
-records `not-validated`; a structured live dispatch records `validated`, `missing`, `truncated`,
-`schema-invalid`, or `schema-violating`. Every structured rejection exits nonzero even without
-logging. Lifecycle recording occurs only when the complete six-member group is supplied.
-Place `--dry-run` after that complete logging group and immediately before `--` to print one compact
-JSON projection instead. The projection includes the complete shell-free child invocation and both
-prospective lifecycle records. Process, clock, and structured artifact outcomes are `deferred`;
-structured artifact outcome is deferred because projection makes no filesystem observation. This
-mode reads an existing event-log tail only to validate a successor; it does not append or start Codex.
-
 ```bash
 codex exec "generate release notes for the last 10 commits" | tee release-notes.md
 ```
+
+### PCE dispatch lifecycle
+
+`pce dispatch codex` adds `--json`, but a logged live dispatch does not keep the invoking process attached to that stream. It appends issuance and returns after issuance while a binary-owned continuation retains the child. The continuation writes the byte-preserved Codex JSONL stream to `<LOG_PATH>.dispatch-<ISSUANCE_SEQUENCE>.stdout` and live progress to the corresponding `.stderr` sidecar. A caller observes the durable dispatch rather than treating the starter process's stdout as child output.
+
+The complete ordered `--log-file`, `--node`, `--role`, `--ref`, `--evidence`, and `--required-artifact` group opts into the durable lifecycle. Issuance is appended before spawn. Immediately after a real child spawn, the binary publishes the identity sidecar at `<LOG_PATH>.dispatches/<ISSUANCE_SEQUENCE>.json`. Exclusive same-directory atomic publication means an independent reader observes either no final path or one complete LF-terminated document, never a partial document. The sidecar names the issuance, real Darwin process number and kernel start identity, owning continuation identity, and required artifact without adding an event-log record. The continuation later appends exactly one measured completion correlated to the issuance sequence, with elapsed milliseconds, terminal usage or an explicit absence reason, and normal exit or Unix signal.
+
+For structured dispatch, use `-o` with `--output-schema` for the final-message artifact. The output and required-artifact paths must be absolute and byte-identical. An unstructured live dispatch records `not-validated`; a structured live dispatch records `validated`, `missing`, `truncated`, `schema-invalid`, or `schema-violating`. Every structured rejection exits nonzero. Lifecycle recording occurs only when the complete six-member group is supplied.
+
+Lifecycle and convergence state obey ADR-0002's placement rule. No lifecycle tally or round counter is stored. The exact `(node, role)` issuance ordinal is derived from issuance records and is used only for artifact naming. Validated-production completions alone charge the validated-production spending limit; productless attempts do not. Instead, two consecutive non-producing completions for the same `(node, role, required artifact)` open the separate typed hold. `pce dispatch check-in` observes without closing, signaling, or killing the child. `pce dispatch reconcile` is the only way to close a dead incomplete issuance, and it refuses while either the child or owning continuation can still append the observed completion.
+
+Place `--dry-run` after the complete logging group and immediately before `--` to print one compact JSON projection. The projection includes the complete shell-free child invocation and both prospective lifecycle records. Process, clock, and structured artifact outcomes are `deferred`; structured artifact outcome is deferred because projection makes no filesystem observation. This mode reads an existing event-log tail only to validate a successor; it does not append, publish a process identity, start Codex, or create a continuation.
 
 Use `--ephemeral` when you don't want to persist session rollout files to disk:
 
