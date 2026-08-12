@@ -908,6 +908,12 @@ pub struct StatedRepositoryContract {
     pub test: String,
     /// The build gate command.
     pub build: String,
+    /// The optional mutation-testing gate command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<String>,
+    /// The repository-declared release tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_tag: Option<String>,
     /// The version policy governing dispatch admission.
     pub version_policy: VersionPolicy,
     /// The branch convention governing step work.
@@ -930,6 +936,9 @@ pub struct GateObservations {
     pub test: ObservedExitStatus,
     /// The build gate exit status.
     pub build: ObservedExitStatus,
+    /// The optional mutation-testing gate exit status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<ObservedExitStatus>,
 }
 
 /// Exact local stand-ins keyed by repository workflow path.
@@ -1002,6 +1011,9 @@ impl RepositoryContractPayload {
                 .status(),
             test: gates.get(crate::tracked_contract::GateKind::Test).status(),
             build: gates.get(crate::tracked_contract::GateKind::Build).status(),
+            mutation: gates
+                .mutation()
+                .map(crate::contract_measurement::GateMeasurement::status),
         };
         let workflow_map = stated
             .workflows()
@@ -1026,6 +1038,10 @@ impl RepositoryContractPayload {
                 typecheck: commands.typecheck().as_str().to_owned(),
                 test: commands.test().as_str().to_owned(),
                 build: commands.build().as_str().to_owned(),
+                mutation: commands
+                    .mutation()
+                    .map(|command| command.as_str().to_owned()),
+                release_tag: stated.release_tag().map(|tag| tag.as_str().to_owned()),
                 version_policy: stated.version_policy().clone(),
                 branch_convention: render_branch_convention(stated.branches()),
                 pull_request_convention: render_pull_request_convention(stated.pull_requests()),
@@ -2059,6 +2075,10 @@ mod tests {
                 GateKind::Typecheck => payload.observations.typecheck,
                 GateKind::Test => payload.observations.test,
                 GateKind::Build => payload.observations.build,
+                GateKind::Mutation => payload
+                    .observations
+                    .mutation
+                    .unwrap_or(payload.observations.build),
             };
             assert_eq!(status.code(), 0);
         }

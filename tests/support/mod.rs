@@ -177,6 +177,8 @@ mkdir "$root/invocation" || exit 126
 } > "$root/invocation/request.bin" || exit 126
 pwd -P > "$root/invocation/cwd.bin" || exit 126
 /usr/bin/env -0 > "$root/invocation/environment.bin" || exit 126
+[ -d "${TMPDIR:-}" ] || exit 126
+: > "$TMPDIR/pce-child-probe" || exit 126
 cat > "$root/invocation/stdin.bin" || exit 126
 printf '%s\n' "$$" > "$root/invocation/pid" || exit 126
 if [ -n "${PCE_CODEX_BLOCK_FILE:-}" ]; then
@@ -210,6 +212,8 @@ mkdir "$root/invocation" || exit 126
 } > "$root/invocation/request.bin" || exit 126
 pwd -P > "$root/invocation/cwd.bin" || exit 126
 /usr/bin/env -0 > "$root/invocation/environment.bin" || exit 126
+[ -d "${TMPDIR:-}" ] || exit 126
+: > "$TMPDIR/pce-child-probe" || exit 126
 cat > "$root/invocation/stdin.bin" || exit 126
 printf '%s\n' "$$" > "$root/invocation/pid" || exit 126
 if [ -n "${PCE_CLAUDE_GATE_EXEC_REQUEST_DIR:-}" ] || [ -n "${PCE_CLAUDE_GATE_EXEC_RESPONSE_DIR:-}" ]; then

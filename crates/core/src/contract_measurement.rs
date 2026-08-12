@@ -79,21 +79,31 @@ pub struct GateMeasurements {
     typecheck: GateMeasurement,
     test: GateMeasurement,
     build: GateMeasurement,
+    mutation: Option<GateMeasurement>,
 }
 
 impl GateMeasurements {
     /// Return the observation for the requested gate role.
-    pub const fn get(&self, kind: GateKind) -> &GateMeasurement {
+    pub fn get(&self, kind: GateKind) -> &GateMeasurement {
         match kind {
             GateKind::Format => &self.format,
             GateKind::Lint => &self.lint,
             GateKind::Typecheck => &self.typecheck,
             GateKind::Test => &self.test,
             GateKind::Build => &self.build,
+            GateKind::Mutation => match self.mutation.as_ref() {
+                Some(measurement) => measurement,
+                None => &self.build,
+            },
         }
     }
 
-    /// Iterate over observations in format, lint, typecheck, test, build order.
+    /// Return the mutation-testing observation, when declared.
+    pub const fn mutation(&self) -> Option<&GateMeasurement> {
+        self.mutation.as_ref()
+    }
+
+    /// Iterate over observations in format, lint, typecheck, test, build, mutation order.
     pub fn iter(&self) -> impl Iterator<Item = &GateMeasurement> {
         [
             &self.format,
@@ -103,6 +113,7 @@ impl GateMeasurements {
             &self.build,
         ]
         .into_iter()
+        .chain(self.mutation.iter())
     }
 }
 
@@ -172,6 +183,10 @@ where
         typecheck: measure_gate(GateKind::Typecheck, commands.typecheck(), &mut execute)?,
         test: measure_gate(GateKind::Test, commands.test(), &mut execute)?,
         build: measure_gate(GateKind::Build, commands.build(), &mut execute)?,
+        mutation: commands
+            .mutation()
+            .map(|command| measure_gate(GateKind::Mutation, command, &mut execute))
+            .transpose()?,
     };
 
     Ok(MeasuredContractSnapshot {
@@ -475,5 +490,31 @@ mod tests {
             "failed to execute stated gate command `cargo fmt --check`: executor unavailable"
         );
         assert_eq!(calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn declared_mutation_gate_is_measured_after_cross_language_acceptance_gates() {
+        let contract = stated_with_mutation(|value| {
+            value["stated"]["gates"]["mutation"] = Value::String("python -m mutmut run".to_owned());
+        });
+        let calls = RefCell::new(Vec::new());
+
+        let snapshot = measure_contract_snapshot(contract.stated(), |command| {
+            calls.borrow_mut().push(command.as_str().to_owned());
+            Ok::<ObservedExitStatus, io::Error>(ObservedExitStatus::from_code(0))
+        })
+        .expect("mutation gate succeeds");
+
+        assert_eq!(
+            calls.borrow().last().map(String::as_str),
+            Some("python -m mutmut run")
+        );
+        assert_eq!(
+            snapshot
+                .gates()
+                .mutation()
+                .map(|measurement| measurement.status().code()),
+            Some(0)
+        );
     }
 }

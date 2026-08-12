@@ -18,7 +18,8 @@
       "milestone_base": "DEFAULT",
       "merge_method": "SQUASH"
     },
-    "workflows": []
+    "workflows": [],
+    "release_tag": "v0.1.16"
   },
   "appendable": {
     "environment_hazards": [],

@@ -159,7 +159,7 @@ fn paired_critic_task() -> String {
     )
 }
 const ORIGIN: &str = "origin";
-const RELEASE_TAG: &str = "v0.1.16";
+const LEGACY_RELEASE_TAG: &str = "v0.1.16";
 const TRACKED_REPOSITORY_CONTRACT_PATH: &str = ".pce/repository-contract.json";
 const FORMAT_BOOTSTRAP_CANDIDATES: &[&str] = &["cargo fmt --all --check", "cargo fmt --check"];
 const LINT_BOOTSTRAP_CANDIDATES: &[&str] = &[
@@ -437,6 +437,17 @@ impl RepositoryContract {
         }
     }
 
+    fn release_tag(&self) -> &str {
+        match self {
+            Self::Current(payload) => payload
+                .stated
+                .release_tag
+                .as_deref()
+                .unwrap_or(LEGACY_RELEASE_TAG),
+            Self::Legacy(_) => LEGACY_RELEASE_TAG,
+        }
+    }
+
     fn root(&self) -> &str {
         match self {
             Self::Current(payload) => payload.repo_root.as_str(),
@@ -497,6 +508,43 @@ impl ProcessResult {
     }
 }
 
+struct SynthesizedTemporaryDirectory(PathBuf);
+
+impl SynthesizedTemporaryDirectory {
+    fn create() -> Result<Self> {
+        let parent = std::env::temp_dir();
+        for attempt in 0..128_u64 {
+            let path = parent.join(format!(
+                "pce-{}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .context("system clock before epoch while creating TMPDIR")?
+                    .as_nanos(),
+                attempt
+            ));
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error).context("failed to create binary-owned TMPDIR"),
+            }
+        }
+        bail!("failed to allocate a unique binary-owned TMPDIR")
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for SynthesizedTemporaryDirectory {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            tracing::warn!(path = %self.0.display(), error = ?error, "failed to remove binary-owned TMPDIR");
+        }
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -520,15 +568,26 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         }
         Command::ExecutionSubjectProbe { output } => run_execution_subject_probe(&output),
         Command::PairedExecutionProof(command) => run_paired_execution_proof(command),
-        Command::Dispatch { envelope, logging } => match logging.as_ref() {
-            Some(DispatchLoggingMode::DryRun { path, metadata }) => {
-                run_dispatch_projection(&envelope, path, metadata)
+        Command::Dispatch { envelope, logging } => {
+            if dispatch_invocation(&envelope).target() == DispatchTarget::Codex
+                && let Some(schema) = envelope.schema_path()
+                && matches!(
+                    schema.as_path().file_name().and_then(|name| name.to_str()),
+                    Some("graph.schema.json" | "verdict.schema.json")
+                )
+            {
+                validate_codex_output_schema(schema.as_path())?;
             }
-            Some(DispatchLoggingMode::Live { path, metadata }) => {
-                start_logged_dispatch(&envelope, LiveDispatchLog { path, metadata })
+            match logging.as_ref() {
+                Some(DispatchLoggingMode::DryRun { path, metadata }) => {
+                    run_dispatch_projection(&envelope, path, metadata)
+                }
+                Some(DispatchLoggingMode::Live { path, metadata }) => {
+                    start_logged_dispatch(&envelope, LiveDispatchLog { path, metadata })
+                }
+                None => execute_dispatch(&envelope, None),
             }
-            None => execute_dispatch(&envelope, None),
-        },
+        }
         Command::DispatchCheckIn { log_path } => {
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
@@ -870,12 +929,14 @@ fn run_execution_subject_probe(relative_output: &Path) -> Result<()> {
     let path_value = std::env::var("PATH").context("execution subject probe requires PATH")?;
     let home_value = std::env::var("HOME").context("execution subject probe requires HOME")?;
     let user_value = std::env::var("USER").context("execution subject probe requires USER")?;
+    let temporary_directory = SynthesizedTemporaryDirectory::create()?;
     let status = std::process::Command::new(gate)
         .current_dir(&cwd)
         .env_clear()
         .env("PATH", path_value)
         .env("HOME", home_value)
         .env("USER", user_value)
+        .env("TMPDIR", temporary_directory.path())
         .stdin(Stdio::null())
         .status()
         .context("failed to execute the execution subject gate")?;
@@ -1933,6 +1994,88 @@ fn run_paired_execution_proof(command: PairedExecutionProofCommand) -> Result<()
     cleanup_result?;
     if !approved {
         bail!("paired execution proof refused");
+    }
+    Ok(())
+}
+
+fn validate_codex_output_schema(path: &Path) -> Result<()> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read Codex output schema {}", path.display()))?;
+    let schema: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("Codex output schema {} is not valid JSON", path.display()))?;
+    validate_codex_schema_node(&schema, "$", true).with_context(|| {
+        format!(
+            "Codex output schema {} violates the strict structured-output dialect",
+            path.display()
+        )
+    })
+}
+
+fn validate_codex_schema_node(schema: &Value, location: &str, root: bool) -> Result<()> {
+    let object = schema
+        .as_object()
+        .with_context(|| format!("schema node {location} must be an object"))?;
+    if root && object.get("type").and_then(Value::as_str) != Some("object") {
+        bail!("root schema type must be object");
+    }
+    if object.get("type").and_then(Value::as_str) == Some("object") {
+        let properties = object
+            .get("properties")
+            .and_then(Value::as_object)
+            .with_context(|| format!("object schema {location} must declare properties"))?;
+        if object.get("additionalProperties") != Some(&Value::Bool(false)) {
+            bail!("object schema {location} must set additionalProperties to false");
+        }
+        let required = object
+            .get("required")
+            .and_then(Value::as_array)
+            .with_context(|| format!("object schema {location} must declare required"))?;
+        let required_names = required
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_owned).with_context(|| {
+                    format!("object schema {location} has a non-string required entry")
+                })
+            })
+            .collect::<Result<std::collections::BTreeSet<_>>>()?;
+        let property_names = properties
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if required_names != property_names {
+            bail!("object schema {location} required must contain every and only property name");
+        }
+        for (name, child) in properties {
+            validate_codex_schema_node(child, &format!("{location}/properties/{name}"), false)?;
+        }
+    }
+    if object.get("type").and_then(Value::as_str) == Some("array") {
+        let items = object
+            .get("items")
+            .with_context(|| format!("array schema {location} must declare items"))?;
+        validate_codex_schema_node(items, &format!("{location}/items"), false)?;
+    }
+    for keyword in ["anyOf", "oneOf"] {
+        if let Some(branches) = object.get(keyword) {
+            let branches = branches
+                .as_array()
+                .with_context(|| format!("schema {location}/{keyword} must be an array"))?;
+            for (index, branch) in branches.iter().enumerate() {
+                validate_codex_schema_node(
+                    branch,
+                    &format!("{location}/{keyword}/{index}"),
+                    false,
+                )?;
+            }
+        }
+    }
+    if let Some(definitions) = object.get("$defs") {
+        let definitions = definitions
+            .as_object()
+            .with_context(|| format!("schema {location}/$defs must be an object"))?;
+        for (name, definition) in definitions {
+            validate_codex_schema_node(definition, &format!("{location}/$defs/{name}"), false)?;
+        }
     }
     Ok(())
 }
@@ -3114,6 +3257,7 @@ fn run_status(
         let (observation, runtime) = observe_repository(
             contract.name().clone(),
             PathBuf::from(contract.root()),
+            contract.release_tag(),
             &integration_branches,
             selected.subject.selector(),
         )?;
@@ -3312,6 +3456,7 @@ fn run_landing_check(
             let (observation, runtime) = observe_repository(
                 contract.name().clone(),
                 PathBuf::from(contract.root()),
+                contract.release_tag(),
                 &integration_branches,
                 selected_selector,
             )?;
@@ -3569,6 +3714,7 @@ fn run_ready(
         let (_, runtime) = observe_repository(
             contract.name().clone(),
             PathBuf::from(contract.root()),
+            contract.release_tag(),
             &[selector.base().as_str().to_owned()],
             &selector,
         )
@@ -5348,6 +5494,7 @@ fn integration_branches(nodes: &[CanonicalNode], selected_index: usize) -> Vec<S
 fn observe_repository(
     name: RepositoryName,
     root: PathBuf,
+    release_tag: &str,
     integration_branches: &[String],
     selector: &PullRequestSelector,
 ) -> Result<(RepositoryObservation, RepositoryRuntime)> {
@@ -5384,7 +5531,7 @@ fn observe_repository(
     let branch_state = probe_branch(&root, selected_branch)?;
     let head = selector.head().as_str();
     let worktree_state = probe_worktree(&root, head)?;
-    let tag_state = probe_tag(&root)?;
+    let tag_state = probe_tag(&root, release_tag)?;
     let observation = RepositoryObservation::new(
         name.clone(),
         fetch,
@@ -5393,7 +5540,7 @@ fn observe_repository(
         branch_state,
         WorktreeIdentity::parse(head).context("failed to parse worktree identity")?,
         worktree_state,
-        TagName::parse(RELEASE_TAG).context("failed to parse release tag name")?,
+        TagName::parse(release_tag).context("failed to parse release tag name")?,
         tag_state,
     );
     Ok((
@@ -5550,8 +5697,8 @@ fn validate_worktree_stanza(stanza: &str) -> Result<()> {
     Ok(())
 }
 
-fn probe_tag(root: &Path) -> Result<TagState> {
-    let reference = format!("refs/tags/{RELEASE_TAG}^{{}}");
+fn probe_tag(root: &Path, release_tag: &str) -> Result<TagState> {
+    let reference = format!("refs/tags/{release_tag}^{{}}");
     let args = git_args(
         root,
         ["rev-parse", "--verify", "--quiet", reference.as_str()],
@@ -7423,6 +7570,22 @@ fn execute_gate_process_with_bounds(
     command.current_dir(working_directory);
     command.env_clear();
     command.envs(stimulus.environment());
+    let temporary_directory = match SynthesizedTemporaryDirectory::create() {
+        Ok(directory) => directory,
+        Err(error) => {
+            return GateProcessExecution {
+                observation: Some(GateProcessObservation {
+                    status: GateTerminalStatus::SpawnFailed {
+                        detail: format!("failed to create binary-owned TMPDIR: {error:#}"),
+                    },
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                diagnostic: None,
+            };
+        }
+    };
+    command.env("TMPDIR", temporary_directory.path());
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -8394,6 +8557,8 @@ fn execute_dispatch(
     command.current_dir(invocation.cwd());
     command.env_clear();
     command.envs(invocation.environment());
+    let temporary_directory = SynthesizedTemporaryDirectory::create()?;
+    command.env("TMPDIR", temporary_directory.path());
     match invocation.stdin_bytes() {
         None => {
             command.stdin(Stdio::null());
@@ -8661,6 +8826,8 @@ fn spawn_envelope(envelope: &DispatchEnvelope) -> Result<ObservedExitStatus> {
     command.current_dir(invocation.cwd());
     command.env_clear();
     command.envs(invocation.environment());
+    let temporary_directory = SynthesizedTemporaryDirectory::create()?;
+    command.env("TMPDIR", temporary_directory.path());
     match invocation.stdin_bytes() {
         None => {
             command.stdin(Stdio::null());
@@ -13281,5 +13448,34 @@ None.
         );
         assert_eq!(member["merge_status"], "merged");
         assert_eq!(member.as_object().expect("step object").len(), 4);
+    }
+
+    #[test]
+    fn codex_dialect_rejects_object_properties_omitted_from_required() {
+        let directory = tempfile::tempdir().expect("schema fixture directory");
+        let path = directory.path().join("invalid.schema.json");
+        fs::write(
+            &path,
+            br#"{"type":"object","properties":{"kept":{"type":"string"},"omitted":{"type":"string"}},"required":["kept"],"additionalProperties":false}"#,
+        )
+        .expect("write schema fixture");
+
+        let error =
+            crate::validate_codex_output_schema(&path).expect_err("dialect mismatch must fail");
+        assert!(
+            format!("{error:#}").contains("required must contain every and only property name")
+        );
+    }
+
+    #[test]
+    fn installed_codex_schemas_conform_to_strict_dialect() {
+        for relative in [
+            "skills/pce/schemas/graph.schema.json",
+            "skills/pce/schemas/verdict.schema.json",
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            crate::validate_codex_output_schema(&path)
+                .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+        }
     }
 }

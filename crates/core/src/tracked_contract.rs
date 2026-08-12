@@ -49,6 +49,7 @@ pub struct StatedContract {
     branches: BranchConvention,
     pull_requests: PullRequestConvention,
     workflows: WorkflowMappings,
+    release_tag: Option<ReleaseTag>,
 }
 
 impl StatedContract {
@@ -75,6 +76,11 @@ impl StatedContract {
     /// Return the workflow-to-local-command mappings.
     pub const fn workflows(&self) -> &WorkflowMappings {
         &self.workflows
+    }
+
+    /// Return the repository-declared release tag, when this contract predates no such declaration.
+    pub const fn release_tag(&self) -> Option<&ReleaseTag> {
+        self.release_tag.as_ref()
     }
 }
 
@@ -333,6 +339,8 @@ pub enum GateKind {
     Test,
     /// The build gate.
     Build,
+    /// The optional repository-declared mutation-testing gate.
+    Mutation,
 }
 
 /// The five required acceptance-gate commands.
@@ -343,6 +351,7 @@ pub struct GateCommands {
     typecheck: GateCommand,
     test: GateCommand,
     build: GateCommand,
+    mutation: Option<GateCommand>,
 }
 
 impl GateCommands {
@@ -371,6 +380,11 @@ impl GateCommands {
         &self.build
     }
 
+    /// Return the repository-declared mutation-testing command, when present.
+    pub const fn mutation(&self) -> Option<&GateCommand> {
+        self.mutation.as_ref()
+    }
+
     /// Iterate over commands in format, lint, typecheck, test, build order.
     pub fn iter(&self) -> impl Iterator<Item = (GateKind, &GateCommand)> {
         [
@@ -381,6 +395,11 @@ impl GateCommands {
             (GateKind::Build, &self.build),
         ]
         .into_iter()
+        .chain(
+            self.mutation
+                .iter()
+                .map(|command| (GateKind::Mutation, command)),
+        )
     }
 }
 
@@ -399,6 +418,10 @@ macro_rules! non_empty_text_type {
     };
 }
 
+non_empty_text_type!(
+    /// The repository-declared tag observed by status.
+    ReleaseTag
+);
 non_empty_text_type!(
     /// The repository's non-empty default branch name.
     DefaultBranchName
@@ -713,6 +736,8 @@ struct RawStatedContract {
     branches: RawBranchConvention,
     pull_requests: RawPullRequestConvention,
     workflows: Vec<RawWorkflowMapping>,
+    #[serde(default)]
+    release_tag: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -723,6 +748,8 @@ struct RawGateCommands {
     typecheck: String,
     test: String,
     build: String,
+    #[serde(default)]
+    mutation: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -802,6 +829,10 @@ impl TryFrom<RawStatedContract> for StatedContract {
             branches: raw.branches.try_into()?,
             pull_requests: raw.pull_requests.into(),
             workflows: raw.workflows.try_into()?,
+            release_tag: raw
+                .release_tag
+                .map(|value| non_empty(value, "stated.release_tag").map(ReleaseTag))
+                .transpose()?,
         })
     }
 }
@@ -816,6 +847,10 @@ impl TryFrom<RawGateCommands> for GateCommands {
             typecheck: GateCommand(non_empty(raw.typecheck, "stated.gates.typecheck")?),
             test: GateCommand(non_empty(raw.test, "stated.gates.test")?),
             build: GateCommand(non_empty(raw.build, "stated.gates.build")?),
+            mutation: raw
+                .mutation
+                .map(|value| non_empty(value, "stated.gates.mutation").map(GateCommand))
+                .transpose()?,
         })
     }
 }
@@ -993,6 +1028,8 @@ struct CanonicalStatedContract<'a> {
     branches: CanonicalBranchConvention<'a>,
     pull_requests: CanonicalPullRequestConvention,
     workflows: Vec<CanonicalWorkflowMapping<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_tag: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -1002,6 +1039,8 @@ struct CanonicalGateCommands<'a> {
     typecheck: &'a str,
     test: &'a str,
     build: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mutation: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -1078,6 +1117,7 @@ impl<'a> From<&'a TrackedRepositoryContract> for CanonicalTrackedRepositoryContr
                     typecheck: gates.typecheck().as_str(),
                     test: gates.test().as_str(),
                     build: gates.build().as_str(),
+                    mutation: gates.mutation().map(GateCommand::as_str),
                 },
                 version_policy: match stated.version_policy() {
                     VersionPolicy::None => CanonicalVersionPolicy::None,
@@ -1119,6 +1159,7 @@ impl<'a> From<&'a TrackedRepositoryContract> for CanonicalTrackedRepositoryContr
                         },
                     })
                     .collect(),
+                release_tag: stated.release_tag().map(ReleaseTag::as_str),
             },
             appendable: CanonicalAppendableContract {
                 environment_hazards: appendable
@@ -1164,11 +1205,12 @@ mod tests {
 
     use super::{
         AppendableCategory, AppendableContract, AppendableFinding, DefaultBranchName,
-        EnvironmentHazard, FindingAdmission, GateCommandParseError, GateKind, GateOrdering,
-        LocalWorkflowStandIn, LockfileRule, MilestoneBranchPattern, MilestonePullRequestBase,
-        PullRequestMergeMethod, StatedContract, StepBranchPattern, StepPullRequestBase,
-        TrackedContractError, admit_recurrent_finding, parse_gate_command,
-        parse_tracked_repository_contract, serialize_tracked_repository_contract,
+        EnvironmentHazard, FindingAdmission, GateCommand, GateCommandParseError, GateKind,
+        GateOrdering, LocalWorkflowStandIn, LockfileRule, MilestoneBranchPattern,
+        MilestonePullRequestBase, PullRequestMergeMethod, ReleaseTag, StatedContract,
+        StepBranchPattern, StepPullRequestBase, TrackedContractError, admit_recurrent_finding,
+        parse_gate_command, parse_tracked_repository_contract,
+        serialize_tracked_repository_contract,
     };
     use crate::run_state::VersionPolicy;
 
@@ -1723,5 +1765,28 @@ mod tests {
         let serialized_value: Value =
             serde_json::from_slice(&serialized).expect("serialized contract should be JSON");
         assert_eq!(serialized_value["stated"], stated_before);
+    }
+
+    #[test]
+    fn repository_may_declare_cross_language_mutation_gate() {
+        let mut value: Value =
+            serde_json::from_slice(VALID_TRACKED_CONTRACT).expect("contract fixture JSON");
+        value["stated"]["gates"]["mutation"] = Value::String("python -m mutmut run".to_owned());
+        value["stated"]["release_tag"] = Value::String("release-2026-08".to_owned());
+        let bytes = serde_json::to_vec(&value).expect("serialize contract fixture");
+
+        let contract = parse_tracked_repository_contract(&bytes).expect("extended contract parses");
+        assert_eq!(
+            contract
+                .stated()
+                .gates()
+                .mutation()
+                .map(GateCommand::as_str),
+            Some("python -m mutmut run")
+        );
+        assert_eq!(
+            contract.stated().release_tag().map(ReleaseTag::as_str),
+            Some("release-2026-08")
+        );
     }
 }

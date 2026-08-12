@@ -666,7 +666,7 @@ fn assert_dry_projection_case(name: &str, structured: bool, plan: Option<&[u8]>)
     projected_environment.insert(OsString::from(format!("PWD={}", cwd.display())));
     projected_environment.insert(OsString::from("SHLVL=1"));
     projected_environment.insert(OsString::from("_=/usr/bin/env"));
-    assert_eq!(invocations[0].environment, projected_environment);
+    assert_environment_with_synthesized_tmpdir(&invocations[0].environment, &projected_environment);
     assert!(
         !invocations[0].environment.contains(&OsString::from(format!(
             "{}={}",
@@ -1554,6 +1554,20 @@ fn dispatch_argv<A: CallerArguments + ?Sized>(
     argv
 }
 
+fn assert_environment_with_synthesized_tmpdir(
+    actual: &BTreeSet<OsString>,
+    expected: &BTreeSet<OsString>,
+) {
+    let tmp_entries = actual
+        .iter()
+        .filter(|entry| entry.to_string_lossy().starts_with("TMPDIR="))
+        .collect::<Vec<_>>();
+    assert_eq!(tmp_entries.len(), 1, "one binary-owned TMPDIR is required");
+    let mut forwarded = actual.clone();
+    forwarded.remove(tmp_entries[0]);
+    assert_eq!(&forwarded, expected);
+}
+
 fn assert_invocation<A: CallerArguments + ?Sized>(
     invocation: &CodexInvocation,
     cwd: &Path,
@@ -1588,7 +1602,7 @@ fn assert_invocation<A: CallerArguments + ?Sized>(
     expected_environment.insert(OsString::from(format!("PWD={}", cwd.display())));
     expected_environment.insert(OsString::from("SHLVL=1"));
     expected_environment.insert(OsString::from("_=/usr/bin/env"));
-    assert_eq!(invocation.environment, expected_environment);
+    assert_environment_with_synthesized_tmpdir(&invocation.environment, &expected_environment);
     assert!(!invocation.environment.contains(&OsString::from(format!(
         "{}={}",
         INHERITED_MARKER.0, INHERITED_MARKER.1
@@ -3719,7 +3733,7 @@ fn gate_invocation_is_pinned_and_environment_is_exact() {
         OsString::from("SHLVL=1"),
         OsString::from("_=/usr/bin/env"),
     ]);
-    assert_eq!(invocation.environment, expected);
+    assert_environment_with_synthesized_tmpdir(&invocation.environment, &expected);
     assert!(
         !invocation
             .environment
@@ -5661,7 +5675,7 @@ fn gate_parent_anthropic_key_is_absent_from_exact_child_environment() {
         OsString::from("SHLVL=1"),
         OsString::from("_=/usr/bin/env"),
     ]);
-    assert_eq!(invocation.environment, expected);
+    assert_environment_with_synthesized_tmpdir(&invocation.environment, &expected);
     assert!(
         !invocation
             .environment

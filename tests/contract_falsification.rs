@@ -864,7 +864,7 @@ fn contract_check_gate_child_environment_forwards_only_runtime_allowlist() {
     fs::write(
         &shim,
         format!(
-            "#!/bin/sh\nenv | sed 's/=.*//' | sort -u | grep -v -E '^(PWD|SHLVL|_)$' > '{}' || exit 74\nwhile IFS= read -r name; do\n  case \"$name\" in PATH|HOME|CARGO_HOME|RUSTUP_HOME) ;; *) exit 75 ;; esac\ndone < '{}'\n",
+            "#!/bin/sh\nenv | sed 's/=.*//' | sort -u | grep -v -E '^(PWD|SHLVL|_)$' > '{}' || exit 74\n[ -d \"$TMPDIR\" ] || exit 76\ntouch \"$TMPDIR/contract-gate-probe\" || exit 77\nwhile IFS= read -r name; do\n  case \"$name\" in PATH|HOME|CARGO_HOME|RUSTUP_HOME|TMPDIR) ;; *) exit 75 ;; esac\ndone < '{}'\n",
             observed.display(),
             observed.display()
         ),
@@ -889,9 +889,10 @@ fn contract_check_gate_child_environment_forwards_only_runtime_allowlist() {
     );
     let names = fs::read_to_string(observed).expect("observed environment should read");
     assert!(
-        names
-            .lines()
-            .all(|name| matches!(name, "PATH" | "HOME" | "CARGO_HOME" | "RUSTUP_HOME")),
+        names.lines().all(|name| matches!(
+            name,
+            "PATH" | "HOME" | "CARGO_HOME" | "RUSTUP_HOME" | "TMPDIR"
+        )),
         "unexpected child environment: {names:?}"
     );
 }
