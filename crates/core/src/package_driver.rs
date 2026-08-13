@@ -8,7 +8,10 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{DependencyKind, WorkPackageGraph};
+use crate::{
+    DependencyKind, RecoveryBudget, RecoveryCriterionEvidence, RecoveryLimits, RecoveryRung,
+    WorkPackageGraph, recovery_budget,
+};
 
 /// One shell termination observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,10 +145,42 @@ pub fn judge_finding_replay(
     }
 }
 
+/// One rung retained in the final cold-readable parking record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryAttemptRecord {
+    pub rung: RecoveryRung,
+    pub issuance: Option<u64>,
+    pub what: String,
+    pub evidence: Vec<RecoveryCriterionEvidence>,
+}
+
 /// One append-only fact in the driver journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DriverEvent {
+    /// The named spending limits selected once for this graph run.
+    RecoveryConfigured { limits: RecoveryLimits },
+    /// A recovery dispatch and the exact augmented brief supplied to it.
+    RecoveryRungAttempted {
+        package: String,
+        issuance: u64,
+        rung: RecoveryRung,
+        evidence: Vec<RecoveryCriterionEvidence>,
+        brief: String,
+    },
+    /// A process/toolchain failure returned the package to readiness without charging its budget.
+    WorkerEnvironmentFailed {
+        package: String,
+        issuance: u64,
+        reason: String,
+    },
+    /// Exhaustion parks only this package and retains the complete three-rung account.
+    RecoveryParked {
+        package: String,
+        reason: String,
+        attempts: Vec<RecoveryAttemptRecord>,
+    },
     /// A worker was issued. Absence of a later outcome means it is still running.
     WorkerDispatched { package: String, issuance: u64 },
     /// A worker claimed implementation completion and may now be judged.
@@ -215,6 +250,7 @@ pub struct DriverSnapshot {
     packages: Vec<(String, DriverPackageState)>,
     ready: Vec<String>,
     amendments: Vec<(String, EffectiveCriterion)>,
+    recovery: Vec<(String, RecoveryBudget)>,
     outcome: DriverLoopOutcome,
 }
 impl DriverSnapshot {
@@ -226,6 +262,9 @@ impl DriverSnapshot {
     }
     pub fn amendments(&self) -> &[(String, EffectiveCriterion)] {
         &self.amendments
+    }
+    pub fn recovery(&self) -> &[(String, RecoveryBudget)] {
+        &self.recovery
     }
     pub const fn outcome(&self) -> DriverLoopOutcome {
         self.outcome
@@ -256,6 +295,9 @@ pub enum PackageDriverError {
         gate: String,
         finding: u64,
     },
+    /// More than one distinct limit configuration appears in one graph-run journal.
+    #[error("driver journal contains conflicting recovery limit configurations")]
+    ConflictingRecoveryLimits,
 }
 
 /// Fold the append-only journal into scheduling state.
@@ -269,6 +311,15 @@ pub fn derive_driver_snapshot(
     events: &[DriverEvent],
     override_risk_ordering: bool,
 ) -> Result<DriverSnapshot, PackageDriverError> {
+    let mut configured_limits = None;
+    for event in events {
+        if let DriverEvent::RecoveryConfigured { limits } = event {
+            if configured_limits.is_some_and(|configured| configured != *limits) {
+                return Err(PackageDriverError::ConflictingRecoveryLimits);
+            }
+            configured_limits = Some(*limits);
+        }
+    }
     let known = graph
         .packages()
         .iter()
@@ -288,9 +339,13 @@ pub fn derive_driver_snapshot(
                 | DriverPackageState::Parked { .. }
         )
     };
-    for event in events {
+    for (event_index, event) in events.iter().enumerate() {
         let package = match event {
-            DriverEvent::WorkerDispatched { package, .. }
+            DriverEvent::RecoveryConfigured { .. } => continue,
+            DriverEvent::RecoveryRungAttempted { package, .. }
+            | DriverEvent::WorkerEnvironmentFailed { package, .. }
+            | DriverEvent::RecoveryParked { package, .. }
+            | DriverEvent::WorkerDispatched { package, .. }
             | DriverEvent::WorkerDone { package, .. }
             | DriverEvent::WorkerFailed { package, .. }
             | DriverEvent::PackageParked { package, .. }
@@ -309,6 +364,38 @@ pub fn derive_driver_snapshot(
             .get_mut(package)
             .unwrap_or_else(|| unreachable!("known package initialized"));
         match event {
+            DriverEvent::RecoveryConfigured { .. } => unreachable!("configuration handled above"),
+            DriverEvent::RecoveryRungAttempted { .. } => {
+                if !matches!(state, DriverPackageState::Pending) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+            }
+            DriverEvent::WorkerEnvironmentFailed { issuance, .. } => match state {
+                DriverPackageState::Running { issuance: running } if running == issuance => {
+                    *state = DriverPackageState::Pending;
+                }
+                _ => {
+                    return Err(PackageDriverError::UnmatchedOutcome {
+                        package: package.clone(),
+                        issuance: *issuance,
+                    });
+                }
+            },
+            DriverEvent::RecoveryParked { reason, .. } => {
+                if matches!(
+                    state,
+                    DriverPackageState::Complete | DriverPackageState::Parked { .. }
+                ) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+                *state = DriverPackageState::Parked {
+                    reason: reason.clone(),
+                };
+            }
             DriverEvent::WorkerDispatched { issuance, .. } => {
                 if *issuance == 0 {
                     return Err(PackageDriverError::ZeroIssuance {
@@ -341,8 +428,15 @@ pub fn derive_driver_snapshot(
                 issuance, reason, ..
             } => match state {
                 DriverPackageState::Running { issuance: running } if running == issuance => {
-                    *state = DriverPackageState::Failed {
-                        reason: reason.clone(),
+                    let charged = charged_failure_count(&events[..=event_index], package);
+                    if configured_limits.is_some_and(|limits| {
+                        recovery_budget(limits, charged).next_rung != RecoveryRung::Replan
+                    }) {
+                        *state = DriverPackageState::Pending;
+                    } else {
+                        *state = DriverPackageState::Failed {
+                            reason: reason.clone(),
+                        };
                     }
                 }
                 _ => {
@@ -426,9 +520,16 @@ pub fn derive_driver_snapshot(
                         package: package.clone(),
                     });
                 }
-                *state = DriverPackageState::Failed {
-                    reason: reason.clone(),
-                };
+                let charged = charged_failure_count(&events[..=event_index], package);
+                if configured_limits.is_some_and(|limits| {
+                    recovery_budget(limits, charged).next_rung != RecoveryRung::Replan
+                }) {
+                    *state = DriverPackageState::Pending;
+                } else {
+                    *state = DriverPackageState::Failed {
+                        reason: reason.clone(),
+                    };
+                }
             }
         }
     }
@@ -461,6 +562,17 @@ pub fn derive_driver_snapshot(
     } else {
         DriverLoopOutcome::Blocked
     };
+    let recovery = graph
+        .packages()
+        .iter()
+        .map(|package| {
+            let charged = charged_failure_count(events, package.id().as_str());
+            (
+                package.id().as_str().to_owned(),
+                recovery_budget(configured_limits.unwrap_or_default(), charged),
+            )
+        })
+        .collect();
     let packages = graph
         .packages()
         .iter()
@@ -477,8 +589,112 @@ pub fn derive_driver_snapshot(
         packages,
         ready,
         amendments,
+        recovery,
         outcome,
     })
+}
+
+/// Count only worker-reported or criterion-judgement failures attributed to package work.
+pub fn charged_failure_count(events: &[DriverEvent], package_id: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event,
+        DriverEvent::WorkerFailed { package, .. } | DriverEvent::PackageFailed { package, .. }
+        if package == package_id)
+        })
+        .count()
+}
+
+/// Return the most recent failed criterion executions for a package.
+pub fn latest_criterion_failure_evidence(
+    events: &[DriverEvent],
+    package_id: &str,
+) -> Vec<RecoveryCriterionEvidence> {
+    let start = events
+        .iter()
+        .rposition(|event| {
+            matches!(event,
+        DriverEvent::WorkerDispatched { package, .. } if package == package_id)
+        })
+        .unwrap_or(0);
+    events[start..]
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::CriterionExecuted {
+                package,
+                name,
+                execution,
+                ..
+            } if package == package_id && !execution.exit_status().is_success() => {
+                let exit_status = match execution.exit_status() {
+                    CommandExitStatus::Exited { code } => format!("exited {code}"),
+                    CommandExitStatus::Signaled { signal } => format!("signaled {signal}"),
+                };
+                Some(RecoveryCriterionEvidence {
+                    criterion: name.clone(),
+                    command: execution.command().to_owned(),
+                    exit_status,
+                    stdout: execution.stdout().to_owned(),
+                    stderr: execution.stderr().to_owned(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Reconstruct the cold-readable record for all attempted rungs, adding the final replan.
+pub fn recovery_attempt_records(
+    events: &[DriverEvent],
+    package_id: &str,
+    final_evidence: Vec<RecoveryCriterionEvidence>,
+) -> Vec<RecoveryAttemptRecord> {
+    let mut records = events.iter().filter_map(|event| match event {
+        DriverEvent::RecoveryRungAttempted { package, issuance, rung, evidence, .. }
+            if package == package_id => Some(RecoveryAttemptRecord {
+                rung: *rung, issuance: Some(*issuance),
+                what: match rung { RecoveryRung::Retry => "same package and same brief with a fresh worker".to_owned(), RecoveryRung::LocalPatch => "same package with recorded criterion failure evidence appended to its brief".to_owned(), RecoveryRung::Replan => "park for plan version n+1".to_owned() },
+                evidence: evidence.clone(),
+            }),
+        _ => None,
+    }).collect::<Vec<_>>();
+    records.push(RecoveryAttemptRecord {
+        rung: RecoveryRung::Replan,
+        issuance: None,
+        what: "park for human re-authoring as plan version n+1".to_owned(),
+        evidence: final_evidence,
+    });
+    records
+}
+
+/// Compose the graph-authored portion passed unchanged to retry and extended for local patch.
+pub fn recovery_base_brief(
+    graph: &WorkPackageGraph,
+    package_id: &str,
+) -> Result<String, PackageDriverError> {
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == package_id)
+        .ok_or_else(|| PackageDriverError::UnknownPackage {
+            package: package_id.to_owned(),
+        })?;
+    let mut brief = format!(
+        "# Work package {}: {}\n\nCriteria:\n",
+        package.id().as_str(),
+        package.title()
+    );
+    for criterion in package.criteria() {
+        brief.push_str(&format!(
+            "- {}\n  Input: {}\n  Observation: {}\n  Command: {}\n",
+            criterion.name(),
+            criterion.input(),
+            criterion.observation(),
+            criterion.command()
+        ));
+    }
+    Ok(brief)
 }
 
 /// Return graph criteria plus accepted amendments, preserving authored then journal order.
@@ -519,10 +735,38 @@ pub fn effective_criteria(
 #[cfg(test)]
 mod tests {
     use super::{DriverEvent, DriverLoopOutcome, DriverPackageState, derive_driver_snapshot};
-    use crate::parse_work_package_graph;
+    use crate::{LocalPatchLimit, RecoveryLimits, RetryLimit, parse_work_package_graph};
 
     fn graph() -> crate::WorkPackageGraph {
         parse_work_package_graph(br#"{"vision":"v","plan_version":1,"authored_at_ref":"HEAD","packages":[{"id":"A","title":"A","repositories":["r"],"criteria":[{"name":"a","input":"i","observation":"o","command":"true"}],"depends_on":[]},{"id":"B","title":"B","repositories":["r"],"criteria":[{"name":"b","input":"i","observation":"o","command":"true"}],"depends_on":[{"id":"A","kind":"buildability","reason":"A"}]}]}"#).expect("valid graph")
+    }
+
+    #[test]
+    fn restart_rederives_identical_recovery_budget_and_ready_dispatch() {
+        let graph = graph();
+        let events = vec![
+            DriverEvent::RecoveryConfigured {
+                limits: RecoveryLimits::new(RetryLimit::new(1), LocalPatchLimit::new(1)),
+            },
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::WorkerFailed {
+                package: "A".to_owned(),
+                issuance: 1,
+                reason: "work blocker".to_owned(),
+            },
+        ];
+        let before = derive_driver_snapshot(&graph, &events, false).expect("before restart");
+        let restarted = derive_driver_snapshot(&graph, &events, false).expect("after restart");
+        assert_eq!(before, restarted);
+        assert_eq!(restarted.ready(), &["A"]);
+        assert_eq!(restarted.recovery()[0].1.dispatches_remaining, 2);
+        assert_eq!(
+            restarted.recovery()[0].1.next_rung,
+            crate::RecoveryRung::Retry
+        );
     }
 
     #[test]
