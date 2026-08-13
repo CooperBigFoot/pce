@@ -21,6 +21,7 @@ pub mod package_gate;
 pub mod package_recovery;
 pub mod package_worker;
 pub mod paired_execution_proof;
+pub mod run_render;
 pub mod run_state;
 pub mod tracked_contract;
 pub mod vision;
@@ -78,6 +79,7 @@ pub use paired_execution_proof::{
     ReferenceValidation, ReplayClassifications, fold_paired_execution_proof,
     paired_stimulus_identity, parse_paired_falsification_verdict,
 };
+pub use run_render::{RunRenderError, render_package_run};
 
 /// Exact diagnostic emitted when a nested Seatbelt capability probe is denied.
 pub const NESTED_SEATBELT_SKIP_MARKER: &str =

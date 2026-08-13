@@ -81,10 +81,11 @@ use pce_core::{
     parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
     parse_work_package_graph, ready_work_packages, rebase_gate_stimulus, recovery_attempt_records,
     recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
-    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
-    serialize_package_worker_result, serialize_tracked_repository_contract, validate_artifact,
-    validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
-    validated_dispatch_completion_payload, verify_criterion_change,
+    render_package_run, seatbelt_capability_probe, serialize_dispatch_check_in,
+    serialize_dispatch_process_identity, serialize_package_worker_result,
+    serialize_tracked_repository_contract, validate_artifact, validate_package_gate_repositories,
+    validate_verdict_references, validate_workflow_coverage, validated_dispatch_completion_payload,
+    verify_criterion_change,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -104,6 +105,7 @@ const USAGE: &str = concat!(
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
+    "       pce package render --graph <GRAPH_PATH> [--journal <DRIVER_JOURNAL>] --output <HTML_PATH>\n",
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
     "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] -- <WORKER_ARG>...\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
@@ -258,6 +260,13 @@ struct PackageDispatchCommand {
 }
 
 #[derive(Debug)]
+struct PackageRenderCommand {
+    graph_path: PathBuf,
+    journal_path: Option<PathBuf>,
+    output_path: PathBuf,
+}
+
+#[derive(Debug)]
 struct DriverStatusCommand {
     graph_path: PathBuf,
     journal_path: PathBuf,
@@ -311,6 +320,7 @@ enum Command {
     PackageGateBrief(PackageGateBriefCommand),
     PackageGateAgent(PackageGateAgentCommand),
     PackageDispatch(PackageDispatchCommand),
+    PackageRender(PackageRenderCommand),
     DriverStatus(DriverStatusCommand),
     DriverCriteria(DriverCriteriaCommand),
     DriverReplay(DriverReplayCommand),
@@ -714,6 +724,7 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::PackageGateBrief(command) => run_package_gate_brief(command),
         Command::PackageGateAgent(command) => run_package_gate_agent(command),
         Command::PackageDispatch(command) => run_package_dispatch(command),
+        Command::PackageRender(command) => run_package_render(command),
         Command::DriverStatus(command) => run_driver_status(command),
         Command::DriverCriteria(command) => run_driver_criteria(command),
         Command::DriverReplay(command) => run_driver_replay(command),
@@ -867,6 +878,9 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         }
         [verb, action, rest @ ..] if verb == "package" && action == "gate-agent" => {
             parse_package_gate_agent(rest)
+        }
+        [verb, action, rest @ ..] if verb == "package" && action == "render" => {
+            parse_package_render(rest)
         }
         [verb, action, rest @ ..] if verb == "package" && action == "driver-status" => {
             parse_driver_status(rest)
@@ -1594,6 +1608,35 @@ fn parse_package_completions(rest: &[String]) -> Result<Command> {
     })
 }
 
+fn parse_package_render(rest: &[String]) -> Result<Command> {
+    let (graph, journal, output) = match rest {
+        [graph_flag, graph, output_flag, output]
+            if graph_flag == "--graph" && output_flag == "--output" =>
+        {
+            (graph, None, output)
+        }
+        [
+            graph_flag,
+            graph,
+            journal_flag,
+            journal,
+            output_flag,
+            output,
+        ] if graph_flag == "--graph"
+            && journal_flag == "--journal"
+            && output_flag == "--output" =>
+        {
+            (graph, Some(PathBuf::from(journal)), output)
+        }
+        _ => bail!(USAGE),
+    };
+    Ok(Command::PackageRender(PackageRenderCommand {
+        graph_path: PathBuf::from(graph),
+        journal_path: journal,
+        output_path: PathBuf::from(output),
+    }))
+}
+
 fn parse_driver_status(rest: &[String]) -> Result<Command> {
     let override_risk_ordering = rest
         .last()
@@ -2138,6 +2181,26 @@ fn read_driver_graph(path: &Path) -> Result<WorkPackageGraph> {
     let bytes =
         fs::read(path).with_context(|| format!("failed to read graph {}", path.display()))?;
     parse_work_package_graph(&bytes).context("failed to parse driver graph")
+}
+
+fn run_package_render(command: PackageRenderCommand) -> Result<()> {
+    let graph = read_driver_graph(&command.graph_path)?;
+    let events = match &command.journal_path {
+        Some(path) => {
+            fs::metadata(path)
+                .with_context(|| format!("failed to read render journal {}", path.display()))?;
+            read_driver_journal(path)
+                .with_context(|| format!("failed to read render journal {}", path.display()))?
+        }
+        None => Vec::new(),
+    };
+    let html = render_package_run(&graph, &events).context("failed to render package run")?;
+    fs::write(&command.output_path, html).with_context(|| {
+        format!(
+            "failed to write rendered package run {}",
+            command.output_path.display()
+        )
+    })
 }
 
 fn run_driver_status(command: DriverStatusCommand) -> Result<()> {
