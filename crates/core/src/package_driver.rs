@@ -203,6 +203,13 @@ pub enum DriverEvent {
         issuance: u64,
         reason: String,
     },
+    /// Repetition established that this package's worker environment is persistently unavailable.
+    PackageEnvironmentBlocked {
+        package: String,
+        issuance: u64,
+        reason: String,
+        identical_failures: u32,
+    },
     /// Exhaustion parks only this package and retains the complete three-rung account.
     RecoveryParked {
         package: String,
@@ -345,13 +352,31 @@ pub enum DriverEvent {
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum DriverPackageState {
     Pending,
-    Running { issuance: u64 },
-    Judging { issuance: u64 },
+    Running {
+        issuance: u64,
+    },
+    Judging {
+        issuance: u64,
+    },
     Complete,
-    Failed { reason: String },
-    CompositionFailed { repository: String, reason: String },
-    EnvironmentPreparationFailed { repository: String, command: String },
-    Parked { reason: String },
+    Failed {
+        reason: String,
+    },
+    CompositionFailed {
+        repository: String,
+        reason: String,
+    },
+    EnvironmentPreparationFailed {
+        repository: String,
+        command: String,
+    },
+    EnvironmentBlocked {
+        reason: String,
+        identical_failures: u32,
+    },
+    Parked {
+        reason: String,
+    },
 }
 
 /// Restart-derived lifecycle state of the final graph assembly.
@@ -489,6 +514,7 @@ pub fn derive_driver_snapshot(
                 | DriverPackageState::Failed { .. }
                 | DriverPackageState::CompositionFailed { .. }
                 | DriverPackageState::EnvironmentPreparationFailed { .. }
+                | DriverPackageState::EnvironmentBlocked { .. }
                 | DriverPackageState::Parked { .. }
         )
     };
@@ -591,6 +617,7 @@ pub fn derive_driver_snapshot(
             | DriverEvent::PackageBaseComposed { package, .. }
             | DriverEvent::PackageCompositionFailed { package, .. }
             | DriverEvent::WorkerEnvironmentFailed { package, .. }
+            | DriverEvent::PackageEnvironmentBlocked { package, .. }
             | DriverEvent::RecoveryParked { package, .. }
             | DriverEvent::WorkerSpawnFailed { package, .. }
             | DriverEvent::WorkerDispatched { package, .. }
@@ -654,6 +681,25 @@ pub fn derive_driver_snapshot(
             DriverEvent::WorkerEnvironmentFailed { issuance, .. } => match state {
                 DriverPackageState::Running { issuance: running } if running == issuance => {
                     *state = DriverPackageState::Pending;
+                }
+                _ => {
+                    return Err(PackageDriverError::UnmatchedOutcome {
+                        package: package.clone(),
+                        issuance: *issuance,
+                    });
+                }
+            },
+            DriverEvent::PackageEnvironmentBlocked {
+                issuance,
+                reason,
+                identical_failures,
+                ..
+            } => match state {
+                DriverPackageState::Running { issuance: running } if running == issuance => {
+                    *state = DriverPackageState::EnvironmentBlocked {
+                        reason: reason.clone(),
+                        identical_failures: *identical_failures,
+                    };
                 }
                 _ => {
                     return Err(PackageDriverError::UnmatchedOutcome {
@@ -1045,6 +1091,66 @@ pub fn pending_completed_pane_cleanups(events: &[DriverEvent]) -> Vec<PendingPan
         .collect()
 }
 
+/// Construct the zero-charge outcome for one worker-environment report from durable history.
+///
+/// Exact equality of the package and reason identifies recurrence. The report that reaches the
+/// configured threshold becomes the distinct terminal event, so every observed cause remains in
+/// the journal without a second, non-atomic state transition.
+pub fn worker_environment_outcome(
+    events: &[DriverEvent],
+    limits: RecoveryLimits,
+    package: String,
+    issuance: u64,
+    reason: String,
+) -> DriverEvent {
+    let mut prior_identical = 0_usize;
+    for event in events.iter().rev() {
+        match event {
+            DriverEvent::WorkerEnvironmentFailed {
+                package: observed_package,
+                reason: observed_reason,
+                ..
+            } if observed_package == &package && observed_reason == &reason => {
+                prior_identical = prior_identical.saturating_add(1);
+            }
+            DriverEvent::WorkerEnvironmentFailed {
+                package: observed_package,
+                ..
+            }
+            | DriverEvent::WorkerSpawnFailed {
+                package: observed_package,
+                ..
+            }
+            | DriverEvent::WorkerDone {
+                package: observed_package,
+                ..
+            }
+            | DriverEvent::WorkerFailed {
+                package: observed_package,
+                ..
+            } if observed_package == &package => break,
+            _ => {}
+        }
+    }
+    let identical_failures = u32::try_from(prior_identical)
+        .unwrap_or(u32::MAX)
+        .saturating_add(1);
+    if identical_failures >= limits.environment_failures() {
+        DriverEvent::PackageEnvironmentBlocked {
+            package,
+            issuance,
+            reason,
+            identical_failures,
+        }
+    } else {
+        DriverEvent::WorkerEnvironmentFailed {
+            package,
+            issuance,
+            reason,
+        }
+    }
+}
+
 /// Count only worker-reported or criterion-judgement failures attributed to package work.
 pub fn charged_failure_count(events: &[DriverEvent], package_id: &str) -> usize {
     events
@@ -1188,9 +1294,12 @@ mod tests {
     use super::{
         CommandExitStatus, CompositionInput, CriterionExecution, CriterionOrigin,
         DriverAssemblyState, DriverEvent, DriverLoopOutcome, DriverPackageState,
-        charged_failure_count, derive_driver_snapshot,
+        charged_failure_count, derive_driver_snapshot, worker_environment_outcome,
     };
-    use crate::{LocalPatchLimit, RecoveryLimits, RetryLimit, parse_work_package_graph};
+    use crate::{
+        EnvironmentFailureLimit, LocalPatchLimit, RecoveryLimits, RetryLimit,
+        parse_work_package_graph,
+    };
 
     fn graph() -> crate::WorkPackageGraph {
         parse_work_package_graph(br#"{"vision":"v","plan_version":1,"authored_at_ref":"HEAD","packages":[{"id":"A","title":"A","repositories":["r"],"criteria":[{"name":"a","input":"i","observation":"o","command":"true"}],"depends_on":[]},{"id":"B","title":"B","repositories":["r"],"criteria":[{"name":"b","input":"i","observation":"o","command":"true"}],"depends_on":[{"id":"A","kind":"buildability","reason":"A"}]}]}"#).expect("valid graph")
@@ -1215,6 +1324,76 @@ mod tests {
                 ]
             })
             .collect()
+    }
+
+    #[test]
+    fn restart_rederives_identical_environment_failures_and_blocks_at_configured_limit() {
+        let graph = graph();
+        let limits = RecoveryLimits::new(RetryLimit::new(1), LocalPatchLimit::new(1))
+            .with_environment_failure_limit(EnvironmentFailureLimit::new(2));
+        let mut events = vec![
+            DriverEvent::RecoveryConfigured { limits },
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+        ];
+        events.push(worker_environment_outcome(
+            &events,
+            limits,
+            "A".to_owned(),
+            1,
+            "same environment".to_owned(),
+        ));
+        let journal = serde_json::to_vec(&events).expect("serialize journal");
+        let mut restarted: Vec<DriverEvent> =
+            serde_json::from_slice(&journal).expect("reload journal");
+        restarted.push(DriverEvent::WorkerDispatched {
+            package: "A".to_owned(),
+            issuance: 2,
+        });
+        restarted.push(worker_environment_outcome(
+            &restarted,
+            limits,
+            "A".to_owned(),
+            2,
+            "same environment".to_owned(),
+        ));
+        let snapshot = derive_driver_snapshot(&graph, &restarted, false).expect("snapshot");
+        assert!(matches!(
+            &snapshot.packages()[0].1,
+            DriverPackageState::EnvironmentBlocked {
+                reason,
+                identical_failures: 2
+            } if reason == "same environment"
+        ));
+        assert!(matches!(
+            &snapshot.packages()[1].1,
+            DriverPackageState::Pending
+        ));
+        assert_eq!(snapshot.outcome(), DriverLoopOutcome::Blocked);
+        assert_eq!(charged_failure_count(&restarted, "A"), 0);
+    }
+
+    #[test]
+    fn a_different_environment_reason_resets_the_identical_streak() {
+        let limits = RecoveryLimits::new(RetryLimit::new(1), LocalPatchLimit::new(1))
+            .with_environment_failure_limit(EnvironmentFailureLimit::new(2));
+        let events = vec![DriverEvent::WorkerEnvironmentFailed {
+            package: "A".to_owned(),
+            issuance: 1,
+            reason: "first cause".to_owned(),
+        }];
+        assert!(matches!(
+            worker_environment_outcome(
+                &events,
+                limits,
+                "A".to_owned(),
+                2,
+                "second cause".to_owned(),
+            ),
+            DriverEvent::WorkerEnvironmentFailed { .. }
+        ));
     }
 
     #[test]

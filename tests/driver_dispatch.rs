@@ -407,3 +407,130 @@ fi
     assert_eq!(journal_text.matches("worker-spawn-failed").count(), 1);
     assert_eq!(journal_text.matches("worker-dispatched").count(), 2);
 }
+
+#[test]
+fn repeated_identical_worker_environment_failure_terminates_without_spending_recovery_budget() {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let temp = tempdir().expect("tempdir");
+    let repository = temp.path().join("repo");
+    fs::create_dir(&repository).expect("repository");
+    for args in [
+        ["init"].as_slice(),
+        ["config", "user.email", "test@example.com"].as_slice(),
+        ["config", "user.name", "Test"].as_slice(),
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(&repository)
+                .args(args)
+                .status()
+                .expect("git")
+                .success()
+        );
+    }
+    fs::write(repository.join("seed"), "seed\n").expect("seed");
+    assert!(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["add", "."])
+            .status()
+            .expect("add")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["commit", "-m", "seed"])
+            .status()
+            .expect("commit")
+            .success()
+    );
+    fs::write(
+        temp.path().join("vision.md"),
+        "# Vision: environment backstop\n",
+    )
+    .expect("vision");
+    let graph = temp.path().join("graph.json");
+    fs::write(&graph, format!(r#"{{"vision":"environment-backstop-{}","plan_version":1,"authored_at_ref":"HEAD","packages":[{{"id":"A","title":"A","repositories":["repo"],"criteria":[{{"name":"floor","input":"repo","observation":"true","command":"true"}}],"depends_on":[]}},{{"id":"B","title":"B","repositories":["repo"],"criteria":[{{"name":"floor","input":"repo","observation":"true","command":"true"}}],"depends_on":[{{"id":"A","kind":"buildability","reason":"A enables B"}}]}},{{"id":"X","title":"X","repositories":["repo"],"criteria":[{{"name":"floor","input":"repo","observation":"true","command":"true"}}],"depends_on":[]}}]}}"#, std::process::id())).expect("graph");
+    let journal = temp.path().join("driver.jsonl");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "driver-run", "--graph"])
+        .arg(&graph)
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--environment-failure-limit", "2"])
+        .args(["--repository"])
+        .arg(format!("repo={}", repository.display()))
+        .args([
+            "--worker-override",
+            "--",
+            "sh",
+            "-c",
+            r#"if [ "$PCE_PACKAGE" = A ]; then exit 23; else printf '%s' '{"outcome":"done"}' > "$PCE_PACKAGE_OUTCOME"; fi"#,
+        ])
+        .env(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+            temp.path().join("worktrees"),
+        )
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("driver");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll driver") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill looping driver");
+            let _ = child.wait();
+            break None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "driver did not terminate successfully; journal: {}",
+        fs::read_to_string(&journal).unwrap_or_default()
+    );
+    use std::io::Read as _;
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .expect("driver stdout")
+        .read_to_string(&mut stdout)
+        .expect("read driver stdout");
+    let snapshot: serde_json::Value = serde_json::from_str(&stdout).expect("snapshot");
+    let state = |package: &str| {
+        snapshot["packages"]
+            .as_array()
+            .expect("packages")
+            .iter()
+            .find(|entry| entry[0] == package)
+            .expect("package")[1]["state"]
+            .as_str()
+            .expect("state")
+    };
+    assert_eq!(state("A"), "environment-blocked");
+    assert_eq!(state("B"), "pending");
+    assert_eq!(state("X"), "complete");
+    assert_eq!(snapshot["outcome"], "blocked");
+    assert_eq!(snapshot["recovery"][0][1]["retry_remaining"], 1);
+    assert_eq!(snapshot["recovery"][0][1]["local_patch_remaining"], 1);
+    let journal = fs::read_to_string(&journal).expect("journal");
+    assert_eq!(journal.matches("worker-environment-failed").count(), 1);
+    assert!(journal.contains("package-environment-blocked"));
+    for distinct_outcome in [
+        "worker-failed",
+        "package-failed",
+        "package-parked",
+        "recovery-parked",
+        "environment-preparation-executed",
+    ] {
+        assert!(!journal.contains(distinct_outcome));
+    }
+    assert!(!journal.contains("recovery-rung-attempted"));
+}

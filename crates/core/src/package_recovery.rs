@@ -33,26 +33,55 @@ impl LocalPatchLimit {
     }
 }
 
-/// Adjustable attempt allowances before the mandatory replan rung.
+/// Number of identical worker-environment reports at which the environment is deemed persistent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EnvironmentFailureLimit(u32);
+impl EnvironmentFailureLimit {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+impl Default for EnvironmentFailureLimit {
+    fn default() -> Self {
+        Self::new(6)
+    }
+}
+
+/// Adjustable driver limits, including the recovery ladder's unchanged spending allowances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryLimits {
     retry_attempts: RetryLimit,
     local_patch_attempts: LocalPatchLimit,
+    #[serde(default)]
+    environment_failures: EnvironmentFailureLimit,
 }
 impl RecoveryLimits {
-    /// Construct named limits for the two dispatching rungs.
+    /// Construct named limits for the two dispatching rungs and the default environment backstop.
     pub const fn new(retry_attempts: RetryLimit, local_patch_attempts: LocalPatchLimit) -> Self {
         Self {
             retry_attempts,
             local_patch_attempts,
+            environment_failures: EnvironmentFailureLimit::new(6),
         }
+    }
+    /// Select the identical-environment-failure threshold without changing recovery spending.
+    pub const fn with_environment_failure_limit(mut self, limit: EnvironmentFailureLimit) -> Self {
+        self.environment_failures = limit;
+        self
     }
     pub const fn retry_attempts(self) -> u32 {
         self.retry_attempts.get()
     }
     pub const fn local_patch_attempts(self) -> u32 {
         self.local_patch_attempts.get()
+    }
+    pub const fn environment_failures(self) -> u32 {
+        self.environment_failures.get()
     }
     pub const fn dispatch_budget(self) -> u32 {
         self.retry_attempts()

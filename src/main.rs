@@ -34,11 +34,11 @@ use pce_core::{
     DispatchLedgerCompletion, DispatchLogging, DispatchPayload, DispatchProcessIdentity,
     DispatchProjectionInput, DispatchRef, DispatchRequiredArtifactObservation, DispatchRole,
     DispatchRoleClass, DispatchRootCause, DispatchTarget, DispatchTokenUsage, DispatchVisionSource,
-    DispatchabilityResult, DriverAssemblyState, DriverEvent, EnvironmentPreparationOutcome,
-    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
-    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState,
-    ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable, ExitCode,
-    ExpectedVerdictOutcome, FileObservation, FindingAdmission, FindingRejectionReason,
+    DispatchabilityResult, DriverAssemblyState, DriverEvent, EnvironmentFailureLimit,
+    EnvironmentPreparationOutcome, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
+    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
+    ExactPullRequestState, ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable,
+    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FindingRejectionReason,
     FindingReplayDecision, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
     GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
     GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
@@ -89,7 +89,7 @@ use pce_core::{
     serialize_package_worker_result, serialize_tracked_repository_contract, validate_artifact,
     validate_package_gate_finding_repositories, validate_package_gate_repositories,
     validate_verdict_references, validate_workflow_coverage, validated_dispatch_completion_payload,
-    verify_criterion_change,
+    verify_criterion_change, worker_environment_outcome,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -111,7 +111,7 @@ const USAGE: &str = concat!(
     "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
     "       pce package render --graph <GRAPH_PATH> [--journal <DRIVER_JOURNAL>] --output <HTML_PATH>\n",
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
-    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
+    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
@@ -1822,6 +1822,7 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
     let mut override_risk_ordering = false;
     let mut retry_limit = 1_u32;
     let mut local_patch_limit = 1_u32;
+    let mut environment_failure_limit = 6_u32;
     let mut wait_timeout = None;
     let mut mapping_args = Vec::new();
     let mut index = 4;
@@ -1829,16 +1830,21 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
         if options[index] == "--override-risk-ordering" {
             override_risk_ordering = true;
             index += 1;
-        } else if options[index] == "--retry-limit" || options[index] == "--local-patch-limit" {
+        } else if options[index] == "--retry-limit"
+            || options[index] == "--local-patch-limit"
+            || options[index] == "--environment-failure-limit"
+        {
             let value = options
                 .get(index + 1)
-                .context("recovery limit requires a value")?
+                .context("driver limit requires a value")?
                 .parse::<u32>()
-                .context("recovery limit must be an unsigned integer")?;
+                .context("driver limit must be an unsigned integer")?;
             if options[index] == "--retry-limit" {
                 retry_limit = value;
-            } else {
+            } else if options[index] == "--local-patch-limit" {
                 local_patch_limit = value;
+            } else {
+                environment_failure_limit = value;
             }
             index += 2;
         } else if options[index] == "--wait-timeout-ms" {
@@ -1867,7 +1873,8 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
         recovery_limits: RecoveryLimits::new(
             RetryLimit::new(retry_limit),
             LocalPatchLimit::new(local_patch_limit),
-        ),
+        )
+        .with_environment_failure_limit(EnvironmentFailureLimit::new(environment_failure_limit)),
         worker_override,
         wait_timeout,
     }))
@@ -1888,11 +1895,13 @@ fn ensure_recovery_configuration(command: &DriverRunCommand, events: &[DriverEve
     });
     match configured {
         Some(limits) if limits != command.recovery_limits => bail!(
-            "driver recovery limits are already retry={} local-patch={}, not retry={} local-patch={}",
+            "driver limits are already retry={} local-patch={} environment-failure={}, not retry={} local-patch={} environment-failure={}",
             limits.retry_attempts(),
             limits.local_patch_attempts(),
+            limits.environment_failures(),
             command.recovery_limits.retry_attempts(),
-            command.recovery_limits.local_patch_attempts()
+            command.recovery_limits.local_patch_attempts(),
+            command.recovery_limits.environment_failures()
         ),
         Some(_) => Ok(()),
         None => append_driver_event(
@@ -1902,6 +1911,18 @@ fn ensure_recovery_configuration(command: &DriverRunCommand, events: &[DriverEve
             },
         ),
     }
+}
+
+fn append_worker_environment_outcome(
+    command: &DriverRunCommand,
+    package: String,
+    issuance: u64,
+    reason: String,
+) -> Result<()> {
+    let events = read_driver_journal(&command.journal_path)?;
+    let event =
+        worker_environment_outcome(&events, command.recovery_limits, package, issuance, reason);
+    append_driver_event(&command.journal_path, &event)
 }
 
 fn park_if_recovery_exhausted(command: &DriverRunCommand, package_id: &str) -> Result<()> {
@@ -3026,16 +3047,14 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                                 &graph, &command, package, issuance, &outcome,
                             )?;
                         } else {
-                            append_driver_event(
-                                &command.journal_path,
-                                &DriverEvent::WorkerEnvironmentFailed {
-                                    package,
-                                    issuance,
-                                    reason: format!(
-                                        "package dispatch stopped without a successful required artifact: {:?}",
-                                        result.exit_status()
-                                    ),
-                                },
+                            append_worker_environment_outcome(
+                                &command,
+                                package,
+                                issuance,
+                                format!(
+                                    "package dispatch stopped without a successful required artifact: {:?}",
+                                    result.exit_status()
+                                ),
                             )?;
                         }
                     }
@@ -3217,15 +3236,13 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                 .wait()
                 .with_context(|| format!("failed to wait for worker {package_id}"))?;
             if !status.success() {
-                append_driver_event(
-                    &command.journal_path,
-                    &DriverEvent::WorkerEnvironmentFailed {
-                        package: package_id,
-                        issuance,
-                        reason: format!(
-                            "worker process exited with {status}; no package judgement was produced"
-                        ),
-                    },
+                append_worker_environment_outcome(
+                    &command,
+                    package_id,
+                    issuance,
+                    format!(
+                        "worker process exited with {status}; no package judgement was produced"
+                    ),
                 )?;
                 continue;
             }
@@ -3281,16 +3298,14 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                 let healthy = matches!(result.exit_status(), DispatchExitStatus::Exited { code } if code.get() == 0)
                     && result.required_artifact_presence() == RequiredArtifactPresence::Present;
                 if !healthy {
-                    append_driver_event(
-                        &command.journal_path,
-                        &DriverEvent::WorkerEnvironmentFailed {
-                            package: package_id,
-                            issuance,
-                            reason: format!(
-                                "package dispatch stopped without a successful required artifact: {:?}",
-                                result.exit_status()
-                            ),
-                        },
+                    append_worker_environment_outcome(
+                        &command,
+                        package_id,
+                        issuance,
+                        format!(
+                            "package dispatch stopped without a successful required artifact: {:?}",
+                            result.exit_status()
+                        ),
                     )?;
                     continue;
                 }

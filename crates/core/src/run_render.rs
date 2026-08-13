@@ -80,6 +80,9 @@ fn state_identity(
         DriverPackageState::EnvironmentPreparationFailed { .. } => {
             ("environment", "⚑", "Environment not prepared")
         }
+        DriverPackageState::EnvironmentBlocked { .. } => {
+            ("environment", "⚑", "Worker environment unavailable")
+        }
     }
 }
 

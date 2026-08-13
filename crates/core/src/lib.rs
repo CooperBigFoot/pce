@@ -58,7 +58,7 @@ pub use package_driver::{
     FindingReplayDecision, PackageDriverError, PaneCleanupOutcome, PendingPaneCleanup,
     RecoveryAttemptRecord, charged_failure_count, derive_driver_snapshot, effective_criteria,
     judge_finding_replay, latest_criterion_failure_evidence, pending_completed_pane_cleanups,
-    recovery_attempt_records, recovery_base_brief,
+    recovery_attempt_records, recovery_base_brief, worker_environment_outcome,
 };
 pub use package_gate::{
     BuiltArtifactRef, PackageGateError, PackageGateFinding, PackageGateRepositoryRefs,
@@ -66,8 +66,8 @@ pub use package_gate::{
     validate_package_gate_finding_repositories, validate_package_gate_repositories,
 };
 pub use package_recovery::{
-    LocalPatchLimit, RecoveryBudget, RecoveryCriterionEvidence, RecoveryLimits, RecoveryRung,
-    RetryLimit, compose_local_patch_brief, recovery_budget,
+    EnvironmentFailureLimit, LocalPatchLimit, RecoveryBudget, RecoveryCriterionEvidence,
+    RecoveryLimits, RecoveryRung, RetryLimit, compose_local_patch_brief, recovery_budget,
 };
 pub use package_worker::{
     MisSpecificationFault, PackageOutcome, PackageWorkerError, RepositoryWorktree, VisionGoal,
