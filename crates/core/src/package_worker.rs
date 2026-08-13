@@ -284,6 +284,13 @@ pub enum PackageOutcome {
 #[serde(try_from = "String")]
 pub struct NonEmptyString(String);
 
+impl NonEmptyString {
+    /// Return the exact non-empty value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl TryFrom<String> for NonEmptyString {
     type Error = &'static str;
     fn try_from(value: String) -> Result<Self, Self::Error> {

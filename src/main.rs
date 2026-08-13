@@ -21,55 +21,57 @@ use pce_core::{
     AbsoluteDispatchTemporaryDirectory, AbsoluteGateExecClientPath,
     AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath, AbsoluteOutputPath,
     AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
-    AbsoluteWorktreeRoot, AcceptanceCriteria, ActReversibility, AppendError, AppendableCategory,
-    AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath, ArtifactProduction,
-    AuthorityFailure, BranchState, BuiltArtifactRef, CanonicalNode as DispatchNode,
-    CheckoutFailure, CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage,
-    CompletionCriterionStatus, CompletionDecision, CreationDate, CriterionChangeDecision,
+    AbsoluteWorktreeRoot, AcceptanceCriteria, ActReversibility, AmendmentRepositoryRefs,
+    AppendError, AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome,
+    ArtifactPath, ArtifactProduction, AuthorityFailure, BranchState, BuiltArtifactRef,
+    CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
+    CodexTerminalObservation, CodexTerminalUsage, CommandExitStatus, CompletionCriterionStatus,
+    CompletionDecision, CreationDate, CriterionChangeDecision, CriterionExecution,
     CurrentArtifactObservation, CurrentArtifactState, DispatchAdmission, DispatchCandidate,
     DispatchCompletionPayload, DispatchDuration, DispatchEnvelope, DispatchExitStatus,
     DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion, DispatchLogging,
     DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
     DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass, DispatchRootCause,
-    DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchabilityResult, EventBodyRef,
-    EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
-    Evidence, ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
-    ExceptionalMergeChainObservation, Executable, ExitCode, ExpectedVerdictOutcome,
-    FileObservation, FindingAdmission, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
-    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
-    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
-    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
-    HerdrTabId, HerdrWorkspaceId, KnownPayload, LandingReadinessDecision,
-    LegacyRepositoryContractPayload, MeasuredContractSnapshot, MergeStatus, MergeSubject,
-    MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId, NonProductionHoldOpenPayload,
-    NonProductionKey, ObservedExitStatus, ObservedWorkflowName, OracleFailure, OracleStage,
-    OrderingEdge, PackageWorkerResult, PackageWorkerStoppedAt, PairedCampaign,
-    PairedExecutionProofError, PairedReplayClassification, ProcessIdentityObservation,
-    ProcessNumber, ProcessStartIdentity, PullRequestAuthorityObservation, PullRequestNumber,
-    PullRequestSelector, ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome,
-    RecordedProcessIdentity, RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation,
-    ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
-    RepositoryContractPayload, RepositoryDispatchInput, RepositoryFetchObservation, RepositoryName,
-    RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
-    RepositoryRelativePath, RepositoryRoot, RepositoryWorktree, RequiredArtifactPresence,
-    RiskOrdering, RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest, SignalNumber,
-    SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
-    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionGoal, VisionName, VisionSlug,
-    WorkPackageClassification, WorkPackageGraph, WorkPackageId, WorkPackageMergeObservation,
-    WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment, WorktreeIdentity,
-    WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
-    classify_codex_terminal_usage, classify_dispatch_admission, classify_dispatch_check_in,
-    classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
-    compose_herdr_work_package_dispatch, compose_package_gate_brief, compose_package_worker_argv,
-    compose_package_worker_brief, compose_planning_role_frame, compute_dispatchability,
-    create_vision, derive_dispatch_outcome_state, derive_merge_status,
-    derive_milestone_merge_status, derive_package_result_path, derive_run_state,
-    derive_run_state_with_dispatch_artifacts, derive_run_state_with_exceptional_merge_chains,
-    derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
-    dispatch_payload, evaluate_completion, evaluate_landing_readiness, event_record_matches,
-    fold_dispatch_ledger, fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot,
+    DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchabilityResult, DriverEvent,
+    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
+    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState,
+    ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable, ExitCode,
+    ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
+    GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef,
+    GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
+    GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
+    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation,
+    HerdrAgentLocation, HerdrInvocation, HerdrTabId, HerdrWorkspaceId, KnownPayload,
+    LandingReadinessDecision, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
+    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
+    NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
+    OracleFailure, OracleStage, OrderingEdge, PackageWorkerResult, PackageWorkerStoppedAt,
+    PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
+    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
+    PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
+    ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
+    RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation, ReplayClassifications,
+    ReplayObservation, ReplayRefResult, RepositoryBranchName, RepositoryContractPayload,
+    RepositoryDispatchInput, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
+    RepositoryWorktree, RequiredArtifactPresence, RiskOrdering, RunSnapshot, Sandbox,
+    SeatbeltCapability, Sequence, Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding,
+    StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName, TagState,
+    TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy,
+    VisionGoal, VisionName, VisionSlug, WorkPackageClassification, WorkPackageGraph, WorkPackageId,
+    WorkPackageMergeObservation, WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment,
+    WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
+    classify_claude_result, classify_codex_terminal_usage, classify_dispatch_admission,
+    classify_dispatch_check_in, classify_replay_pair, classify_seatbelt_capability,
+    compose_gate_arguments, compose_herdr_work_package_dispatch, compose_package_gate_brief,
+    compose_package_worker_argv, compose_package_worker_brief, compose_planning_role_frame,
+    compute_dispatchability, create_vision, derive_dispatch_outcome_state, derive_driver_snapshot,
+    derive_merge_status, derive_milestone_merge_status, derive_package_result_path,
+    derive_run_state, derive_run_state_with_dispatch_artifacts,
+    derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
+    dispatch_completion_payload, dispatch_invocation, dispatch_payload, effective_criteria,
+    evaluate_completion, evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
+    fold_paired_execution_proof, fold_replay_runs, judge_finding_replay, measure_contract_snapshot,
     meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
     parse_acceptance_criteria, parse_claude_result, parse_dispatch_process_identity,
     parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
@@ -100,6 +102,10 @@ const USAGE: &str = concat!(
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
+    "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
+    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--override-risk-ordering] -- <WORKER_ARG>...\n",
+    "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>...\n",
+    "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>...\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
     "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
@@ -250,6 +256,41 @@ struct PackageDispatchCommand {
 }
 
 #[derive(Debug)]
+struct DriverStatusCommand {
+    graph_path: PathBuf,
+    journal_path: PathBuf,
+    override_risk_ordering: bool,
+}
+
+#[derive(Debug)]
+struct DriverCriteriaCommand {
+    graph_path: PathBuf,
+    journal_path: PathBuf,
+    package_id: String,
+    repositories: Vec<(String, PathBuf)>,
+}
+
+#[derive(Debug)]
+struct DriverReplayCommand {
+    graph_path: PathBuf,
+    journal_path: PathBuf,
+    package_id: String,
+    gate: String,
+    finding: usize,
+    outcome_path: PathBuf,
+    repositories: Vec<(String, PathBuf)>,
+}
+
+#[derive(Debug)]
+struct DriverRunCommand {
+    graph_path: PathBuf,
+    journal_path: PathBuf,
+    repositories: Vec<(String, PathBuf)>,
+    override_risk_ordering: bool,
+    worker_arguments: Vec<String>,
+}
+
+#[derive(Debug)]
 enum Command {
     DispatchContinuation,
     GateExec,
@@ -264,6 +305,10 @@ enum Command {
     PackageGateBrief(PackageGateBriefCommand),
     PackageGateAgent(PackageGateAgentCommand),
     PackageDispatch(PackageDispatchCommand),
+    DriverStatus(DriverStatusCommand),
+    DriverCriteria(DriverCriteriaCommand),
+    DriverReplay(DriverReplayCommand),
+    DriverRun(DriverRunCommand),
     PackageWorker {
         result_path: PathBuf,
         required_artifact_path: PathBuf,
@@ -663,6 +708,10 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::PackageGateBrief(command) => run_package_gate_brief(command),
         Command::PackageGateAgent(command) => run_package_gate_agent(command),
         Command::PackageDispatch(command) => run_package_dispatch(command),
+        Command::DriverStatus(command) => run_driver_status(command),
+        Command::DriverCriteria(command) => run_driver_criteria(command),
+        Command::DriverReplay(command) => run_driver_replay(command),
+        Command::DriverRun(command) => run_driver_loop(command),
         Command::PackageWorker {
             result_path,
             required_artifact_path,
@@ -812,6 +861,18 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         }
         [verb, action, rest @ ..] if verb == "package" && action == "gate-agent" => {
             parse_package_gate_agent(rest)
+        }
+        [verb, action, rest @ ..] if verb == "package" && action == "driver-status" => {
+            parse_driver_status(rest)
+        }
+        [verb, action, rest @ ..] if verb == "package" && action == "criteria-run" => {
+            parse_driver_criteria(rest)
+        }
+        [verb, action, rest @ ..] if verb == "package" && action == "replay-finding" => {
+            parse_driver_replay(rest)
+        }
+        [verb, action, rest @ ..] if verb == "package" && action == "driver-run" => {
+            parse_driver_run(rest)
         }
         [verb, action] if verb == "vision" && action == "check" => Ok(Command::VisionCheck),
         [verb, action, raw_name] if verb == "vision" && action == "new" => {
@@ -1517,6 +1578,689 @@ fn parse_package_completions(rest: &[String]) -> Result<Command> {
         log_path,
         vision_dir,
     })
+}
+
+fn parse_driver_status(rest: &[String]) -> Result<Command> {
+    let override_risk_ordering = rest
+        .last()
+        .is_some_and(|value| value == "--override-risk-ordering");
+    let values = if override_risk_ordering {
+        &rest[..rest.len() - 1]
+    } else {
+        rest
+    };
+    let [graph_flag, graph, journal_flag, journal] = values else {
+        bail!(USAGE);
+    };
+    if graph_flag != "--graph" || journal_flag != "--journal" {
+        bail!(USAGE);
+    }
+    Ok(Command::DriverStatus(DriverStatusCommand {
+        graph_path: PathBuf::from(graph),
+        journal_path: PathBuf::from(journal),
+        override_risk_ordering,
+    }))
+}
+
+fn parse_repository_mappings(rest: &[String]) -> Result<Vec<(String, PathBuf)>> {
+    if rest.is_empty() || !rest.len().is_multiple_of(2) {
+        bail!(USAGE);
+    }
+    let mut repositories = Vec::new();
+    for pair in rest.chunks_exact(2) {
+        if pair[0] != "--repository" {
+            bail!(USAGE);
+        }
+        let (name, raw_path) = pair[1]
+            .split_once('=')
+            .context("repository mapping requires NAME=PATH")?;
+        if name.is_empty() {
+            bail!("repository mapping name must be non-empty");
+        }
+        repositories.push((name.to_owned(), PathBuf::from(raw_path)));
+    }
+    Ok(repositories)
+}
+
+fn parse_driver_criteria(rest: &[String]) -> Result<Command> {
+    let [
+        graph_flag,
+        graph,
+        journal_flag,
+        journal,
+        package_flag,
+        package,
+        trailing @ ..,
+    ] = rest
+    else {
+        bail!(USAGE);
+    };
+    if graph_flag != "--graph" || journal_flag != "--journal" || package_flag != "--package" {
+        bail!(USAGE);
+    }
+    Ok(Command::DriverCriteria(DriverCriteriaCommand {
+        graph_path: PathBuf::from(graph),
+        journal_path: PathBuf::from(journal),
+        package_id: package.clone(),
+        repositories: parse_repository_mappings(trailing)?,
+    }))
+}
+
+fn parse_driver_replay(rest: &[String]) -> Result<Command> {
+    let [
+        graph_flag,
+        graph,
+        journal_flag,
+        journal,
+        package_flag,
+        package,
+        gate_flag,
+        gate,
+        finding_flag,
+        finding,
+        outcome_flag,
+        outcome,
+        trailing @ ..,
+    ] = rest
+    else {
+        bail!(USAGE);
+    };
+    if graph_flag != "--graph"
+        || journal_flag != "--journal"
+        || package_flag != "--package"
+        || gate_flag != "--gate"
+        || finding_flag != "--finding"
+        || outcome_flag != "--outcome"
+    {
+        bail!(USAGE);
+    }
+    Ok(Command::DriverReplay(DriverReplayCommand {
+        graph_path: PathBuf::from(graph),
+        journal_path: PathBuf::from(journal),
+        package_id: package.clone(),
+        gate: gate.clone(),
+        finding: finding
+            .parse()
+            .context("finding index must be an unsigned integer")?,
+        outcome_path: PathBuf::from(outcome),
+        repositories: parse_repository_mappings(trailing)?,
+    }))
+}
+
+fn parse_driver_run(rest: &[String]) -> Result<Command> {
+    let delimiter = rest
+        .iter()
+        .position(|value| value == "--")
+        .context("driver run requires -- before worker arguments")?;
+    let (options, worker) = rest.split_at(delimiter);
+    let worker_arguments = worker[1..].to_vec();
+    if worker_arguments.is_empty() {
+        bail!("driver run worker command is empty");
+    }
+    if options.len() < 6 || options[0] != "--graph" || options[2] != "--journal" {
+        bail!(USAGE);
+    }
+    let mut override_risk_ordering = false;
+    let mut mapping_args = Vec::new();
+    let mut index = 4;
+    while index < options.len() {
+        if options[index] == "--override-risk-ordering" {
+            override_risk_ordering = true;
+            index += 1;
+        } else {
+            if index + 1 >= options.len() {
+                bail!(USAGE);
+            }
+            mapping_args.extend_from_slice(&options[index..index + 2]);
+            index += 2;
+        }
+    }
+    Ok(Command::DriverRun(DriverRunCommand {
+        graph_path: PathBuf::from(&options[1]),
+        journal_path: PathBuf::from(&options[3]),
+        repositories: parse_repository_mappings(&mapping_args)?,
+        override_risk_ordering,
+        worker_arguments,
+    }))
+}
+
+fn driver_outcome_path(journal: &Path, package: &str, issuance: u64) -> Result<PathBuf> {
+    let parent = journal.parent().context("driver journal has no parent")?;
+    Ok(parent
+        .join("package-outcomes")
+        .join(package)
+        .join(format!("{issuance}.json")))
+}
+
+fn observe_driver_worker_outcome(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    package_id: String,
+    issuance: u64,
+    outcome_path: &Path,
+) -> Result<bool> {
+    let outcome = match fs::read(outcome_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {}", outcome_path.display()));
+        }
+    };
+    match pce_core::parse_package_outcome(&outcome).context("worker outcome is invalid")? {
+        pce_core::PackageOutcome::Done => {
+            append_driver_event(
+                &command.journal_path,
+                &DriverEvent::WorkerDone {
+                    package: package_id.clone(),
+                    issuance,
+                },
+            )?;
+            let _ = execute_driver_criteria(DriverCriteriaCommand {
+                graph_path: command.graph_path.clone(),
+                journal_path: command.journal_path.clone(),
+                package_id: package_id.clone(),
+                repositories: command.repositories.clone(),
+            })?;
+            let refreshed = read_driver_journal(&command.journal_path)?;
+            let state = derive_driver_snapshot(graph, &refreshed, command.override_risk_ordering)?;
+            if state.packages().iter().any(|(name, package_state)| {
+                name == &package_id
+                    && matches!(package_state, pce_core::DriverPackageState::Judging { .. })
+            }) {
+                append_driver_event(
+                    &command.journal_path,
+                    &DriverEvent::GateFinished {
+                        package: package_id.clone(),
+                        gate: "driver-no-findings".to_owned(),
+                    },
+                )?;
+                append_driver_event(
+                    &command.journal_path,
+                    &DriverEvent::PackageCompleted {
+                        package: package_id,
+                    },
+                )?;
+            }
+        }
+        pce_core::PackageOutcome::Failed { blocked_by } => append_driver_event(
+            &command.journal_path,
+            &DriverEvent::WorkerFailed {
+                package: package_id,
+                issuance,
+                reason: blocked_by.as_str().to_owned(),
+            },
+        )?,
+        pce_core::PackageOutcome::MisSpecified { fault } => {
+            let reason = match fault {
+                pce_core::MisSpecificationFault::Criterion { name } => {
+                    format!("criterion: {}", name.as_str())
+                }
+                pce_core::MisSpecificationFault::MissingDependency { id } => {
+                    format!("missing dependency: {}", id.as_str())
+                }
+            };
+            append_driver_event(
+                &command.journal_path,
+                &DriverEvent::PackageParked {
+                    package: package_id,
+                    issuance,
+                    reason,
+                },
+            )?;
+        }
+    }
+    Ok(true)
+}
+
+fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
+    loop {
+        let graph = read_driver_graph(&command.graph_path)?;
+        let events = read_driver_journal(&command.journal_path)?;
+        let snapshot = derive_driver_snapshot(&graph, &events, command.override_risk_ordering)
+            .context("failed to derive driver loop state")?;
+        match snapshot.outcome() {
+            pce_core::DriverLoopOutcome::Finished | pce_core::DriverLoopOutcome::Blocked => {
+                return run_driver_status(DriverStatusCommand {
+                    graph_path: command.graph_path,
+                    journal_path: command.journal_path,
+                    override_risk_ordering: command.override_risk_ordering,
+                });
+            }
+            pce_core::DriverLoopOutcome::Running => {}
+        }
+        let ready = snapshot.ready().to_vec();
+        if ready.is_empty() {
+            let mut observed = false;
+            for (package, state) in snapshot.packages() {
+                if let pce_core::DriverPackageState::Running { issuance } = state {
+                    let outcome_path =
+                        driver_outcome_path(&command.journal_path, package, *issuance)?;
+                    observed |= observe_driver_worker_outcome(
+                        &graph,
+                        &command,
+                        package.clone(),
+                        *issuance,
+                        &outcome_path,
+                    )?;
+                }
+            }
+            if !observed {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            continue;
+        }
+        let next_issuance = events
+            .iter()
+            .filter_map(|event| match event {
+                DriverEvent::WorkerDispatched { issuance, .. } => Some(*issuance),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut children = Vec::new();
+        // The full ready antichain is spawned before waiting for any member, preserving graph concurrency.
+        for (offset, package_id) in ready.iter().enumerate() {
+            let issuance = next_issuance
+                .saturating_add(u64::try_from(offset).context("ready set exceeds u64")?);
+            let outcome = driver_outcome_path(&command.journal_path, package_id, issuance)?;
+            fs::create_dir_all(outcome.parent().context("outcome path has no parent")?)?;
+            append_driver_event(
+                &command.journal_path,
+                &DriverEvent::WorkerDispatched {
+                    package: package_id.clone(),
+                    issuance,
+                },
+            )?;
+            let (program, arguments) = command
+                .worker_arguments
+                .split_first()
+                .context("driver worker command is empty")?;
+            let child = std::process::Command::new(program)
+                .args(arguments)
+                .env("PCE_PACKAGE", package_id)
+                .env("PCE_PACKAGE_OUTCOME", &outcome)
+                .spawn()
+                .with_context(|| format!("failed to spawn worker for {package_id}"))?;
+            children.push((package_id.clone(), issuance, outcome, child));
+        }
+        for (package_id, issuance, outcome_path, mut child) in children {
+            let status = child
+                .wait()
+                .with_context(|| format!("failed to wait for worker {package_id}"))?;
+            if !status.success() {
+                append_driver_event(
+                    &command.journal_path,
+                    &DriverEvent::WorkerFailed {
+                        package: package_id,
+                        issuance,
+                        reason: format!("worker exited with {status}"),
+                    },
+                )?;
+                continue;
+            }
+            if !observe_driver_worker_outcome(
+                &graph,
+                &command,
+                package_id,
+                issuance,
+                &outcome_path,
+            )? {
+                bail!(
+                    "successful worker wrote no outcome at {}",
+                    outcome_path.display()
+                );
+            }
+        }
+    }
+}
+
+fn read_driver_journal(path: &Path) -> Result<Vec<DriverEvent>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read driver journal {}", path.display()));
+        }
+    };
+    let mut events = Vec::new();
+    let lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_slice::<DriverEvent>(line) {
+            Ok(event) => events.push(event),
+            Err(_) if index + 1 == lines.len() && !bytes.ends_with(b"\n") => break,
+            Err(source) => {
+                return Err(source).with_context(|| {
+                    format!(
+                        "invalid driver journal line {} in {}",
+                        index + 1,
+                        path.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(events)
+}
+
+fn append_driver_event(path: &Path, event: &DriverEvent) -> Result<()> {
+    let parent = path.parent().context("driver journal path has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let mut bytes = serde_json::to_vec(event).context("failed to serialize driver event")?;
+    bytes.push(b'\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("failed to open driver journal {}", path.display()))?;
+    file.write_all(&bytes)
+        .context("failed to append driver event")?;
+    file.sync_all().context("failed to sync driver journal")
+}
+
+fn read_driver_graph(path: &Path) -> Result<WorkPackageGraph> {
+    let bytes =
+        fs::read(path).with_context(|| format!("failed to read graph {}", path.display()))?;
+    parse_work_package_graph(&bytes).context("failed to parse driver graph")
+}
+
+fn run_driver_status(command: DriverStatusCommand) -> Result<()> {
+    let graph = read_driver_graph(&command.graph_path)?;
+    let events = read_driver_journal(&command.journal_path)?;
+    let snapshot = derive_driver_snapshot(&graph, &events, command.override_risk_ordering)
+        .context("failed to derive driver state")?;
+    write_json_stdout(&serde_json::to_value(snapshot).context("failed to serialize driver state")?)
+}
+
+fn package_repository_sources(
+    package: &pce_core::WorkPackage,
+    repositories: &[(String, PathBuf)],
+) -> Result<Vec<(String, PathBuf)>> {
+    let by_name = repositories
+        .iter()
+        .map(|(name, path)| (name.as_str(), path.as_path()))
+        .collect::<BTreeMap<_, _>>();
+    if by_name.len() != repositories.len() {
+        bail!("driver repository mappings must be unique");
+    }
+    package
+        .repositories()
+        .iter()
+        .map(|name| {
+            by_name
+                .get(name.as_str())
+                .map(|path| (name.clone(), (*path).to_path_buf()))
+                .with_context(|| format!("driver omitted repository mapping `{name}`"))
+        })
+        .collect()
+}
+
+fn git_oid(repository: &Path, reference: &str) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(repository)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{reference}^{{commit}}"),
+        ])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to resolve `{reference}` in {}",
+                repository.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "git could not resolve `{reference}` in {}: {}",
+            repository.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8(output.stdout)
+        .context("git returned non-UTF-8 oid")?
+        .trim()
+        .to_owned())
+}
+
+struct DriverMaterialization {
+    root: PathBuf,
+}
+impl Drop for DriverMaterialization {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+impl DriverMaterialization {
+    fn paths(&self) -> Result<Vec<PathBuf>> {
+        let mut entries = fs::read_dir(&self.root)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort();
+        Ok(entries)
+    }
+}
+
+fn materialize_driver_state(
+    journal: &Path,
+    label: &str,
+    sources: &[(String, PathBuf)],
+    references: &BTreeMap<String, String>,
+) -> Result<DriverMaterialization> {
+    let parent = journal
+        .parent()
+        .context("driver journal has no parent")?
+        .join("driver-materializations");
+    fs::create_dir_all(&parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .context("clock precedes epoch")?
+        .as_nanos();
+    let root = parent.join(format!("{}-{}-{nonce}", std::process::id(), label));
+    fs::create_dir(&root).with_context(|| format!("failed to create {}", root.display()))?;
+    let materialization = DriverMaterialization { root };
+    for (index, (name, source)) in sources.iter().enumerate() {
+        let checkout = materialization.root.join(format!("{index:02}-repository"));
+        let status = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--no-checkout", "--shared"])
+            .arg(source)
+            .arg(&checkout)
+            .status()
+            .with_context(|| format!("failed to clone repository `{name}`"))?;
+        if !status.success() {
+            bail!("failed to materialize repository `{name}`");
+        }
+        let reference = references
+            .get(name)
+            .with_context(|| format!("missing materialization ref for `{name}`"))?;
+        let output = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&checkout)
+            .args(["checkout", "--quiet", "--detach", reference])
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "failed to checkout `{reference}` for `{name}`: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    }
+    Ok(materialization)
+}
+
+fn shell_execution(command: &str, paths: &[PathBuf]) -> Result<CriterionExecution> {
+    let cwd = paths
+        .first()
+        .context("package has no materialized repository")?;
+    let projection =
+        serde_json::to_string(paths).context("failed to serialize coordinated worktrees")?;
+    let mut child = std::process::Command::new("/bin/sh");
+    child
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .env("PCE_WORKTREES", projection);
+    for (index, path) in paths.iter().enumerate() {
+        child.env(format!("PCE_WORKTREE_{index}"), path);
+    }
+    let output = child
+        .output()
+        .with_context(|| format!("failed to execute criterion `{command}`"))?;
+    let exit_status = match output.status.code() {
+        Some(code) => CommandExitStatus::Exited { code },
+        None => CommandExitStatus::Signaled {
+            signal: output
+                .status
+                .signal()
+                .context("shell has neither exit code nor signal")?,
+        },
+    };
+    Ok(CriterionExecution::new(
+        command.to_owned(),
+        cwd.display().to_string(),
+        exit_status,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+fn execute_driver_criteria(command: DriverCriteriaCommand) -> Result<DriverStatusCommand> {
+    let graph = read_driver_graph(&command.graph_path)?;
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == command.package_id)
+        .with_context(|| format!("package {} is absent from graph", command.package_id))?;
+    let sources = package_repository_sources(package, &command.repositories)?;
+    let references = sources
+        .iter()
+        .map(|(name, source)| Ok((name.clone(), git_oid(source, "HEAD")?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let materialization =
+        materialize_driver_state(&command.journal_path, "criteria", &sources, &references)?;
+    let paths = materialization.paths()?;
+    let events = read_driver_journal(&command.journal_path)?;
+    let criteria = effective_criteria(&graph, &command.package_id, &events)
+        .context("failed to derive effective criteria")?;
+    let mut failed = Vec::new();
+    for criterion in criteria {
+        let execution = shell_execution(&criterion.command, &paths)?;
+        if !execution.exit_status().is_success() {
+            failed.push(criterion.name.clone());
+        }
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::CriterionExecuted {
+                package: command.package_id.clone(),
+                name: criterion.name,
+                origin: criterion.origin,
+                execution,
+            },
+        )?;
+    }
+    if !failed.is_empty() {
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::PackageFailed {
+                package: command.package_id.clone(),
+                reason: format!("criteria failed: {}", failed.join(", ")),
+            },
+        )?;
+    }
+    Ok(DriverStatusCommand {
+        graph_path: command.graph_path,
+        journal_path: command.journal_path,
+        override_risk_ordering: false,
+    })
+}
+
+fn run_driver_criteria(command: DriverCriteriaCommand) -> Result<()> {
+    run_driver_status(execute_driver_criteria(command)?)
+}
+
+fn run_driver_replay(command: DriverReplayCommand) -> Result<()> {
+    let graph = read_driver_graph(&command.graph_path)?;
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == command.package_id)
+        .with_context(|| format!("package {} is absent from graph", command.package_id))?;
+    let sources = package_repository_sources(package, &command.repositories)?;
+    let outcome_bytes = fs::read(&command.outcome_path)
+        .with_context(|| format!("failed to read {}", command.outcome_path.display()))?;
+    let outcome =
+        parse_package_gate_outcome(&outcome_bytes).context("failed to parse gate outcome")?;
+    validate_package_gate_repositories(&outcome, package.repositories())
+        .context("finding exceeds package repository scope")?;
+    let worktrees = sources
+        .iter()
+        .map(|(name, path)| RepositoryWorktree::parse(name.clone(), path.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    validate_package_gate_refs(&outcome, &worktrees)
+        .context("finding refs do not satisfy the WP6 witness/repair contract")?;
+    let finding = outcome
+        .findings()
+        .get(command.finding)
+        .with_context(|| format!("gate finding {} is absent", command.finding))?;
+    let by_refs = finding
+        .repository_refs()
+        .iter()
+        .map(|refs| (refs.repository(), refs))
+        .collect::<BTreeMap<_, _>>();
+    let mut witness_refs = BTreeMap::new();
+    let mut repair_refs = BTreeMap::new();
+    let mut recorded_refs = Vec::new();
+    for (name, source) in &sources {
+        if let Some(refs) = by_refs.get(name.as_str()) {
+            let witness = git_oid(source, refs.witness_ref())?;
+            let repair = git_oid(source, refs.repair_ref())?;
+            witness_refs.insert(name.clone(), witness.clone());
+            repair_refs.insert(name.clone(), repair.clone());
+            recorded_refs.push(AmendmentRepositoryRefs {
+                repository: name.clone(),
+                witness_ref: witness,
+                repair_ref: repair,
+            });
+        } else {
+            let head = git_oid(source, "HEAD")?;
+            witness_refs.insert(name.clone(), head.clone());
+            repair_refs.insert(name.clone(), head);
+        }
+    }
+    let witness_state =
+        materialize_driver_state(&command.journal_path, "witness", &sources, &witness_refs)?;
+    let witness = shell_execution(
+        finding.proposed_criterion_command(),
+        &witness_state.paths()?,
+    )?;
+    drop(witness_state);
+    let repair_state =
+        materialize_driver_state(&command.journal_path, "repair", &sources, &repair_refs)?;
+    let repair = shell_execution(finding.proposed_criterion_command(), &repair_state.paths()?)?;
+    let decision = judge_finding_replay(&witness, &repair);
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::FindingReplayed {
+            package: command.package_id.clone(),
+            gate: command.gate,
+            finding: u64::try_from(command.finding).context("finding index exceeds u64")?,
+            command: finding.proposed_criterion_command().to_owned(),
+            repository_refs: recorded_refs,
+            witness,
+            repair,
+            decision: decision.clone(),
+        },
+    )?;
+    write_json_stdout(&json!({"decision": decision}))
 }
 
 fn package_result_path(vision_dir: &Path, package: &NodeId, issuance: Sequence) -> Result<PathBuf> {
