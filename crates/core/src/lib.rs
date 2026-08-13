@@ -49,8 +49,9 @@ pub use package_completion::{
     serialize_package_worker_result,
 };
 pub use package_gate::{
-    BuiltArtifactRef, PackageGateError, PackageGateFinding, PackageGateOutcome,
-    compose_package_gate_brief, parse_package_gate_outcome,
+    BuiltArtifactRef, PackageGateError, PackageGateFinding, PackageGateRepositoryRefs,
+    ParsedPackageGateOutcome, compose_package_gate_brief, parse_package_gate_outcome,
+    validate_package_gate_repositories,
 };
 pub use package_worker::{
     MisSpecificationFault, PackageOutcome, PackageWorkerError, RepositoryWorktree, VisionGoal,

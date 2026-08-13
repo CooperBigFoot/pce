@@ -52,6 +52,15 @@ pub enum PackageGateError {
     /// Outcome bytes are not syntactically valid for the typed carrier.
     #[error("package gate outcome is malformed: {source}")]
     MalformedOutcome { source: serde_json::Error },
+    /// A finding has no repository reference pair.
+    #[error("package gate finding must name at least one repository ref pair")]
+    MissingRepositoryRefs,
+    /// A finding repeats one repository identity.
+    #[error("package gate finding repeats repository `{repository}`")]
+    DuplicateFindingRepository { repository: String },
+    /// A finding names a repository outside the target package.
+    #[error("package gate finding names untouched repository `{repository}`")]
+    UntouchedFindingRepository { repository: String },
 }
 
 fn dependency_kind(kind: DependencyKind) -> &'static str {
@@ -180,11 +189,11 @@ pub fn compose_package_gate_brief(
     output.push_str("\nThese criteria already passed. Do not merely repeat them. Attack the built artifact to find material defects that this known floor misses. Do not execute the listed criteria; the driver owns mechanical judgement.\n");
 
     output.push_str("\n## 4. Repair and scope boundary\n\n");
-    output.push_str("You may repair a defect that you find. Repair only the defect you named. Do not refactor or make adjacent improvements. Do not expand scope or change another package. Do not push, merge, or tag. If a repair requires cross-package work, report that necessity instead of performing it.\n");
+    output.push_str("You may repair a defect that you find, using exactly two commits in order in each repository the finding touches. Treat the repository-local commits as one coordinated witness phase followed by one coordinated repair phase. First author a witness commit that introduces the falsifier and nothing else; the proposed command must fail there. Second author a repair commit, descending from the witness, containing only the bounded fix; the same command must pass there. Repair only the defect you named and proved with the witness. A repair without its preceding witness cannot be reported as a finding. Do not refactor or make adjacent improvements. Do not expand scope or change another package. Do not push, merge, or tag. If a repair requires cross-package work, report that necessity instead of performing it. Do not execute the proposed command at either commit; the driver owns that semantic replay.\n");
 
     output.push_str("\n## Required outcome\n\n");
     output.push_str("Write exactly one strict JSON outcome document to the path in `PCE_PACKAGE_GATE_OUTCOME` before exiting. Finding nothing is valid and must be written as `{");
-    output.push_str("\"findings\":[]}`. Each finding must contain exactly five non-empty strings: `description`, `repair`, `proposed_criterion_command`, `pre_repair_ref`, and `post_repair_ref`. The repair must already be applied and bounded to the described defect. The proposed criterion must fail at the pre-repair ref and pass at the post-repair ref. Produce the command and refs but do not execute the command; the driver will replay it independently.\n");
+    output.push_str("\"findings\":[]}`. Each finding must contain non-empty `description`, `repair`, and `proposed_criterion_command` strings plus a non-empty `repository_refs` list. Every repository entry must contain exactly `repository`, `witness_ref`, and `repair_ref`; name every repository changed by the finding and no repository outside this package. The witness commit must contain the falsifier alone and the repair commit must descend from it. Produce the command and repository-qualified refs but do not execute the command; the driver will require failure at each witness and success at each repair.\n");
     Ok(output)
 }
 
@@ -204,15 +213,43 @@ impl TryFrom<String> for NonEmptyString {
     }
 }
 
+/// One repository-specific witness and repair commit pair.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageGateRepositoryRefs {
+    repository: NonEmptyString,
+    witness_ref: NonEmptyString,
+    repair_ref: NonEmptyString,
+}
+
+impl PackageGateRepositoryRefs {
+    /// Return the graph repository identity.
+    pub fn repository(&self) -> &str {
+        &self.repository.0
+    }
+    /// Return the gate-authored commit containing only the falsifier.
+    pub fn witness_ref(&self) -> &str {
+        &self.witness_ref.0
+    }
+    /// Return the descendant commit containing the bounded repair.
+    pub fn repair_ref(&self) -> &str {
+        &self.repair_ref.0
+    }
+}
+
 /// One gate finding, applied repair, and its independently replayable falsifier.
+///
+/// WP7 must execute `proposed_criterion_command` at every witness ref and require failure, then
+/// execute it at every repair ref and require success. If either condition does not hold, WP7 must
+/// reject the finding without crediting it to the gate. WP7 must bridge these repository-qualified
+/// refs and the command into the recorded stimulus and evidence consumed by `pce gate replay`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackageGateFinding {
     description: NonEmptyString,
     repair: NonEmptyString,
     proposed_criterion_command: NonEmptyString,
-    pre_repair_ref: NonEmptyString,
-    post_repair_ref: NonEmptyString,
+    repository_refs: Vec<PackageGateRepositoryRefs>,
 }
 
 impl PackageGateFinding {
@@ -228,24 +265,23 @@ impl PackageGateFinding {
     pub fn proposed_criterion_command(&self) -> &str {
         &self.proposed_criterion_command.0
     }
-    /// Return the reference immediately before repair.
-    pub fn pre_repair_ref(&self) -> &str {
-        &self.pre_repair_ref.0
-    }
-    /// Return the reference containing the repair.
-    pub fn post_repair_ref(&self) -> &str {
-        &self.post_repair_ref.0
+    /// Return the witness/repair pair for every repository changed by this finding.
+    pub fn repository_refs(&self) -> &[PackageGateRepositoryRefs] {
+        &self.repository_refs
     }
 }
 
-/// The product emitted by a completed gate, including a valid no-findings result.
+/// A syntactically parsed gate document that is not yet creditable as an outcome.
+///
+/// The composition root must validate package repository scope, ref resolution, reachability, and
+/// direct witness-to-repair ancestry before treating this document as a gate product.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PackageGateOutcome {
+pub struct ParsedPackageGateOutcome {
     findings: Vec<PackageGateFinding>,
 }
 
-impl PackageGateOutcome {
+impl ParsedPackageGateOutcome {
     /// Return all findings. An empty slice means the gate completed without finding a defect.
     pub fn findings(&self) -> &[PackageGateFinding] {
         &self.findings
@@ -256,8 +292,53 @@ impl PackageGateOutcome {
 ///
 /// # Errors
 ///
-/// Returns [`PackageGateError`] for malformed JSON, unknown fields, or any missing, blank, or
-/// mistyped finding field.
-pub fn parse_package_gate_outcome(bytes: &[u8]) -> Result<PackageGateOutcome, PackageGateError> {
-    serde_json::from_slice(bytes).map_err(|source| PackageGateError::MalformedOutcome { source })
+/// Returns [`PackageGateError`] for malformed JSON, unknown fields, or any missing, blank, mistyped,
+/// empty, or duplicate repository-ref entry.
+pub fn parse_package_gate_outcome(
+    bytes: &[u8],
+) -> Result<ParsedPackageGateOutcome, PackageGateError> {
+    let outcome: ParsedPackageGateOutcome = serde_json::from_slice(bytes)
+        .map_err(|source| PackageGateError::MalformedOutcome { source })?;
+    for finding in &outcome.findings {
+        if finding.repository_refs.is_empty() {
+            return Err(PackageGateError::MissingRepositoryRefs);
+        }
+        let mut repositories = HashSet::new();
+        for refs in &finding.repository_refs {
+            if !repositories.insert(refs.repository()) {
+                return Err(PackageGateError::DuplicateFindingRepository {
+                    repository: refs.repository().to_owned(),
+                });
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+/// Ensure every finding names only repositories belonging to the target package.
+///
+/// This checks graph scope only. Ref resolution and ancestry are checked by the composition root
+/// against the assigned repository worktrees, without executing proposed criteria.
+///
+/// # Errors
+///
+/// Returns [`PackageGateError::UntouchedFindingRepository`] for an out-of-package repository.
+pub fn validate_package_gate_repositories(
+    outcome: &ParsedPackageGateOutcome,
+    package_repositories: &[String],
+) -> Result<(), PackageGateError> {
+    let allowed = package_repositories
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    for finding in &outcome.findings {
+        for refs in &finding.repository_refs {
+            if !allowed.contains(refs.repository()) {
+                return Err(PackageGateError::UntouchedFindingRepository {
+                    repository: refs.repository().to_owned(),
+                });
+            }
+        }
+    }
+    Ok(())
 }

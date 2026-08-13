@@ -1,3 +1,5 @@
+> Historical WP6 evidence: this run predates the follow-up repository-qualified witness/repair format. The flat pre/post outcome shown below is no longer accepted. See `wp6-followup-end-to-end.md` for the current two-commit contract.
+
 # WP6 end-to-end evidence
 
 Run root: `/tmp/pce-wp6-e2e-final-dtm0hkbz`  

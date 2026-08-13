@@ -73,13 +73,14 @@ use pce_core::{
     meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
     parse_acceptance_criteria, parse_claude_result, parse_dispatch_process_identity,
     parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
-    parse_package_worker_result, parse_paired_falsification_verdict, parse_replay_output_path,
-    parse_replay_schema_path, parse_tracked_repository_contract, parse_work_package_graph,
-    ready_work_packages, rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
-    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    parse_package_gate_outcome, parse_package_worker_result, parse_paired_falsification_verdict,
+    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
+    parse_work_package_graph, ready_work_packages, rebase_gate_stimulus,
+    render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
+    serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_package_worker_result, serialize_tracked_repository_contract, validate_artifact,
-    validate_verdict_references, validate_workflow_coverage, validated_dispatch_completion_payload,
-    verify_criterion_change,
+    validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
+    validated_dispatch_completion_payload, verify_criterion_change,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -957,13 +958,161 @@ fn run_package_gate_agent(command: PackageGateAgentCommand) -> Result<()> {
     let status = child
         .wait()
         .context("failed to wait for package gate agent worker")?;
-    if let Some(code) = status.code() {
-        std::process::exit(code);
+    match status.code() {
+        Some(0) => {}
+        Some(code) => std::process::exit(code),
+        None => {
+            let signal = status
+                .signal()
+                .context("package gate agent worker has no exit code or signal")?;
+            std::process::exit(128_i32.saturating_add(signal));
+        }
     }
-    let signal = status
-        .signal()
-        .context("package gate agent worker has no exit code or signal")?;
-    std::process::exit(128_i32.saturating_add(signal));
+    let outcome_bytes = fs::read(&command.outcome_path).with_context(|| {
+        format!(
+            "successful package gate wrote no readable outcome at {}",
+            command.outcome_path.display()
+        )
+    })?;
+    let outcome = parse_package_gate_outcome(&outcome_bytes)
+        .context("failed to parse package gate outcome")?;
+    validate_package_gate_repositories(&outcome, package.repositories())
+        .context("package gate outcome exceeded package repository scope")?;
+    validate_package_gate_refs(&outcome, &worktrees)
+}
+
+fn resolve_package_gate_commit(worktree: &Path, reference: &str) -> Result<String> {
+    let commit = format!("{reference}^{{commit}}");
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(worktree)
+        .args(["rev-parse", "--verify", "--end-of-options"])
+        .arg(&commit)
+        .output()
+        .with_context(|| format!("failed to resolve package gate ref `{reference}`"))?;
+    if !output.status.success() {
+        bail!(
+            "package gate ref `{reference}` does not resolve to a commit in {}: {}",
+            worktree.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let oid = String::from_utf8(output.stdout).context("git returned a non-UTF-8 commit id")?;
+    let oid = oid.trim();
+    if oid.is_empty() {
+        bail!("git returned an empty commit id for package gate ref `{reference}`");
+    }
+    let reachable = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(worktree)
+        .args(["for-each-ref", "--contains", oid, "--format=%(refname)"])
+        .output()
+        .with_context(|| {
+            format!("failed to inspect reachability of package gate ref `{reference}`")
+        })?;
+    if !reachable.status.success() {
+        bail!(
+            "failed to inspect reachability of package gate ref `{reference}` in {}: {}",
+            worktree.display(),
+            String::from_utf8_lossy(&reachable.stderr).trim()
+        );
+    }
+    if reachable.stdout.is_empty() {
+        let from_head = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(worktree)
+            .args(["merge-base", "--is-ancestor", oid, "HEAD"])
+            .output()
+            .with_context(|| format!("failed to inspect HEAD reachability of `{reference}`"))?;
+        if from_head.status.code() != Some(0) {
+            bail!(
+                "package gate ref `{reference}` resolves but is not reachable from any ref or HEAD in {}",
+                worktree.display()
+            );
+        }
+    }
+    Ok(oid.to_owned())
+}
+
+fn validate_package_gate_refs(
+    outcome: &pce_core::ParsedPackageGateOutcome,
+    worktrees: &[RepositoryWorktree],
+) -> Result<()> {
+    let by_repository = worktrees
+        .iter()
+        .map(|worktree| (worktree.repository(), worktree.path()))
+        .collect::<BTreeMap<_, _>>();
+    for finding in outcome.findings() {
+        for refs in finding.repository_refs() {
+            let worktree = by_repository
+                .get(refs.repository())
+                .with_context(|| format!("no assigned worktree for `{}`", refs.repository()))?;
+            let witness = resolve_package_gate_commit(worktree, refs.witness_ref())?;
+            let repair = resolve_package_gate_commit(worktree, refs.repair_ref())?;
+            if witness == repair {
+                bail!(
+                    "package gate witness ref `{}` and repair ref `{}` identify the same commit in repository `{}`",
+                    refs.witness_ref(),
+                    refs.repair_ref(),
+                    refs.repository()
+                );
+            }
+            let parents = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(worktree)
+                .args(["rev-list", "--parents", "-n", "1", &repair])
+                .output()
+                .with_context(|| {
+                    format!(
+                        "failed to inspect repair parents in `{}`",
+                        refs.repository()
+                    )
+                })?;
+            if !parents.status.success() {
+                bail!(
+                    "failed to inspect repair parents in repository `{}`",
+                    refs.repository()
+                );
+            }
+            let parent_line = String::from_utf8(parents.stdout)
+                .context("git returned non-UTF-8 repair ancestry")?;
+            let identities = parent_line.split_whitespace().collect::<Vec<_>>();
+            if identities.as_slice() != [repair.as_str(), witness.as_str()] {
+                bail!(
+                    "package gate repair ref `{}` must have witness ref `{}` as its sole direct parent in repository `{}`",
+                    refs.repair_ref(),
+                    refs.witness_ref(),
+                    refs.repository()
+                );
+            }
+            let relationship = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(worktree)
+                .args(["merge-base", "--is-ancestor", &witness, &repair])
+                .output()
+                .with_context(|| {
+                    format!(
+                        "failed to inspect package gate ancestry in {}",
+                        worktree.display()
+                    )
+                })?;
+            match relationship.status.code() {
+                Some(0) => {}
+                Some(1) => bail!(
+                    "package gate repair ref `{}` does not descend from witness ref `{}` in repository `{}`",
+                    refs.repair_ref(),
+                    refs.witness_ref(),
+                    refs.repository()
+                ),
+                code => bail!(
+                    "git ancestry inspection failed in repository `{}` with status {code:?}: {}",
+                    refs.repository(),
+                    String::from_utf8_lossy(&relationship.stderr).trim()
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_package_gate_brief(rest: &[String]) -> Result<Command> {
