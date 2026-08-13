@@ -74,7 +74,7 @@ What belongs in each section:
 | `## Constraints` | Technical, process, and environment constraints that bind implementers. |
 | `## Acceptance criteria (vision-level "done")` | Exactly one fenced `json` object in the canonical shape below, and nothing else. Each criterion names a concrete `input` and an externally observable `observation`; test existence is never an observation. |
 | `## Decomposition hints` | Suggested milestone/step structure, orderings, risky-first slices. |
-| `## Open questions / risks` | Unresolved decisions and assumptions needing validation. |
+| `## Open questions / risks` | Risks and assumptions the run must carry, written for the orchestrator rather than for the human. Not a place to reopen decisions the grill settled, and not a question list addressed to the user; empty is correct when the grill left nothing unresolved. |
 
 The acceptance-criteria section must use exactly this canonical shape, including key names and key order:
 
@@ -172,4 +172,6 @@ The checker has no success output. A non-zero result prohibits `mv`, Step 3 repo
 
 ## Step 3 — Report
 
-Tell the user the path `$VISION_DIR/vision.md`, summarize what was captured under each section, and flag any `## Open questions / risks` entries that need their input before an orchestrator run.
+Tell the user the path `$VISION_DIR/vision.md` and summarize what was captured under each section.
+
+Ask the user nothing. This skill runs after a grill, where every question was already put to the user and answered; a question here is a question the grill failed to ask, and re-opening it treats settled understanding as unsettled. Never end the report with open questions, things needing their input, points to confirm, or a request to review what was captured. Never invent an unresolved decision to fill `## Open questions / risks`; when the conversation left nothing genuinely unresolved, that section carries only risks the run itself must carry, and may be left empty. The two exceptions are the blocking repository facts named in the cross-repo rules and a failed `pce vision check` — both are missing facts that no default can supply, not reopened decisions.

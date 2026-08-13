@@ -66,11 +66,13 @@ At least one acceptance criterion names an input designed to make the thing fail
 
 Write them in this division of labour:
 
-1. **The user supplies the fear** — "an agent could quietly bill my API account instead of my subscription."
+1. **You name the way it could go wrong, concretely** — "this could quietly bill your API account instead of your subscription." Derive it from the code, the corpus, and what the change touches.
 2. **You supply the probe** — the input and the observation that would catch it.
-3. **They ratify in plain words** — "if that variable is gone from the child, does that settle your worry?" That question they can always answer, because it is about their fear and not about the mechanism.
+3. **They react** — "that one matters" or "I don't care about that" or "the real problem is next door."
 
-Never ask them to ratify something they cannot evaluate.
+**Never ask the user what they are afraid of.** They do not know, and asking produces either silence or an invented answer worse than no answer. A person cannot enumerate their own tacit assumptions on request; they can recognise a concrete description of something going wrong and flinch at it. Bring them the description.
+
+The same rule governs ratification: state what the probe would catch in plain words and let them disagree. Never ask them to ratify something they cannot evaluate.
 
 Note when an acceptance criterion is only checkable outside the run that delivers it — a global hook, a live environment measurement — and say so rather than letting it be discovered late.
 
