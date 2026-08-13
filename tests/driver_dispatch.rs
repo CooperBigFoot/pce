@@ -63,14 +63,20 @@ if [ "$1 $2" = "worktree create" ]; then
   while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
   git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
   printf '%s\t%s\n' "$path" "$branch" >> "$HOME/herdr-worktrees"
-  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"}}}'
+  count=1; [ ! -f "$HOME/herdr-worktree-count" ] || count=$(( $(cat "$HOME/herdr-worktree-count") + 1 ))
+  printf '%s' "$count" > "$HOME/herdr-worktree-count"
+  printf '{"result":{"workspace":{"workspace_id":"owned-workspace-%s"},"tab":{"tab_id":"owned-workspace-%s:t1"},"root_pane":{"pane_id":"owned-pane-%s","workspace_id":"owned-workspace-%s"}}}\n' "$count" "$count" "$count" "$count"
+elif [ "$1 $2" = "workspace close" ]; then
+  [ "$3" != "unrelated-workspace" ]
+  printf '%s\n' "$3" >> "$HOME/herdr-closed-panes"
+  if [ "$3" = "owned-workspace-2" ]; then echo 'simulated close refusal' >&2; exit 71; fi
+  printf '%s\n' '{"result":{"closed":true}}'
 else
   shift 2; agent_cwd=
   while [ "$1" != "--" ]; do if [ "$1" = "--cwd" ]; then agent_cwd=$2; shift 2; else shift; fi; done; shift
   (cd "$agent_cwd" && "$@") &
   printf '%s\n' '{}'
-fi
-"#,
+fi"#,
     );
     executable(
         &bin.join("prime-agent"),
@@ -146,6 +152,18 @@ fi
         0,
         "completed implementation and gate attempt roots remain"
     );
+    let closed = fs::read_to_string(temp.path().join("herdr-closed-panes"))
+        .unwrap_or_else(|error| panic!("closed pane log: {error}; journal: {journal}"));
+    assert_eq!(
+        closed.lines().collect::<Vec<_>>(),
+        ["owned-workspace-1", "owned-workspace-2"]
+    );
+    assert!(!closed.contains("unrelated-workspace"));
+    assert!(journal.contains("owned-pane-1"));
+    assert!(journal.contains("owned-pane-2"));
+    assert!(journal.contains("dispatch-pane-cleanup"));
+    assert!(journal.contains("simulated close refusal"));
+    assert!(journal.contains("\"outcome\":\"failed\""));
 }
 
 #[test]

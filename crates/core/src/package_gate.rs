@@ -327,17 +327,30 @@ pub fn validate_package_gate_repositories(
     outcome: &ParsedPackageGateOutcome,
     package_repositories: &[String],
 ) -> Result<(), PackageGateError> {
+    for finding in &outcome.findings {
+        validate_package_gate_finding_repositories(finding, package_repositories)?;
+    }
+    Ok(())
+}
+
+/// Ensure one finding names only repositories belonging to the target package.
+///
+/// # Errors
+///
+/// Returns [`PackageGateError::UntouchedFindingRepository`] for an out-of-package repository.
+pub fn validate_package_gate_finding_repositories(
+    finding: &PackageGateFinding,
+    package_repositories: &[String],
+) -> Result<(), PackageGateError> {
     let allowed = package_repositories
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    for finding in &outcome.findings {
-        for refs in &finding.repository_refs {
-            if !allowed.contains(refs.repository()) {
-                return Err(PackageGateError::UntouchedFindingRepository {
-                    repository: refs.repository().to_owned(),
-                });
-            }
+    for refs in &finding.repository_refs {
+        if !allowed.contains(refs.repository()) {
+            return Err(PackageGateError::UntouchedFindingRepository {
+                repository: refs.repository().to_owned(),
+            });
         }
     }
     Ok(())

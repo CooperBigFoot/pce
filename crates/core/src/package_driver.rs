@@ -115,6 +115,8 @@ pub enum FindingRejectionReason {
     WitnessPassed,
     /// The proposed falsifier did not pass in the coordinated repaired state.
     RepairFailed,
+    /// Repository scope, resolution, reachability, or ancestry made the finding unusable.
+    StructurallyMalformed,
 }
 
 /// The credit decision for a coordinated replay.
@@ -163,6 +165,16 @@ pub struct RecoveryAttemptRecord {
     pub evidence: Vec<RecoveryCriterionEvidence>,
 }
 
+/// The best-effort result of closing one run-owned dispatch pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PaneCleanupOutcome {
+    /// Herdr confirmed that the pane was closed.
+    Closed,
+    /// The pane could not be closed; package judgement remains unchanged.
+    Failed,
+}
+
 /// One append-only fact in the driver journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
@@ -197,6 +209,28 @@ pub enum DriverEvent {
     },
     /// A worker was issued. Absence of a later outcome means it is still running.
     WorkerDispatched { package: String, issuance: u64 },
+    /// Herdr's worktree-create response named the exact root pane and its workspace.
+    DispatchPaneOpened {
+        package: String,
+        issuance: u64,
+        pane_id: String,
+        workspace_id: String,
+    },
+    /// Best-effort cleanup was attempted only after this package attempt completed.
+    DispatchPaneCleanup {
+        package: String,
+        issuance: u64,
+        pane_id: String,
+        workspace_id: String,
+        outcome: PaneCleanupOutcome,
+        detail: String,
+    },
+    /// Pane ownership could not be established; no pane was selected for later cleanup.
+    DispatchPaneOwnershipUnresolved {
+        package: String,
+        issuance: u64,
+        detail: String,
+    },
     /// A caller-supplied observation bound elapsed; the worker remains running and unaccounted.
     DriverStoppedWaiting {
         package: String,
@@ -232,6 +266,15 @@ pub enum DriverEvent {
         name: String,
         origin: CriterionOrigin,
         execution: CriterionExecution,
+    },
+    /// One structurally unusable finding was rejected before executing its proposed command.
+    FindingRejected {
+        package: String,
+        gate: String,
+        finding: u64,
+        command: String,
+        reason: FindingRejectionReason,
+        detail: String,
     },
     /// One finding was replayed against coordinated repository states.
     FindingReplayed {
@@ -330,6 +373,9 @@ pub enum PackageDriverError {
         gate: String,
         finding: u64,
     },
+    /// A pre-replay rejection used a reason reserved for execution evidence.
+    #[error("structural finding rejection for package `{package}` has a non-structural reason")]
+    InvalidStructuralFindingReason { package: String },
     /// More than one distinct limit configuration appears in one graph-run journal.
     #[error("driver journal contains conflicting recovery limit configurations")]
     ConflictingRecoveryLimits,
@@ -383,12 +429,16 @@ pub fn derive_driver_snapshot(
             | DriverEvent::RecoveryParked { package, .. }
             | DriverEvent::WorkerSpawnFailed { package, .. }
             | DriverEvent::WorkerDispatched { package, .. }
+            | DriverEvent::DispatchPaneOpened { package, .. }
+            | DriverEvent::DispatchPaneCleanup { package, .. }
+            | DriverEvent::DispatchPaneOwnershipUnresolved { package, .. }
             | DriverEvent::DriverStoppedWaiting { package, .. }
             | DriverEvent::WorkerDone { package, .. }
             | DriverEvent::WorkerFailed { package, .. }
             | DriverEvent::PackageParked { package, .. }
             | DriverEvent::EnvironmentPreparationExecuted { package, .. }
             | DriverEvent::CriterionExecuted { package, .. }
+            | DriverEvent::FindingRejected { package, .. }
             | DriverEvent::FindingReplayed { package, .. }
             | DriverEvent::GateFinished { package, .. }
             | DriverEvent::PackageCompleted { package }
@@ -460,6 +510,26 @@ pub fn derive_driver_snapshot(
                 *state = DriverPackageState::Running {
                     issuance: *issuance,
                 };
+            }
+            DriverEvent::DispatchPaneOpened { issuance, .. }
+            | DriverEvent::DispatchPaneOwnershipUnresolved { issuance, .. } => match state {
+                DriverPackageState::Running { issuance: active }
+                | DriverPackageState::Judging { issuance: active }
+                    if active == issuance => {}
+                _ => {
+                    return Err(PackageDriverError::UnmatchedOutcome {
+                        package: package.clone(),
+                        issuance: *issuance,
+                    });
+                }
+            },
+            DriverEvent::DispatchPaneCleanup { issuance, .. } => {
+                if *issuance == 0 || !matches!(state, DriverPackageState::Complete) {
+                    return Err(PackageDriverError::UnmatchedOutcome {
+                        package: package.clone(),
+                        issuance: *issuance,
+                    });
+                }
             }
             DriverEvent::DriverStoppedWaiting { issuance, .. } => match state {
                 DriverPackageState::Running { issuance: running } if running == issuance => {}
@@ -551,6 +621,18 @@ pub fn derive_driver_snapshot(
             DriverEvent::CriterionExecuted { .. } | DriverEvent::GateFinished { .. } => {
                 if !matches!(state, DriverPackageState::Judging { .. }) {
                     return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+            }
+            DriverEvent::FindingRejected { reason, .. } => {
+                if !matches!(state, DriverPackageState::Judging { .. }) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+                if !matches!(reason, FindingRejectionReason::StructurallyMalformed) {
+                    return Err(PackageDriverError::InvalidStructuralFindingReason {
                         package: package.clone(),
                     });
                 }
@@ -679,6 +761,86 @@ pub fn derive_driver_snapshot(
         recovery,
         outcome,
     })
+}
+
+/// One exact pane capability belonging to a package attempt that completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPaneCleanup {
+    package: String,
+    issuance: u64,
+    pane_id: String,
+    workspace_id: String,
+}
+
+impl PendingPaneCleanup {
+    /// Return the completed package identity.
+    pub fn package(&self) -> &str {
+        &self.package
+    }
+
+    /// Return the attempt whose worker and gate panes may be removed.
+    pub const fn issuance(&self) -> u64 {
+        self.issuance
+    }
+
+    /// Return the exact pane capability supplied by Herdr at creation.
+    pub fn pane_id(&self) -> &str {
+        &self.pane_id
+    }
+
+    /// Return the exact worktree workspace containing the run-created root pane.
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+}
+
+/// Derive exact, not-yet-attempted cleanup targets only for completed package attempts.
+pub fn pending_completed_pane_cleanups(events: &[DriverEvent]) -> Vec<PendingPaneCleanup> {
+    let mut last_done = HashMap::<&str, u64>::new();
+    let mut completed = HashSet::<(&str, u64)>::new();
+    let mut accounted = HashSet::<(&str, u64, &str)>::new();
+    for event in events {
+        match event {
+            DriverEvent::WorkerDone { package, issuance } => {
+                last_done.insert(package, *issuance);
+            }
+            DriverEvent::PackageCompleted { package } => {
+                if let Some(issuance) = last_done.get(package.as_str()) {
+                    completed.insert((package, *issuance));
+                }
+            }
+            DriverEvent::DispatchPaneCleanup {
+                package,
+                issuance,
+                pane_id,
+                ..
+            } => {
+                accounted.insert((package, *issuance, pane_id));
+            }
+            _ => {}
+        }
+    }
+    events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::DispatchPaneOpened {
+                package,
+                issuance,
+                pane_id,
+                workspace_id,
+            } if completed.contains(&(package.as_str(), *issuance))
+                && !accounted.contains(&(package.as_str(), *issuance, pane_id.as_str())) =>
+            {
+                Some(PendingPaneCleanup {
+                    package: package.clone(),
+                    issuance: *issuance,
+                    pane_id: pane_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Count only worker-reported or criterion-judgement failures attributed to package work.
@@ -959,5 +1121,83 @@ mod tests {
             unmatched,
             super::PackageDriverError::UnmatchedOutcome { issuance: 1, .. }
         ));
+    }
+
+    #[test]
+    fn pane_cleanup_targets_only_the_completed_attempt_exact_ids() {
+        let events = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::DispatchPaneOpened {
+                package: "A".to_owned(),
+                issuance: 1,
+                pane_id: "failed-attempt".to_owned(),
+                workspace_id: "owned-workspace".to_owned(),
+            },
+            DriverEvent::WorkerFailed {
+                package: "A".to_owned(),
+                issuance: 1,
+                reason: "retry".to_owned(),
+            },
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 2,
+            },
+            DriverEvent::DispatchPaneOpened {
+                package: "A".to_owned(),
+                issuance: 2,
+                pane_id: "completed-worker".to_owned(),
+                workspace_id: "owned-workspace".to_owned(),
+            },
+            DriverEvent::WorkerDone {
+                package: "A".to_owned(),
+                issuance: 2,
+            },
+            DriverEvent::DispatchPaneOpened {
+                package: "A".to_owned(),
+                issuance: 2,
+                pane_id: "completed-gate".to_owned(),
+                workspace_id: "owned-workspace".to_owned(),
+            },
+            DriverEvent::PackageCompleted {
+                package: "A".to_owned(),
+            },
+            DriverEvent::WorkerDispatched {
+                package: "B".to_owned(),
+                issuance: 3,
+            },
+            DriverEvent::DispatchPaneOpened {
+                package: "B".to_owned(),
+                issuance: 3,
+                pane_id: "unrelated-running".to_owned(),
+                workspace_id: "owned-workspace".to_owned(),
+            },
+        ];
+        let pending = super::pending_completed_pane_cleanups(&events);
+        assert_eq!(
+            pending
+                .iter()
+                .map(super::PendingPaneCleanup::pane_id)
+                .collect::<Vec<_>>(),
+            ["completed-worker", "completed-gate"]
+        );
+        let mut accounted = events;
+        accounted.push(DriverEvent::DispatchPaneCleanup {
+            package: "A".to_owned(),
+            issuance: 2,
+            pane_id: "completed-worker".to_owned(),
+            workspace_id: "owned-workspace".to_owned(),
+            outcome: super::PaneCleanupOutcome::Failed,
+            detail: "herdr unavailable".to_owned(),
+        });
+        assert_eq!(
+            super::pending_completed_pane_cleanups(&accounted)
+                .iter()
+                .map(super::PendingPaneCleanup::pane_id)
+                .collect::<Vec<_>>(),
+            ["completed-gate"]
+        );
     }
 }

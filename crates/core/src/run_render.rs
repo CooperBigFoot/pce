@@ -414,6 +414,9 @@ pub fn render_package_run(
                             match reason {
                                 crate::FindingRejectionReason::WitnessPassed => "witness-passed",
                                 crate::FindingRejectionReason::RepairFailed => "repair-failed",
+                                crate::FindingRejectionReason::StructurallyMalformed => {
+                                    "structurally-malformed"
+                                }
                             }
                         ),
                     ),
@@ -431,6 +434,46 @@ pub fn render_package_run(
                     .collect::<Vec<_>>()
                     .join("; ");
                 details.push_str(&format!("<section class=\"finding {decision_name}\" data-finding-decision=\"{decision_name}\"><h4>Gate {gate}, finding {finding}</h4><p class=\"decision\">{decision_label}</p><p><code>{command}</code></p><p class=\"refs\">{refs}</p><details><summary>Replay evidence</summary><div class=\"finding-executions\"><div><h5>Witness</h5>{witness}</div><div><h5>Repair</h5>{repair}</div></div></details></section>", gate=escaped(gate), command=escaped(command), witness=render_execution(witness), repair=render_execution(repair)));
+            }
+            if let DriverEvent::FindingRejected {
+                package: event_package,
+                gate,
+                finding,
+                command,
+                reason,
+                detail,
+            } = event
+                && event_package == package.id().as_str()
+            {
+                let reason = match reason {
+                    crate::FindingRejectionReason::StructurallyMalformed => {
+                        "structurally-malformed"
+                    }
+                    crate::FindingRejectionReason::WitnessPassed => "witness-passed",
+                    crate::FindingRejectionReason::RepairFailed => "repair-failed",
+                };
+                details.push_str(&format!(r#"<section class="finding rejected" data-finding-decision="rejected"><h4>Gate {gate}, finding {finding}</h4><p class="decision">Rejected · {reason}</p><p><code>{command}</code></p><p class="validation-detail">{detail}</p></section>"#, gate=escaped(gate), command=escaped(command), detail=escaped(detail)));
+            }
+            if let DriverEvent::GateFinished {
+                package: event_package,
+                gate,
+            } = event
+                && event_package == package.id().as_str()
+                && !events.iter().any(|candidate| match candidate {
+                    DriverEvent::FindingReplayed {
+                        package,
+                        gate: candidate_gate,
+                        ..
+                    }
+                    | DriverEvent::FindingRejected {
+                        package,
+                        gate: candidate_gate,
+                        ..
+                    } => package == event_package && candidate_gate == gate,
+                    _ => false,
+                })
+            {
+                details.push_str(&format!(r#"<section class="gate-summary no-findings"><h4>Gate {}</h4><p>No findings reported</p></section>"#, escaped(gate)));
             }
         }
         details.push_str("</article>");

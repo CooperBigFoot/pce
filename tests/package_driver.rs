@@ -582,3 +582,110 @@ fn replay_preparation_failure_records_not_judged_and_executes_no_proposed_comman
     assert!(events.contains("\"materialization\":\"repair\""));
     assert!(!events.contains("finding-replayed"));
 }
+
+#[test]
+fn mixed_valid_and_structurally_malformed_findings_credit_only_valid_finding() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "witness");
+    let witness = git(&repo, &["rev-parse", "HEAD"]);
+    fs::write(repo.join("value"), "repair").expect("repair");
+    git(&repo, &["commit", "-qam", "repair"]);
+    let repair = git(&repo, &["rev-parse", "HEAD"]);
+    let unreachable = git(
+        &repo,
+        &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "dangling"],
+    );
+    let graph_path = temp.path().join("graph.json");
+    let journal = temp.path().join("driver.jsonl");
+    graph(
+        &graph_path,
+        &["repo"],
+        json!([{"name":"floor","input":"repo","observation":"zero","command":"true"}]),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-done","package":"A","issuance":1}),
+    );
+    let outcome = temp.path().join("mixed.json");
+    fs::write(&outcome, serde_json::to_vec(&json!({"findings":[
+        {"description":"valid","repair":"fixed","proposed_criterion_command":"test \"$(cat value)\" = repair","repository_refs":[{"repository":"repo","witness_ref":witness,"repair_ref":repair}]},
+        {"description":"unusable","repair":"none","proposed_criterion_command":"false","repository_refs":[{"repository":"repo","witness_ref":"missing-witness","repair_ref":"HEAD"}]},
+        {"description":"unreachable","repair":"none","proposed_criterion_command":"false","repository_refs":[{"repository":"repo","witness_ref":repair,"repair_ref":unreachable}]}
+    ]})).expect("json")).expect("outcome");
+    let replay = |finding: &str| {
+        run(
+            temp.path(),
+            &[
+                "package".into(),
+                "replay-finding".into(),
+                "--graph".into(),
+                graph_path.display().to_string(),
+                "--journal".into(),
+                journal.display().to_string(),
+                "--package".into(),
+                "A".into(),
+                "--gate".into(),
+                "g".into(),
+                "--finding".into(),
+                finding.into(),
+                "--outcome".into(),
+                outcome.display().to_string(),
+                "--repository".into(),
+                format!("repo={}", repo.display()),
+            ],
+        )
+    };
+    let accepted = replay("0");
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let rejected = replay("1");
+    assert!(
+        rejected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    let rejection: Value = serde_json::from_slice(&rejected.stdout).expect("rejection");
+    assert_eq!(rejection["decision"]["decision"], "rejected");
+    assert_eq!(rejection["decision"]["reason"], "structurally-malformed");
+    let unreachable_rejection = replay("2");
+    assert!(
+        unreachable_rejection.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unreachable_rejection.stderr)
+    );
+    let unreachable_decision: Value =
+        serde_json::from_slice(&unreachable_rejection.stdout).expect("unreachable rejection");
+    assert_eq!(
+        unreachable_decision["decision"]["reason"],
+        "structurally-malformed"
+    );
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(events.contains("finding-replayed"));
+    assert!(events.contains("finding-rejected"));
+    assert!(events.contains("missing-witness"));
+    assert!(events.contains(&unreachable));
+    assert!(events.contains("not reachable from any ref or HEAD"));
+    let status = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-status".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+        ],
+    );
+    let snapshot: Value = serde_json::from_slice(&status.stdout).expect("snapshot");
+    assert_eq!(
+        snapshot["amendments"].as_array().expect("amendments").len(),
+        1
+    );
+}

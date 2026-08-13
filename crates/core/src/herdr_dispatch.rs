@@ -1,7 +1,9 @@
 //! herdr_dispatch_plan : Vision × WorkPackage × DispatchAttempt × RepositoryDispatchInput* × WorkerEnvironment × WorkerArgv → HerdrWorkPackageDispatchPlan
+//! pane_close : PaneId → HerdrInvocation
 //!
 //! The result is a pure, ordered description of Herdr worktree creation followed by one agent
-//! start. Herdr owns all process creation and lifecycle observation; this module performs no I/O.
+//! start, plus exact cleanup composition for the pane returned by that start. This module performs
+//! no I/O.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -227,6 +229,18 @@ impl HerdrWorkspaceId {
         }
         Ok(Self(value))
     }
+
+    /// Return the exact workspace identifier.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Compose closure of the exact worktree workspace containing the run-created root pane.
+    pub fn close_invocation(&self) -> HerdrInvocation {
+        HerdrInvocation {
+            argv: vec!["workspace".to_owned(), "close".to_owned(), self.0.clone()],
+        }
+    }
 }
 
 /// An opaque tab identifier returned by Herdr worktree creation.
@@ -250,6 +264,39 @@ impl HerdrTabId {
     }
 }
 
+/// An opaque pane identifier observed in Herdr's pane inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HerdrPaneId(String);
+
+impl HerdrPaneId {
+    /// Parse a non-empty opaque pane identifier.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty identifier.
+    pub fn parse(value: impl Into<String>) -> Result<Self, HerdrDispatchPlanError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(HerdrDispatchPlanError::EmptyValue {
+                field: "Herdr pane id",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    /// Return the exact identifier accepted by `herdr pane close`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Compose the exact pane-close invocation.
+    pub fn close_invocation(&self) -> HerdrInvocation {
+        HerdrInvocation {
+            argv: vec!["pane".to_owned(), "close".to_owned(), self.0.clone()],
+        }
+    }
+}
+
 /// The runtime location read from a Herdr worktree-create JSON response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrAgentLocation {
@@ -261,6 +308,16 @@ impl HerdrAgentLocation {
     /// Bind the opaque workspace and tab returned by Herdr.
     pub const fn new(workspace: HerdrWorkspaceId, tab: HerdrTabId) -> Self {
         Self { workspace, tab }
+    }
+
+    /// Return the exact workspace identifier.
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace.0
+    }
+
+    /// Return the exact tab identifier.
+    pub fn tab_id(&self) -> &str {
+        &self.tab.0
     }
 }
 
@@ -386,6 +443,9 @@ pub enum HerdrDispatchPlanError {
     /// A package repeated a repository, which would violate one-worktree-per-repository identity.
     #[error("package repeats repository `{repository}`")]
     DuplicatePackageRepository { repository: String },
+    /// More than one newly observed pane matched the exact agent-start location and cwd.
+    #[error("{count} newly observed panes match the run-owned agent-start identity")]
+    AmbiguousCreatedPane { count: usize },
 }
 
 /// Derive the stable agent name from length-framed vision and package identity.
@@ -745,5 +805,24 @@ mod tests {
         let empty =
             WorkerEnvironment::parse(BTreeMap::new()).unwrap_or_else(|error| panic!("{error}"));
         assert!(empty.0.is_empty());
+    }
+    #[test]
+    fn pane_close_targets_only_the_exact_returned_opaque_identity() {
+        let pane = super::HerdrPaneId::parse("w9:p73").unwrap_or_else(|error| panic!("{error}"));
+        let close = pane.close_invocation();
+        assert_eq!(close.executable(), "herdr");
+        assert_eq!(close.argv(), ["pane", "close", "w9:p73"]);
+        assert!(!close.argv().iter().any(|argument| argument == "unrelated"));
+
+        let workspace =
+            super::HerdrWorkspaceId::parse("w9").unwrap_or_else(|error| panic!("{error}"));
+        let workspace_close = workspace.close_invocation();
+        assert_eq!(workspace_close.argv(), ["workspace", "close", "w9"]);
+        assert!(
+            !workspace_close
+                .argv()
+                .iter()
+                .any(|argument| argument == "w8")
+        );
     }
 }

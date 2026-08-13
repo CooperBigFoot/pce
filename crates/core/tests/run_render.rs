@@ -99,6 +99,18 @@ fn stopped_run_keeps_failure_output_amendment_and_rejected_finding() {
                 reason: FindingRejectionReason::WitnessPassed,
             },
         },
+        DriverEvent::FindingRejected {
+            package: "A".to_owned(),
+            gate: "falsifier-1".to_owned(),
+            finding: 2,
+            command: "./unusable".to_owned(),
+            reason: FindingRejectionReason::StructurallyMalformed,
+            detail: "missing & unreachable <ref>".to_owned(),
+        },
+        DriverEvent::GateFinished {
+            package: "A".to_owned(),
+            gate: "empty-gate".to_owned(),
+        },
         DriverEvent::PackageFailed {
             package: "A".to_owned(),
             reason: "criterion tests failed".to_owned(),
@@ -113,6 +125,10 @@ fn stopped_run_keeps_failure_output_amendment_and_rejected_finding() {
     assert!(html.contains("data-finding-decision=\"accepted\""));
     assert!(html.contains("data-finding-decision=\"rejected\""));
     assert!(html.contains("witness-passed"));
+    assert!(html.contains("structurally-malformed"));
+    assert!(html.contains("missing &amp; unreachable &lt;ref&gt;"));
+    assert!(html.contains("empty-gate"));
+    assert!(html.contains("No findings reported"));
     assert!(html.contains("bad123"));
 }
 

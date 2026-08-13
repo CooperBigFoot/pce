@@ -38,17 +38,18 @@ use pce_core::{
     EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
     ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
     ExceptionalMergeChainObservation, Executable, ExitCode, ExpectedVerdictOutcome,
-    FileObservation, FindingAdmission, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
-    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
-    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
-    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
-    GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
-    HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, KnownPayload, LandingReadinessDecision,
+    FileObservation, FindingAdmission, FindingRejectionReason, FindingReplayDecision,
+    FinishedResult, GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig,
+    GateExecutionRef, GateExecutionRejection, GateExecutionResponse, GateObservedResult,
+    GateProcessObservation, GateProcessStimulus, GateStimulus, GateTerminalStatus,
+    GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
+    GitMergeObservation, HerdrAgentLocation, HerdrInvocation, HerdrPaneId, HerdrTabId,
+    HerdrWorkspaceId, HerdrWorktreeSpec, KnownPayload, LandingReadinessDecision,
     LegacyRepositoryContractPayload, LocalPatchLimit, MeasuredContractSnapshot, MergeStatus,
     MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
     NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
     OracleFailure, OracleStage, OrderingEdge, PackageWorkerResult, PackageWorkerStoppedAt,
-    PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
+    PairedCampaign, PairedExecutionProofError, PairedReplayClassification, PaneCleanupOutcome,
     ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
     PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
@@ -81,11 +82,12 @@ use pce_core::{
     parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
     parse_package_gate_outcome, parse_package_worker_result, parse_paired_falsification_verdict,
     parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
-    parse_work_package_graph, ready_work_packages, rebase_gate_stimulus, recovery_attempt_records,
-    recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
-    render_package_run, seatbelt_capability_probe, serialize_dispatch_check_in,
-    serialize_dispatch_process_identity, serialize_package_worker_result,
-    serialize_tracked_repository_contract, validate_artifact, validate_package_gate_repositories,
+    parse_work_package_graph, pending_completed_pane_cleanups, ready_work_packages,
+    rebase_gate_stimulus, recovery_attempt_records, recovery_base_brief, recovery_budget,
+    render_dispatch_projection, render_human_snapshot, render_package_run,
+    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    serialize_package_worker_result, serialize_tracked_repository_contract, validate_artifact,
+    validate_package_gate_finding_repositories, validate_package_gate_repositories,
     validate_verdict_references, validate_workflow_coverage, validated_dispatch_completion_payload,
     verify_criterion_change,
 };
@@ -247,6 +249,7 @@ struct PackageGateAgentCommand {
     package_id: String,
     artifact_ref: BuiltArtifactRef,
     outcome_path: PathBuf,
+    defer_finding_validation: bool,
     worker_arguments: Vec<String>,
 }
 
@@ -939,6 +942,12 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
 }
 
 fn parse_package_gate_agent(rest: &[String]) -> Result<Command> {
+    let delimiter = rest
+        .iter()
+        .position(|argument| argument == "--")
+        .context(USAGE)?;
+    let (options, worker_with_delimiter) = rest.split_at(delimiter);
+    let worker = &worker_with_delimiter[1..];
     let [
         vision_flag,
         vision,
@@ -950,18 +959,21 @@ fn parse_package_gate_agent(rest: &[String]) -> Result<Command> {
         artifact_ref,
         outcome_flag,
         outcome,
-        delimiter,
-        worker @ ..,
-    ] = rest
+        trailing @ ..,
+    ] = options
     else {
         bail!(USAGE);
+    };
+    let defer_finding_validation = match trailing {
+        [] => false,
+        [flag] if flag == "--defer-finding-validation" => true,
+        _ => bail!(USAGE),
     };
     if vision_flag != "--vision"
         || graph_flag != "--graph"
         || package_flag != "--package"
         || artifact_flag != "--artifact-ref"
         || outcome_flag != "--outcome"
-        || delimiter != "--"
         || worker.is_empty()
     {
         bail!(USAGE);
@@ -978,6 +990,7 @@ fn parse_package_gate_agent(rest: &[String]) -> Result<Command> {
         package_id: package.clone(),
         artifact_ref: BuiltArtifactRef::parse(artifact_ref.clone())?,
         outcome_path,
+        defer_finding_validation,
         worker_arguments: worker.to_vec(),
     }))
 }
@@ -1063,6 +1076,9 @@ fn run_package_gate_agent(command: PackageGateAgentCommand) -> Result<()> {
     })?;
     let outcome = parse_package_gate_outcome(&outcome_bytes)
         .context("failed to parse package gate outcome")?;
+    if command.defer_finding_validation {
+        return Ok(());
+    }
     validate_package_gate_repositories(&outcome, package.repositories())
         .context("package gate outcome exceeded package repository scope")?;
     validate_package_gate_refs(&outcome, &worktrees)
@@ -1125,78 +1141,86 @@ fn validate_package_gate_refs(
     outcome: &pce_core::ParsedPackageGateOutcome,
     worktrees: &[RepositoryWorktree],
 ) -> Result<()> {
+    for finding in outcome.findings() {
+        validate_package_gate_finding_refs(finding, worktrees)?;
+    }
+    Ok(())
+}
+
+fn validate_package_gate_finding_refs(
+    finding: &pce_core::PackageGateFinding,
+    worktrees: &[RepositoryWorktree],
+) -> Result<()> {
     let by_repository = worktrees
         .iter()
         .map(|worktree| (worktree.repository(), worktree.path()))
         .collect::<BTreeMap<_, _>>();
-    for finding in outcome.findings() {
-        for refs in finding.repository_refs() {
-            let worktree = by_repository
-                .get(refs.repository())
-                .with_context(|| format!("no assigned worktree for `{}`", refs.repository()))?;
-            let witness = resolve_package_gate_commit(worktree, refs.witness_ref())?;
-            let repair = resolve_package_gate_commit(worktree, refs.repair_ref())?;
-            if witness == repair {
-                bail!(
-                    "package gate witness ref `{}` and repair ref `{}` identify the same commit in repository `{}`",
-                    refs.witness_ref(),
-                    refs.repair_ref(),
+    for refs in finding.repository_refs() {
+        let worktree = by_repository
+            .get(refs.repository())
+            .with_context(|| format!("no assigned worktree for `{}`", refs.repository()))?;
+        let witness = resolve_package_gate_commit(worktree, refs.witness_ref())?;
+        let repair = resolve_package_gate_commit(worktree, refs.repair_ref())?;
+        if witness == repair {
+            bail!(
+                "package gate witness ref `{}` and repair ref `{}` identify the same commit in repository `{}`",
+                refs.witness_ref(),
+                refs.repair_ref(),
+                refs.repository()
+            );
+        }
+        let parents = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(worktree)
+            .args(["rev-list", "--parents", "-n", "1", &repair])
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to inspect repair parents in `{}`",
                     refs.repository()
-                );
-            }
-            let parents = std::process::Command::new("git")
-                .args(["-C"])
-                .arg(worktree)
-                .args(["rev-list", "--parents", "-n", "1", &repair])
-                .output()
-                .with_context(|| {
-                    format!(
-                        "failed to inspect repair parents in `{}`",
-                        refs.repository()
-                    )
-                })?;
-            if !parents.status.success() {
-                bail!(
-                    "failed to inspect repair parents in repository `{}`",
-                    refs.repository()
-                );
-            }
-            let parent_line = String::from_utf8(parents.stdout)
-                .context("git returned non-UTF-8 repair ancestry")?;
-            let identities = parent_line.split_whitespace().collect::<Vec<_>>();
-            if identities.as_slice() != [repair.as_str(), witness.as_str()] {
-                bail!(
-                    "package gate repair ref `{}` must have witness ref `{}` as its sole direct parent in repository `{}`",
-                    refs.repair_ref(),
-                    refs.witness_ref(),
-                    refs.repository()
-                );
-            }
-            let relationship = std::process::Command::new("git")
-                .args(["-C"])
-                .arg(worktree)
-                .args(["merge-base", "--is-ancestor", &witness, &repair])
-                .output()
-                .with_context(|| {
-                    format!(
-                        "failed to inspect package gate ancestry in {}",
-                        worktree.display()
-                    )
-                })?;
-            match relationship.status.code() {
-                Some(0) => {}
-                Some(1) => bail!(
-                    "package gate repair ref `{}` does not descend from witness ref `{}` in repository `{}`",
-                    refs.repair_ref(),
-                    refs.witness_ref(),
-                    refs.repository()
-                ),
-                code => bail!(
-                    "git ancestry inspection failed in repository `{}` with status {code:?}: {}",
-                    refs.repository(),
-                    String::from_utf8_lossy(&relationship.stderr).trim()
-                ),
-            }
+                )
+            })?;
+        if !parents.status.success() {
+            bail!(
+                "failed to inspect repair parents in repository `{}`",
+                refs.repository()
+            );
+        }
+        let parent_line =
+            String::from_utf8(parents.stdout).context("git returned non-UTF-8 repair ancestry")?;
+        let identities = parent_line.split_whitespace().collect::<Vec<_>>();
+        if identities.as_slice() != [repair.as_str(), witness.as_str()] {
+            bail!(
+                "package gate repair ref `{}` must have witness ref `{}` as its sole direct parent in repository `{}`",
+                refs.repair_ref(),
+                refs.witness_ref(),
+                refs.repository()
+            );
+        }
+        let relationship = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(worktree)
+            .args(["merge-base", "--is-ancestor", &witness, &repair])
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to inspect package gate ancestry in {}",
+                    worktree.display()
+                )
+            })?;
+        match relationship.status.code() {
+            Some(0) => {}
+            Some(1) => bail!(
+                "package gate repair ref `{}` does not descend from witness ref `{}` in repository `{}`",
+                refs.repair_ref(),
+                refs.witness_ref(),
+                refs.repository()
+            ),
+            code => bail!(
+                "git ancestry inspection failed in repository `{}` with status {code:?}: {}",
+                refs.repository(),
+                String::from_utf8_lossy(&relationship.stderr).trim()
+            ),
         }
     }
     Ok(())
@@ -1953,6 +1977,7 @@ fn run_composed_driver_gate(
         artifact_ref,
         "--outcome".to_owned(),
         gate_outcome.display().to_string(),
+        "--defer-finding-validation".to_owned(),
         "--".to_owned(),
         "prime-agent".to_owned(),
         "-p".to_owned(),
@@ -1978,6 +2003,7 @@ fn run_composed_driver_gate(
         environment: route_environment()?,
         worker_arguments,
     })?;
+    record_driver_dispatch_panes(&command.journal_path, package_id, issuance, &response)?;
     let result_path = PathBuf::from(
         response["result_path"]
             .as_str()
@@ -2005,25 +2031,32 @@ fn run_composed_driver_gate(
     let outcome = parse_package_gate_outcome(&fs::read(&gate_outcome)?)
         .context("failed to parse composed gate outcome")?;
     let gate_name = format!("package-gate-{issuance}");
+    let mut structurally_usable = 0_usize;
     for finding in 0..outcome.findings().len() {
-        run_driver_replay(DriverReplayCommand {
-            graph_path: command.graph_path.clone(),
-            journal_path: command.journal_path.clone(),
-            package_id: package_id.to_owned(),
-            gate: gate_name.clone(),
-            finding,
-            outcome_path: gate_outcome.clone(),
-            repositories: implementation_worktrees
-                .iter()
-                .map(|worktree| {
-                    (
-                        worktree.repository().to_owned(),
-                        worktree.path().to_path_buf(),
-                    )
-                })
-                .collect(),
-            preparations: command.preparations.clone(),
-        })?;
+        let disposition = replay_driver_finding(
+            DriverReplayCommand {
+                graph_path: command.graph_path.clone(),
+                journal_path: command.journal_path.clone(),
+                package_id: package_id.to_owned(),
+                gate: gate_name.clone(),
+                finding,
+                outcome_path: gate_outcome.clone(),
+                repositories: implementation_worktrees
+                    .iter()
+                    .map(|worktree| {
+                        (
+                            worktree.repository().to_owned(),
+                            worktree.path().to_path_buf(),
+                        )
+                    })
+                    .collect(),
+                preparations: command.preparations.clone(),
+            },
+            false,
+        )?;
+        if matches!(disposition, DriverFindingDisposition::StructurallyUsable) {
+            structurally_usable = structurally_usable.saturating_add(1);
+        }
     }
     append_driver_event(
         &command.journal_path,
@@ -2032,6 +2065,19 @@ fn run_composed_driver_gate(
             gate: gate_name,
         },
     )?;
+    if !outcome.findings().is_empty() && structurally_usable == 0 {
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::PackageFailed {
+                package: package_id.to_owned(),
+                reason: format!(
+                    "gate produced {} findings; all were structurally malformed",
+                    outcome.findings().len()
+                ),
+            },
+        )?;
+        return Ok(());
+    }
     append_driver_event(
         &command.journal_path,
         &DriverEvent::PackageCompleted {
@@ -2234,6 +2280,48 @@ fn compose_driver_worker_brief(
     }))
 }
 
+fn record_driver_dispatch_panes(
+    journal: &Path,
+    package: &str,
+    issuance: u64,
+    response: &Value,
+) -> Result<()> {
+    let targets = response
+        .get("pane_cleanup_targets")
+        .and_then(Value::as_array)
+        .context("package dispatch omitted pane_cleanup_targets")?;
+    for target in targets {
+        let pane_id = target
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .context("package dispatch pane target omitted pane_id")?;
+        let workspace_id = target
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .context("package dispatch pane target omitted workspace_id")?;
+        append_driver_event(
+            journal,
+            &DriverEvent::DispatchPaneOpened {
+                package: package.to_owned(),
+                issuance,
+                pane_id: pane_id.to_owned(),
+                workspace_id: workspace_id.to_owned(),
+            },
+        )?;
+    }
+    if let Some(detail) = response.get("pane_ownership_error").and_then(Value::as_str) {
+        append_driver_event(
+            journal,
+            &DriverEvent::DispatchPaneOwnershipUnresolved {
+                package: package.to_owned(),
+                issuance,
+                detail: detail.to_owned(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn issue_driver_package_dispatch(
     command: &DriverRunCommand,
     graph: &WorkPackageGraph,
@@ -2303,6 +2391,7 @@ fn issue_driver_package_dispatch(
         environment: route_environment()?,
         worker_arguments,
     })?;
+    record_driver_dispatch_panes(&command.journal_path, package_id, issuance, &response)?;
     let result_path = response["result_path"]
         .as_str()
         .context("composed package dispatch omitted result_path")?;
@@ -2364,12 +2453,46 @@ fn wait_for_driver_results(paths: &[PathBuf], timeout: Option<Duration>) -> Resu
     }
 }
 
+fn reconcile_completed_dispatch_panes(journal: &Path, events: &[DriverEvent]) -> Result<usize> {
+    let pending = pending_completed_pane_cleanups(events);
+    for target in &pending {
+        // Herdr 0.7.1 refuses `pane close` for the last pane in a worktree group. Closing the exact
+        // workspace returned alongside that root pane removes the UI group without using a pattern.
+        let result = HerdrWorkspaceId::parse(target.workspace_id())
+            .map_err(Error::new)
+            .and_then(|workspace_id| execute_herdr(&workspace_id.close_invocation()));
+        let (outcome, detail) = match result {
+            Ok(_) => (
+                PaneCleanupOutcome::Closed,
+                "herdr confirmed closure of the exact workspace containing the run-created pane"
+                    .to_owned(),
+            ),
+            Err(source) => (PaneCleanupOutcome::Failed, format!("{source:#}")),
+        };
+        append_driver_event(
+            journal,
+            &DriverEvent::DispatchPaneCleanup {
+                package: target.package().to_owned(),
+                issuance: target.issuance(),
+                pane_id: target.pane_id().to_owned(),
+                workspace_id: target.workspace_id().to_owned(),
+                outcome,
+                detail,
+            },
+        )?;
+    }
+    Ok(pending.len())
+}
+
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
     let initial_events = read_driver_journal(&command.journal_path)?;
     ensure_recovery_configuration(&command, &initial_events)?;
     loop {
         let graph = read_driver_graph(&command.graph_path)?;
         let events = read_driver_journal(&command.journal_path)?;
+        if reconcile_completed_dispatch_panes(&command.journal_path, &events)? > 0 {
+            continue;
+        }
         let snapshot = derive_driver_snapshot(&graph, &events, command.override_risk_ordering)
             .context("failed to derive driver loop state")?;
         let exhausted = snapshot
@@ -3232,7 +3355,20 @@ fn run_driver_criteria(command: DriverCriteriaCommand) -> Result<()> {
     run_driver_status(execute_driver_criteria(command)?)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriverFindingDisposition {
+    StructurallyUsable,
+    StructurallyMalformed,
+}
+
 fn run_driver_replay(command: DriverReplayCommand) -> Result<()> {
+    replay_driver_finding(command, true).map(|_| ())
+}
+
+fn replay_driver_finding(
+    command: DriverReplayCommand,
+    emit_stdout: bool,
+) -> Result<DriverFindingDisposition> {
     let graph = read_driver_graph(&command.graph_path)?;
     let package = graph
         .packages()
@@ -3244,18 +3380,42 @@ fn run_driver_replay(command: DriverReplayCommand) -> Result<()> {
         .with_context(|| format!("failed to read {}", command.outcome_path.display()))?;
     let outcome =
         parse_package_gate_outcome(&outcome_bytes).context("failed to parse gate outcome")?;
-    validate_package_gate_repositories(&outcome, package.repositories())
-        .context("finding exceeds package repository scope")?;
-    let worktrees = sources
-        .iter()
-        .map(|(name, path)| RepositoryWorktree::parse(name.clone(), path.clone()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    validate_package_gate_refs(&outcome, &worktrees)
-        .context("finding refs do not satisfy the WP6 witness/repair contract")?;
     let finding = outcome
         .findings()
         .get(command.finding)
         .with_context(|| format!("gate finding {} is absent", command.finding))?;
+    let worktrees = sources
+        .iter()
+        .map(|(name, path)| RepositoryWorktree::parse(name.clone(), path.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let structural_validation =
+        validate_package_gate_finding_repositories(finding, package.repositories())
+            .context("finding exceeds package repository scope")
+            .and_then(|()| {
+                validate_package_gate_finding_refs(finding, &worktrees)
+                    .context("finding refs do not satisfy the WP6 witness/repair contract")
+            });
+    if let Err(source) = structural_validation {
+        let detail = format!("{source:#}");
+        let decision = FindingReplayDecision::Rejected {
+            reason: FindingRejectionReason::StructurallyMalformed,
+        };
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::FindingRejected {
+                package: command.package_id.clone(),
+                gate: command.gate,
+                finding: u64::try_from(command.finding).context("finding index exceeds u64")?,
+                command: finding.proposed_criterion_command().to_owned(),
+                reason: FindingRejectionReason::StructurallyMalformed,
+                detail,
+            },
+        )?;
+        if emit_stdout {
+            write_json_stdout(&json!({"decision": decision}))?;
+        }
+        return Ok(DriverFindingDisposition::StructurallyMalformed);
+    }
     let by_refs = finding
         .repository_refs()
         .iter()
@@ -3294,9 +3454,12 @@ fn run_driver_replay(command: DriverReplayCommand) -> Result<()> {
         &command.preparations,
     )?;
     if !witness_prepared {
-        return write_json_stdout(
-            &json!({"decision": "not-judged", "reason": "environment-preparation-failed"}),
-        );
+        if emit_stdout {
+            write_json_stdout(
+                &json!({"decision": "not-judged", "reason": "environment-preparation-failed"}),
+            )?;
+        }
+        return Ok(DriverFindingDisposition::StructurallyUsable);
     }
     let repair_prepared = prepare_driver_materialization(
         &command.journal_path,
@@ -3307,9 +3470,12 @@ fn run_driver_replay(command: DriverReplayCommand) -> Result<()> {
         &command.preparations,
     )?;
     if !repair_prepared {
-        return write_json_stdout(
-            &json!({"decision": "not-judged", "reason": "environment-preparation-failed"}),
-        );
+        if emit_stdout {
+            write_json_stdout(
+                &json!({"decision": "not-judged", "reason": "environment-preparation-failed"}),
+            )?;
+        }
+        return Ok(DriverFindingDisposition::StructurallyUsable);
     }
     let witness = shell_execution(
         finding.proposed_criterion_command(),
@@ -3330,7 +3496,10 @@ fn run_driver_replay(command: DriverReplayCommand) -> Result<()> {
             decision: decision.clone(),
         },
     )?;
-    write_json_stdout(&json!({"decision": decision}))
+    if emit_stdout {
+        write_json_stdout(&json!({"decision": decision}))?;
+    }
+    Ok(DriverFindingDisposition::StructurallyUsable)
 }
 
 fn package_result_path(vision_dir: &Path, package: &NodeId, issuance: Sequence) -> Result<PathBuf> {
@@ -3784,10 +3953,42 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             return Err(Error::new(SpawnObservedDispatchError { source }));
         }
     };
+    let mut pane_cleanup_targets = Vec::new();
+    let mut pane_ownership_errors = Vec::new();
+    for item in &created {
+        let pane_id = item
+            .pointer("/response/result/root_pane/pane_id")
+            .and_then(Value::as_str)
+            .context("herdr worktree response omitted result.root_pane.pane_id")
+            .and_then(|value| HerdrPaneId::parse(value).map_err(Error::new));
+        let workspace_id = item
+            .pointer("/response/result/root_pane/workspace_id")
+            .and_then(Value::as_str)
+            .context("herdr worktree response omitted result.root_pane.workspace_id")
+            .and_then(|value| HerdrWorkspaceId::parse(value).map_err(Error::new));
+        match (pane_id, workspace_id) {
+            (Ok(pane_id), Ok(workspace_id)) => pane_cleanup_targets.push(json!({
+                "pane_id": pane_id.as_str(),
+                "workspace_id": workspace_id.as_str(),
+            })),
+            (pane, workspace) => pane_ownership_errors.push(format!(
+                "pane identity: {}; workspace identity: {}",
+                pane.err()
+                    .map_or_else(|| "available".to_owned(), |error| format!("{error:#}")),
+                workspace
+                    .err()
+                    .map_or_else(|| "available".to_owned(), |error| format!("{error:#}")),
+            )),
+        }
+    }
+    let pane_ownership_error =
+        (!pane_ownership_errors.is_empty()).then(|| pane_ownership_errors.join("; "));
     Ok(json!({
         "agent_name": plan.agent_name().as_str(),
         "issuance_sequence": issuance.sequence().get(),
         "result_path": result_path.as_str(),
+        "pane_cleanup_targets": pane_cleanup_targets,
+        "pane_ownership_error": pane_ownership_error,
         "worktrees": created,
         "agent_start": start_response,
     }))

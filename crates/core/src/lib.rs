@@ -55,14 +55,15 @@ pub use package_driver::{
     AmendmentRepositoryRefs, CommandExitStatus, CriterionExecution, CriterionOrigin, DriverEvent,
     DriverLoopOutcome, DriverPackageState, DriverSnapshot, EffectiveCriterion,
     EnvironmentPreparationOutcome, FindingRejectionReason, FindingReplayDecision,
-    PackageDriverError, RecoveryAttemptRecord, charged_failure_count, derive_driver_snapshot,
-    effective_criteria, judge_finding_replay, latest_criterion_failure_evidence,
-    recovery_attempt_records, recovery_base_brief,
+    PackageDriverError, PaneCleanupOutcome, PendingPaneCleanup, RecoveryAttemptRecord,
+    charged_failure_count, derive_driver_snapshot, effective_criteria, judge_finding_replay,
+    latest_criterion_failure_evidence, pending_completed_pane_cleanups, recovery_attempt_records,
+    recovery_base_brief,
 };
 pub use package_gate::{
     BuiltArtifactRef, PackageGateError, PackageGateFinding, PackageGateRepositoryRefs,
     ParsedPackageGateOutcome, compose_package_gate_brief, parse_package_gate_outcome,
-    validate_package_gate_repositories,
+    validate_package_gate_finding_repositories, validate_package_gate_repositories,
 };
 pub use package_recovery::{
     LocalPatchLimit, RecoveryBudget, RecoveryCriterionEvidence, RecoveryLimits, RecoveryRung,
@@ -153,8 +154,8 @@ pub use gate_replay::{
 pub use herdr_dispatch::{
     AbsoluteDispatchTemporaryDirectory, AbsoluteWorktreeRoot, DispatchAttempt,
     DispatchVisionSource, HerdrAgentLocation, HerdrAgentName, HerdrDispatchPlanError,
-    HerdrInvocation, HerdrTabId, HerdrWorkPackageDispatchPlan, HerdrWorkspaceId, HerdrWorktreeSpec,
-    RepositoryDispatchInput, WorkerArgumentVector, WorkerEnvironment,
+    HerdrInvocation, HerdrPaneId, HerdrTabId, HerdrWorkPackageDispatchPlan, HerdrWorkspaceId,
+    HerdrWorktreeSpec, RepositoryDispatchInput, WorkerArgumentVector, WorkerEnvironment,
     compose_herdr_work_package_dispatch,
 };
 pub use landing_readiness::{
