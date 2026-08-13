@@ -52,12 +52,12 @@ pub use package_completion::{
     serialize_package_worker_result,
 };
 pub use package_driver::{
-    AmendmentRepositoryRefs, CommandExitStatus, CriterionExecution, CriterionOrigin, DriverEvent,
-    DriverLoopOutcome, DriverPackageState, DriverSnapshot, EffectiveCriterion,
-    EnvironmentPreparationOutcome, FindingRejectionReason, FindingReplayDecision,
-    PackageDriverError, RecoveryAttemptRecord, charged_failure_count, derive_driver_snapshot,
-    effective_criteria, judge_finding_replay, latest_criterion_failure_evidence,
-    recovery_attempt_records, recovery_base_brief,
+    AmendmentRepositoryRefs, CommandExitStatus, CompositionInput, CriterionExecution,
+    CriterionOrigin, DriverAssemblyState, DriverEvent, DriverLoopOutcome, DriverPackageState,
+    DriverSnapshot, EffectiveCriterion, EnvironmentPreparationOutcome, FindingRejectionReason,
+    FindingReplayDecision, PackageDriverError, RecoveryAttemptRecord, charged_failure_count,
+    derive_driver_snapshot, effective_criteria, judge_finding_replay,
+    latest_criterion_failure_evidence, recovery_attempt_records, recovery_base_brief,
 };
 pub use package_gate::{
     BuiltArtifactRef, PackageGateError, PackageGateFinding, PackageGateRepositoryRefs,
