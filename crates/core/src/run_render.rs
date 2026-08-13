@@ -269,9 +269,9 @@ pub fn render_package_run(
             let start = points[from];
             let end = points[to];
             let (kind, marker, label) = match edge.kind() {
-                DependencyKind::Buildability => ("buildability", "build", "B"),
-                DependencyKind::Safety => ("safety", "warn", "S"),
-                DependencyKind::RiskOrdering => ("risk-ordering", "muted", "R · choice"),
+                DependencyKind::Buildability => ("buildability", "arrow-build", "B"),
+                DependencyKind::Safety => ("safety", "arrow-warn", "S"),
+                DependencyKind::RiskOrdering => ("risk-ordering", "arrow-muted", "R · choice"),
             };
             let critical = critical_edges.contains(&(from, to));
             let near = edge.kind() == DependencyKind::RiskOrdering
