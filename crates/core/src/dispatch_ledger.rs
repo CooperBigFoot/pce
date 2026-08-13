@@ -9,7 +9,7 @@ use crate::event_log::{
     DispatchRef, DispatchRole, DispatchTokenUsage, EventBodyRef, EventRecord, EventTimestamp,
     Evidence, KnownPayload, NodeId, ObservedDispatchCompletionPayload,
     ObservedDispatchCompletionWithArtifactPresencePayload, ReconciledDeadDispatchCompletionPayload,
-    RequiredArtifactPresence, Sequence,
+    RequiredArtifactPresence, Sequence, SpawnFailedDispatchCompletionPayload,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +39,11 @@ pub enum DispatchLedgerCompletion {
         sequence: Sequence,
         timestamp: EventTimestamp,
         payload: ObservedChildCompletion,
+    },
+    SpawnFailed {
+        sequence: Sequence,
+        timestamp: EventTimestamp,
+        payload: SpawnFailedDispatchCompletionPayload,
     },
     ReconciledDead {
         sequence: Sequence,
@@ -162,16 +167,16 @@ impl DispatchLedgerIssuance {
 impl DispatchLedgerCompletion {
     pub const fn sequence(&self) -> Sequence {
         match self {
-            Self::ObservedChild { sequence, .. } | Self::ReconciledDead { sequence, .. } => {
-                *sequence
-            }
+            Self::ObservedChild { sequence, .. }
+            | Self::SpawnFailed { sequence, .. }
+            | Self::ReconciledDead { sequence, .. } => *sequence,
         }
     }
     pub const fn timestamp(&self) -> EventTimestamp {
         match self {
-            Self::ObservedChild { timestamp, .. } | Self::ReconciledDead { timestamp, .. } => {
-                *timestamp
-            }
+            Self::ObservedChild { timestamp, .. }
+            | Self::SpawnFailed { timestamp, .. }
+            | Self::ReconciledDead { timestamp, .. } => *timestamp,
         }
     }
 }
@@ -309,6 +314,13 @@ pub fn fold_dispatch_ledger(
                             payload: ObservedChildCompletion::Legacy(payload.clone()),
                         }
                     }
+                    DispatchCompletionOutcomeRef::SpawnFailed(payload) => {
+                        DispatchLedgerCompletion::SpawnFailed {
+                            sequence,
+                            timestamp: *record.timestamp(),
+                            payload: payload.clone(),
+                        }
+                    }
                     DispatchCompletionOutcomeRef::ReconciledDead(payload) => {
                         DispatchLedgerCompletion::ReconciledDead {
                             sequence,
@@ -353,6 +365,17 @@ mod tests {
             ),
         )
     }
+    fn spawn_failed(sequence: u64, issuance: u64) -> crate::EventRecord {
+        event(
+            sequence,
+            "dispatch-completion",
+            "m1-s2",
+            &format!(
+                r#"{{"issuance_sequence":{issuance},"outcome":"spawn-failed","artifact_production":"not-produced"}}"#
+            ),
+        )
+    }
+
     fn reconciled(sequence: u64, issuance: u64) -> crate::EventRecord {
         event(
             sequence,
@@ -501,5 +524,23 @@ mod tests {
                 expected
             );
         }
+    }
+    #[test]
+    fn spawning_codes_failure_fact_accounts_for_an_issuance_without_inference() {
+        let ledger =
+            fold_dispatch_ledger(&[issuance(1), spawn_failed(2, 1)]).expect("spawn-failed ledger");
+        assert!(ledger.unaccounted().entries().is_empty());
+        assert!(matches!(
+            ledger.entries()[0].completion(),
+            Some(DispatchLedgerCompletion::SpawnFailed { .. })
+        ));
+        assert_eq!(
+            fold_dispatch_ledger(&[issuance(1)])
+                .expect("open issuance")
+                .unaccounted()
+                .entries()
+                .len(),
+            1
+        );
     }
 }

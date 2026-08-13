@@ -741,6 +741,8 @@ pub enum DispatchCompletionPayload {
     ObservedChildWithArtifactPresence(ObservedDispatchCompletionWithArtifactPresencePayload),
     /// Measurements observed by the owning continuation after reaping its child.
     ObservedChild(ObservedDispatchCompletionPayload),
+    /// Durable closure after spawning code observed that no child was produced.
+    SpawnFailed(SpawnFailedDispatchCompletionPayload),
     /// Durable closure after both recorded process identities were observed dead.
     ReconciledDead(ReconciledDeadDispatchCompletionPayload),
 }
@@ -781,6 +783,22 @@ pub struct ObservedDispatchCompletionPayload {
     pub artifact_outcome: ArtifactOutcome,
 }
 
+/// A completion written only by spawning code after it observed that no child was produced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnFailedDispatchCompletionPayload {
+    pub issuance_sequence: Sequence,
+    pub outcome: SpawnDispatchOutcome,
+    pub artifact_production: ArtifactProduction,
+}
+
+/// The closed set of outcomes observed synchronously by spawning code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpawnDispatchOutcome {
+    SpawnFailed,
+}
+
 /// A completion written by reconciliation after a dispatch is observed dead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -802,6 +820,7 @@ pub enum ReconciledDispatchOutcome {
 pub enum DispatchCompletionOutcomeRef<'a> {
     ObservedChildWithArtifactPresence(&'a ObservedDispatchCompletionWithArtifactPresencePayload),
     ObservedChild(&'a ObservedDispatchCompletionPayload),
+    SpawnFailed(&'a SpawnFailedDispatchCompletionPayload),
     ReconciledDead(&'a ReconciledDeadDispatchCompletionPayload),
 }
 
@@ -810,6 +829,7 @@ impl DispatchCompletionPayload {
         match self {
             Self::ObservedChildWithArtifactPresence(payload) => payload.issuance_sequence,
             Self::ObservedChild(payload) => payload.issuance_sequence,
+            Self::SpawnFailed(payload) => payload.issuance_sequence,
             Self::ReconciledDead(payload) => payload.issuance_sequence,
         }
     }
@@ -820,6 +840,7 @@ impl DispatchCompletionPayload {
                 DispatchCompletionOutcomeRef::ObservedChildWithArtifactPresence(payload)
             }
             Self::ObservedChild(payload) => DispatchCompletionOutcomeRef::ObservedChild(payload),
+            Self::SpawnFailed(payload) => DispatchCompletionOutcomeRef::SpawnFailed(payload),
             Self::ReconciledDead(payload) => DispatchCompletionOutcomeRef::ReconciledDead(payload),
         }
     }

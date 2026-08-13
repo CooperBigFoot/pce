@@ -131,9 +131,10 @@ pub use event_log::{
     PlanningArtifactApprovedPayload, ReadKind, ReadPayload, ReasoningOutputTokens,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RepositoryContractPayload,
     RepositoryName, RepositoryRoot, RequiredArtifactPresence, Sequence, Sha256Digest, SignalNumber,
-    StatedRepositoryContract, UnpaidCriterionReason, UnparsedPayload, UsageAbsenceReason,
-    WorkflowMap, WriteKind, append_event, event_record_matches, parse_event_line,
-    serialize_event_line, successor_sequence, validate_evidence_policy,
+    SpawnDispatchOutcome, SpawnFailedDispatchCompletionPayload, StatedRepositoryContract,
+    UnpaidCriterionReason, UnparsedPayload, UsageAbsenceReason, WorkflowMap, WriteKind,
+    append_event, event_record_matches, parse_event_line, serialize_event_line, successor_sequence,
+    validate_evidence_policy,
 };
 pub use gate_execution::{
     AbsoluteGateExecClientPath, AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath,
@@ -150,10 +151,11 @@ pub use gate_replay::{
     parse_replay_output_path, parse_replay_schema_path, rebase_gate_stimulus,
 };
 pub use herdr_dispatch::{
-    AbsoluteDispatchTemporaryDirectory, AbsoluteWorktreeRoot, DispatchVisionSource,
-    HerdrAgentLocation, HerdrAgentName, HerdrDispatchPlanError, HerdrInvocation, HerdrTabId,
-    HerdrWorkPackageDispatchPlan, HerdrWorkspaceId, HerdrWorktreeSpec, RepositoryDispatchInput,
-    WorkerArgumentVector, WorkerEnvironment, compose_herdr_work_package_dispatch,
+    AbsoluteDispatchTemporaryDirectory, AbsoluteWorktreeRoot, DispatchAttempt,
+    DispatchVisionSource, HerdrAgentLocation, HerdrAgentName, HerdrDispatchPlanError,
+    HerdrInvocation, HerdrTabId, HerdrWorkPackageDispatchPlan, HerdrWorkspaceId, HerdrWorktreeSpec,
+    RepositoryDispatchInput, WorkerArgumentVector, WorkerEnvironment,
+    compose_herdr_work_package_dispatch,
 };
 pub use landing_readiness::{
     CompletionCriterionIndex, LandingCriterionEvidence, LandingReadinessDecision,

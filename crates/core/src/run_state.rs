@@ -15,6 +15,7 @@ use crate::event_log::{
     DispatchTokenUsage, EscalationKey, EventBodyRef, EventRecord, EventTimestamp, Evidence,
     FinishedResult, KnownPayload, NodeId, NonProductionHoldResolution, NonProductionKey,
     ReconciledDispatchOutcome, RepositoryName, RequiredArtifactPresence, Sequence, Sha256Digest,
+    SpawnDispatchOutcome,
 };
 use crate::{AcceptanceCriteria, AcceptanceCriterion};
 
@@ -1381,6 +1382,7 @@ pub struct DispatchObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchLifecycleObservation {
     ObservedChild(ObservedDispatchLifecycleObservation),
+    SpawnFailed(SpawnFailedDispatchLifecycleObservation),
     ReconciledDead(ReconciledDeadDispatchLifecycleObservation),
 }
 
@@ -1397,6 +1399,15 @@ pub struct ObservedDispatchLifecycleObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnFailedDispatchLifecycleObservation {
+    completion_sequence: Sequence,
+    completion_timestamp: EventTimestamp,
+    issuance: DispatchObservation,
+    outcome: SpawnDispatchOutcome,
+    artifact_production: ArtifactProduction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconciledDeadDispatchLifecycleObservation {
     completion_sequence: Sequence,
     completion_timestamp: EventTimestamp,
@@ -1409,18 +1420,21 @@ impl DispatchLifecycleObservation {
     pub const fn completion_sequence(&self) -> Sequence {
         match self {
             Self::ObservedChild(value) => value.completion_sequence,
+            Self::SpawnFailed(value) => value.completion_sequence,
             Self::ReconciledDead(value) => value.completion_sequence,
         }
     }
     pub const fn completion_timestamp(&self) -> EventTimestamp {
         match self {
             Self::ObservedChild(value) => value.completion_timestamp,
+            Self::SpawnFailed(value) => value.completion_timestamp,
             Self::ReconciledDead(value) => value.completion_timestamp,
         }
     }
     pub const fn issuance(&self) -> &DispatchObservation {
         match self {
             Self::ObservedChild(value) => &value.issuance,
+            Self::SpawnFailed(value) => &value.issuance,
             Self::ReconciledDead(value) => &value.issuance,
         }
     }
@@ -2717,6 +2731,11 @@ pub enum DispatchCompletionSnapshot<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         required_artifact_presence: Option<RequiredArtifactPresence>,
     },
+    SpawnFailed {
+        sequence: u64,
+        timestamp: EventTimestamp,
+        artifact_production: ArtifactProduction,
+    },
     ReconciledDead {
         sequence: u64,
         timestamp: EventTimestamp,
@@ -2782,6 +2801,13 @@ impl<'a> DispatchSnapshot<'a> {
                         exit_status: observed.exit_status,
                         artifact_outcome: observed.artifact_outcome,
                         required_artifact_presence: observed.required_artifact_presence,
+                    }
+                }
+                DispatchLifecycleObservation::SpawnFailed(failed) => {
+                    DispatchCompletionSnapshot::SpawnFailed {
+                        sequence: failed.completion_sequence.get(),
+                        timestamp: failed.completion_timestamp,
+                        artifact_production: failed.artifact_production,
                     }
                 }
                 DispatchLifecycleObservation::ReconciledDead(reconciled) => {
@@ -3370,6 +3396,17 @@ pub fn render_human_snapshot(snapshot: &RunSnapshot<'_>) -> String {
                 };
                 output.push_str(&format!(" completion=observed-child completion-sequence={} duration-ms={} exit-status={} artifact-outcome={} required-artifact-presence={} usage={}", sequence, duration_ms.get(), render_dispatch_exit(*exit_status), render_artifact_outcome(*artifact_outcome), presence, render_dispatch_usage(usage)));
             }
+            Some(DispatchCompletionSnapshot::SpawnFailed {
+                sequence,
+                artifact_production,
+                ..
+            }) => {
+                let production = match artifact_production {
+                    ArtifactProduction::Produced => "produced",
+                    ArtifactProduction::NotProduced => "not-produced",
+                };
+                output.push_str(&format!(" completion=spawn-failed completion-sequence={sequence} artifact-production={production}"));
+            }
             Some(DispatchCompletionSnapshot::ReconciledDead {
                 sequence,
                 artifact_production,
@@ -3952,7 +3989,8 @@ pub fn derive_dispatch_outcome_state(
                             }
                         }
                     }
-                    DispatchCompletionOutcomeRef::ObservedChild(_) => {}
+                    DispatchCompletionOutcomeRef::ObservedChild(_)
+                    | DispatchCompletionOutcomeRef::SpawnFailed(_) => {}
                     DispatchCompletionOutcomeRef::ReconciledDead(reconciled) => {
                         match reconciled.artifact_production {
                             ArtifactProduction::Produced => {
@@ -4509,6 +4547,17 @@ fn derive_run_state_internal(
                                 exit_status: payload.exit_status,
                                 artifact_outcome: payload.artifact_outcome,
                                 required_artifact_presence: None,
+                            },
+                        )
+                    }
+                    DispatchCompletionOutcomeRef::SpawnFailed(payload) => {
+                        DispatchLifecycleObservation::SpawnFailed(
+                            SpawnFailedDispatchLifecycleObservation {
+                                completion_sequence: record.sequence(),
+                                completion_timestamp: *record.timestamp(),
+                                issuance,
+                                outcome: payload.outcome,
+                                artifact_production: payload.artifact_production,
                             },
                         )
                     }

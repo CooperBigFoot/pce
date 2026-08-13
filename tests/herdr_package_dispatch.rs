@@ -79,6 +79,10 @@ fn live_herdr_package_dispatch_records_sleep_then_exit_three() {
     let log = directory.path().join("events.jsonl");
     let artifact = directory.path().join("result");
     let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .env(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+            directory.path().join("worktrees"),
+        )
         .args(["dispatch", "package", "--file"])
         .arg(&log)
         .args(["--vision-dir"])
@@ -168,5 +172,223 @@ fn live_herdr_package_dispatch_records_sleep_then_exit_three() {
                 "--json",
             ])
             .status();
+    }
+}
+
+#[test]
+fn live_herdr_retry_uses_distinct_attempt_identity_and_authored_base() {
+    if !herdr_available() {
+        eprintln!("PCE_TEST_SKIP: live Herdr session unavailable");
+        return;
+    }
+    let directory = tempdir().expect("temporary directory");
+    let repository = directory.path().join("repo");
+    fs::create_dir(&repository).expect("repository directory");
+    for arguments in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "pce@example.invalid"],
+        vec!["config", "user.name", "pce"],
+    ] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(arguments)
+                .status()
+                .expect("git")
+                .success()
+        );
+    }
+    fs::write(repository.join("base"), b"authored base").expect("base fixture");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["add", "base"])
+            .status()
+            .expect("git add")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["commit", "-qm", "base"])
+            .status()
+            .expect("git commit")
+            .success()
+    );
+    let base = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("base oid")
+            .stdout,
+    )
+    .expect("UTF-8 base")
+    .trim()
+    .to_owned();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let graph_path = directory.path().join("graph.json");
+    fs::write(&graph_path, serde_json::to_vec(&json!({
+        "vision": format!("retry-{nonce}"), "plan_version": 1, "authored_at_ref": base,
+        "packages": [{"id":"WP11","title":"retry dispatch","repositories":["repo"],
+            "criteria":[{"name":"true","input":"none","observation":"zero","command":"true"}],"depends_on":[]}]
+    })).expect("graph JSON")).expect("graph");
+    let log = directory.path().join("events.jsonl");
+    let mut responses = Vec::new();
+    let mut commits = Vec::new();
+    for attempt in 1..=2 {
+        let artifact = directory.path().join(format!("artifact-{attempt}"));
+        let script = format!(
+            "test ! -e attempt-1; printf {attempt} > attempt-{attempt}; git add attempt-{attempt}; git commit -qm attempt-{attempt}; : > {}",
+            artifact.display()
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+            .env(
+                "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+                directory.path().join("worktrees"),
+            )
+            .args(["dispatch", "package", "--file"])
+            .arg(&log)
+            .args(["--vision-dir"])
+            .arg(directory.path())
+            .args(["--graph"])
+            .arg(&graph_path)
+            .args(["--package", "WP11", "--required-artifact"])
+            .arg(&artifact)
+            .args(["--repository"])
+            .arg(format!("repo={}", repository.display()))
+            .args(["--env"])
+            .arg(format!(
+                "PATH={}",
+                std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned())
+            ))
+            .args(["--env"])
+            .arg(format!(
+                "HOME={}",
+                std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned())
+            ))
+            .args(["--env"])
+            .arg(format!(
+                "USER={}",
+                std::env::var("USER").unwrap_or_else(|_| "worker".to_owned())
+            ))
+            .args(["--", "/bin/sh", "-c", &script])
+            .output()
+            .expect("dispatch");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: Value = serde_json::from_slice(&output.stdout).expect("dispatch JSON");
+        let result_path =
+            std::path::PathBuf::from(response["result_path"].as_str().expect("result path"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !result_path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(result_path.exists(), "attempt {attempt} result missing");
+        let worktree = std::path::PathBuf::from(
+            response["worktrees"][0]["path"]
+                .as_str()
+                .expect("worktree path"),
+        );
+        let commit = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&worktree)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("attempt oid")
+                .stdout,
+        )
+        .expect("UTF-8 oid")
+        .trim()
+        .to_owned();
+        commits.push(commit);
+        responses.push(response);
+    }
+    assert_ne!(responses[0]["agent_name"], responses[1]["agent_name"]);
+    assert_ne!(
+        responses[0]["worktrees"][0]["path"],
+        responses[1]["worktrees"][0]["path"]
+    );
+    let branch = |response: &Value| {
+        let argv = response["worktrees"][0]["response"]["result"]["branch"].as_str();
+        argv.map(str::to_owned).unwrap_or_else(|| {
+            let path = response["worktrees"][0]["path"]
+                .as_str()
+                .expect("worktree path");
+            String::from_utf8(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(path)
+                    .args(["branch", "--show-current"])
+                    .output()
+                    .expect("branch")
+                    .stdout,
+            )
+            .expect("UTF-8 branch")
+            .trim()
+            .to_owned()
+        })
+    };
+    let branches = responses.iter().map(branch).collect::<Vec<_>>();
+    assert_ne!(branches[0], branches[1]);
+    assert_eq!(
+        String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(
+                    responses[1]["worktrees"][0]["path"]
+                        .as_str()
+                        .expect("second path")
+                )
+                .args(["rev-parse", "HEAD^"])
+                .output()
+                .expect("second parent")
+                .stdout
+        )
+        .expect("UTF-8 parent")
+        .trim(),
+        base
+    );
+    assert_eq!(
+        String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", &branches[0]])
+                .output()
+                .expect("first branch")
+                .stdout
+        )
+        .expect("UTF-8 branch oid")
+        .trim(),
+        commits[0]
+    );
+
+    for response in &responses {
+        if let Some(workspace) =
+            response["worktrees"][0]["response"]["result"]["workspace"]["workspace_id"].as_str()
+        {
+            let _ = Command::new("herdr")
+                .args([
+                    "worktree",
+                    "remove",
+                    "--workspace",
+                    workspace,
+                    "--force",
+                    "--json",
+                ])
+                .status();
+        }
     }
 }

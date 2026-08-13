@@ -62,6 +62,7 @@ if [ "$1 $2" = "worktree create" ]; then
   shift 2; cwd= path= branch= base=
   while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
   git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
+  printf '%s\t%s\n' "$path" "$branch" >> "$HOME/herdr-worktrees"
   printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"}}}'
 else
   shift 2; agent_cwd=
@@ -95,6 +96,10 @@ fi
         .args(["--repository"])
         .arg(format!("repo={}", repository.display()))
         .env("HERDR_ENV", "1")
+        .env(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+            temp.path().join("worktrees"),
+        )
         .env("PATH", path)
         .env("HOME", temp.path())
         .env("USER", "tester")
@@ -114,6 +119,33 @@ fi
     assert!(!journal.contains("driver-no-findings"));
     assert!(temp.path().join(".pce/package-results/A/1.json").is_file());
     assert!(temp.path().join(".pce/package-results/A/3.json").is_file());
+    let worktrees = fs::read_to_string(temp.path().join("herdr-worktrees")).expect("worktree log");
+    let first = worktrees.lines().next().expect("implementation worktree");
+    let (path, branch) = first.split_once('\t').expect("path and branch");
+    assert!(
+        !Path::new(path).exists(),
+        "completed clean implementation worktree remains"
+    );
+    assert!(
+        !Path::new(path).parent().expect("attempt root").exists(),
+        "empty completed attempt root remains"
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["rev-parse", "--verify", branch])
+            .status()
+            .expect("branch resolves")
+            .success()
+    );
+    assert_eq!(
+        fs::read_dir(temp.path().join("worktrees"))
+            .expect("worktree root")
+            .count(),
+        0,
+        "completed implementation and gate attempt roots remain"
+    );
 }
 
 #[test]
@@ -182,6 +214,10 @@ fi
         .arg(format!("repo={}", repository.display()))
         .args(["--wait-timeout-ms", "100"])
         .env("HERDR_ENV", "1")
+        .env(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+            temp.path().join("worktrees"),
+        )
         .env("PATH", path)
         .env("HOME", temp.path())
         .env("USER", "tester")
@@ -202,4 +238,154 @@ fi
         fs::read_to_string(temp.path().join(".pce/package-dispatch.jsonl")).expect("dispatch");
     assert_eq!(dispatch.matches("\"kind\":\"dispatch\"").count(), 1);
     assert!(!dispatch.contains("dispatch-completion"));
+}
+
+#[test]
+fn synchronous_herdr_refusal_is_recorded_and_restart_redispatches() {
+    let temp = tempdir().expect("tempdir");
+    let repository = temp.path().join("repo");
+    fs::create_dir(&repository).expect("repository");
+    for args in [
+        ["init"].as_slice(),
+        ["config", "user.email", "test@example.com"].as_slice(),
+        ["config", "user.name", "Test"].as_slice(),
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(&repository)
+                .args(args)
+                .status()
+                .expect("git")
+                .success()
+        );
+    }
+    fs::write(
+        repository.join("seed"),
+        "seed
+",
+    )
+    .expect("seed");
+    assert!(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["add", "."])
+            .status()
+            .expect("add")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["commit", "-m", "seed"])
+            .status()
+            .expect("commit")
+            .success()
+    );
+    fs::write(
+        temp.path().join("vision.md"),
+        "# Vision: spawn refusal
+
+## Goal / Why
+
+Prove restart.
+
+## Acceptance criteria (vision-level \"done\")
+
+```json
+{\"criteria\":[{\"name\":\"known\",\"input\":\"file\",\"observation\":\"known\"}]}
+```
+",
+    )
+    .expect("vision");
+    let graph = temp.path().join("graph.json");
+    fs::write(&graph, format!(r#"{{"vision":"spawn-refusal-{}","plan_version":1,"authored_at_ref":"HEAD","packages":[{{"id":"A","title":"A","repositories":["repo"],"criteria":[{{"name":"known","input":"repo","observation":"known","command":"test \"$(cat known.txt)\" = known"}}],"depends_on":[]}}]}}"#, std::process::id())).expect("graph");
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).expect("bin");
+    executable(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+set -eu
+marker="$HOME/herdr-refused-once"
+if [ "$1 $2" = "worktree create" ]; then
+  if [ ! -e "$marker" ]; then : > "$marker"; echo refused >&2; exit 73; fi
+  shift 2; cwd= path= branch= base=
+  while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
+  git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
+  printf '%s\t%s\n' "$path" "$branch" >> "$HOME/herdr-worktrees"
+  printf '%s
+' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"}}}'
+else
+  shift 2; agent_cwd=
+  while [ "$1" != "--" ]; do if [ "$1" = "--cwd" ]; then agent_cwd=$2; shift 2; else shift; fi; done; shift
+  (cd "$agent_cwd" && "$@") &
+  printf '%s
+' '{}'
+fi
+"#,
+    );
+    executable(
+        &bin.join("prime-agent"),
+        r#"#!/bin/sh
+set -eu
+cat >/dev/null
+if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
+  printf 'known
+' > known.txt
+  git add known.txt; git commit -m implementation >/dev/null
+  printf '%s' '{"outcome":"done"}' > "$PCE_PACKAGE_OUTCOME"
+else
+  printf '%s' '{"findings":[]}' > "$PCE_PACKAGE_GATE_OUTCOME"
+fi
+"#,
+    );
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
+    let journal = temp.path().join("driver.jsonl");
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_pce"))
+            .args(["package", "driver-run", "--graph"])
+            .arg(&graph)
+            .args(["--journal"])
+            .arg(&journal)
+            .args(["--repository"])
+            .arg(format!("repo={}", repository.display()))
+            .env("HERDR_ENV", "1")
+            .env(
+                "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+                temp.path().join("worktrees"),
+            )
+            .env("PATH", &path)
+            .env("HOME", temp.path())
+            .env("USER", "tester")
+            .output()
+            .expect("driver")
+    };
+    let first = run();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_snapshot: serde_json::Value =
+        serde_json::from_slice(&first.stdout).expect("snapshot");
+    assert_eq!(first_snapshot["packages"][0][1]["state"], "pending");
+    let first_journal = fs::read_to_string(&journal).expect("journal");
+    assert!(first_journal.contains("worker-dispatched"));
+    assert!(first_journal.contains("worker-spawn-failed"));
+    assert!(!first_journal.contains("driver-stopped-waiting"));
+    let dispatch =
+        fs::read_to_string(temp.path().join(".pce/package-dispatch.jsonl")).expect("dispatch");
+    assert!(dispatch.contains("spawn-failed"));
+    assert!(dispatch.contains("not-produced"));
+
+    let second = run();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let snapshot: serde_json::Value = serde_json::from_slice(&second.stdout).expect("snapshot");
+    assert_eq!(snapshot["outcome"], "finished");
+    let journal_text = fs::read_to_string(&journal).expect("journal");
+    assert_eq!(journal_text.matches("worker-spawn-failed").count(), 1);
+    assert_eq!(journal_text.matches("worker-dispatched").count(), 2);
 }

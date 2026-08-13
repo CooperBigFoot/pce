@@ -1,4 +1,4 @@
-//! herdr_dispatch_plan : Vision × WorkPackage × RepositoryDispatchInput* × WorkerEnvironment × WorkerArgv → HerdrWorkPackageDispatchPlan
+//! herdr_dispatch_plan : Vision × WorkPackage × DispatchAttempt × RepositoryDispatchInput* × WorkerEnvironment × WorkerArgv → HerdrWorkPackageDispatchPlan
 //!
 //! The result is a pure, ordered description of Herdr worktree creation followed by one agent
 //! start. Herdr owns all process creation and lifecycle observation; this module performs no I/O.
@@ -10,6 +10,29 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{WorkPackage, WorkPackageId};
+
+/// A positive identity for one attempt to dispatch a package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchAttempt(u64);
+
+impl DispatchAttempt {
+    /// Parse a first-based attempt identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HerdrDispatchPlanError::ZeroAttempt`] when `value` is zero.
+    pub fn parse(value: u64) -> Result<Self, HerdrDispatchPlanError> {
+        if value == 0 {
+            return Err(HerdrDispatchPlanError::ZeroAttempt);
+        }
+        Ok(Self(value))
+    }
+
+    /// Return the numeric attempt identity.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 const ENV_EXECUTABLE: &str = "/usr/bin/env";
 const HERDR_EXECUTABLE: &str = "herdr";
@@ -351,6 +374,9 @@ pub enum HerdrDispatchPlanError {
     /// The deterministic PCE_WORKTREES JSON projection unexpectedly failed.
     #[error("PCE_WORKTREES JSON serialization failed: {message}")]
     WorktreesJson { message: String },
+    /// A dispatch attempt was zero, which cannot identify an attempt.
+    #[error("dispatch attempt must be positive")]
+    ZeroAttempt,
     /// The worker argv had no executable.
     #[error("worker arguments must begin with a non-empty executable")]
     EmptyWorkerArguments,
@@ -363,12 +389,17 @@ pub enum HerdrDispatchPlanError {
 }
 
 /// Derive the stable agent name from length-framed vision and package identity.
-fn derive_agent_name(vision: &DispatchVisionSource, package: &WorkPackageId) -> HerdrAgentName {
+fn derive_agent_name(
+    vision: &DispatchVisionSource,
+    package: &WorkPackageId,
+    attempt: DispatchAttempt,
+) -> HerdrAgentName {
     let mut digest = Sha256::new();
     digest.update(vision.as_str().len().to_be_bytes());
     digest.update(vision.as_str().as_bytes());
     digest.update(package.as_str().len().to_be_bytes());
     digest.update(package.as_str().as_bytes());
+    digest.update(attempt.get().to_be_bytes());
     let bytes = digest.finalize();
     let suffix = bytes[..14]
         .iter()
@@ -400,6 +431,7 @@ fn worktree_component(index: usize, repository: &str) -> String {
 pub fn compose_herdr_work_package_dispatch(
     vision: &DispatchVisionSource,
     package: &WorkPackage,
+    attempt: DispatchAttempt,
     repositories: &[RepositoryDispatchInput],
     worktree_root: &AbsoluteWorktreeRoot,
     temporary_directory: &AbsoluteDispatchTemporaryDirectory,
@@ -434,20 +466,30 @@ pub fn compose_herdr_work_package_dispatch(
         }
     }
 
-    let agent_name = derive_agent_name(vision, package.id());
+    let agent_name = derive_agent_name(vision, package.id(), attempt);
     let package_root = worktree_root.0.join(agent_name.as_str());
     let mut worktrees = Vec::with_capacity(package.repositories().len());
     for (index, repository_name) in package.repositories().iter().enumerate() {
         let repository = by_name[repository_name.as_str()];
         let path = package_root.join(worktree_component(index, repository_name));
-        let label = format!("{}:{}", package.id().as_str(), repository_name);
+        let label = format!(
+            "{}:{}:attempt-{}",
+            package.id().as_str(),
+            repository_name,
+            attempt.get()
+        );
         let argv = vec![
             "worktree".to_owned(),
             "create".to_owned(),
             "--cwd".to_owned(),
             repository.source_checkout.display().to_string(),
             "--branch".to_owned(),
-            format!("pce/{}/{}", vision.as_str(), package.id().as_str()),
+            format!(
+                "pce/{}/{}/attempt-{}",
+                vision.as_str(),
+                package.id().as_str(),
+                attempt.get()
+            ),
             "--base".to_owned(),
             repository.base_ref.clone(),
             "--path".to_owned(),
@@ -499,9 +541,10 @@ mod tests {
     use crate::parse_work_package_graph;
 
     use super::{
-        AbsoluteDispatchTemporaryDirectory, AbsoluteWorktreeRoot, DispatchVisionSource,
-        HerdrAgentLocation, HerdrTabId, HerdrWorkspaceId, RepositoryDispatchInput,
-        WorkerArgumentVector, WorkerEnvironment, compose_herdr_work_package_dispatch,
+        AbsoluteDispatchTemporaryDirectory, AbsoluteWorktreeRoot, DispatchAttempt,
+        DispatchVisionSource, HerdrAgentLocation, HerdrTabId, HerdrWorkspaceId,
+        RepositoryDispatchInput, WorkerArgumentVector, WorkerEnvironment,
+        compose_herdr_work_package_dispatch,
     };
 
     fn package_graph(repositories: &[&str]) -> crate::WorkPackageGraph {
@@ -521,7 +564,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"))
     }
 
-    fn compose(repositories: &[&str], vision: &str) -> super::HerdrWorkPackageDispatchPlan {
+    fn compose(
+        repositories: &[&str],
+        vision: &str,
+        attempt: u64,
+    ) -> super::HerdrWorkPackageDispatchPlan {
         let graph = package_graph(repositories);
         let inputs = repositories
             .iter()
@@ -530,6 +577,7 @@ mod tests {
         compose_herdr_work_package_dispatch(
             &DispatchVisionSource::parse(vision).unwrap_or_else(|error| panic!("{error}")),
             &graph.packages()[0],
+            DispatchAttempt::parse(attempt).unwrap_or_else(|error| panic!("{error}")),
             &inputs,
             &AbsoluteWorktreeRoot::parse(PathBuf::from("/worktrees"))
                 .unwrap_or_else(|error| panic!("{error}")),
@@ -549,7 +597,7 @@ mod tests {
 
     #[test]
     fn single_repository_composes_exact_argv_environment_name_and_tmpdir() {
-        let plan = compose(&["pce"], "vision-one");
+        let plan = compose(&["pce"], "vision-one", 1);
         let target = format!("/worktrees/{}/00-pce", plan.agent_name().as_str());
         assert_eq!(plan.worktrees().len(), 1);
         assert_eq!(plan.worktrees()[0].path(), Path::new(&target));
@@ -562,13 +610,13 @@ mod tests {
                 "--cwd",
                 "/repos/pce",
                 "--branch",
-                "pce/vision-one/WP4",
+                "pce/vision-one/WP4/attempt-1",
                 "--base",
                 "main",
                 "--path",
                 &target,
                 "--label",
-                "WP4:pce",
+                "WP4:pce:attempt-1",
                 "--no-focus",
                 "--json",
             ]
@@ -620,7 +668,7 @@ mod tests {
 
     #[test]
     fn two_repositories_have_exact_paths_json_and_indexed_environment() {
-        let plan = compose(&["pce", "herdr"], "vision-one");
+        let plan = compose(&["pce", "herdr"], "vision-one", 1);
         let first = format!("/worktrees/{}/00-pce", plan.agent_name().as_str());
         let second = format!("/worktrees/{}/01-herdr", plan.agent_name().as_str());
         assert_eq!(
@@ -645,13 +693,13 @@ mod tests {
                 "--cwd",
                 "/repos/herdr",
                 "--branch",
-                "pce/vision-one/WP4",
+                "pce/vision-one/WP4/attempt-1",
                 "--base",
                 "main",
                 "--path",
                 &format!("/worktrees/{}/01-herdr", plan.agent_name().as_str()),
                 "--label",
-                "WP4:herdr",
+                "WP4:herdr:attempt-1",
                 "--no-focus",
                 "--json",
             ]
@@ -659,12 +707,19 @@ mod tests {
     }
 
     #[test]
-    fn agent_name_is_sha256_hex_truncated_grammar_bounded_and_cross_vision_distinct() {
-        let first = compose(&["pce"], "vision-one");
-        let repeated = compose(&["pce"], "vision-one");
-        let other = compose(&["pce"], "vision-two");
+    fn agent_name_is_sha256_hex_truncated_grammar_bounded_and_attempt_distinct() {
+        let first = compose(&["pce"], "vision-one", 1);
+        let repeated = compose(&["pce"], "vision-one", 1);
+        let retry = compose(&["pce"], "vision-one", 2);
+        let other = compose(&["pce"], "vision-two", 1);
         assert_eq!(first.agent_name(), repeated.agent_name());
+        assert_ne!(first.agent_name(), retry.agent_name());
         assert_ne!(first.agent_name(), other.agent_name());
+        assert_ne!(first.worktrees()[0].path(), retry.worktrees()[0].path());
+        assert_eq!(
+            retry.worktrees()[0].invocation().argv()[5],
+            "pce/vision-one/WP4/attempt-2"
+        );
         let name = first.agent_name().as_str();
         assert_eq!(name.len(), 32);
         assert!(name.starts_with("pce-"));

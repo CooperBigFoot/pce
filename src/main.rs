@@ -28,26 +28,27 @@ use pce_core::{
     CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
     CodexTerminalObservation, CodexTerminalUsage, CommandExitStatus, CompletionCriterionStatus,
     CompletionDecision, CreationDate, CriterionChangeDecision, CriterionExecution,
-    CurrentArtifactObservation, CurrentArtifactState, DispatchAdmission, DispatchCandidate,
-    DispatchCompletionPayload, DispatchDuration, DispatchEnvelope, DispatchExitStatus,
-    DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion, DispatchLogging,
-    DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
-    DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass, DispatchRootCause,
-    DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchabilityResult, DriverEvent,
-    EnvironmentPreparationOutcome, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
-    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
-    ExactPullRequestState, ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable,
-    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
-    GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef,
-    GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
-    GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
-    GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation,
-    HerdrAgentLocation, HerdrInvocation, HerdrTabId, HerdrWorkspaceId, KnownPayload,
-    LandingReadinessDecision, LegacyRepositoryContractPayload, LocalPatchLimit,
-    MeasuredContractSnapshot, MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode,
-    NamedReplayRef, NodeId, NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus,
-    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PackageWorkerResult,
-    PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
+    CurrentArtifactObservation, CurrentArtifactState, DispatchAdmission, DispatchAttempt,
+    DispatchCandidate, DispatchCompletionPayload, DispatchDuration, DispatchEnvelope,
+    DispatchExitStatus, DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion,
+    DispatchLogging, DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput,
+    DispatchRef, DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass,
+    DispatchRootCause, DispatchTarget, DispatchTokenUsage, DispatchVisionSource,
+    DispatchabilityResult, DriverEvent, EnvironmentPreparationOutcome, EventBodyRef, EventKindName,
+    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
+    ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
+    ExceptionalMergeChainObservation, Executable, ExitCode, ExpectedVerdictOutcome,
+    FileObservation, FindingAdmission, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
+    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
+    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
+    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
+    GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
+    HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, KnownPayload, LandingReadinessDecision,
+    LegacyRepositoryContractPayload, LocalPatchLimit, MeasuredContractSnapshot, MergeStatus,
+    MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
+    NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
+    OracleFailure, OracleStage, OrderingEdge, PackageWorkerResult, PackageWorkerStoppedAt,
+    PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
     ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
     PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
@@ -57,18 +58,18 @@ use pce_core::{
     RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
     RepositoryRelativePath, RepositoryRoot, RepositoryWorktree, RequiredArtifactPresence,
     RetryLimit, RiskOrdering, RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest,
-    SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
-    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
-    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionGoal, VisionName, VisionSlug,
-    WorkPackageClassification, WorkPackageGraph, WorkPackageId, WorkPackageMergeObservation,
-    WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment, WorktreeIdentity,
-    WorktreeState, WriteKind, admit_recurrent_finding, append_event, charged_failure_count,
-    classify_claude_result, classify_codex_terminal_usage, classify_dispatch_admission,
-    classify_dispatch_check_in, classify_replay_pair, classify_seatbelt_capability,
-    compose_gate_arguments, compose_herdr_work_package_dispatch, compose_local_patch_brief,
-    compose_package_gate_brief, compose_package_worker_argv, compose_package_worker_brief,
-    compose_planning_role_frame, compute_dispatchability, create_vision,
-    derive_dispatch_outcome_state, derive_driver_snapshot, derive_merge_status,
+    SignalNumber, SpawnDispatchOutcome, SpawnFailedDispatchCompletionPayload, SquashCommitOid,
+    StdinBinding, StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName,
+    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason,
+    VersionPolicy, VisionGoal, VisionName, VisionSlug, WorkPackageClassification, WorkPackageGraph,
+    WorkPackageId, WorkPackageMergeObservation, WorkPackageMergeSubject, WorkerArgumentVector,
+    WorkerEnvironment, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
+    append_event, charged_failure_count, classify_claude_result, classify_codex_terminal_usage,
+    classify_dispatch_admission, classify_dispatch_check_in, classify_replay_pair,
+    classify_seatbelt_capability, compose_gate_arguments, compose_herdr_work_package_dispatch,
+    compose_local_patch_brief, compose_package_gate_brief, compose_package_worker_argv,
+    compose_package_worker_brief, compose_planning_role_frame, compute_dispatchability,
+    create_vision, derive_dispatch_outcome_state, derive_driver_snapshot, derive_merge_status,
     derive_milestone_merge_status, derive_package_result_path, derive_run_state,
     derive_run_state_with_dispatch_artifacts, derive_run_state_with_exceptional_merge_chains,
     derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
@@ -256,6 +257,7 @@ struct PackageDispatchCommand {
     graph_path: PathBuf,
     require_graph_at_vision_root: bool,
     package_id: String,
+    attempt: Option<DispatchAttempt>,
     required_artifact_path: AbsoluteRequiredArtifactPath,
     repositories: Vec<(String, PathBuf)>,
     environment: BTreeMap<String, String>,
@@ -1555,6 +1557,7 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
         graph_path,
         require_graph_at_vision_root: true,
         package_id: package_id.clone(),
+        attempt: None,
         required_artifact_path,
         repositories,
         environment,
@@ -1902,7 +1905,7 @@ fn run_composed_driver_gate(
     package_id: &str,
     issuance: u64,
 ) -> Result<()> {
-    let implementation_worktrees = driver_package_worktrees(command, graph, package_id)?;
+    let implementation_worktrees = driver_package_worktrees(command, graph, package_id, issuance)?;
     let first = implementation_worktrees
         .first()
         .context("package gate has no implementation worktree")?;
@@ -1960,6 +1963,7 @@ fn run_composed_driver_gate(
         graph_path: dispatch_graph_path,
         require_graph_at_vision_root: false,
         package_id: package_id.to_owned(),
+        attempt: None,
         required_artifact_path: AbsoluteRequiredArtifactPath::parse(gate_outcome.clone())?,
         repositories: command
             .repositories
@@ -2033,7 +2037,9 @@ fn run_composed_driver_gate(
         &DriverEvent::PackageCompleted {
             package: package_id.to_owned(),
         },
-    )
+    )?;
+    remove_clean_gate_worktrees(&response, &implementation_worktrees)?;
+    remove_clean_driver_worktrees(command, graph, package_id, issuance)
 }
 
 fn observe_driver_worker_outcome(
@@ -2062,7 +2068,7 @@ fn observe_driver_worker_outcome(
             )?;
             let mut repositories = command.repositories.clone();
             if command.worker_override.is_none() {
-                for worktree in driver_package_worktrees(command, graph, &package_id)? {
+                for worktree in driver_package_worktrees(command, graph, &package_id, issuance)? {
                     if let Some((_, path)) = repositories
                         .iter_mut()
                         .find(|(name, _)| name == worktree.repository())
@@ -2165,6 +2171,7 @@ fn driver_package_worktrees(
     command: &DriverRunCommand,
     graph: &WorkPackageGraph,
     package_id: &str,
+    issuance: u64,
 ) -> Result<Vec<RepositoryWorktree>> {
     let package = graph
         .packages()
@@ -2187,8 +2194,9 @@ fn driver_package_worktrees(
     let plan = compose_herdr_work_package_dispatch(
         &vision,
         package,
+        DispatchAttempt::parse(issuance)?,
         &inputs,
-        &AbsoluteWorktreeRoot::parse(PathBuf::from("/tmp/pce-work-package-worktrees"))?,
+        &AbsoluteWorktreeRoot::parse(package_worktree_root()?)?,
         &AbsoluteDispatchTemporaryDirectory::parse(package_temporary_directory(
             &vision,
             package.id(),
@@ -2209,6 +2217,7 @@ fn compose_driver_worker_brief(
     command: &DriverRunCommand,
     graph: &WorkPackageGraph,
     package_id: &str,
+    issuance: u64,
     local_patch_evidence: Option<&[pce_core::RecoveryCriterionEvidence]>,
 ) -> Result<String> {
     let vision_path = driver_vision_directory(command)?.join("vision.md");
@@ -2217,7 +2226,7 @@ fn compose_driver_worker_brief(
     let goal = VisionGoal::parse_document(&vision).context("failed to parse vision goal")?;
     let criteria =
         parse_acceptance_criteria(&vision).context("failed to parse acceptance criteria")?;
-    let worktrees = driver_package_worktrees(command, graph, package_id)?;
+    let worktrees = driver_package_worktrees(command, graph, package_id, issuance)?;
     let brief = compose_package_worker_brief(&goal, &criteria, graph, package_id, &worktrees)
         .context("failed to compose driver-owned worker brief")?;
     Ok(local_patch_evidence.map_or(brief.clone(), |evidence| {
@@ -2288,6 +2297,7 @@ fn issue_driver_package_dispatch(
         graph_path,
         require_graph_at_vision_root: true,
         package_id: package_id.to_owned(),
+        attempt: Some(DispatchAttempt::parse(issuance)?),
         required_artifact_path: AbsoluteRequiredArtifactPath::parse(outcome_path)?,
         repositories,
         environment: route_environment()?,
@@ -2515,6 +2525,7 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
             .saturating_add(1);
         let mut override_children = Vec::new();
         let mut composed_dispatches = Vec::new();
+        let mut spawn_failed = false;
         // The full ready antichain is issued before waiting for any member.
         for (offset, package_id) in ready.iter().enumerate() {
             let issuance = next_issuance
@@ -2566,29 +2577,70 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                 let (program, arguments) = worker_arguments
                     .split_first()
                     .context("driver worker override is empty")?;
-                let child = std::process::Command::new(program)
+                match std::process::Command::new(program)
                     .args(arguments)
                     .env("PCE_PACKAGE", package_id)
                     .env("PCE_PACKAGE_OUTCOME", &outcome)
                     .env("PCE_RECOVERY_RUNG", rung_name)
                     .env("PCE_PACKAGE_BRIEF", worker_brief)
                     .spawn()
-                    .with_context(|| format!("failed to spawn worker override for {package_id}"))?;
-                override_children.push((package_id.clone(), issuance, outcome, child));
+                {
+                    Ok(child) => {
+                        override_children.push((package_id.clone(), issuance, outcome, child));
+                    }
+                    Err(source) => {
+                        spawn_failed = true;
+                        append_driver_event(
+                            &command.journal_path,
+                            &DriverEvent::WorkerSpawnFailed {
+                                package: package_id.clone(),
+                                issuance,
+                                reason: format!("failed to spawn worker override: {source}"),
+                            },
+                        )?;
+                    }
+                }
             } else {
                 let evidence = (rung_name == "local-patch")
                     .then(|| latest_criterion_failure_evidence(&events, package_id));
-                let composed_brief =
-                    compose_driver_worker_brief(&command, &graph, package_id, evidence.as_deref())?;
-                let result = issue_driver_package_dispatch(
+                let composed_brief = compose_driver_worker_brief(
+                    &command,
+                    &graph,
+                    package_id,
+                    issuance,
+                    evidence.as_deref(),
+                )?;
+                match issue_driver_package_dispatch(
                     &command,
                     &graph,
                     package_id,
                     issuance,
                     &outcome,
                     &composed_brief,
-                )?;
-                composed_dispatches.push((package_id.clone(), issuance, outcome, result));
+                ) {
+                    Ok(result) => {
+                        composed_dispatches.push((package_id.clone(), issuance, outcome, result));
+                    }
+                    Err(source) => {
+                        if source
+                            .downcast_ref::<SpawnObservedDispatchError>()
+                            .is_some()
+                        {
+                            return Err(source).context(format!(
+                                "worker spawn for {package_id} was observed but could not be recorded"
+                            ));
+                        }
+                        spawn_failed = true;
+                        append_driver_event(
+                            &command.journal_path,
+                            &DriverEvent::WorkerSpawnFailed {
+                                package: package_id.clone(),
+                                issuance,
+                                reason: format!("worker spawn failed: {source:#}"),
+                            },
+                        )?;
+                    }
+                }
             }
         }
         for (package_id, issuance, outcome_path, mut child) in override_children {
@@ -2686,6 +2738,13 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                     );
                 }
             }
+        }
+        if spawn_failed {
+            return run_driver_status(DriverStatusCommand {
+                graph_path: command.graph_path,
+                journal_path: command.journal_path,
+                override_risk_ordering: command.override_risk_ordering,
+            });
         }
     }
 }
@@ -2823,6 +2882,130 @@ fn git_oid(repository: &Path, reference: &str) -> Result<String> {
         .context("git returned non-UTF-8 oid")?
         .trim()
         .to_owned())
+}
+
+fn remove_clean_worktree(source: &Path, worktree: &Path) -> Result<()> {
+    if !worktree.exists() {
+        return Ok(());
+    }
+    let status = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(worktree)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()
+        .with_context(|| format!("failed to inspect worktree {}", worktree.display()))?;
+    if !status.status.success() {
+        bail!(
+            "git could not inspect worktree {}: {}",
+            worktree.display(),
+            String::from_utf8_lossy(&status.stderr).trim()
+        );
+    }
+    if !status.stdout.is_empty() {
+        return Ok(());
+    }
+    let removed = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(source)
+        .args(["worktree", "remove"])
+        .arg(worktree)
+        .output()
+        .with_context(|| format!("failed to remove worktree {}", worktree.display()))?;
+    if !removed.status.success() {
+        bail!(
+            "git could not remove clean worktree {}: {}",
+            worktree.display(),
+            String::from_utf8_lossy(&removed.stderr).trim()
+        );
+    }
+    if let Some(attempt_root) = worktree.parent() {
+        match fs::remove_dir(attempt_root) {
+            Ok(()) => {}
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(source) => {
+                return Err(source).with_context(|| {
+                    format!(
+                        "failed to remove empty attempt root {}",
+                        attempt_root.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_clean_created_worktrees(
+    worktrees: &[HerdrWorktreeSpec],
+    repositories: &[(String, PathBuf)],
+) -> Result<()> {
+    for worktree in worktrees {
+        let source = repositories
+            .iter()
+            .find(|(name, _)| name == worktree.repository())
+            .map(|(_, path)| path)
+            .with_context(|| {
+                format!(
+                    "dispatch omitted repository mapping `{}`",
+                    worktree.repository()
+                )
+            })?;
+        remove_clean_worktree(source, worktree.path())?;
+    }
+    Ok(())
+}
+
+fn remove_clean_driver_worktrees(
+    command: &DriverRunCommand,
+    graph: &WorkPackageGraph,
+    package_id: &str,
+    issuance: u64,
+) -> Result<()> {
+    for worktree in driver_package_worktrees(command, graph, package_id, issuance)? {
+        let source = command
+            .repositories
+            .iter()
+            .find(|(name, _)| name == worktree.repository())
+            .map(|(_, path)| path)
+            .with_context(|| {
+                format!(
+                    "driver omitted repository mapping `{}`",
+                    worktree.repository()
+                )
+            })?;
+        remove_clean_worktree(source, worktree.path())?;
+    }
+    Ok(())
+}
+
+fn remove_clean_gate_worktrees(
+    response: &Value,
+    implementation_worktrees: &[RepositoryWorktree],
+) -> Result<()> {
+    let worktrees = response["worktrees"]
+        .as_array()
+        .context("gate dispatch omitted worktrees")?;
+    for worktree in worktrees {
+        let repository = worktree["repository"]
+            .as_str()
+            .context("gate dispatch worktree omitted repository")?;
+        let path = Path::new(
+            worktree["path"]
+                .as_str()
+                .context("gate dispatch worktree omitted path")?,
+        );
+        let source = implementation_worktrees
+            .iter()
+            .find(|candidate| candidate.repository() == repository)
+            .map(RepositoryWorktree::path)
+            .with_context(|| format!("gate worktree names unknown repository `{repository}`"))?;
+        remove_clean_worktree(source, path)?;
+    }
+    Ok(())
 }
 
 struct DriverMaterialization {
@@ -3323,6 +3506,82 @@ fn run_package_completions(log_path: &Path, vision_dir: &Path) -> Result<()> {
     write_json_stdout(&completions)
 }
 
+#[derive(Debug)]
+struct SpawnObservedDispatchError {
+    source: Error,
+}
+
+impl std::fmt::Display for SpawnObservedDispatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "child spawn was observed but its response was unusable: {:#}",
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for SpawnObservedDispatchError {}
+
+enum HerdrAgentStartOutcome {
+    Started(Value),
+    Refused(Error),
+    SpawnObservedButUnusable(Error),
+}
+
+fn execute_herdr_agent_start(invocation: &HerdrInvocation) -> HerdrAgentStartOutcome {
+    let output = match std::process::Command::new(invocation.executable())
+        .args(invocation.argv())
+        .output()
+    {
+        Ok(output) => output,
+        Err(source) => {
+            return HerdrAgentStartOutcome::Refused(
+                Error::new(source)
+                    .context(format!("failed to execute {}", invocation.executable())),
+            );
+        }
+    };
+    if !output.status.success() {
+        return HerdrAgentStartOutcome::Refused(anyhow!(
+            "herdr command failed with {} for {:?}: {}",
+            output.status,
+            invocation.argv(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    match serde_json::from_slice(&output.stdout) {
+        Ok(response) => HerdrAgentStartOutcome::Started(response),
+        Err(source) => HerdrAgentStartOutcome::SpawnObservedButUnusable(
+            Error::new(source).context("herdr agent-start returned invalid JSON"),
+        ),
+    }
+}
+
+fn record_dispatch_spawn_failure(
+    log_path: &Path,
+    node: &NodeId,
+    issuance_sequence: Sequence,
+) -> Result<()> {
+    close_dispatch_conditionally(
+        log_path,
+        DispatchClosureTarget {
+            issuance_sequence,
+            node: node.clone(),
+        },
+        |_| {
+            Ok(DispatchCompletionPayload::SpawnFailed(
+                SpawnFailedDispatchCompletionPayload {
+                    issuance_sequence,
+                    outcome: SpawnDispatchOutcome::SpawnFailed,
+                    artifact_production: ArtifactProduction::NotProduced,
+                },
+            ))
+        },
+    )
+    .map(|_| ())
+}
+
 fn execute_herdr(invocation: &HerdrInvocation) -> Result<Value> {
     let output = std::process::Command::new(invocation.executable())
         .args(invocation.argv())
@@ -3352,6 +3611,19 @@ fn herdr_location(response: &Value) -> Result<HerdrAgentLocation> {
         HerdrWorkspaceId::parse(workspace)?,
         HerdrTabId::parse(tab)?,
     ))
+}
+
+fn package_worktree_root() -> Result<PathBuf> {
+    let path = std::env::var_os("PCE_WORK_PACKAGE_WORKTREE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/pce-work-package-worktrees"));
+    if !path.is_absolute() {
+        bail!(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT must be absolute: {}",
+            path.display()
+        );
+    }
+    Ok(path)
 }
 
 fn package_temporary_directory(vision: &DispatchVisionSource, package: &WorkPackageId) -> PathBuf {
@@ -3405,6 +3677,9 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     };
     let issuance =
         admit_and_append_dispatch(&command.log_path, &metadata, dispatch_payload(&metadata))?;
+    let attempt = command
+        .attempt
+        .unwrap_or(DispatchAttempt::parse(issuance.sequence().get())?);
     let vision = DispatchVisionSource::parse(graph.vision().to_owned())?;
     let repository_inputs = command
         .repositories
@@ -3417,7 +3692,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             )
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let worktree_root = PathBuf::from("/tmp/pce-work-package-worktrees");
+    let worktree_root = package_worktree_root()?;
     let temporary_directory = package_temporary_directory(&vision, package.id());
     fs::create_dir_all(&worktree_root).context("failed to create binary-owned worktree root")?;
     fs::create_dir_all(&temporary_directory).context("failed to create binary-owned TMPDIR")?;
@@ -3427,6 +3702,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     let provisional = compose_herdr_work_package_dispatch(
         &vision,
         package,
+        attempt,
         &repository_inputs,
         &worktree_root,
         &temporary_directory,
@@ -3460,6 +3736,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     let plan = compose_herdr_work_package_dispatch(
         &vision,
         package,
+        attempt,
         &repository_inputs,
         &worktree_root,
         &temporary_directory,
@@ -3469,7 +3746,17 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     let mut first_location = None;
     let mut created = Vec::new();
     for worktree in plan.worktrees() {
-        let response = execute_herdr(worktree.invocation())?;
+        let response = match execute_herdr(worktree.invocation()) {
+            Ok(response) => response,
+            Err(source) => {
+                record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+                remove_clean_created_worktrees(
+                    &plan.worktrees()[..created.len()],
+                    &command.repositories,
+                )?;
+                return Err(source);
+            }
+        };
         if first_location.is_none() {
             first_location = Some(herdr_location(&response)?);
         }
@@ -3479,8 +3766,24 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             "response": response,
         }));
     }
-    let location = first_location.context("package dispatch composed no worktree")?;
-    let start_response = execute_herdr(&plan.agent_start(&location))?;
+    let location = match first_location.context("package dispatch composed no worktree") {
+        Ok(location) => location,
+        Err(source) => {
+            record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+            return Err(source);
+        }
+    };
+    let start_response = match execute_herdr_agent_start(&plan.agent_start(&location)) {
+        HerdrAgentStartOutcome::Started(response) => response,
+        HerdrAgentStartOutcome::Refused(source) => {
+            record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+            remove_clean_created_worktrees(plan.worktrees(), &command.repositories)?;
+            return Err(source);
+        }
+        HerdrAgentStartOutcome::SpawnObservedButUnusable(source) => {
+            return Err(Error::new(SpawnObservedDispatchError { source }));
+        }
+    };
     Ok(json!({
         "agent_name": plan.agent_name().as_str(),
         "issuance_sequence": issuance.sequence().get(),
@@ -6069,6 +6372,9 @@ fn close_dispatch_conditionally(
             let (outcome, sequence) = match completion {
                 DispatchLedgerCompletion::ObservedChild { sequence, .. } => {
                     ("observed-child", sequence)
+                }
+                DispatchLedgerCompletion::SpawnFailed { sequence, .. } => {
+                    ("spawn-failed", sequence)
                 }
                 DispatchLedgerCompletion::ReconciledDead { sequence, .. } => {
                     ("reconciled-dead", sequence)

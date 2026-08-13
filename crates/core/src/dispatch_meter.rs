@@ -12,7 +12,7 @@ use crate::dispatch_ledger::{DispatchLedgerCompletion, DispatchLedgerError, fold
 use crate::event_log::{
     ArtifactOutcome, ArtifactProduction, DispatchDuration, DispatchExitStatus, DispatchRole,
     DispatchTokenUsage, EventRecord, EventTimestamp, Evidence, NodeId, ReconciledDispatchOutcome,
-    Sequence,
+    Sequence, SpawnDispatchOutcome,
 };
 
 /// The issuance half of one dispatch lifecycle report.
@@ -31,6 +31,7 @@ pub struct DispatchMeterIssuance {
 #[serde(untagged)]
 pub enum DispatchMeterCompletion {
     ObservedChild(ObservedDispatchMeterCompletion),
+    SpawnFailed(SpawnFailedDispatchMeterCompletion),
     ReconciledDead(ReconciledDeadDispatchMeterCompletion),
 }
 
@@ -42,6 +43,14 @@ pub struct ObservedDispatchMeterCompletion {
     pub exit_status: DispatchExitStatus,
     pub artifact_outcome: ArtifactOutcome,
     pub usage: DispatchTokenUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpawnFailedDispatchMeterCompletion {
+    pub sequence: Sequence,
+    pub timestamp: EventTimestamp,
+    pub outcome: SpawnDispatchOutcome,
+    pub artifact_production: ArtifactProduction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -189,6 +198,16 @@ pub fn meter_dispatches(
                         exit_status: payload.exit_status(),
                         artifact_outcome: payload.artifact_outcome(),
                         usage: project_usage(payload.usage()),
+                    }),
+                    DispatchLedgerCompletion::SpawnFailed {
+                        sequence,
+                        timestamp,
+                        payload,
+                    } => DispatchMeterCompletion::SpawnFailed(SpawnFailedDispatchMeterCompletion {
+                        sequence: *sequence,
+                        timestamp: *timestamp,
+                        outcome: payload.outcome,
+                        artifact_production: payload.artifact_production,
                     }),
                     DispatchLedgerCompletion::ReconciledDead {
                         sequence,

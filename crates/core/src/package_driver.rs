@@ -189,6 +189,12 @@ pub enum DriverEvent {
         reason: String,
         attempts: Vec<RecoveryAttemptRecord>,
     },
+    /// The spawning code observed that no child was produced.
+    WorkerSpawnFailed {
+        package: String,
+        issuance: u64,
+        reason: String,
+    },
     /// A worker was issued. Absence of a later outcome means it is still running.
     WorkerDispatched { package: String, issuance: u64 },
     /// A caller-supplied observation bound elapsed; the worker remains running and unaccounted.
@@ -375,6 +381,7 @@ pub fn derive_driver_snapshot(
             DriverEvent::RecoveryRungAttempted { package, .. }
             | DriverEvent::WorkerEnvironmentFailed { package, .. }
             | DriverEvent::RecoveryParked { package, .. }
+            | DriverEvent::WorkerSpawnFailed { package, .. }
             | DriverEvent::WorkerDispatched { package, .. }
             | DriverEvent::DriverStoppedWaiting { package, .. }
             | DriverEvent::WorkerDone { package, .. }
@@ -428,6 +435,17 @@ pub fn derive_driver_snapshot(
                     reason: reason.clone(),
                 };
             }
+            DriverEvent::WorkerSpawnFailed { issuance, .. } => match state {
+                DriverPackageState::Running { issuance: running } if running == issuance => {
+                    *state = DriverPackageState::Pending;
+                }
+                _ => {
+                    return Err(PackageDriverError::UnmatchedOutcome {
+                        package: package.clone(),
+                        issuance: *issuance,
+                    });
+                }
+            },
             DriverEvent::WorkerDispatched { issuance, .. } => {
                 if *issuance == 0 {
                     return Err(PackageDriverError::ZeroIssuance {
@@ -911,5 +929,35 @@ mod tests {
             DriverPackageState::Pending
         ));
         assert_eq!(snapshot.outcome(), DriverLoopOutcome::Blocked);
+    }
+    #[test]
+    fn observed_spawn_failure_returns_package_to_restart_ready_state() {
+        let graph = graph();
+        let events = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::WorkerSpawnFailed {
+                package: "A".to_owned(),
+                issuance: 1,
+                reason: "Herdr refused before creating a child".to_owned(),
+            },
+        ];
+        let snapshot = derive_driver_snapshot(&graph, &events, false).expect("spawn failure fold");
+        let restarted = derive_driver_snapshot(&graph, &events, false).expect("restart fold");
+        assert_eq!(snapshot, restarted);
+        assert_eq!(restarted.ready(), &["A"]);
+        assert!(matches!(
+            restarted.packages()[0].1,
+            DriverPackageState::Pending
+        ));
+
+        let unmatched = derive_driver_snapshot(&graph, &events[1..], false)
+            .expect_err("spawn failure requires a matching request");
+        assert!(matches!(
+            unmatched,
+            super::PackageDriverError::UnmatchedOutcome { issuance: 1, .. }
+        ));
     }
 }
