@@ -42,44 +42,46 @@ use pce_core::{
     GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
     GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation,
     HerdrAgentLocation, HerdrInvocation, HerdrTabId, HerdrWorkspaceId, KnownPayload,
-    LandingReadinessDecision, LegacyRepositoryContractPayload, MeasuredContractSnapshot,
-    MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
-    NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
-    OracleFailure, OracleStage, OrderingEdge, PackageWorkerResult, PackageWorkerStoppedAt,
-    PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
+    LandingReadinessDecision, LegacyRepositoryContractPayload, LocalPatchLimit,
+    MeasuredContractSnapshot, MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode,
+    NamedReplayRef, NodeId, NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus,
+    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PackageWorkerResult,
+    PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
     ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
     PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
-    RecoveryLogPath, ReferenceValidation, ReplayArtifactObservation, ReplayClassifications,
-    ReplayObservation, ReplayRefResult, RepositoryBranchName, RepositoryContractPayload,
-    RepositoryDispatchInput, RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
-    RepositoryWorktree, RequiredArtifactPresence, RiskOrdering, RunSnapshot, Sandbox,
-    SeatbeltCapability, Sequence, Sha256Digest, SignalNumber, SquashCommitOid, StdinBinding,
-    StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName, TagState,
-    TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy,
-    VisionGoal, VisionName, VisionSlug, WorkPackageClassification, WorkPackageGraph, WorkPackageId,
-    WorkPackageMergeObservation, WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment,
-    WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
+    RecoveryLimits, RecoveryLogPath, RecoveryRung, ReferenceValidation, ReplayArtifactObservation,
+    ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
+    RepositoryContractPayload, RepositoryDispatchInput, RepositoryFetchObservation, RepositoryName,
+    RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
+    RepositoryRelativePath, RepositoryRoot, RepositoryWorktree, RequiredArtifactPresence,
+    RetryLimit, RiskOrdering, RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest,
+    SignalNumber, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
+    StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
+    UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionGoal, VisionName, VisionSlug,
+    WorkPackageClassification, WorkPackageGraph, WorkPackageId, WorkPackageMergeObservation,
+    WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment, WorktreeIdentity,
+    WorktreeState, WriteKind, admit_recurrent_finding, append_event, charged_failure_count,
     classify_claude_result, classify_codex_terminal_usage, classify_dispatch_admission,
     classify_dispatch_check_in, classify_replay_pair, classify_seatbelt_capability,
-    compose_gate_arguments, compose_herdr_work_package_dispatch, compose_package_gate_brief,
-    compose_package_worker_argv, compose_package_worker_brief, compose_planning_role_frame,
-    compute_dispatchability, create_vision, derive_dispatch_outcome_state, derive_driver_snapshot,
-    derive_merge_status, derive_milestone_merge_status, derive_package_result_path,
-    derive_run_state, derive_run_state_with_dispatch_artifacts,
-    derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
-    dispatch_completion_payload, dispatch_invocation, dispatch_payload, effective_criteria,
-    evaluate_completion, evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
-    fold_paired_execution_proof, fold_replay_runs, judge_finding_replay, measure_contract_snapshot,
+    compose_gate_arguments, compose_herdr_work_package_dispatch, compose_local_patch_brief,
+    compose_package_gate_brief, compose_package_worker_argv, compose_package_worker_brief,
+    compose_planning_role_frame, compute_dispatchability, create_vision,
+    derive_dispatch_outcome_state, derive_driver_snapshot, derive_merge_status,
+    derive_milestone_merge_status, derive_package_result_path, derive_run_state,
+    derive_run_state_with_dispatch_artifacts, derive_run_state_with_exceptional_merge_chains,
+    derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
+    dispatch_payload, effective_criteria, evaluate_completion, evaluate_landing_readiness,
+    event_record_matches, fold_dispatch_ledger, fold_paired_execution_proof, fold_replay_runs,
+    judge_finding_replay, latest_criterion_failure_evidence, measure_contract_snapshot,
     meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
     parse_acceptance_criteria, parse_claude_result, parse_dispatch_process_identity,
     parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
     parse_package_gate_outcome, parse_package_worker_result, parse_paired_falsification_verdict,
     parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
-    parse_work_package_graph, ready_work_packages, rebase_gate_stimulus,
-    render_dispatch_projection, render_human_snapshot, seatbelt_capability_probe,
-    serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    parse_work_package_graph, ready_work_packages, rebase_gate_stimulus, recovery_attempt_records,
+    recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
+    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_package_worker_result, serialize_tracked_repository_contract, validate_artifact,
     validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
     validated_dispatch_completion_payload, verify_criterion_change,
@@ -103,7 +105,7 @@ const USAGE: &str = concat!(
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
-    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] -- <WORKER_ARG>...\n",
+    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] -- <WORKER_ARG>...\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
@@ -290,6 +292,7 @@ struct DriverRunCommand {
     repositories: Vec<(String, PathBuf)>,
     preparations: BTreeMap<String, String>,
     override_risk_ordering: bool,
+    recovery_limits: RecoveryLimits,
     worker_arguments: Vec<String>,
 }
 
@@ -1336,9 +1339,17 @@ fn run_package_agent(command: PackageAgentCommand) -> Result<()> {
     let goal = VisionGoal::parse_document(&vision).context("failed to parse vision goal")?;
     let criteria =
         parse_acceptance_criteria(&vision).context("failed to parse vision acceptance criteria")?;
-    let brief =
+    let mut brief =
         compose_package_worker_brief(&goal, &criteria, &graph, &command.package_id, &worktrees)
             .context("failed to compose package worker brief")?;
+    if let Some(raw_supplement) = std::env::var_os("PCE_RECOVERY_SUPPLEMENT") {
+        let supplement = raw_supplement
+            .into_string()
+            .map_err(|_| anyhow!("PCE_RECOVERY_SUPPLEMENT is not UTF-8"))?;
+        if !supplement.is_empty() {
+            brief.push_str(&supplement);
+        }
+    }
     let (program, arguments) = command
         .worker_arguments
         .split_first()
@@ -1731,12 +1742,26 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
         bail!(USAGE);
     }
     let mut override_risk_ordering = false;
+    let mut retry_limit = 1_u32;
+    let mut local_patch_limit = 1_u32;
     let mut mapping_args = Vec::new();
     let mut index = 4;
     while index < options.len() {
         if options[index] == "--override-risk-ordering" {
             override_risk_ordering = true;
             index += 1;
+        } else if options[index] == "--retry-limit" || options[index] == "--local-patch-limit" {
+            let value = options
+                .get(index + 1)
+                .context("recovery limit requires a value")?
+                .parse::<u32>()
+                .context("recovery limit must be an unsigned integer")?;
+            if options[index] == "--retry-limit" {
+                retry_limit = value;
+            } else {
+                local_patch_limit = value;
+            }
+            index += 2;
         } else {
             if index + 1 >= options.len() {
                 bail!(USAGE);
@@ -1752,6 +1777,10 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
         repositories,
         preparations,
         override_risk_ordering,
+        recovery_limits: RecoveryLimits::new(
+            RetryLimit::new(retry_limit),
+            LocalPatchLimit::new(local_patch_limit),
+        ),
         worker_arguments,
     }))
 }
@@ -1762,6 +1791,50 @@ fn driver_outcome_path(journal: &Path, package: &str, issuance: u64) -> Result<P
         .join("package-outcomes")
         .join(package)
         .join(format!("{issuance}.json")))
+}
+
+fn ensure_recovery_configuration(command: &DriverRunCommand, events: &[DriverEvent]) -> Result<()> {
+    let configured = events.iter().find_map(|event| match event {
+        DriverEvent::RecoveryConfigured { limits } => Some(*limits),
+        _ => None,
+    });
+    match configured {
+        Some(limits) if limits != command.recovery_limits => bail!(
+            "driver recovery limits are already retry={} local-patch={}, not retry={} local-patch={}",
+            limits.retry_attempts(),
+            limits.local_patch_attempts(),
+            command.recovery_limits.retry_attempts(),
+            command.recovery_limits.local_patch_attempts()
+        ),
+        Some(_) => Ok(()),
+        None => append_driver_event(
+            &command.journal_path,
+            &DriverEvent::RecoveryConfigured {
+                limits: command.recovery_limits,
+            },
+        ),
+    }
+}
+
+fn park_if_recovery_exhausted(command: &DriverRunCommand, package_id: &str) -> Result<()> {
+    let events = read_driver_journal(&command.journal_path)?;
+    let charged = charged_failure_count(&events, package_id);
+    let budget = recovery_budget(command.recovery_limits, charged);
+    if budget.next_rung != RecoveryRung::Replan {
+        return Ok(());
+    }
+    let evidence = latest_criterion_failure_evidence(&events, package_id);
+    let attempts = recovery_attempt_records(&events, package_id, evidence);
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::RecoveryParked {
+            package: package_id.to_owned(),
+            reason: format!(
+                "recovery spending exhausted after {charged} attributable failures; re-author as plan version n+1"
+            ),
+            attempts,
+        },
+    )
 }
 
 fn observe_driver_worker_outcome(
@@ -1795,6 +1868,7 @@ fn observe_driver_worker_outcome(
                 repositories: command.repositories.clone(),
                 preparations: command.preparations.clone(),
             })?;
+            park_if_recovery_exhausted(command, &package_id)?;
             let refreshed = read_driver_journal(&command.journal_path)?;
             let state = derive_driver_snapshot(graph, &refreshed, command.override_risk_ordering)?;
             if state.packages().iter().any(|(name, package_state)| {
@@ -1816,21 +1890,24 @@ fn observe_driver_worker_outcome(
                 )?;
             }
         }
-        pce_core::PackageOutcome::Failed { blocked_by } => append_driver_event(
-            &command.journal_path,
-            &DriverEvent::WorkerFailed {
-                package: package_id,
-                issuance,
-                reason: blocked_by.as_str().to_owned(),
-            },
-        )?,
+        pce_core::PackageOutcome::Failed { blocked_by } => {
+            append_driver_event(
+                &command.journal_path,
+                &DriverEvent::WorkerFailed {
+                    package: package_id.clone(),
+                    issuance,
+                    reason: blocked_by.as_str().to_owned(),
+                },
+            )?;
+            park_if_recovery_exhausted(command, &package_id)?;
+        }
         pce_core::PackageOutcome::MisSpecified { fault } => {
             let reason = match fault {
                 pce_core::MisSpecificationFault::Criterion { name } => {
-                    format!("criterion: {}", name.as_str())
+                    format!("replan: criterion: {}", name.as_str())
                 }
                 pce_core::MisSpecificationFault::MissingDependency { id } => {
-                    format!("missing dependency: {}", id.as_str())
+                    format!("replan: missing dependency: {}", id.as_str())
                 }
             };
             append_driver_event(
@@ -1847,11 +1924,25 @@ fn observe_driver_worker_outcome(
 }
 
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
+    let initial_events = read_driver_journal(&command.journal_path)?;
+    ensure_recovery_configuration(&command, &initial_events)?;
     loop {
         let graph = read_driver_graph(&command.graph_path)?;
         let events = read_driver_journal(&command.journal_path)?;
         let snapshot = derive_driver_snapshot(&graph, &events, command.override_risk_ordering)
             .context("failed to derive driver loop state")?;
+        let exhausted = snapshot
+            .packages()
+            .iter()
+            .filter(|(_, state)| matches!(state, pce_core::DriverPackageState::Failed { .. }))
+            .map(|(package, _)| package.clone())
+            .collect::<Vec<_>>();
+        if !exhausted.is_empty() {
+            for package in exhausted {
+                park_if_recovery_exhausted(&command, &package)?;
+            }
+            continue;
+        }
         match snapshot.outcome() {
             pce_core::DriverLoopOutcome::Finished | pce_core::DriverLoopOutcome::Blocked => {
                 return run_driver_status(DriverStatusCommand {
@@ -1899,6 +1990,47 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                 .saturating_add(u64::try_from(offset).context("ready set exceeds u64")?);
             let outcome = driver_outcome_path(&command.journal_path, package_id, issuance)?;
             fs::create_dir_all(outcome.parent().context("outcome path has no parent")?)?;
+            let charged = charged_failure_count(&events, package_id);
+            let base_brief = recovery_base_brief(&graph, package_id)?;
+            let (rung_name, worker_brief, recovery_supplement) = if charged == 0 {
+                ("initial", base_brief, String::new())
+            } else {
+                let budget = recovery_budget(command.recovery_limits, charged);
+                let evidence = latest_criterion_failure_evidence(&events, package_id);
+                let (brief, supplement) = match budget.next_rung {
+                    RecoveryRung::Retry => (base_brief, String::new()),
+                    RecoveryRung::LocalPatch => {
+                        let supplement = compose_local_patch_brief("", &evidence);
+                        (
+                            compose_local_patch_brief(&base_brief, &evidence),
+                            supplement,
+                        )
+                    }
+                    RecoveryRung::Replan => {
+                        park_if_recovery_exhausted(&command, package_id)?;
+                        continue;
+                    }
+                };
+                append_driver_event(
+                    &command.journal_path,
+                    &DriverEvent::RecoveryRungAttempted {
+                        package: package_id.clone(),
+                        issuance,
+                        rung: budget.next_rung,
+                        evidence,
+                        brief: brief.clone(),
+                    },
+                )?;
+                (
+                    match budget.next_rung {
+                        RecoveryRung::Retry => "retry",
+                        RecoveryRung::LocalPatch => "local-patch",
+                        RecoveryRung::Replan => unreachable!("handled above"),
+                    },
+                    brief,
+                    supplement,
+                )
+            };
             append_driver_event(
                 &command.journal_path,
                 &DriverEvent::WorkerDispatched {
@@ -1914,6 +2046,9 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                 .args(arguments)
                 .env("PCE_PACKAGE", package_id)
                 .env("PCE_PACKAGE_OUTCOME", &outcome)
+                .env("PCE_RECOVERY_RUNG", rung_name)
+                .env("PCE_PACKAGE_BRIEF", worker_brief)
+                .env("PCE_RECOVERY_SUPPLEMENT", recovery_supplement)
                 .spawn()
                 .with_context(|| format!("failed to spawn worker for {package_id}"))?;
             children.push((package_id.clone(), issuance, outcome, child));
@@ -1925,10 +2060,12 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
             if !status.success() {
                 append_driver_event(
                     &command.journal_path,
-                    &DriverEvent::WorkerFailed {
+                    &DriverEvent::WorkerEnvironmentFailed {
                         package: package_id,
                         issuance,
-                        reason: format!("worker exited with {status}"),
+                        reason: format!(
+                            "worker process exited with {status}; no package judgement was produced"
+                        ),
                     },
                 )?;
                 continue;

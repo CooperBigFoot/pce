@@ -18,6 +18,7 @@ pub mod landing_readiness;
 pub mod package_completion;
 pub mod package_driver;
 pub mod package_gate;
+pub mod package_recovery;
 pub mod package_worker;
 pub mod paired_execution_proof;
 pub mod run_state;
@@ -53,12 +54,18 @@ pub use package_driver::{
     AmendmentRepositoryRefs, CommandExitStatus, CriterionExecution, CriterionOrigin, DriverEvent,
     DriverLoopOutcome, DriverPackageState, DriverSnapshot, EffectiveCriterion,
     EnvironmentPreparationOutcome, FindingRejectionReason, FindingReplayDecision,
-    PackageDriverError, derive_driver_snapshot, effective_criteria, judge_finding_replay,
+    PackageDriverError, RecoveryAttemptRecord, charged_failure_count, derive_driver_snapshot,
+    effective_criteria, judge_finding_replay, latest_criterion_failure_evidence,
+    recovery_attempt_records, recovery_base_brief,
 };
 pub use package_gate::{
     BuiltArtifactRef, PackageGateError, PackageGateFinding, PackageGateRepositoryRefs,
     ParsedPackageGateOutcome, compose_package_gate_brief, parse_package_gate_outcome,
     validate_package_gate_repositories,
+};
+pub use package_recovery::{
+    LocalPatchLimit, RecoveryBudget, RecoveryCriterionEvidence, RecoveryLimits, RecoveryRung,
+    RetryLimit, compose_local_patch_brief, recovery_budget,
 };
 pub use package_worker::{
     MisSpecificationFault, PackageOutcome, PackageWorkerError, RepositoryWorktree, VisionGoal,
