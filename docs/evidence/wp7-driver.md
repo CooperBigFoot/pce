@@ -46,7 +46,7 @@ finishes. The journal contains exactly one A dispatch, proving restart did not r
 
 - `cargo fmt --check`
 - `cargo clippy --workspace --all-targets` (passes with pre-existing warnings)
-- `cargo test --workspace` (all non-ignored tests passed)
+- `cargo test --workspace` (all non-ignored tests passed; the known concurrent large pipe-drain test failed twice in full-suite runs and passed alone, then the complete suite passed on the final rerun)
 
 ## Scope note
 
@@ -56,3 +56,74 @@ prime-agent/Herdr seeded-defect campaign was not run; doing so requires an inter
 Herdr-managed pane (`HERDR_ENV=1`) and authenticated prime-agent execution. The deterministic Git and
 shell scenario exercises the same criterion, coordinated replay, amendment, dependency-release,
 parking, and disk-only fold paths.
+
+
+## Follow-up: environment preparation
+
+The driver accepts repeatable `--prepare NAME=COMMAND` options beside `--repository NAME=PATH` on
+`driver-run`, `criteria-run`, and `replay-finding`. Each command runs through `/bin/sh -c` with its
+working directory set to that repository's detached driver-owned clone. It runs once for the
+criteria materialization and once for each coordinated replay side. No option preserves prior
+behavior.
+
+Every attempted preparation appends `environment-preparation-executed`, carrying the package,
+materialization label, repository, exact command, explicit `succeeded`/`failed` outcome, working
+directory, exit status, stdout, and stderr. A nonzero status folds to the distinct terminal state `environment-preparation-failed` and
+no `criterion-executed` or `finding-replayed` event is appended. Tests cover criteria preparation
+failure, four successful two-repository/two-state replay preparations, and repair-side preparation
+failure before either proposed-command execution.
+
+The worker brief now states: “Commit all completed work before reporting done. Criteria run against
+the resulting commit, not the working tree, so uncommitted work will not be judged.”
+
+## Real Prime Agent and Herdr 0.7.1 drive
+
+Run root: `/tmp/pce-wp7-real-prepare-1786612230`. Isolated PCE binary:
+`/tmp/pce-wp7-follow-target/debug/pce`. Installed `herdr --version`: 0.7.1. Installed
+`prime-agent --version`: 0.7.2.
+
+The driver invocation was:
+
+```sh
+/tmp/pce-wp7-follow-target/debug/pce package driver-run --graph /tmp/pce-wp7-real-prepare-1786612230/graph.json --journal /tmp/pce-wp7-real-prepare-1786612230/driver-events.jsonl --repository demo=/tmp/pce-work-package-worktrees/pce-2dbcea68b4a5a4654db1581a94c7/00-demo --prepare demo=touch .prepared -- /tmp/pce-wp7-real-prepare-1786612230/herdr-worker-adapter.sh
+```
+
+The adapter invoked actual `pce dispatch package`, which asked actual Herdr 0.7.1 to create the
+worktree and start `pce package agent`; that command piped the composed brief to actual
+`prime-agent --no-session --thinking minimal -p`. Completion was observed only from the atomically
+published WP4 result file and package outcome, never from Herdr.
+
+Observed sequence:
+
+1. Driver appended `worker-dispatched` for T1 issuance 1.
+2. Herdr created `/tmp/pce-work-package-worktrees/pce-2dbcea68b4a5a4654db1581a94c7/00-demo` and started agent `pce-2dbcea68b4a5a4654db1581a94c7`.
+3. Prime Agent created and committed `known.txt` as commit
+   `8035b4f67565d9ee551f5695cec4da13e58a93de` with contents `known`, then wrote
+   `{"outcome":"done"}`.
+4. WP4 wrote `.pce/package-results/T1/1.json`: exit 0, artifact present, duration 13641 ms.
+5. Driver appended `worker-done`, cloned committed HEAD, ran `touch .prepared`, and recorded its
+   zero exit as environment preparation.
+6. The criterion `test -f .prepared && test "$(cat known.txt)" = known` exited zero in that same
+   clone and was recorded.
+7. Driver appended `gate-finished` with its no-findings gate and `package-completed`; final outcome
+   was `finished`.
+
+Recorded artifacts:
+
+- `/tmp/pce-wp7-real-prepare-1786612230/vision.md`
+- `/tmp/pce-wp7-real-prepare-1786612230/graph.json`
+- `/tmp/pce-wp7-real-prepare-1786612230/driver-events.jsonl`
+- `/tmp/pce-wp7-real-prepare-1786612230/dispatch-events.jsonl`
+- `/tmp/pce-wp7-real-prepare-1786612230/herdr-dispatch.json`
+- `/tmp/pce-wp7-real-prepare-1786612230/package-outcomes/T1/1.json`
+- `/tmp/pce-wp7-real-prepare-1786612230/.pce/package-results/T1/1.json`
+- `/tmp/pce-wp7-real-prepare-1786612230/herdr-worker-adapter.sh`
+- `/tmp/pce-wp7-real-prepare-1786612230/seed-repo`
+- `/tmp/pce-work-package-worktrees/pce-2dbcea68b4a5a4654db1581a94c7/00-demo/known.txt` and its committed Git history
+
+The native driver currently accepts a worker argv rather than directly composing WP4 dispatch, so a
+small adapter was required to join its synchronous worker contract to WP4's asynchronous Herdr
+start/result contract. The spawned implementation worker was actual Prime Agent through actual
+Herdr; the adapter contained no implementation logic. Consolidating environment preparation into
+tracked contract `install`/`preflight` was not attempted because those fields contain prose rather
+than executable commands.

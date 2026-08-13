@@ -52,8 +52,8 @@ pub use package_completion::{
 pub use package_driver::{
     AmendmentRepositoryRefs, CommandExitStatus, CriterionExecution, CriterionOrigin, DriverEvent,
     DriverLoopOutcome, DriverPackageState, DriverSnapshot, EffectiveCriterion,
-    FindingRejectionReason, FindingReplayDecision, PackageDriverError, derive_driver_snapshot,
-    effective_criteria, judge_finding_replay,
+    EnvironmentPreparationOutcome, FindingRejectionReason, FindingReplayDecision,
+    PackageDriverError, derive_driver_snapshot, effective_criteria, judge_finding_replay,
 };
 pub use package_gate::{
     BuiltArtifactRef, PackageGateError, PackageGateFinding, PackageGateRepositoryRefs,

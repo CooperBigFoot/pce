@@ -377,3 +377,206 @@ fn restarted_driver_collects_existing_outcome_without_redispatch() {
         1
     );
 }
+
+#[test]
+fn preparation_runs_once_per_repository_and_failure_is_not_a_criterion_failure() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "base");
+    let graph_path = temp.path().join("graph.json");
+    let journal = temp.path().join("driver.jsonl");
+    graph(
+        &graph_path,
+        &["repo"],
+        json!([{"name":"must-not-run","input":"repo","observation":"zero","command":"touch criterion-ran; exit 8"}]),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-done","package":"A","issuance":1}),
+    );
+    let source_before = git(
+        &repo,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    );
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "criteria-run".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--package".into(),
+            "A".into(),
+            "--repository".into(),
+            format!("repo={}", repo.display()),
+            "--prepare".into(),
+            "repo=printf prepared > prepared-marker; printf prep-out; printf prep-err >&2; exit 6"
+                .into(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        source_before,
+        git(
+            &repo,
+            &["status", "--porcelain=v1", "--untracked-files=all"]
+        )
+    );
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(events.contains("environment-preparation-executed"));
+    assert!(events.contains("repo=printf prepared") || events.contains("printf prepared"));
+    assert!(events.contains("prep-out"));
+    assert!(events.contains("prep-err"));
+    assert!(events.contains("\"code\":6"));
+    assert!(!events.contains("criterion-executed"));
+    assert!(!events.contains("criteria failed"));
+    let snapshot: Value = serde_json::from_slice(&output.stdout).expect("snapshot");
+    let state = &snapshot["packages"][0][1];
+    assert_eq!(state["state"], "environment-preparation-failed");
+    assert_eq!(state["repository"], "repo");
+}
+
+#[test]
+fn coordinated_replay_prepares_every_repository_in_both_states_before_replay() {
+    let temp = TempDir::new().expect("tempdir");
+    let a = repository(temp.path(), "a", "witness");
+    let b = repository(temp.path(), "b", "witness");
+    let wa = git(&a, &["rev-parse", "HEAD"]);
+    let wb = git(&b, &["rev-parse", "HEAD"]);
+    fs::write(a.join("value"), "repair").expect("repair a");
+    git(&a, &["commit", "-qam", "repair"]);
+    let ra = git(&a, &["rev-parse", "HEAD"]);
+    fs::write(b.join("value"), "repair").expect("repair b");
+    git(&b, &["commit", "-qam", "repair"]);
+    let rb = git(&b, &["rev-parse", "HEAD"]);
+    let graph_path = temp.path().join("graph.json");
+    let journal = temp.path().join("driver.jsonl");
+    graph(
+        &graph_path,
+        &["a", "b"],
+        json!([{"name":"floor","input":"repo","observation":"zero","command":"true"}]),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-done","package":"A","issuance":1}),
+    );
+    let outcome = temp.path().join("gate.json");
+    fs::write(&outcome,serde_json::to_vec(&json!({"findings":[{"description":"values","repair":"both","proposed_criterion_command":"test -e prepared-a && test -e \"$PCE_WORKTREE_1/prepared-b\" && test \"$(cat value)\" = repair","repository_refs":[{"repository":"a","witness_ref":wa,"repair_ref":ra},{"repository":"b","witness_ref":wb,"repair_ref":rb}]}]})).expect("json")).expect("outcome");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "replay-finding".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--package".into(),
+            "A".into(),
+            "--gate".into(),
+            "g".into(),
+            "--finding".into(),
+            "0".into(),
+            "--outcome".into(),
+            outcome.display().to_string(),
+            "--repository".into(),
+            format!("a={}", a.display()),
+            "--prepare".into(),
+            "a=touch prepared-a".into(),
+            "--repository".into(),
+            format!("b={}", b.display()),
+            "--prepare".into(),
+            "b=touch prepared-b".into(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let decision: Value = serde_json::from_slice(&output.stdout).expect("decision");
+    assert_eq!(decision["decision"]["decision"], "accepted");
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert_eq!(
+        events.matches("environment-preparation-executed").count(),
+        4
+    );
+    assert!(events.contains("\"materialization\":\"witness\""));
+    assert!(events.contains("\"materialization\":\"repair\""));
+}
+
+#[test]
+fn replay_preparation_failure_records_not_judged_and_executes_no_proposed_command() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "witness");
+    let witness = git(&repo, &["rev-parse", "HEAD"]);
+    fs::write(repo.join("value"), "repair").expect("repair");
+    git(&repo, &["commit", "-qam", "repair"]);
+    let repair = git(&repo, &["rev-parse", "HEAD"]);
+    let graph_path = temp.path().join("graph.json");
+    let journal = temp.path().join("driver.jsonl");
+    graph(
+        &graph_path,
+        &["repo"],
+        json!([{"name":"floor","input":"repo","observation":"zero","command":"true"}]),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-done","package":"A","issuance":1}),
+    );
+    let sentinel = temp.path().join("proposed-ran");
+    let outcome = temp.path().join("gate.json");
+    fs::write(&outcome,serde_json::to_vec(&json!({"findings":[{"description":"d","repair":"r","proposed_criterion_command":format!("touch {}",sentinel.display()),"repository_refs":[{"repository":"repo","witness_ref":witness,"repair_ref":repair}]}]})).expect("json")).expect("outcome");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "replay-finding".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--package".into(),
+            "A".into(),
+            "--gate".into(),
+            "g".into(),
+            "--finding".into(),
+            "0".into(),
+            "--outcome".into(),
+            outcome.display().to_string(),
+            "--repository".into(),
+            format!("repo={}", repo.display()),
+            "--prepare".into(),
+            "repo=test \"$(cat value)\" = witness".into(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!sentinel.exists());
+    let result: Value = serde_json::from_slice(&output.stdout).expect("result");
+    assert_eq!(result["decision"], "not-judged");
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(events.contains("environment-preparation-executed"));
+    assert!(events.contains("\"materialization\":\"repair\""));
+    assert!(!events.contains("finding-replayed"));
+}

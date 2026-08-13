@@ -65,6 +65,8 @@ fn rr2_brief_contains_global_context_target_detail_and_scope_boundary() {
     assert!(brief.contains("RR1, RR3, RR4, RR5, RR6, and RR7 are out of bounds"));
     assert!(brief.contains("not the judgement"));
     assert!(brief.contains("executed independently"));
+    assert!(brief.contains("Commit all completed work before reporting done"));
+    assert!(brief.contains("uncommitted work will not be judged"));
 
     // Other-package summary criteria are visible, but their commands, repositories, and edges are not.
     assert!(brief.contains("Four value states survive compile"));

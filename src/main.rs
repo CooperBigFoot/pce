@@ -33,10 +33,10 @@ use pce_core::{
     DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
     DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass, DispatchRootCause,
     DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchabilityResult, DriverEvent,
-    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
-    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState,
-    ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable, ExitCode,
-    ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
+    EnvironmentPreparationOutcome, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
+    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
+    ExactPullRequestState, ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable,
+    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FinishedResult,
     GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig, GateExecutionRef,
     GateExecutionRejection, GateExecutionResponse, GateObservedResult, GateProcessObservation,
     GateProcessStimulus, GateStimulus, GateTerminalStatus, GitAuthorityObservation,
@@ -103,9 +103,9 @@ const USAGE: &str = concat!(
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
-    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--override-risk-ordering] -- <WORKER_ARG>...\n",
-    "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>...\n",
-    "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>...\n",
+    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] -- <WORKER_ARG>...\n",
+    "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
+    "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
     "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
@@ -268,6 +268,7 @@ struct DriverCriteriaCommand {
     journal_path: PathBuf,
     package_id: String,
     repositories: Vec<(String, PathBuf)>,
+    preparations: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -279,6 +280,7 @@ struct DriverReplayCommand {
     finding: usize,
     outcome_path: PathBuf,
     repositories: Vec<(String, PathBuf)>,
+    preparations: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -286,6 +288,7 @@ struct DriverRunCommand {
     graph_path: PathBuf,
     journal_path: PathBuf,
     repositories: Vec<(String, PathBuf)>,
+    preparations: BTreeMap<String, String>,
     override_risk_ordering: bool,
     worker_arguments: Vec<String>,
 }
@@ -1602,24 +1605,47 @@ fn parse_driver_status(rest: &[String]) -> Result<Command> {
     }))
 }
 
-fn parse_repository_mappings(rest: &[String]) -> Result<Vec<(String, PathBuf)>> {
+fn parse_driver_repository_options(
+    rest: &[String],
+) -> Result<(Vec<(String, PathBuf)>, BTreeMap<String, String>)> {
     if rest.is_empty() || !rest.len().is_multiple_of(2) {
         bail!(USAGE);
     }
     let mut repositories = Vec::new();
+    let mut preparations = BTreeMap::new();
     for pair in rest.chunks_exact(2) {
-        if pair[0] != "--repository" {
-            bail!(USAGE);
-        }
-        let (name, raw_path) = pair[1]
+        let (name, value) = pair[1]
             .split_once('=')
-            .context("repository mapping requires NAME=PATH")?;
-        if name.is_empty() {
-            bail!("repository mapping name must be non-empty");
+            .context("driver repository option requires NAME=VALUE")?;
+        if name.is_empty() || value.is_empty() {
+            bail!("driver repository option name and value must be non-empty");
         }
-        repositories.push((name.to_owned(), PathBuf::from(raw_path)));
+        match pair[0].as_str() {
+            "--repository" => repositories.push((name.to_owned(), PathBuf::from(value))),
+            "--prepare" => {
+                if preparations
+                    .insert(name.to_owned(), value.to_owned())
+                    .is_some()
+                {
+                    bail!("preparation command for repository `{name}` is repeated");
+                }
+            }
+            _ => bail!(USAGE),
+        }
     }
-    Ok(repositories)
+    if repositories.is_empty() {
+        bail!(USAGE);
+    }
+    let repository_names = repositories
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for name in preparations.keys() {
+        if !repository_names.contains(name.as_str()) {
+            bail!("preparation command names unmapped repository `{name}`");
+        }
+    }
+    Ok((repositories, preparations))
 }
 
 fn parse_driver_criteria(rest: &[String]) -> Result<Command> {
@@ -1638,11 +1664,13 @@ fn parse_driver_criteria(rest: &[String]) -> Result<Command> {
     if graph_flag != "--graph" || journal_flag != "--journal" || package_flag != "--package" {
         bail!(USAGE);
     }
+    let (repositories, preparations) = parse_driver_repository_options(trailing)?;
     Ok(Command::DriverCriteria(DriverCriteriaCommand {
         graph_path: PathBuf::from(graph),
         journal_path: PathBuf::from(journal),
         package_id: package.clone(),
-        repositories: parse_repository_mappings(trailing)?,
+        repositories,
+        preparations,
     }))
 }
 
@@ -1674,6 +1702,7 @@ fn parse_driver_replay(rest: &[String]) -> Result<Command> {
     {
         bail!(USAGE);
     }
+    let (repositories, preparations) = parse_driver_repository_options(trailing)?;
     Ok(Command::DriverReplay(DriverReplayCommand {
         graph_path: PathBuf::from(graph),
         journal_path: PathBuf::from(journal),
@@ -1683,7 +1712,8 @@ fn parse_driver_replay(rest: &[String]) -> Result<Command> {
             .parse()
             .context("finding index must be an unsigned integer")?,
         outcome_path: PathBuf::from(outcome),
-        repositories: parse_repository_mappings(trailing)?,
+        repositories,
+        preparations,
     }))
 }
 
@@ -1715,10 +1745,12 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
             index += 2;
         }
     }
+    let (repositories, preparations) = parse_driver_repository_options(&mapping_args)?;
     Ok(Command::DriverRun(DriverRunCommand {
         graph_path: PathBuf::from(&options[1]),
         journal_path: PathBuf::from(&options[3]),
-        repositories: parse_repository_mappings(&mapping_args)?,
+        repositories,
+        preparations,
         override_risk_ordering,
         worker_arguments,
     }))
@@ -1761,6 +1793,7 @@ fn observe_driver_worker_outcome(
                 journal_path: command.journal_path.clone(),
                 package_id: package_id.clone(),
                 repositories: command.repositories.clone(),
+                preparations: command.preparations.clone(),
             })?;
             let refreshed = read_driver_journal(&command.journal_path)?;
             let state = derive_driver_snapshot(graph, &refreshed, command.override_risk_ordering)?;
@@ -2040,6 +2073,19 @@ impl Drop for DriverMaterialization {
     }
 }
 impl DriverMaterialization {
+    fn named_paths(&self, sources: &[(String, PathBuf)]) -> Vec<(String, PathBuf)> {
+        sources
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| {
+                (
+                    name.clone(),
+                    self.root.join(format!("{index:02}-repository")),
+                )
+            })
+            .collect()
+    }
+
     fn paths(&self) -> Result<Vec<PathBuf>> {
         let mut entries = fs::read_dir(&self.root)?
             .map(|entry| entry.map(|entry| entry.path()))
@@ -2101,6 +2147,10 @@ fn shell_execution(command: &str, paths: &[PathBuf]) -> Result<CriterionExecutio
     let cwd = paths
         .first()
         .context("package has no materialized repository")?;
+    shell_execution_at(command, cwd, paths)
+}
+
+fn shell_execution_at(command: &str, cwd: &Path, paths: &[PathBuf]) -> Result<CriterionExecution> {
     let projection =
         serde_json::to_string(paths).context("failed to serialize coordinated worktrees")?;
     let mut child = std::process::Command::new("/bin/sh");
@@ -2133,6 +2183,43 @@ fn shell_execution(command: &str, paths: &[PathBuf]) -> Result<CriterionExecutio
     ))
 }
 
+fn prepare_driver_materialization(
+    journal: &Path,
+    package: &str,
+    materialization_label: &str,
+    materialization: &DriverMaterialization,
+    sources: &[(String, PathBuf)],
+    preparations: &BTreeMap<String, String>,
+) -> Result<bool> {
+    let paths = materialization.paths()?;
+    for (repository, checkout) in materialization.named_paths(sources) {
+        let Some(command) = preparations.get(&repository) else {
+            continue;
+        };
+        let execution = shell_execution_at(command, &checkout, &paths)?;
+        let succeeded = execution.exit_status().is_success();
+        append_driver_event(
+            journal,
+            &DriverEvent::EnvironmentPreparationExecuted {
+                package: package.to_owned(),
+                materialization: materialization_label.to_owned(),
+                repository,
+                command: command.clone(),
+                outcome: if succeeded {
+                    EnvironmentPreparationOutcome::Succeeded
+                } else {
+                    EnvironmentPreparationOutcome::Failed
+                },
+                execution,
+            },
+        )?;
+        if !succeeded {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn execute_driver_criteria(command: DriverCriteriaCommand) -> Result<DriverStatusCommand> {
     let graph = read_driver_graph(&command.graph_path)?;
     let package = graph
@@ -2147,6 +2234,20 @@ fn execute_driver_criteria(command: DriverCriteriaCommand) -> Result<DriverStatu
         .collect::<Result<BTreeMap<_, _>>>()?;
     let materialization =
         materialize_driver_state(&command.journal_path, "criteria", &sources, &references)?;
+    if !prepare_driver_materialization(
+        &command.journal_path,
+        &command.package_id,
+        "criteria",
+        &materialization,
+        &sources,
+        &command.preparations,
+    )? {
+        return Ok(DriverStatusCommand {
+            graph_path: command.graph_path,
+            journal_path: command.journal_path,
+            override_risk_ordering: false,
+        });
+    }
     let paths = materialization.paths()?;
     let events = read_driver_journal(&command.journal_path)?;
     let criteria = effective_criteria(&graph, &command.package_id, &events)
@@ -2238,13 +2339,38 @@ fn run_driver_replay(command: DriverReplayCommand) -> Result<()> {
     }
     let witness_state =
         materialize_driver_state(&command.journal_path, "witness", &sources, &witness_refs)?;
+    let repair_state =
+        materialize_driver_state(&command.journal_path, "repair", &sources, &repair_refs)?;
+    let witness_prepared = prepare_driver_materialization(
+        &command.journal_path,
+        &command.package_id,
+        "witness",
+        &witness_state,
+        &sources,
+        &command.preparations,
+    )?;
+    if !witness_prepared {
+        return write_json_stdout(
+            &json!({"decision": "not-judged", "reason": "environment-preparation-failed"}),
+        );
+    }
+    let repair_prepared = prepare_driver_materialization(
+        &command.journal_path,
+        &command.package_id,
+        "repair",
+        &repair_state,
+        &sources,
+        &command.preparations,
+    )?;
+    if !repair_prepared {
+        return write_json_stdout(
+            &json!({"decision": "not-judged", "reason": "environment-preparation-failed"}),
+        );
+    }
     let witness = shell_execution(
         finding.proposed_criterion_command(),
         &witness_state.paths()?,
     )?;
-    drop(witness_state);
-    let repair_state =
-        materialize_driver_state(&command.journal_path, "repair", &sources, &repair_refs)?;
     let repair = shell_execution(finding.proposed_criterion_command(), &repair_state.paths()?)?;
     let decision = judge_finding_replay(&witness, &repair);
     append_driver_event(

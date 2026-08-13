@@ -142,6 +142,14 @@ pub fn judge_finding_replay(
     }
 }
 
+/// The non-judgement result of preparing one repository environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EnvironmentPreparationOutcome {
+    Succeeded,
+    Failed,
+}
+
 /// One append-only fact in the driver journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
@@ -161,6 +169,15 @@ pub enum DriverEvent {
         package: String,
         issuance: u64,
         reason: String,
+    },
+    /// One repository environment was prepared inside a driver-owned materialization.
+    EnvironmentPreparationExecuted {
+        package: String,
+        materialization: String,
+        repository: String,
+        command: String,
+        outcome: EnvironmentPreparationOutcome,
+        execution: CriterionExecution,
     },
     /// One authored or amended criterion was executed.
     CriterionExecuted {
@@ -197,6 +214,7 @@ pub enum DriverPackageState {
     Judging { issuance: u64 },
     Complete,
     Failed { reason: String },
+    EnvironmentPreparationFailed { repository: String, command: String },
     Parked { reason: String },
 }
 
@@ -247,6 +265,11 @@ pub enum PackageDriverError {
     /// A terminal package was subsequently mutated by an impossible lifecycle event.
     #[error("driver event occurs after package `{package}` reached a terminal state")]
     EventAfterTerminal { package: String },
+    /// A preparation record's outcome disagrees with its shell status.
+    #[error(
+        "environment preparation outcome for package `{package}` repository `{repository}` disagrees with evidence"
+    )]
+    InconsistentEnvironmentPreparationOutcome { package: String, repository: String },
     /// A finding record's stored decision disagrees with its executions.
     #[error(
         "finding replay decision for package `{package}` gate `{gate}` finding {finding} disagrees with evidence"
@@ -285,6 +308,7 @@ pub fn derive_driver_snapshot(
             state,
             DriverPackageState::Complete
                 | DriverPackageState::Failed { .. }
+                | DriverPackageState::EnvironmentPreparationFailed { .. }
                 | DriverPackageState::Parked { .. }
         )
     };
@@ -294,6 +318,7 @@ pub fn derive_driver_snapshot(
             | DriverEvent::WorkerDone { package, .. }
             | DriverEvent::WorkerFailed { package, .. }
             | DriverEvent::PackageParked { package, .. }
+            | DriverEvent::EnvironmentPreparationExecuted { package, .. }
             | DriverEvent::CriterionExecuted { package, .. }
             | DriverEvent::FindingReplayed { package, .. }
             | DriverEvent::GateFinished { package, .. }
@@ -367,6 +392,34 @@ pub fn derive_driver_snapshot(
                     });
                 }
             },
+            DriverEvent::EnvironmentPreparationExecuted {
+                repository,
+                command,
+                outcome,
+                execution,
+                ..
+            } => {
+                if !matches!(state, DriverPackageState::Judging { .. }) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+                let succeeded = execution.exit_status().is_success();
+                if succeeded != matches!(outcome, EnvironmentPreparationOutcome::Succeeded) {
+                    return Err(
+                        PackageDriverError::InconsistentEnvironmentPreparationOutcome {
+                            package: package.clone(),
+                            repository: repository.clone(),
+                        },
+                    );
+                }
+                if !succeeded {
+                    *state = DriverPackageState::EnvironmentPreparationFailed {
+                        repository: repository.clone(),
+                        command: command.clone(),
+                    };
+                }
+            }
             DriverEvent::CriterionExecuted { .. } | DriverEvent::GateFinished { .. } => {
                 if !matches!(state, DriverPackageState::Judging { .. }) {
                     return Err(PackageDriverError::EventAfterTerminal {
@@ -556,6 +609,42 @@ mod tests {
         assert!(matches!(
             snapshot.packages()[0].1,
             DriverPackageState::Parked { .. }
+        ));
+        assert!(matches!(
+            snapshot.packages()[1].1,
+            DriverPackageState::Pending
+        ));
+        assert_eq!(snapshot.outcome(), DriverLoopOutcome::Blocked);
+
+        let preparation_failed = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::WorkerDone {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::EnvironmentPreparationExecuted {
+                package: "A".to_owned(),
+                materialization: "criteria".to_owned(),
+                repository: "r".to_owned(),
+                command: "exit 9".to_owned(),
+                outcome: super::EnvironmentPreparationOutcome::Failed,
+                execution: super::CriterionExecution::new(
+                    "exit 9".to_owned(),
+                    "/clone".to_owned(),
+                    super::CommandExitStatus::Exited { code: 9 },
+                    String::new(),
+                    String::new(),
+                ),
+            },
+        ];
+        let snapshot = derive_driver_snapshot(&graph, &preparation_failed, false)
+            .expect("preparation failure fold");
+        assert!(matches!(
+            snapshot.packages()[0].1,
+            DriverPackageState::EnvironmentPreparationFailed { .. }
         ));
         assert!(matches!(
             snapshot.packages()[1].1,
