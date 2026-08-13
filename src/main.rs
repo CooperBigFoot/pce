@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
+use notify::{RecursiveMode, Watcher};
 use pce_core::GateCommand;
 use pce_core::tracked_contract::parse_gate_command;
 use pce_core::{
@@ -102,12 +103,12 @@ const USAGE: &str = concat!(
     "       pce graph check --file <GRAPH_PATH>\n",
     "       pce graph freeze --vision-dir <VISION_DIR>\n",
     "       pce package brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --worktree <NAME=ABSOLUTE_PATH>...\n",
-    "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
+    "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> [--brief <ABSOLUTE_BRIEF_PATH>] -- <WORKER_ARG>...\n",
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
     "       pce package render --graph <GRAPH_PATH> [--journal <DRIVER_JOURNAL>] --output <HTML_PATH>\n",
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
-    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] -- <WORKER_ARG>...\n",
+    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
@@ -225,6 +226,7 @@ struct PackageAgentCommand {
     graph_path: PathBuf,
     package_id: String,
     outcome_path: PathBuf,
+    brief_path: Option<PathBuf>,
     worker_arguments: Vec<String>,
 }
 
@@ -252,6 +254,7 @@ struct PackageDispatchCommand {
     log_path: PathBuf,
     vision_dir: PathBuf,
     graph_path: PathBuf,
+    require_graph_at_vision_root: bool,
     package_id: String,
     required_artifact_path: AbsoluteRequiredArtifactPath,
     repositories: Vec<(String, PathBuf)>,
@@ -302,7 +305,8 @@ struct DriverRunCommand {
     preparations: BTreeMap<String, String>,
     override_risk_ordering: bool,
     recovery_limits: RecoveryLimits,
-    worker_arguments: Vec<String>,
+    worker_override: Option<Vec<String>>,
+    wait_timeout: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -1281,41 +1285,43 @@ fn run_package_gate_brief(command: PackageGateBriefCommand) -> Result<()> {
 }
 
 fn parse_package_agent(rest: &[String]) -> Result<Command> {
-    let [
-        vision_flag,
-        vision,
-        graph_flag,
-        graph,
-        package_flag,
-        package,
-        outcome_flag,
-        outcome,
-        delimiter,
-        worker @ ..,
-    ] = rest
-    else {
-        bail!(USAGE);
-    };
-    if vision_flag != "--vision"
-        || graph_flag != "--graph"
-        || package_flag != "--package"
-        || outcome_flag != "--outcome"
-        || delimiter != "--"
-        || worker.is_empty()
+    if rest.len() < 10
+        || rest[0] != "--vision"
+        || rest[2] != "--graph"
+        || rest[4] != "--package"
+        || rest[6] != "--outcome"
     {
         bail!(USAGE);
     }
-    let vision_path = PathBuf::from(vision);
-    let graph_path = PathBuf::from(graph);
-    let outcome_path = PathBuf::from(outcome);
-    if !vision_path.is_absolute() || !graph_path.is_absolute() || !outcome_path.is_absolute() {
-        bail!("package agent vision, graph, and outcome paths must be absolute");
+    let delimiter = rest
+        .iter()
+        .position(|value| value == "--")
+        .context("package agent requires -- before worker arguments")?;
+    let worker = &rest[delimiter + 1..];
+    if worker.is_empty() {
+        bail!(USAGE);
+    }
+    let brief_path = match &rest[8..delimiter] {
+        [] => None,
+        [flag, path] if flag == "--brief" => Some(PathBuf::from(path)),
+        _ => bail!(USAGE),
+    };
+    let vision_path = PathBuf::from(&rest[1]);
+    let graph_path = PathBuf::from(&rest[3]);
+    let outcome_path = PathBuf::from(&rest[7]);
+    if !vision_path.is_absolute()
+        || !graph_path.is_absolute()
+        || !outcome_path.is_absolute()
+        || brief_path.as_ref().is_some_and(|path| !path.is_absolute())
+    {
+        bail!("package agent vision, graph, outcome, and brief paths must be absolute");
     }
     Ok(Command::PackageAgent(PackageAgentCommand {
         vision_path,
         graph_path,
-        package_id: package.clone(),
+        package_id: rest[5].clone(),
         outcome_path,
+        brief_path,
         worker_arguments: worker.to_vec(),
     }))
 }
@@ -1348,22 +1354,18 @@ fn run_package_agent(command: PackageAgentCommand) -> Result<()> {
                 .context("failed to parse package worktree environment")
         })
         .collect::<Result<Vec<_>>>()?;
-    let vision = fs::read_to_string(&command.vision_path)
-        .with_context(|| format!("failed to read vision {}", command.vision_path.display()))?;
-    let goal = VisionGoal::parse_document(&vision).context("failed to parse vision goal")?;
-    let criteria =
-        parse_acceptance_criteria(&vision).context("failed to parse vision acceptance criteria")?;
-    let mut brief =
+    let brief = if let Some(path) = &command.brief_path {
+        fs::read_to_string(path)
+            .with_context(|| format!("failed to read composed package brief {}", path.display()))?
+    } else {
+        let vision = fs::read_to_string(&command.vision_path)
+            .with_context(|| format!("failed to read vision {}", command.vision_path.display()))?;
+        let goal = VisionGoal::parse_document(&vision).context("failed to parse vision goal")?;
+        let criteria = parse_acceptance_criteria(&vision)
+            .context("failed to parse vision acceptance criteria")?;
         compose_package_worker_brief(&goal, &criteria, &graph, &command.package_id, &worktrees)
-            .context("failed to compose package worker brief")?;
-    if let Some(raw_supplement) = std::env::var_os("PCE_RECOVERY_SUPPLEMENT") {
-        let supplement = raw_supplement
-            .into_string()
-            .map_err(|_| anyhow!("PCE_RECOVERY_SUPPLEMENT is not UTF-8"))?;
-        if !supplement.is_empty() {
-            brief.push_str(&supplement);
-        }
-    }
+            .context("failed to compose package worker brief")?
+    };
     let (program, arguments) = command
         .worker_arguments
         .split_first()
@@ -1551,6 +1553,7 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
         log_path,
         vision_dir,
         graph_path,
+        require_graph_at_vision_root: true,
         package_id: package_id.clone(),
         required_artifact_path,
         repositories,
@@ -1772,21 +1775,25 @@ fn parse_driver_replay(rest: &[String]) -> Result<Command> {
 }
 
 fn parse_driver_run(rest: &[String]) -> Result<Command> {
-    let delimiter = rest
-        .iter()
-        .position(|value| value == "--")
-        .context("driver run requires -- before worker arguments")?;
-    let (options, worker) = rest.split_at(delimiter);
-    let worker_arguments = worker[1..].to_vec();
-    if worker_arguments.is_empty() {
-        bail!("driver run worker command is empty");
-    }
+    let delimiter = rest.iter().position(|value| value == "--");
+    let (options, worker_override) = match delimiter {
+        Some(index) if index > 0 && rest[index - 1] == "--worker-override" => {
+            let worker = rest[index + 1..].to_vec();
+            if worker.is_empty() {
+                bail!("driver run worker override is empty");
+            }
+            (&rest[..index - 1], Some(worker))
+        }
+        Some(_) => bail!("driver worker override requires --worker-override -- <ARGV>"),
+        None => (rest, None),
+    };
     if options.len() < 6 || options[0] != "--graph" || options[2] != "--journal" {
         bail!(USAGE);
     }
     let mut override_risk_ordering = false;
     let mut retry_limit = 1_u32;
     let mut local_patch_limit = 1_u32;
+    let mut wait_timeout = None;
     let mut mapping_args = Vec::new();
     let mut index = 4;
     while index < options.len() {
@@ -1804,6 +1811,14 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
             } else {
                 local_patch_limit = value;
             }
+            index += 2;
+        } else if options[index] == "--wait-timeout-ms" {
+            let value = options
+                .get(index + 1)
+                .context("wait timeout requires a value")?
+                .parse::<u64>()
+                .context("wait timeout must be an unsigned integer")?;
+            wait_timeout = Some(Duration::from_millis(value));
             index += 2;
         } else {
             if index + 1 >= options.len() {
@@ -1824,7 +1839,8 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
             RetryLimit::new(retry_limit),
             LocalPatchLimit::new(local_patch_limit),
         ),
-        worker_arguments,
+        worker_override,
+        wait_timeout,
     }))
 }
 
@@ -1880,6 +1896,146 @@ fn park_if_recovery_exhausted(command: &DriverRunCommand, package_id: &str) -> R
     )
 }
 
+fn run_composed_driver_gate(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    package_id: &str,
+    issuance: u64,
+) -> Result<()> {
+    let implementation_worktrees = driver_package_worktrees(command, graph, package_id)?;
+    let first = implementation_worktrees
+        .first()
+        .context("package gate has no implementation worktree")?;
+    let artifact_ref = git_oid(first.path(), "HEAD")?;
+    let vision_dir = driver_vision_directory(command)?;
+    let gate_outcome = vision_dir
+        .join(".pce/package-gate-outcomes")
+        .join(package_id)
+        .join(format!("{issuance}.json"));
+    fs::create_dir_all(
+        gate_outcome
+            .parent()
+            .context("gate outcome has no parent")?,
+    )?;
+
+    let mut dispatch_graph: Value = serde_json::from_slice(
+        &fs::read(&command.graph_path).context("failed to read gate dispatch graph")?,
+    )
+    .context("failed to parse gate dispatch graph JSON")?;
+    dispatch_graph["vision"] = Value::String(format!("{}-gate-{issuance}", graph.vision()));
+    dispatch_graph["authored_at_ref"] = Value::String("HEAD".to_owned());
+    let dispatch_graph_path = vision_dir
+        .join(".pce/gate-dispatch-graphs")
+        .join(package_id)
+        .join(format!("{issuance}.json"));
+    fs::create_dir_all(
+        dispatch_graph_path
+            .parent()
+            .context("gate dispatch graph has no parent")?,
+    )?;
+    fs::write(&dispatch_graph_path, serde_json::to_vec(&dispatch_graph)?)?;
+
+    let executable = std::env::current_exe().context("failed to resolve gate driver executable")?;
+    let worker_arguments = vec![
+        executable.display().to_string(),
+        "package".to_owned(),
+        "gate-agent".to_owned(),
+        "--vision".to_owned(),
+        vision_dir.join("vision.md").display().to_string(),
+        "--graph".to_owned(),
+        absolute_path(&command.graph_path)?.display().to_string(),
+        "--package".to_owned(),
+        package_id.to_owned(),
+        "--artifact-ref".to_owned(),
+        artifact_ref,
+        "--outcome".to_owned(),
+        gate_outcome.display().to_string(),
+        "--".to_owned(),
+        "prime-agent".to_owned(),
+        "-p".to_owned(),
+    ];
+    let response = issue_package_dispatch(PackageDispatchCommand {
+        log_path: driver_dispatch_log(command)?,
+        vision_dir: vision_dir.clone(),
+        graph_path: dispatch_graph_path,
+        require_graph_at_vision_root: false,
+        package_id: package_id.to_owned(),
+        required_artifact_path: AbsoluteRequiredArtifactPath::parse(gate_outcome.clone())?,
+        repositories: command
+            .repositories
+            .iter()
+            .filter(|(name, _)| {
+                implementation_worktrees
+                    .iter()
+                    .any(|worktree| worktree.repository() == name)
+            })
+            .cloned()
+            .collect(),
+        environment: route_environment()?,
+        worker_arguments,
+    })?;
+    let result_path = PathBuf::from(
+        response["result_path"]
+            .as_str()
+            .context("gate dispatch omitted result path")?,
+    );
+    wait_for_driver_results(std::slice::from_ref(&result_path), None)?;
+    let _completions = collect_package_completions(&driver_dispatch_log(command)?, &vision_dir)?;
+    let result = read_package_result(&result_path)?
+        .context("gate dispatch notification had no durable result")?;
+    let healthy = matches!(result.exit_status(), DispatchExitStatus::Exited { code } if code.get() == 0)
+        && result.required_artifact_presence() == RequiredArtifactPresence::Present;
+    if !healthy {
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::PackageFailed {
+                package: package_id.to_owned(),
+                reason: format!(
+                    "gate dispatch stopped without an outcome: {:?}",
+                    result.exit_status()
+                ),
+            },
+        )?;
+        return Ok(());
+    }
+    let outcome = parse_package_gate_outcome(&fs::read(&gate_outcome)?)
+        .context("failed to parse composed gate outcome")?;
+    let gate_name = format!("package-gate-{issuance}");
+    for finding in 0..outcome.findings().len() {
+        run_driver_replay(DriverReplayCommand {
+            graph_path: command.graph_path.clone(),
+            journal_path: command.journal_path.clone(),
+            package_id: package_id.to_owned(),
+            gate: gate_name.clone(),
+            finding,
+            outcome_path: gate_outcome.clone(),
+            repositories: implementation_worktrees
+                .iter()
+                .map(|worktree| {
+                    (
+                        worktree.repository().to_owned(),
+                        worktree.path().to_path_buf(),
+                    )
+                })
+                .collect(),
+            preparations: command.preparations.clone(),
+        })?;
+    }
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::GateFinished {
+            package: package_id.to_owned(),
+            gate: gate_name,
+        },
+    )?;
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::PackageCompleted {
+            package: package_id.to_owned(),
+        },
+    )
+}
+
 fn observe_driver_worker_outcome(
     graph: &WorkPackageGraph,
     command: &DriverRunCommand,
@@ -1904,11 +2060,22 @@ fn observe_driver_worker_outcome(
                     issuance,
                 },
             )?;
+            let mut repositories = command.repositories.clone();
+            if command.worker_override.is_none() {
+                for worktree in driver_package_worktrees(command, graph, &package_id)? {
+                    if let Some((_, path)) = repositories
+                        .iter_mut()
+                        .find(|(name, _)| name == worktree.repository())
+                    {
+                        *path = worktree.path().to_path_buf();
+                    }
+                }
+            }
             let _ = execute_driver_criteria(DriverCriteriaCommand {
                 graph_path: command.graph_path.clone(),
                 journal_path: command.journal_path.clone(),
                 package_id: package_id.clone(),
-                repositories: command.repositories.clone(),
+                repositories,
                 preparations: command.preparations.clone(),
             })?;
             park_if_recovery_exhausted(command, &package_id)?;
@@ -1918,19 +2085,23 @@ fn observe_driver_worker_outcome(
                 name == &package_id
                     && matches!(package_state, pce_core::DriverPackageState::Judging { .. })
             }) {
-                append_driver_event(
-                    &command.journal_path,
-                    &DriverEvent::GateFinished {
-                        package: package_id.clone(),
-                        gate: "driver-no-findings".to_owned(),
-                    },
-                )?;
-                append_driver_event(
-                    &command.journal_path,
-                    &DriverEvent::PackageCompleted {
-                        package: package_id,
-                    },
-                )?;
+                if command.worker_override.is_some() {
+                    append_driver_event(
+                        &command.journal_path,
+                        &DriverEvent::GateFinished {
+                            package: package_id.clone(),
+                            gate: "worker-override-no-findings".to_owned(),
+                        },
+                    )?;
+                    append_driver_event(
+                        &command.journal_path,
+                        &DriverEvent::PackageCompleted {
+                            package: package_id,
+                        },
+                    )?;
+                } else {
+                    run_composed_driver_gate(graph, command, &package_id, issuance)?;
+                }
             }
         }
         pce_core::PackageOutcome::Failed { blocked_by } => {
@@ -1966,6 +2137,223 @@ fn observe_driver_worker_outcome(
     Ok(true)
 }
 
+fn driver_vision_directory(command: &DriverRunCommand) -> Result<PathBuf> {
+    absolute_path(
+        command
+            .graph_path
+            .parent()
+            .context("driver graph has no parent directory")?,
+    )
+}
+
+fn driver_dispatch_log(command: &DriverRunCommand) -> Result<PathBuf> {
+    Ok(driver_vision_directory(command)?.join(".pce/package-dispatch.jsonl"))
+}
+
+fn route_environment() -> Result<BTreeMap<String, String>> {
+    ["PATH", "HOME", "USER"]
+        .into_iter()
+        .map(|name| {
+            std::env::var(name)
+                .with_context(|| format!("driver route environment omitted {name}"))
+                .map(|value| (name.to_owned(), value))
+        })
+        .collect()
+}
+
+fn driver_package_worktrees(
+    command: &DriverRunCommand,
+    graph: &WorkPackageGraph,
+    package_id: &str,
+) -> Result<Vec<RepositoryWorktree>> {
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == package_id)
+        .with_context(|| format!("package {package_id} is absent from graph"))?;
+    let vision = DispatchVisionSource::parse(graph.vision().to_owned())?;
+    let inputs = command
+        .repositories
+        .iter()
+        .filter(|(name, _)| package.repositories().contains(name))
+        .map(|(name, root)| {
+            RepositoryDispatchInput::parse(
+                name.clone(),
+                root.clone(),
+                graph.authored_at_ref().to_owned(),
+            )
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let plan = compose_herdr_work_package_dispatch(
+        &vision,
+        package,
+        &inputs,
+        &AbsoluteWorktreeRoot::parse(PathBuf::from("/tmp/pce-work-package-worktrees"))?,
+        &AbsoluteDispatchTemporaryDirectory::parse(package_temporary_directory(
+            &vision,
+            package.id(),
+        ))?,
+        WorkerEnvironment::parse(route_environment()?)?,
+        WorkerArgumentVector::parse(vec!["prime-agent".to_owned(), "-p".to_owned()])?,
+    )?;
+    plan.worktrees()
+        .iter()
+        .map(|worktree| {
+            RepositoryWorktree::parse(worktree.repository(), worktree.path().to_path_buf())
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to derive driver package worktrees")
+}
+
+fn compose_driver_worker_brief(
+    command: &DriverRunCommand,
+    graph: &WorkPackageGraph,
+    package_id: &str,
+    local_patch_evidence: Option<&[pce_core::RecoveryCriterionEvidence]>,
+) -> Result<String> {
+    let vision_path = driver_vision_directory(command)?.join("vision.md");
+    let vision = fs::read_to_string(&vision_path)
+        .with_context(|| format!("failed to read vision {}", vision_path.display()))?;
+    let goal = VisionGoal::parse_document(&vision).context("failed to parse vision goal")?;
+    let criteria =
+        parse_acceptance_criteria(&vision).context("failed to parse acceptance criteria")?;
+    let worktrees = driver_package_worktrees(command, graph, package_id)?;
+    let brief = compose_package_worker_brief(&goal, &criteria, graph, package_id, &worktrees)
+        .context("failed to compose driver-owned worker brief")?;
+    Ok(local_patch_evidence.map_or(brief.clone(), |evidence| {
+        compose_local_patch_brief(&brief, evidence)
+    }))
+}
+
+fn issue_driver_package_dispatch(
+    command: &DriverRunCommand,
+    graph: &WorkPackageGraph,
+    package_id: &str,
+    issuance: u64,
+    outcome_path: &Path,
+    brief: &str,
+) -> Result<PathBuf> {
+    let executable = std::env::current_exe().context("failed to resolve driver executable")?;
+    let vision_dir = driver_vision_directory(command)?;
+    let vision_path = vision_dir.join("vision.md");
+    let graph_path = absolute_path(&command.graph_path)?;
+    let outcome_path = absolute_path(outcome_path)?;
+    let brief_path = vision_dir
+        .join(".pce/package-briefs")
+        .join(package_id)
+        .join(format!("{issuance}.md"));
+    fs::create_dir_all(
+        brief_path
+            .parent()
+            .context("package brief path has no parent")?,
+    )?;
+    fs::write(&brief_path, brief).with_context(|| {
+        format!(
+            "failed to write composed package brief {}",
+            brief_path.display()
+        )
+    })?;
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == package_id)
+        .with_context(|| format!("package {package_id} is absent from graph"))?;
+    let repositories = command
+        .repositories
+        .iter()
+        .filter(|(name, _)| package.repositories().contains(name))
+        .cloned()
+        .collect();
+    let worker_arguments = vec![
+        executable.display().to_string(),
+        "package".to_owned(),
+        "agent".to_owned(),
+        "--vision".to_owned(),
+        vision_path.display().to_string(),
+        "--graph".to_owned(),
+        graph_path.display().to_string(),
+        "--package".to_owned(),
+        package_id.to_owned(),
+        "--outcome".to_owned(),
+        outcome_path.display().to_string(),
+        "--brief".to_owned(),
+        brief_path.display().to_string(),
+        "--".to_owned(),
+        "prime-agent".to_owned(),
+        "-p".to_owned(),
+    ];
+    let response = issue_package_dispatch(PackageDispatchCommand {
+        log_path: driver_dispatch_log(command)?,
+        vision_dir,
+        graph_path,
+        require_graph_at_vision_root: true,
+        package_id: package_id.to_owned(),
+        required_artifact_path: AbsoluteRequiredArtifactPath::parse(outcome_path)?,
+        repositories,
+        environment: route_environment()?,
+        worker_arguments,
+    })?;
+    let result_path = response["result_path"]
+        .as_str()
+        .context("composed package dispatch omitted result_path")?;
+    Ok(PathBuf::from(result_path))
+}
+
+fn wait_for_driver_results(paths: &[PathBuf], timeout: Option<Duration>) -> Result<bool> {
+    if paths.iter().all(|path| path.is_file()) {
+        return Ok(true);
+    }
+    let roots = paths
+        .iter()
+        .map(|path| path.parent().context("package result path has no parent"))
+        .collect::<Result<Vec<_>>>()?;
+    for root in &roots {
+        fs::create_dir_all(root).with_context(|| {
+            format!("failed to create result watch directory {}", root.display())
+        })?;
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event| {
+        let _ignored = sender.send(event);
+    })
+    .context("failed to create package result watcher")?;
+    for root in &roots {
+        watcher
+            .watch(root, RecursiveMode::NonRecursive)
+            .with_context(|| format!("failed to watch {}", root.display()))?;
+    }
+    if paths.iter().all(|path| path.is_file()) {
+        return Ok(true);
+    }
+    let started = Instant::now();
+    loop {
+        match timeout {
+            Some(limit) => {
+                let remaining = limit.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Ok(false);
+                }
+                match receiver.recv_timeout(remaining) {
+                    Ok(event) => event.context("package result watcher failed")?,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(false),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        bail!("package result watcher disconnected")
+                    }
+                };
+            }
+            None => {
+                receiver
+                    .recv()
+                    .context("package result watcher disconnected")?
+                    .context("package result watcher failed")?;
+            }
+        }
+        if paths.iter().all(|path| path.is_file()) {
+            return Ok(true);
+        }
+    }
+}
+
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
     let initial_events = read_driver_journal(&command.journal_path)?;
     ensure_recovery_configuration(&command, &initial_events)?;
@@ -1998,6 +2386,101 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
         }
         let ready = snapshot.ready().to_vec();
         if ready.is_empty() {
+            if command.worker_override.is_none() {
+                let vision_dir = driver_vision_directory(&command)?;
+                let dispatch_log = driver_dispatch_log(&command)?;
+                let records = read_event_log(&dispatch_log)?
+                    .into_iter()
+                    .map(|line| line.record)
+                    .collect::<Vec<_>>();
+                let ledger = fold_dispatch_ledger(&records)
+                    .context("failed to derive driver dispatch ledger")?;
+                let mut running_results = Vec::new();
+                for (package, state) in snapshot.packages() {
+                    if let pce_core::DriverPackageState::Running { issuance } = state
+                        && let Some(entry) = ledger
+                            .unaccounted()
+                            .entries()
+                            .iter()
+                            .rev()
+                            .find(|entry| entry.node().as_str() == package)
+                    {
+                        running_results.push((
+                            package.clone(),
+                            *issuance,
+                            driver_outcome_path(&command.journal_path, package, *issuance)?,
+                            package_result_path(&vision_dir, entry.node(), entry.sequence())?,
+                        ));
+                    }
+                }
+                if !running_results.is_empty() {
+                    let paths = running_results
+                        .iter()
+                        .map(|(_, _, _, path)| path.clone())
+                        .collect::<Vec<_>>();
+                    if !wait_for_driver_results(&paths, command.wait_timeout)? {
+                        let waited_ms =
+                            u64::try_from(command.wait_timeout.unwrap_or_default().as_millis())
+                                .context("driver wait timeout exceeds u64")?;
+                        for (package, issuance, _, path) in &running_results {
+                            if !path.is_file() {
+                                append_driver_event(
+                                    &command.journal_path,
+                                    &DriverEvent::DriverStoppedWaiting {
+                                        package: package.clone(),
+                                        issuance: *issuance,
+                                        waited_ms,
+                                    },
+                                )?;
+                            }
+                        }
+                        return run_driver_status(DriverStatusCommand {
+                            graph_path: command.graph_path,
+                            journal_path: command.journal_path,
+                            override_risk_ordering: command.override_risk_ordering,
+                        });
+                    }
+                    let _completions = collect_package_completions(&dispatch_log, &vision_dir)?;
+                    for (package, issuance, outcome, result_path) in running_results {
+                        let result = read_package_result(&result_path)?
+                            .context("durable dispatch result vanished")?;
+                        let healthy = matches!(result.exit_status(), DispatchExitStatus::Exited { code } if code.get() == 0)
+                            && result.required_artifact_presence()
+                                == RequiredArtifactPresence::Present;
+                        if healthy {
+                            let _observed = observe_driver_worker_outcome(
+                                &graph, &command, package, issuance, &outcome,
+                            )?;
+                        } else {
+                            append_driver_event(
+                                &command.journal_path,
+                                &DriverEvent::WorkerEnvironmentFailed {
+                                    package,
+                                    issuance,
+                                    reason: format!(
+                                        "package dispatch stopped without a successful required artifact: {:?}",
+                                        result.exit_status()
+                                    ),
+                                },
+                            )?;
+                        }
+                    }
+                    continue;
+                }
+                if let Some((package, pce_core::DriverPackageState::Judging { issuance })) =
+                    snapshot.packages().iter().find(|(_, state)| {
+                        matches!(state, pce_core::DriverPackageState::Judging { .. })
+                    })
+                {
+                    run_composed_driver_gate(&graph, &command, package, *issuance)?;
+                    continue;
+                }
+                return run_driver_status(DriverStatusCommand {
+                    graph_path: command.graph_path,
+                    journal_path: command.journal_path,
+                    override_risk_ordering: command.override_risk_ordering,
+                });
+            }
             let mut observed = false;
             for (package, state) in snapshot.packages() {
                 if let pce_core::DriverPackageState::Running { issuance } = state {
@@ -2013,7 +2496,11 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                 }
             }
             if !observed {
-                std::thread::sleep(Duration::from_millis(25));
+                return run_driver_status(DriverStatusCommand {
+                    graph_path: command.graph_path,
+                    journal_path: command.journal_path,
+                    override_risk_ordering: command.override_risk_ordering,
+                });
             }
             continue;
         }
@@ -2026,8 +2513,9 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        let mut children = Vec::new();
-        // The full ready antichain is spawned before waiting for any member, preserving graph concurrency.
+        let mut override_children = Vec::new();
+        let mut composed_dispatches = Vec::new();
+        // The full ready antichain is issued before waiting for any member.
         for (offset, package_id) in ready.iter().enumerate() {
             let issuance = next_issuance
                 .saturating_add(u64::try_from(offset).context("ready set exceeds u64")?);
@@ -2035,20 +2523,14 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
             fs::create_dir_all(outcome.parent().context("outcome path has no parent")?)?;
             let charged = charged_failure_count(&events, package_id);
             let base_brief = recovery_base_brief(&graph, package_id)?;
-            let (rung_name, worker_brief, recovery_supplement) = if charged == 0 {
-                ("initial", base_brief, String::new())
+            let (rung_name, worker_brief) = if charged == 0 {
+                ("initial", base_brief)
             } else {
                 let budget = recovery_budget(command.recovery_limits, charged);
                 let evidence = latest_criterion_failure_evidence(&events, package_id);
-                let (brief, supplement) = match budget.next_rung {
-                    RecoveryRung::Retry => (base_brief, String::new()),
-                    RecoveryRung::LocalPatch => {
-                        let supplement = compose_local_patch_brief("", &evidence);
-                        (
-                            compose_local_patch_brief(&base_brief, &evidence),
-                            supplement,
-                        )
-                    }
+                let brief = match budget.next_rung {
+                    RecoveryRung::Retry => base_brief,
+                    RecoveryRung::LocalPatch => compose_local_patch_brief(&base_brief, &evidence),
                     RecoveryRung::Replan => {
                         park_if_recovery_exhausted(&command, package_id)?;
                         continue;
@@ -2071,7 +2553,6 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                         RecoveryRung::Replan => unreachable!("handled above"),
                     },
                     brief,
-                    supplement,
                 )
             };
             append_driver_event(
@@ -2081,22 +2562,36 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                     issuance,
                 },
             )?;
-            let (program, arguments) = command
-                .worker_arguments
-                .split_first()
-                .context("driver worker command is empty")?;
-            let child = std::process::Command::new(program)
-                .args(arguments)
-                .env("PCE_PACKAGE", package_id)
-                .env("PCE_PACKAGE_OUTCOME", &outcome)
-                .env("PCE_RECOVERY_RUNG", rung_name)
-                .env("PCE_PACKAGE_BRIEF", worker_brief)
-                .env("PCE_RECOVERY_SUPPLEMENT", recovery_supplement)
-                .spawn()
-                .with_context(|| format!("failed to spawn worker for {package_id}"))?;
-            children.push((package_id.clone(), issuance, outcome, child));
+            if let Some(worker_arguments) = &command.worker_override {
+                let (program, arguments) = worker_arguments
+                    .split_first()
+                    .context("driver worker override is empty")?;
+                let child = std::process::Command::new(program)
+                    .args(arguments)
+                    .env("PCE_PACKAGE", package_id)
+                    .env("PCE_PACKAGE_OUTCOME", &outcome)
+                    .env("PCE_RECOVERY_RUNG", rung_name)
+                    .env("PCE_PACKAGE_BRIEF", worker_brief)
+                    .spawn()
+                    .with_context(|| format!("failed to spawn worker override for {package_id}"))?;
+                override_children.push((package_id.clone(), issuance, outcome, child));
+            } else {
+                let evidence = (rung_name == "local-patch")
+                    .then(|| latest_criterion_failure_evidence(&events, package_id));
+                let composed_brief =
+                    compose_driver_worker_brief(&command, &graph, package_id, evidence.as_deref())?;
+                let result = issue_driver_package_dispatch(
+                    &command,
+                    &graph,
+                    package_id,
+                    issuance,
+                    &outcome,
+                    &composed_brief,
+                )?;
+                composed_dispatches.push((package_id.clone(), issuance, outcome, result));
+            }
         }
-        for (package_id, issuance, outcome_path, mut child) in children {
+        for (package_id, issuance, outcome_path, mut child) in override_children {
             let status = child
                 .wait()
                 .with_context(|| format!("failed to wait for worker {package_id}"))?;
@@ -2124,6 +2619,72 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                     "successful worker wrote no outcome at {}",
                     outcome_path.display()
                 );
+            }
+        }
+        if !composed_dispatches.is_empty() {
+            let paths = composed_dispatches
+                .iter()
+                .map(|(_, _, _, result)| result.clone())
+                .collect::<Vec<_>>();
+            if !wait_for_driver_results(&paths, command.wait_timeout)? {
+                let waited_ms = u64::try_from(command.wait_timeout.unwrap_or_default().as_millis())
+                    .context("driver wait timeout exceeds u64")?;
+                for (package, issuance, _, result) in &composed_dispatches {
+                    if !result.is_file() {
+                        append_driver_event(
+                            &command.journal_path,
+                            &DriverEvent::DriverStoppedWaiting {
+                                package: package.clone(),
+                                issuance: *issuance,
+                                waited_ms,
+                            },
+                        )?;
+                    }
+                }
+                return run_driver_status(DriverStatusCommand {
+                    graph_path: command.graph_path,
+                    journal_path: command.journal_path,
+                    override_risk_ordering: command.override_risk_ordering,
+                });
+            }
+            let vision_dir = driver_vision_directory(&command)?;
+            let dispatch_log = driver_dispatch_log(&command)?;
+            let _completions = collect_package_completions(&dispatch_log, &vision_dir)?;
+            for (package_id, issuance, outcome_path, result_path) in composed_dispatches {
+                let result = read_package_result(&result_path)?.with_context(|| {
+                    format!(
+                        "notified package result vanished: {}",
+                        result_path.display()
+                    )
+                })?;
+                let healthy = matches!(result.exit_status(), DispatchExitStatus::Exited { code } if code.get() == 0)
+                    && result.required_artifact_presence() == RequiredArtifactPresence::Present;
+                if !healthy {
+                    append_driver_event(
+                        &command.journal_path,
+                        &DriverEvent::WorkerEnvironmentFailed {
+                            package: package_id,
+                            issuance,
+                            reason: format!(
+                                "package dispatch stopped without a successful required artifact: {:?}",
+                                result.exit_status()
+                            ),
+                        },
+                    )?;
+                    continue;
+                }
+                if !observe_driver_worker_outcome(
+                    &graph,
+                    &command,
+                    package_id,
+                    issuance,
+                    &outcome_path,
+                )? {
+                    bail!(
+                        "package dispatch result exists without outcome {}",
+                        outcome_path.display()
+                    );
+                }
             }
         }
     }
@@ -2691,7 +3252,7 @@ fn read_package_result(path: &Path) -> Result<Option<PackageWorkerResult>> {
     }
 }
 
-fn run_package_completions(log_path: &Path, vision_dir: &Path) -> Result<()> {
+fn collect_package_completions(log_path: &Path, vision_dir: &Path) -> Result<Value> {
     let records = read_event_log(log_path)?
         .into_iter()
         .map(|line| line.record)
@@ -2754,7 +3315,12 @@ fn run_package_completions(log_path: &Path, vision_dir: &Path) -> Result<()> {
             }))
         })
         .collect::<Result<Vec<_>>>()?;
-    write_json_stdout(&json!({ "appended": appended, "packages": packages }))
+    Ok(json!({ "appended": appended, "packages": packages }))
+}
+
+fn run_package_completions(log_path: &Path, vision_dir: &Path) -> Result<()> {
+    let completions = collect_package_completions(log_path, vision_dir)?;
+    write_json_stdout(&completions)
 }
 
 fn execute_herdr(invocation: &HerdrInvocation) -> Result<Value> {
@@ -2764,8 +3330,9 @@ fn execute_herdr(invocation: &HerdrInvocation) -> Result<Value> {
         .with_context(|| format!("failed to execute {}", invocation.executable()))?;
     if !output.status.success() {
         bail!(
-            "herdr command failed with {}: {}",
+            "herdr command failed with {} for {:?}: {}",
             output.status,
+            invocation.argv(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -2801,7 +3368,7 @@ fn package_temporary_directory(vision: &DispatchVisionSource, package: &WorkPack
     PathBuf::from("/tmp/pce-tmp").join(suffix)
 }
 
-fn run_package_dispatch(command: PackageDispatchCommand) -> Result<()> {
+fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
         bail!("package dispatch requires HERDR_ENV=1 inside a Herdr-managed pane");
     }
@@ -2812,13 +3379,14 @@ fn run_package_dispatch(command: PackageDispatchCommand) -> Result<()> {
         )
     })?;
     let graph = parse_work_package_graph(&graph_bytes).context("failed to parse package graph")?;
-    if absolute_path(&command.vision_dir)?
-        != absolute_path(
-            command
-                .graph_path
-                .parent()
-                .context("package graph has no parent")?,
-        )?
+    if command.require_graph_at_vision_root
+        && absolute_path(&command.vision_dir)?
+            != absolute_path(
+                command
+                    .graph_path
+                    .parent()
+                    .context("package graph has no parent")?,
+            )?
     {
         bail!("package graph must be at the supplied vision directory root");
     }
@@ -2913,13 +3481,18 @@ fn run_package_dispatch(command: PackageDispatchCommand) -> Result<()> {
     }
     let location = first_location.context("package dispatch composed no worktree")?;
     let start_response = execute_herdr(&plan.agent_start(&location))?;
-    write_json_stdout(&json!({
+    Ok(json!({
         "agent_name": plan.agent_name().as_str(),
         "issuance_sequence": issuance.sequence().get(),
         "result_path": result_path.as_str(),
         "worktrees": created,
         "agent_start": start_response,
     }))
+}
+
+fn run_package_dispatch(command: PackageDispatchCommand) -> Result<()> {
+    let dispatched = issue_package_dispatch(command)?;
+    write_json_stdout(&dispatched)
 }
 
 fn parse_dispatch_reconcile(rest: &[String]) -> Result<Command> {

@@ -100,9 +100,6 @@ Create one known file.
         .args(["--package", "T1", "--outcome"]).arg(&outcome)
         .args(["--", "/bin/sh", "-c", "cat > \"$PCE_PACKAGE_OUTCOME.brief\"; printf %s \"${TMPDIR-unset}\" > \"$PCE_PACKAGE_OUTCOME.tmpdir\"; printf '{\"outcome\":\"done\"}' > \"$PCE_PACKAGE_OUTCOME\""])
         .env("PCE_WORKTREE_0", directory.path().join("repo-worktree"))
-        .env("PCE_RECOVERY_SUPPLEMENT", "
-RECORDED FAILURE: exact-output-23
-")
         .env("TMPDIR", "/tmp/operator-controlled-and-intentionally-long")
         .output().expect("package agent");
     assert!(
@@ -121,7 +118,6 @@ RECORDED FAILURE: exact-output-23
     );
     let piped = fs::read_to_string(format!("{}.brief", outcome.display())).expect("piped brief");
     assert!(piped.contains("Create one known file."));
-    assert!(piped.contains("RECORDED FAILURE: exact-output-23"));
     assert!(piped.contains(&format!(
         "repo: {}",
         directory.path().join("repo-worktree").display()

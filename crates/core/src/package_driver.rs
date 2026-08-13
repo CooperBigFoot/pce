@@ -191,6 +191,12 @@ pub enum DriverEvent {
     },
     /// A worker was issued. Absence of a later outcome means it is still running.
     WorkerDispatched { package: String, issuance: u64 },
+    /// A caller-supplied observation bound elapsed; the worker remains running and unaccounted.
+    DriverStoppedWaiting {
+        package: String,
+        issuance: u64,
+        waited_ms: u64,
+    },
     /// A worker claimed implementation completion and may now be judged.
     WorkerDone { package: String, issuance: u64 },
     /// A retryable worker failure stopped this attempt.
@@ -370,6 +376,7 @@ pub fn derive_driver_snapshot(
             | DriverEvent::WorkerEnvironmentFailed { package, .. }
             | DriverEvent::RecoveryParked { package, .. }
             | DriverEvent::WorkerDispatched { package, .. }
+            | DriverEvent::DriverStoppedWaiting { package, .. }
             | DriverEvent::WorkerDone { package, .. }
             | DriverEvent::WorkerFailed { package, .. }
             | DriverEvent::PackageParked { package, .. }
@@ -436,6 +443,15 @@ pub fn derive_driver_snapshot(
                     issuance: *issuance,
                 };
             }
+            DriverEvent::DriverStoppedWaiting { issuance, .. } => match state {
+                DriverPackageState::Running { issuance: running } if running == issuance => {}
+                _ => {
+                    return Err(PackageDriverError::UnmatchedOutcome {
+                        package: package.clone(),
+                        issuance: *issuance,
+                    });
+                }
+            },
             DriverEvent::WorkerDone { issuance, .. } => match state {
                 DriverPackageState::Running { issuance: running } if running == issuance => {
                     *state = DriverPackageState::Judging {
