@@ -1,0 +1,1 @@
+{"findings":[{"description":"repair marker must survive","repair":"retain the repaired marker","proposed_criterion_command":"test \"$(cat value)\" = repair","repository_refs":[{"repository":"repo","witness_ref":"59d7a4dcfcd6a0feb2f473d4ac500adc30af04ea","repair_ref":"fcf1c70d4ecb2649113fe68262c9cf988978634a"}]}]}
