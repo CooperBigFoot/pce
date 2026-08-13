@@ -16,6 +16,7 @@ pub mod gate_replay;
 pub mod herdr_dispatch;
 pub mod landing_readiness;
 pub mod package_completion;
+pub mod package_gate;
 pub mod package_worker;
 pub mod paired_execution_proof;
 pub mod run_state;
@@ -46,6 +47,10 @@ pub use package_completion::{
     AbsolutePackageResultPath, PackageCompletionError, PackageWorkerResult, PackageWorkerStoppedAt,
     compose_package_worker_argv, derive_package_result_path, parse_package_worker_result,
     serialize_package_worker_result,
+};
+pub use package_gate::{
+    BuiltArtifactRef, PackageGateError, PackageGateFinding, PackageGateOutcome,
+    compose_package_gate_brief, parse_package_gate_outcome,
 };
 pub use package_worker::{
     MisSpecificationFault, PackageOutcome, PackageWorkerError, RepositoryWorktree, VisionGoal,

@@ -71,6 +71,16 @@ impl RepositoryWorktree {
         }
         Ok(Self { repository, path })
     }
+
+    /// Return the graph repository name.
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+
+    /// Return the assigned absolute worktree path.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
 }
 
 /// A package-brief composition or outcome-parse failure.

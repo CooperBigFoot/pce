@@ -23,13 +23,13 @@ use pce_core::{
     AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
     AbsoluteWorktreeRoot, AcceptanceCriteria, ActReversibility, AppendError, AppendableCategory,
     AppendableFinding, ArgumentVector, ArtifactOutcome, ArtifactPath, ArtifactProduction,
-    AuthorityFailure, BranchState, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage,
-    ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage, CompletionCriterionStatus,
-    CompletionDecision, CreationDate, CriterionChangeDecision, CurrentArtifactObservation,
-    CurrentArtifactState, DispatchAdmission, DispatchCandidate, DispatchCompletionPayload,
-    DispatchDuration, DispatchEnvelope, DispatchExitStatus, DispatchIdentityObservation,
-    DispatchLedger, DispatchLedgerCompletion, DispatchLogging, DispatchPayload,
-    DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
+    AuthorityFailure, BranchState, BuiltArtifactRef, CanonicalNode as DispatchNode,
+    CheckoutFailure, CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage,
+    CompletionCriterionStatus, CompletionDecision, CreationDate, CriterionChangeDecision,
+    CurrentArtifactObservation, CurrentArtifactState, DispatchAdmission, DispatchCandidate,
+    DispatchCompletionPayload, DispatchDuration, DispatchEnvelope, DispatchExitStatus,
+    DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion, DispatchLogging,
+    DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
     DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass, DispatchRootCause,
     DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchabilityResult, EventBodyRef,
     EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
@@ -57,25 +57,25 @@ use pce_core::{
     SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
     StructuredArtifactObservation, TagName, TagState, TagTarget, TrackedRepositoryContract,
     UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionGoal, VisionName, VisionSlug,
-    WorkPackageClassification, WorkPackageGraph, WorkPackageMergeObservation,
+    WorkPackageClassification, WorkPackageGraph, WorkPackageId, WorkPackageMergeObservation,
     WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment, WorktreeIdentity,
     WorktreeState, WriteKind, admit_recurrent_finding, append_event, classify_claude_result,
     classify_codex_terminal_usage, classify_dispatch_admission, classify_dispatch_check_in,
     classify_replay_pair, classify_seatbelt_capability, compose_gate_arguments,
-    compose_herdr_work_package_dispatch, compose_package_worker_argv, compose_package_worker_brief,
-    compose_planning_role_frame, compute_dispatchability, create_vision,
-    derive_dispatch_outcome_state, derive_merge_status, derive_milestone_merge_status,
-    derive_package_result_path, derive_run_state, derive_run_state_with_dispatch_artifacts,
-    derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
-    dispatch_completion_payload, dispatch_invocation, dispatch_payload, evaluate_completion,
-    evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
-    fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot, meter_dispatches,
-    normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
-    parse_claude_result, parse_dispatch_process_identity, parse_event_line,
-    parse_gate_execution_evidence, parse_gate_stimulus, parse_package_worker_result,
-    parse_paired_falsification_verdict, parse_replay_output_path, parse_replay_schema_path,
-    parse_tracked_repository_contract, parse_work_package_graph, ready_work_packages,
-    rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
+    compose_herdr_work_package_dispatch, compose_package_gate_brief, compose_package_worker_argv,
+    compose_package_worker_brief, compose_planning_role_frame, compute_dispatchability,
+    create_vision, derive_dispatch_outcome_state, derive_merge_status,
+    derive_milestone_merge_status, derive_package_result_path, derive_run_state,
+    derive_run_state_with_dispatch_artifacts, derive_run_state_with_exceptional_merge_chains,
+    derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
+    dispatch_payload, evaluate_completion, evaluate_landing_readiness, event_record_matches,
+    fold_dispatch_ledger, fold_paired_execution_proof, fold_replay_runs, measure_contract_snapshot,
+    meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
+    parse_acceptance_criteria, parse_claude_result, parse_dispatch_process_identity,
+    parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
+    parse_package_worker_result, parse_paired_falsification_verdict, parse_replay_output_path,
+    parse_replay_schema_path, parse_tracked_repository_contract, parse_work_package_graph,
+    ready_work_packages, rebase_gate_stimulus, render_dispatch_projection, render_human_snapshot,
     seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_package_worker_result, serialize_tracked_repository_contract, validate_artifact,
     validate_verdict_references, validate_workflow_coverage, validated_dispatch_completion_payload,
@@ -97,6 +97,8 @@ const USAGE: &str = concat!(
     "       pce graph freeze --vision-dir <VISION_DIR>\n",
     "       pce package brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
+    "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
+    "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
     "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
@@ -216,6 +218,25 @@ struct PackageAgentCommand {
 }
 
 #[derive(Debug)]
+struct PackageGateBriefCommand {
+    vision_path: PathBuf,
+    graph_path: PathBuf,
+    package_id: String,
+    artifact_ref: BuiltArtifactRef,
+    worktrees: Vec<(String, PathBuf)>,
+}
+
+#[derive(Debug)]
+struct PackageGateAgentCommand {
+    vision_path: PathBuf,
+    graph_path: PathBuf,
+    package_id: String,
+    artifact_ref: BuiltArtifactRef,
+    outcome_path: PathBuf,
+    worker_arguments: Vec<String>,
+}
+
+#[derive(Debug)]
 struct PackageDispatchCommand {
     log_path: PathBuf,
     vision_dir: PathBuf,
@@ -239,6 +260,8 @@ enum Command {
     PairedExecutionProof(PairedExecutionProofCommand),
     PackageBrief(PackageBriefCommand),
     PackageAgent(PackageAgentCommand),
+    PackageGateBrief(PackageGateBriefCommand),
+    PackageGateAgent(PackageGateAgentCommand),
     PackageDispatch(PackageDispatchCommand),
     PackageWorker {
         result_path: PathBuf,
@@ -636,6 +659,8 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::PairedExecutionProof(command) => run_paired_execution_proof(command),
         Command::PackageBrief(command) => run_package_brief(command),
         Command::PackageAgent(command) => run_package_agent(command),
+        Command::PackageGateBrief(command) => run_package_gate_brief(command),
+        Command::PackageGateAgent(command) => run_package_gate_agent(command),
         Command::PackageDispatch(command) => run_package_dispatch(command),
         Command::PackageWorker {
             result_path,
@@ -781,6 +806,12 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         [verb, action, rest @ ..] if verb == "package" && action == "agent" => {
             parse_package_agent(rest)
         }
+        [verb, action, rest @ ..] if verb == "package" && action == "gate-brief" => {
+            parse_package_gate_brief(rest)
+        }
+        [verb, action, rest @ ..] if verb == "package" && action == "gate-agent" => {
+            parse_package_gate_agent(rest)
+        }
         [verb, action] if verb == "vision" && action == "check" => Ok(Command::VisionCheck),
         [verb, action, raw_name] if verb == "vision" && action == "new" => {
             let name = VisionName::parse(raw_name).context("failed to parse vision name")?;
@@ -817,6 +848,206 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         .with_context(|| USAGE),
         _ => bail!(USAGE),
     }
+}
+
+fn parse_package_gate_agent(rest: &[String]) -> Result<Command> {
+    let [
+        vision_flag,
+        vision,
+        graph_flag,
+        graph,
+        package_flag,
+        package,
+        artifact_flag,
+        artifact_ref,
+        outcome_flag,
+        outcome,
+        delimiter,
+        worker @ ..,
+    ] = rest
+    else {
+        bail!(USAGE);
+    };
+    if vision_flag != "--vision"
+        || graph_flag != "--graph"
+        || package_flag != "--package"
+        || artifact_flag != "--artifact-ref"
+        || outcome_flag != "--outcome"
+        || delimiter != "--"
+        || worker.is_empty()
+    {
+        bail!(USAGE);
+    }
+    let vision_path = PathBuf::from(vision);
+    let graph_path = PathBuf::from(graph);
+    let outcome_path = PathBuf::from(outcome);
+    if !vision_path.is_absolute() || !graph_path.is_absolute() || !outcome_path.is_absolute() {
+        bail!("package gate agent vision, graph, and outcome paths must be absolute");
+    }
+    Ok(Command::PackageGateAgent(PackageGateAgentCommand {
+        vision_path,
+        graph_path,
+        package_id: package.clone(),
+        artifact_ref: BuiltArtifactRef::parse(artifact_ref.clone())?,
+        outcome_path,
+        worker_arguments: worker.to_vec(),
+    }))
+}
+
+fn run_package_gate_agent(command: PackageGateAgentCommand) -> Result<()> {
+    let graph_bytes = fs::read(&command.graph_path).with_context(|| {
+        format!(
+            "failed to read package graph {}",
+            command.graph_path.display()
+        )
+    })?;
+    let graph = parse_work_package_graph(&graph_bytes).context("failed to parse package graph")?;
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == command.package_id)
+        .with_context(|| format!("package {} is absent from graph", command.package_id))?;
+    let vision_identity = DispatchVisionSource::parse(graph.vision().to_owned())?;
+    let temporary_directory = package_temporary_directory(&vision_identity, package.id());
+    fs::create_dir_all(&temporary_directory).context("failed to create binary-owned TMPDIR")?;
+    let worktrees = package
+        .repositories()
+        .iter()
+        .enumerate()
+        .map(|(index, repository)| {
+            let name = format!("PCE_WORKTREE_{index}");
+            let path = std::env::var_os(&name)
+                .with_context(|| format!("package gate agent environment omitted {name}"))?;
+            RepositoryWorktree::parse(repository.clone(), PathBuf::from(path))
+                .context("failed to parse package gate worktree environment")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let vision = fs::read_to_string(&command.vision_path)
+        .with_context(|| format!("failed to read vision {}", command.vision_path.display()))?;
+    let goal = VisionGoal::parse_document(&vision).context("failed to parse vision goal")?;
+    let criteria =
+        parse_acceptance_criteria(&vision).context("failed to parse vision acceptance criteria")?;
+    let brief = compose_package_gate_brief(
+        &goal,
+        &criteria,
+        &graph,
+        &command.package_id,
+        &worktrees,
+        &command.artifact_ref,
+    )
+    .context("failed to compose package gate brief")?;
+    let (program, arguments) = command
+        .worker_arguments
+        .split_first()
+        .context("package gate agent worker command is empty")?;
+    let mut child = std::process::Command::new(program)
+        .args(arguments)
+        .env("PCE_PACKAGE_GATE_OUTCOME", &command.outcome_path)
+        .env("TMPDIR", &temporary_directory)
+        .stdin(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to spawn package gate agent worker `{program}`"))?;
+    child
+        .stdin
+        .as_mut()
+        .context("package gate agent worker stdin unavailable")?
+        .write_all(brief.as_bytes())
+        .context("failed to pipe package gate brief to worker")?;
+    drop(child.stdin.take());
+    let status = child
+        .wait()
+        .context("failed to wait for package gate agent worker")?;
+    if let Some(code) = status.code() {
+        std::process::exit(code);
+    }
+    let signal = status
+        .signal()
+        .context("package gate agent worker has no exit code or signal")?;
+    std::process::exit(128_i32.saturating_add(signal));
+}
+
+fn parse_package_gate_brief(rest: &[String]) -> Result<Command> {
+    let [
+        vision_flag,
+        vision,
+        graph_flag,
+        graph,
+        package_flag,
+        package,
+        artifact_flag,
+        artifact_ref,
+        trailing @ ..,
+    ] = rest
+    else {
+        bail!(USAGE);
+    };
+    if vision_flag != "--vision"
+        || graph_flag != "--graph"
+        || package_flag != "--package"
+        || artifact_flag != "--artifact-ref"
+        || trailing.is_empty()
+        || trailing.len() % 2 != 0
+    {
+        bail!(USAGE);
+    }
+    let vision_path = PathBuf::from(vision);
+    let graph_path = PathBuf::from(graph);
+    if !vision_path.is_absolute() || !graph_path.is_absolute() {
+        bail!("package gate brief vision and graph paths must be absolute");
+    }
+    let mut worktrees = Vec::new();
+    for pair in trailing.chunks_exact(2) {
+        if pair[0] != "--worktree" {
+            bail!(USAGE);
+        }
+        let Some((repository, path)) = pair[1].split_once('=') else {
+            bail!(USAGE);
+        };
+        if repository.is_empty() {
+            bail!("package gate worktree mapping requires NAME=ABSOLUTE_PATH");
+        }
+        worktrees.push((repository.to_owned(), PathBuf::from(path)));
+    }
+    Ok(Command::PackageGateBrief(PackageGateBriefCommand {
+        vision_path,
+        graph_path,
+        package_id: package.clone(),
+        artifact_ref: BuiltArtifactRef::parse(artifact_ref.clone())?,
+        worktrees,
+    }))
+}
+
+fn run_package_gate_brief(command: PackageGateBriefCommand) -> Result<()> {
+    let vision = fs::read_to_string(&command.vision_path)
+        .with_context(|| format!("failed to read vision {}", command.vision_path.display()))?;
+    let graph_bytes = fs::read(&command.graph_path).with_context(|| {
+        format!(
+            "failed to read package graph {}",
+            command.graph_path.display()
+        )
+    })?;
+    let graph = parse_work_package_graph(&graph_bytes).context("failed to parse package graph")?;
+    let goal = VisionGoal::parse_document(&vision).context("failed to parse vision goal")?;
+    let criteria =
+        parse_acceptance_criteria(&vision).context("failed to parse vision acceptance criteria")?;
+    let worktrees = command
+        .worktrees
+        .into_iter()
+        .map(|(repository, path)| RepositoryWorktree::parse(repository, path))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let brief = compose_package_gate_brief(
+        &goal,
+        &criteria,
+        &graph,
+        &command.package_id,
+        &worktrees,
+        &command.artifact_ref,
+    )
+    .context("failed to compose package gate brief")?;
+    std::io::stdout()
+        .lock()
+        .write_all(brief.as_bytes())
+        .context("failed to write package gate brief")
 }
 
 fn parse_package_agent(rest: &[String]) -> Result<Command> {
@@ -872,6 +1103,9 @@ fn run_package_agent(command: PackageAgentCommand) -> Result<()> {
         .iter()
         .find(|package| package.id().as_str() == command.package_id)
         .with_context(|| format!("package {} is absent from graph", command.package_id))?;
+    let vision_identity = DispatchVisionSource::parse(graph.vision().to_owned())?;
+    let temporary_directory = package_temporary_directory(&vision_identity, package.id());
+    fs::create_dir_all(&temporary_directory).context("failed to create binary-owned TMPDIR")?;
     let worktrees = package
         .repositories()
         .iter()
@@ -899,9 +1133,7 @@ fn run_package_agent(command: PackageAgentCommand) -> Result<()> {
     let mut child = std::process::Command::new(program)
         .args(arguments)
         .env("PCE_PACKAGE_OUTCOME", &command.outcome_path)
-        // WP4's package-scoped TMPDIR can make Prime Agent's nested Unix socket path exceed the
-        // platform limit. Removing it lets the child runtime select its short system default.
-        .env_remove("TMPDIR")
+        .env("TMPDIR", &temporary_directory)
         .stdin(Stdio::piped())
         .spawn()
         .with_context(|| format!("failed to spawn package agent worker `{program}`"))?;
@@ -1336,6 +1568,20 @@ fn herdr_location(response: &Value) -> Result<HerdrAgentLocation> {
     ))
 }
 
+fn package_temporary_directory(vision: &DispatchVisionSource, package: &WorkPackageId) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(vision.as_str().len().to_be_bytes());
+    digest.update(vision.as_str().as_bytes());
+    digest.update(package.as_str().len().to_be_bytes());
+    digest.update(package.as_str().as_bytes());
+    let bytes = digest.finalize();
+    let suffix = bytes[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    PathBuf::from("/tmp/pce-tmp").join(suffix)
+}
+
 fn run_package_dispatch(command: PackageDispatchCommand) -> Result<()> {
     if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
         bail!("package dispatch requires HERDR_ENV=1 inside a Herdr-managed pane");
@@ -1385,9 +1631,7 @@ fn run_package_dispatch(command: PackageDispatchCommand) -> Result<()> {
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let worktree_root = PathBuf::from("/tmp/pce-work-package-worktrees");
-    let temporary_directory = PathBuf::from("/tmp/pce-work-package-tmp")
-        .join(graph.vision())
-        .join(package.id().as_str());
+    let temporary_directory = package_temporary_directory(&vision, package.id());
     fs::create_dir_all(&worktree_root).context("failed to create binary-owned worktree root")?;
     fs::create_dir_all(&temporary_directory).context("failed to create binary-owned TMPDIR")?;
     let worktree_root = AbsoluteWorktreeRoot::parse(worktree_root)?;
@@ -14722,6 +14966,29 @@ None.
         assert!(
             format!("{error:#}").contains("required must contain every and only property name")
         );
+    }
+
+    #[test]
+    fn package_tmpdir_leaves_darwin_socket_headroom() {
+        let vision = pce_core::DispatchVisionSource::parse(
+            "2026-08-11-the-store-is-the-only-copy".to_owned(),
+        )
+        .expect("vision");
+        let graph = pce_core::parse_work_package_graph(include_bytes!(
+            "../crates/core/tests/data/rivretrieve-work-package-graph.json"
+        ))
+        .expect("graph");
+        let package = graph
+            .packages()
+            .iter()
+            .find(|package| package.id().as_str() == "RR2")
+            .expect("RR2");
+        let path = crate::package_temporary_directory(&vision, package.id());
+        let rendered = path.to_str().expect("ASCII temporary path");
+        assert!(rendered.starts_with("/tmp/pce-tmp/"));
+        assert_eq!(rendered.len(), 25);
+        assert!(rendered[13..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(104_usize - rendered.len() >= 40);
     }
 
     #[test]

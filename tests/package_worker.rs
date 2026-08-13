@@ -91,13 +91,14 @@ Create one known file.
     let graph = directory.path().join("graph.json");
     fs::write(&graph, r#"{"vision":"trivial","plan_version":1,"authored_at_ref":"main","packages":[{"id":"T1","title":"create known file","repositories":["repo"],"criteria":[{"name":"file exists","input":"worktree","observation":"known contents","command":"test \"$(cat known.txt)\" = known"}],"depends_on":[]}] }"#).expect("graph");
     let outcome = directory.path().join("outcome.json");
+    let binary_owned_tmpdir = "/tmp/pce-tmp/e83b5998486a";
     let output = pce()
         .args(["package", "agent", "--vision"]).arg(&vision)
         .args(["--graph"]).arg(&graph)
         .args(["--package", "T1", "--outcome"]).arg(&outcome)
         .args(["--", "/bin/sh", "-c", "cat > \"$PCE_PACKAGE_OUTCOME.brief\"; printf %s \"${TMPDIR-unset}\" > \"$PCE_PACKAGE_OUTCOME.tmpdir\"; printf '{\"outcome\":\"done\"}' > \"$PCE_PACKAGE_OUTCOME\""])
         .env("PCE_WORKTREE_0", directory.path().join("repo-worktree"))
-        .env("TMPDIR", "/tmp/this-intentionally-long-package-temporary-directory-that-makes-prime-agent-unix-domain-sockets-exceed-the-platform-limit")
+        .env("TMPDIR", "/tmp/operator-controlled-and-intentionally-long")
         .output().expect("package agent");
     assert!(
         output.status.success(),
@@ -111,7 +112,7 @@ Create one known file.
     assert_eq!(
         fs::read_to_string(format!("{}.tmpdir", outcome.display()))
             .expect("child TMPDIR observation"),
-        "unset"
+        binary_owned_tmpdir
     );
     let piped = fs::read_to_string(format!("{}.brief", outcome.display())).expect("piped brief");
     assert!(piped.contains("Create one known file."));
