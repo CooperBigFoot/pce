@@ -155,6 +155,14 @@ pub enum EnvironmentPreparationOutcome {
     Failed,
 }
 
+/// One package commit supplied as an input to repository composition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompositionInput {
+    pub package: String,
+    pub oid: String,
+}
+
 /// One rung retained in the final cold-readable parking record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -205,6 +213,20 @@ pub enum DriverEvent {
     WorkerSpawnFailed {
         package: String,
         issuance: u64,
+        reason: String,
+    },
+    /// One repository base containing all composing dependencies was produced for a package.
+    PackageBaseComposed {
+        package: String,
+        repository: String,
+        base_oid: String,
+        dependencies: Vec<CompositionInput>,
+    },
+    /// The dependencies for one package repository could not be composed.
+    PackageCompositionFailed {
+        package: String,
+        repository: String,
+        dependencies: Vec<CompositionInput>,
         reason: String,
     },
     /// A worker was issued. Absence of a later outcome means it is still running.
@@ -293,6 +315,29 @@ pub enum DriverEvent {
     PackageCompleted { package: String },
     /// Driver judgement failed; dependents remain blocked.
     PackageFailed { package: String, reason: String },
+    /// One repository containing every completed package was produced for assembly gating.
+    AssemblyRepositoryComposed {
+        repository: String,
+        base_oid: String,
+        packages: Vec<CompositionInput>,
+    },
+    /// Completed package commits could not be composed in one assembly repository.
+    AssemblyCompositionFailed {
+        repository: String,
+        packages: Vec<CompositionInput>,
+        reason: String,
+    },
+    /// One effective package criterion was re-executed against the composed assembly.
+    AssemblyCriterionExecuted {
+        package: String,
+        name: String,
+        origin: CriterionOrigin,
+        execution: CriterionExecution,
+    },
+    /// Every effective criterion passed against the composed assembly.
+    AssemblyCompleted,
+    /// Assembly gating reached a terminal failure distinct from package judgement.
+    AssemblyFailed { reason: String },
 }
 
 /// Restart-derived lifecycle state of one graph package.
@@ -304,8 +349,19 @@ pub enum DriverPackageState {
     Judging { issuance: u64 },
     Complete,
     Failed { reason: String },
+    CompositionFailed { repository: String, reason: String },
     EnvironmentPreparationFailed { repository: String, command: String },
     Parked { reason: String },
+}
+
+/// Restart-derived lifecycle state of the final graph assembly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum DriverAssemblyState {
+    Pending,
+    Gating,
+    Complete,
+    Failed { reason: String },
 }
 
 /// Terminal state of the graph driver loop.
@@ -324,6 +380,7 @@ pub struct DriverSnapshot {
     ready: Vec<String>,
     amendments: Vec<(String, EffectiveCriterion)>,
     recovery: Vec<(String, RecoveryBudget)>,
+    assembly: DriverAssemblyState,
     outcome: DriverLoopOutcome,
 }
 impl DriverSnapshot {
@@ -338,6 +395,9 @@ impl DriverSnapshot {
     }
     pub fn recovery(&self) -> &[(String, RecoveryBudget)] {
         &self.recovery
+    }
+    pub const fn assembly(&self) -> &DriverAssemblyState {
+        &self.assembly
     }
     pub const fn outcome(&self) -> DriverLoopOutcome {
         self.outcome
@@ -379,6 +439,15 @@ pub enum PackageDriverError {
     /// More than one distinct limit configuration appears in one graph-run journal.
     #[error("driver journal contains conflicting recovery limit configurations")]
     ConflictingRecoveryLimits,
+    /// Assembly work began before every package had completed successfully.
+    #[error("assembly event occurs before every graph package is complete")]
+    AssemblyBeforePackagesComplete,
+    /// An assembly event contradicts an already-terminal assembly outcome.
+    #[error("assembly event occurs after assembly reached a terminal state")]
+    AssemblyEventAfterTerminal,
+    /// A criterion was recorded before an assembly repository entered gating.
+    #[error("assembly criterion for package `{package}` occurs before assembly gating")]
+    AssemblyCriterionBeforeGating { package: String },
 }
 
 /// Fold the append-only journal into scheduling state.
@@ -412,19 +481,115 @@ pub fn derive_driver_snapshot(
         .map(|p| (p.id().as_str().to_owned(), DriverPackageState::Pending))
         .collect::<HashMap<_, _>>();
     let mut amendments = Vec::new();
+    let mut assembly = DriverAssemblyState::Pending;
     let terminal = |state: &DriverPackageState| {
         matches!(
             state,
             DriverPackageState::Complete
                 | DriverPackageState::Failed { .. }
+                | DriverPackageState::CompositionFailed { .. }
                 | DriverPackageState::EnvironmentPreparationFailed { .. }
                 | DriverPackageState::Parked { .. }
         )
     };
     for (event_index, event) in events.iter().enumerate() {
+        let all_packages_complete = || {
+            states
+                .values()
+                .all(|state| matches!(state, DriverPackageState::Complete))
+        };
+        match event {
+            DriverEvent::AssemblyRepositoryComposed { .. } => {
+                if !all_packages_complete() {
+                    return Err(PackageDriverError::AssemblyBeforePackagesComplete);
+                }
+                if matches!(
+                    assembly,
+                    DriverAssemblyState::Complete | DriverAssemblyState::Failed { .. }
+                ) {
+                    return Err(PackageDriverError::AssemblyEventAfterTerminal);
+                }
+                assembly = DriverAssemblyState::Gating;
+                continue;
+            }
+            DriverEvent::AssemblyCompositionFailed { reason, .. } => {
+                if !all_packages_complete() {
+                    return Err(PackageDriverError::AssemblyBeforePackagesComplete);
+                }
+                if matches!(
+                    assembly,
+                    DriverAssemblyState::Complete | DriverAssemblyState::Failed { .. }
+                ) {
+                    return Err(PackageDriverError::AssemblyEventAfterTerminal);
+                }
+                assembly = DriverAssemblyState::Failed {
+                    reason: reason.clone(),
+                };
+                continue;
+            }
+            DriverEvent::AssemblyCriterionExecuted { package, .. } => {
+                if !known.contains(package.as_str()) {
+                    return Err(PackageDriverError::UnknownPackage {
+                        package: package.clone(),
+                    });
+                }
+                if !all_packages_complete() {
+                    return Err(PackageDriverError::AssemblyBeforePackagesComplete);
+                }
+                match assembly {
+                    DriverAssemblyState::Gating => {}
+                    DriverAssemblyState::Complete | DriverAssemblyState::Failed { .. } => {
+                        return Err(PackageDriverError::AssemblyEventAfterTerminal);
+                    }
+                    DriverAssemblyState::Pending => {
+                        return Err(PackageDriverError::AssemblyCriterionBeforeGating {
+                            package: package.clone(),
+                        });
+                    }
+                }
+                continue;
+            }
+            DriverEvent::AssemblyCompleted => {
+                if !all_packages_complete() {
+                    return Err(PackageDriverError::AssemblyBeforePackagesComplete);
+                }
+                match assembly {
+                    DriverAssemblyState::Gating => {
+                        assembly = DriverAssemblyState::Complete;
+                    }
+                    DriverAssemblyState::Complete | DriverAssemblyState::Failed { .. } => {
+                        return Err(PackageDriverError::AssemblyEventAfterTerminal);
+                    }
+                    DriverAssemblyState::Pending => {
+                        return Err(PackageDriverError::AssemblyCriterionBeforeGating {
+                            package: "<completion>".to_owned(),
+                        });
+                    }
+                }
+                continue;
+            }
+            DriverEvent::AssemblyFailed { reason } => {
+                if !all_packages_complete() {
+                    return Err(PackageDriverError::AssemblyBeforePackagesComplete);
+                }
+                if matches!(
+                    assembly,
+                    DriverAssemblyState::Complete | DriverAssemblyState::Failed { .. }
+                ) {
+                    return Err(PackageDriverError::AssemblyEventAfterTerminal);
+                }
+                assembly = DriverAssemblyState::Failed {
+                    reason: reason.clone(),
+                };
+                continue;
+            }
+            _ => {}
+        }
         let package = match event {
             DriverEvent::RecoveryConfigured { .. } => continue,
             DriverEvent::RecoveryRungAttempted { package, .. }
+            | DriverEvent::PackageBaseComposed { package, .. }
+            | DriverEvent::PackageCompositionFailed { package, .. }
             | DriverEvent::WorkerEnvironmentFailed { package, .. }
             | DriverEvent::RecoveryParked { package, .. }
             | DriverEvent::WorkerSpawnFailed { package, .. }
@@ -443,6 +608,11 @@ pub fn derive_driver_snapshot(
             | DriverEvent::GateFinished { package, .. }
             | DriverEvent::PackageCompleted { package }
             | DriverEvent::PackageFailed { package, .. } => package,
+            DriverEvent::AssemblyRepositoryComposed { .. }
+            | DriverEvent::AssemblyCompositionFailed { .. }
+            | DriverEvent::AssemblyCriterionExecuted { .. }
+            | DriverEvent::AssemblyCompleted
+            | DriverEvent::AssemblyFailed { .. } => unreachable!("assembly handled above"),
         };
         if !known.contains(package.as_str()) {
             return Err(PackageDriverError::UnknownPackage {
@@ -454,6 +624,26 @@ pub fn derive_driver_snapshot(
             .unwrap_or_else(|| unreachable!("known package initialized"));
         match event {
             DriverEvent::RecoveryConfigured { .. } => unreachable!("configuration handled above"),
+            DriverEvent::PackageBaseComposed { .. } => {
+                if !matches!(state, DriverPackageState::Pending) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+            }
+            DriverEvent::PackageCompositionFailed {
+                repository, reason, ..
+            } => {
+                if !matches!(state, DriverPackageState::Pending) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+                *state = DriverPackageState::CompositionFailed {
+                    repository: repository.clone(),
+                    reason: reason.clone(),
+                };
+            }
             DriverEvent::RecoveryRungAttempted { .. } => {
                 if !matches!(state, DriverPackageState::Pending) {
                     return Err(PackageDriverError::EventAfterTerminal {
@@ -700,6 +890,11 @@ pub fn derive_driver_snapshot(
                     };
                 }
             }
+            DriverEvent::AssemblyRepositoryComposed { .. }
+            | DriverEvent::AssemblyCompositionFailed { .. }
+            | DriverEvent::AssemblyCriterionExecuted { .. }
+            | DriverEvent::AssemblyCompleted
+            | DriverEvent::AssemblyFailed { .. } => unreachable!("assembly handled above"),
         }
     }
     let mut ready = Vec::new();
@@ -725,7 +920,13 @@ pub fn derive_driver_snapshot(
         .values()
         .all(|state| matches!(state, DriverPackageState::Complete));
     let outcome = if all_complete {
-        DriverLoopOutcome::Finished
+        match assembly {
+            DriverAssemblyState::Complete => DriverLoopOutcome::Finished,
+            DriverAssemblyState::Failed { .. } => DriverLoopOutcome::Blocked,
+            DriverAssemblyState::Pending | DriverAssemblyState::Gating => {
+                DriverLoopOutcome::Running
+            }
+        }
     } else if running || !ready.is_empty() {
         DriverLoopOutcome::Running
     } else {
@@ -759,6 +960,7 @@ pub fn derive_driver_snapshot(
         ready,
         amendments,
         recovery,
+        assembly,
         outcome,
     })
 }
@@ -983,11 +1185,36 @@ pub fn effective_criteria(
 
 #[cfg(test)]
 mod tests {
-    use super::{DriverEvent, DriverLoopOutcome, DriverPackageState, derive_driver_snapshot};
+    use super::{
+        CommandExitStatus, CompositionInput, CriterionExecution, CriterionOrigin,
+        DriverAssemblyState, DriverEvent, DriverLoopOutcome, DriverPackageState,
+        charged_failure_count, derive_driver_snapshot,
+    };
     use crate::{LocalPatchLimit, RecoveryLimits, RetryLimit, parse_work_package_graph};
 
     fn graph() -> crate::WorkPackageGraph {
         parse_work_package_graph(br#"{"vision":"v","plan_version":1,"authored_at_ref":"HEAD","packages":[{"id":"A","title":"A","repositories":["r"],"criteria":[{"name":"a","input":"i","observation":"o","command":"true"}],"depends_on":[]},{"id":"B","title":"B","repositories":["r"],"criteria":[{"name":"b","input":"i","observation":"o","command":"true"}],"depends_on":[{"id":"A","kind":"buildability","reason":"A"}]}]}"#).expect("valid graph")
+    }
+
+    fn completed_packages() -> Vec<DriverEvent> {
+        ["A", "B"]
+            .into_iter()
+            .flat_map(|package| {
+                [
+                    DriverEvent::WorkerDispatched {
+                        package: package.to_owned(),
+                        issuance: 1,
+                    },
+                    DriverEvent::WorkerDone {
+                        package: package.to_owned(),
+                        issuance: 1,
+                    },
+                    DriverEvent::PackageCompleted {
+                        package: package.to_owned(),
+                    },
+                ]
+            })
+            .collect()
     }
 
     #[test]
@@ -1199,5 +1426,125 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["completed-gate"]
         );
+    }
+
+    #[test]
+    fn package_composition_events_are_typed_terminal_and_uncharged() {
+        let graph = graph();
+        let base = vec![DriverEvent::PackageBaseComposed {
+            package: "A".to_owned(),
+            repository: "r".to_owned(),
+            base_oid: "base-a".to_owned(),
+            dependencies: Vec::new(),
+        }];
+        let snapshot = derive_driver_snapshot(&graph, &base, false).expect("composed base fold");
+        assert!(matches!(
+            snapshot.packages()[0].1,
+            DriverPackageState::Pending
+        ));
+        assert_eq!(snapshot.ready(), &["A"]);
+
+        let failed = vec![DriverEvent::PackageCompositionFailed {
+            package: "A".to_owned(),
+            repository: "r".to_owned(),
+            dependencies: vec![CompositionInput {
+                package: "dependency".to_owned(),
+                oid: "deadbeef".to_owned(),
+            }],
+            reason: "merge conflict".to_owned(),
+        }];
+        let snapshot = derive_driver_snapshot(&graph, &failed, false).expect("failed composition");
+        assert!(matches!(
+            &snapshot.packages()[0].1,
+            DriverPackageState::CompositionFailed { repository, reason }
+                if repository == "r" && reason == "merge conflict"
+        ));
+        assert_eq!(snapshot.outcome(), DriverLoopOutcome::Blocked);
+        assert_eq!(charged_failure_count(&failed, "A"), 0);
+    }
+
+    #[test]
+    fn assembly_lifecycle_is_restart_derived_and_controls_graph_outcome() {
+        let graph = graph();
+        let mut events = completed_packages();
+        let pending = derive_driver_snapshot(&graph, &events, false).expect("pending assembly");
+        assert_eq!(pending.assembly(), &DriverAssemblyState::Pending);
+        assert_eq!(pending.outcome(), DriverLoopOutcome::Running);
+
+        events.push(DriverEvent::AssemblyRepositoryComposed {
+            repository: "r".to_owned(),
+            base_oid: "assembly".to_owned(),
+            packages: vec![
+                CompositionInput {
+                    package: "A".to_owned(),
+                    oid: "a".to_owned(),
+                },
+                CompositionInput {
+                    package: "B".to_owned(),
+                    oid: "b".to_owned(),
+                },
+            ],
+        });
+        events.push(DriverEvent::AssemblyCriterionExecuted {
+            package: "A".to_owned(),
+            name: "a".to_owned(),
+            origin: CriterionOrigin::Authored,
+            execution: CriterionExecution::new(
+                "true".to_owned(),
+                "/assembly/r".to_owned(),
+                CommandExitStatus::Exited { code: 0 },
+                String::new(),
+                String::new(),
+            ),
+        });
+        let gating = derive_driver_snapshot(&graph, &events, false).expect("assembly gating");
+        assert_eq!(gating.assembly(), &DriverAssemblyState::Gating);
+        assert_eq!(gating.outcome(), DriverLoopOutcome::Running);
+
+        events.push(DriverEvent::AssemblyCompleted);
+        let completed = derive_driver_snapshot(&graph, &events, false).expect("assembly complete");
+        let restarted = derive_driver_snapshot(&graph, &events, false).expect("restart fold");
+        assert_eq!(completed, restarted);
+        assert_eq!(completed.assembly(), &DriverAssemblyState::Complete);
+        assert_eq!(completed.outcome(), DriverLoopOutcome::Finished);
+    }
+
+    #[test]
+    fn assembly_composition_and_gating_failures_are_distinct_blocked_states() {
+        let graph = graph();
+        let mut composition_events = completed_packages();
+        composition_events.push(DriverEvent::AssemblyCompositionFailed {
+            repository: "r".to_owned(),
+            packages: Vec::new(),
+            reason: "packages conflict".to_owned(),
+        });
+        let composition = derive_driver_snapshot(&graph, &composition_events, false)
+            .expect("assembly composition failure");
+        assert_eq!(
+            composition.assembly(),
+            &DriverAssemblyState::Failed {
+                reason: "packages conflict".to_owned(),
+            }
+        );
+        assert_eq!(composition.outcome(), DriverLoopOutcome::Blocked);
+
+        let mut gating_events = completed_packages();
+        gating_events.push(DriverEvent::AssemblyRepositoryComposed {
+            repository: "r".to_owned(),
+            base_oid: "assembly".to_owned(),
+            packages: Vec::new(),
+        });
+        gating_events.push(DriverEvent::AssemblyFailed {
+            reason: "criterion a failed".to_owned(),
+        });
+        let gating = derive_driver_snapshot(&graph, &gating_events, false)
+            .expect("assembly criterion failure");
+        assert_eq!(
+            gating.assembly(),
+            &DriverAssemblyState::Failed {
+                reason: "criterion a failed".to_owned(),
+            }
+        );
+        assert_eq!(gating.outcome(), DriverLoopOutcome::Blocked);
     }
 }

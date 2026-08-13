@@ -72,7 +72,9 @@ fn state_identity(
         DriverPackageState::Running { .. } => ("running", "▶", "Running"),
         DriverPackageState::Judging { .. } => ("running", "▶", "Running · judging"),
         DriverPackageState::Complete => ("complete", "✓", "Complete"),
-        DriverPackageState::Failed { .. } => ("failed", "✕", "Failed"),
+        DriverPackageState::Failed { .. } | DriverPackageState::CompositionFailed { .. } => {
+            ("failed", "✕", "Failed")
+        }
         DriverPackageState::Parked { .. } => ("parked", "Ⅱ", "Parked"),
         // Not a judgement: the criteria never ran, so this is neither passing nor failing.
         DriverPackageState::EnvironmentPreparationFailed { .. } => {

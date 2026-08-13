@@ -176,7 +176,7 @@ fn live_herdr_package_dispatch_records_sleep_then_exit_three() {
 }
 
 #[test]
-fn live_herdr_retry_uses_distinct_attempt_identity_and_authored_base() {
+fn live_herdr_retry_uses_distinct_attempt_identity_and_composed_base() {
     if !herdr_available() {
         eprintln!("PCE_TEST_SKIP: live Herdr session unavailable");
         return;
@@ -230,13 +230,58 @@ fn live_herdr_retry_uses_distinct_attempt_identity_and_authored_base() {
     .expect("UTF-8 base")
     .trim()
     .to_owned();
+    fs::write(repository.join("dependency"), b"completed dependency").expect("dependency fixture");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["add", "dependency"])
+            .status()
+            .expect("git add dependency")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["commit", "-qm", "composed dependency base"])
+            .status()
+            .expect("git commit dependency")
+            .success()
+    );
+    let composed_base = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("composed base oid")
+            .stdout,
+    )
+    .expect("UTF-8 composed base")
+    .trim()
+    .to_owned();
+    assert_eq!(
+        String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "HEAD^"])
+                .output()
+                .expect("dependency parent")
+                .stdout
+        )
+        .expect("UTF-8 dependency parent")
+        .trim(),
+        base
+    );
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
     let graph_path = directory.path().join("graph.json");
     fs::write(&graph_path, serde_json::to_vec(&json!({
-        "vision": format!("retry-{nonce}"), "plan_version": 1, "authored_at_ref": base,
+        "vision": format!("retry-{nonce}"), "plan_version": 1, "authored_at_ref": composed_base,
         "packages": [{"id":"WP11","title":"retry dispatch","repositories":["repo"],
             "criteria":[{"name":"true","input":"none","observation":"zero","command":"true"}],"depends_on":[]}]
     })).expect("graph JSON")).expect("graph");
@@ -246,7 +291,7 @@ fn live_herdr_retry_uses_distinct_attempt_identity_and_authored_base() {
     for attempt in 1..=2 {
         let artifact = directory.path().join(format!("artifact-{attempt}"));
         let script = format!(
-            "test ! -e attempt-1; printf {attempt} > attempt-{attempt}; git add attempt-{attempt}; git commit -qm attempt-{attempt}; : > {}",
+            "test -e dependency; test ! -e attempt-1; printf {attempt} > attempt-{attempt}; git add attempt-{attempt}; git commit -qm attempt-{attempt}; : > {}",
             artifact.display()
         );
         let output = Command::new(env!("CARGO_BIN_EXE_pce"))
@@ -358,7 +403,7 @@ fn live_herdr_retry_uses_distinct_attempt_identity_and_authored_base() {
         )
         .expect("UTF-8 parent")
         .trim(),
-        base
+        composed_base
     );
     assert_eq!(
         String::from_utf8(

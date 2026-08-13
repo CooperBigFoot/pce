@@ -27,30 +27,30 @@ use pce_core::{
     ArtifactPath, ArtifactProduction, AuthorityFailure, BranchState, BuiltArtifactRef,
     CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
     CodexTerminalObservation, CodexTerminalUsage, CommandExitStatus, CompletionCriterionStatus,
-    CompletionDecision, CreationDate, CriterionChangeDecision, CriterionExecution,
-    CurrentArtifactObservation, CurrentArtifactState, DispatchAdmission, DispatchAttempt,
-    DispatchCandidate, DispatchCompletionPayload, DispatchDuration, DispatchEnvelope,
-    DispatchExitStatus, DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion,
-    DispatchLogging, DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput,
-    DispatchRef, DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass,
-    DispatchRootCause, DispatchTarget, DispatchTokenUsage, DispatchVisionSource,
-    DispatchabilityResult, DriverEvent, EnvironmentPreparationOutcome, EventBodyRef, EventKindName,
-    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
-    ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
-    ExceptionalMergeChainObservation, Executable, ExitCode, ExpectedVerdictOutcome,
-    FileObservation, FindingAdmission, FindingRejectionReason, FindingReplayDecision,
-    FinishedResult, GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig,
-    GateExecutionRef, GateExecutionRejection, GateExecutionResponse, GateObservedResult,
-    GateProcessObservation, GateProcessStimulus, GateStimulus, GateTerminalStatus,
-    GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
-    GitMergeObservation, HerdrAgentLocation, HerdrInvocation, HerdrPaneId, HerdrTabId,
-    HerdrWorkspaceId, HerdrWorktreeSpec, KnownPayload, LandingReadinessDecision,
-    LegacyRepositoryContractPayload, LocalPatchLimit, MeasuredContractSnapshot, MergeStatus,
-    MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
-    NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
-    OracleFailure, OracleStage, OrderingEdge, PackageWorkerResult, PackageWorkerStoppedAt,
-    PairedCampaign, PairedExecutionProofError, PairedReplayClassification, PaneCleanupOutcome,
-    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
+    CompletionDecision, CompositionInput, CreationDate, CriterionChangeDecision,
+    CriterionExecution, CurrentArtifactObservation, CurrentArtifactState, DispatchAdmission,
+    DispatchAttempt, DispatchCandidate, DispatchCompletionPayload, DispatchDuration,
+    DispatchEnvelope, DispatchExitStatus, DispatchIdentityObservation, DispatchLedger,
+    DispatchLedgerCompletion, DispatchLogging, DispatchPayload, DispatchProcessIdentity,
+    DispatchProjectionInput, DispatchRef, DispatchRequiredArtifactObservation, DispatchRole,
+    DispatchRoleClass, DispatchRootCause, DispatchTarget, DispatchTokenUsage, DispatchVisionSource,
+    DispatchabilityResult, DriverAssemblyState, DriverEvent, EnvironmentPreparationOutcome,
+    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
+    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState,
+    ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable, ExitCode,
+    ExpectedVerdictOutcome, FileObservation, FindingAdmission, FindingRejectionReason,
+    FindingReplayDecision, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
+    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
+    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
+    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
+    GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
+    HerdrPaneId, HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, KnownPayload,
+    LandingReadinessDecision, LegacyRepositoryContractPayload, LocalPatchLimit,
+    MeasuredContractSnapshot, MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode,
+    NamedReplayRef, NodeId, NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus,
+    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PackageWorkerResult,
+    PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
+    PaneCleanupOutcome, ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
     PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
     RecoveryLimits, RecoveryLogPath, RecoveryRung, ReferenceValidation, ReplayArtifactObservation,
@@ -263,6 +263,7 @@ struct PackageDispatchCommand {
     attempt: Option<DispatchAttempt>,
     required_artifact_path: AbsoluteRequiredArtifactPath,
     repositories: Vec<(String, PathBuf)>,
+    base_refs: BTreeMap<String, String>,
     environment: BTreeMap<String, String>,
     worker_arguments: Vec<String>,
 }
@@ -1584,6 +1585,7 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
         attempt: None,
         required_artifact_path,
         repositories,
+        base_refs: BTreeMap::new(),
         environment,
         worker_arguments,
     }))
@@ -2000,6 +2002,7 @@ fn run_composed_driver_gate(
             })
             .cloned()
             .collect(),
+        base_refs: BTreeMap::new(),
         environment: route_environment()?,
         worker_arguments,
     })?;
@@ -2213,6 +2216,218 @@ fn route_environment() -> Result<BTreeMap<String, String>> {
         .collect()
 }
 
+fn completed_package_issuance(events: &[DriverEvent], package_id: &str) -> Result<u64> {
+    let completion = events
+        .iter()
+        .rposition(|event| matches!(event, DriverEvent::PackageCompleted { package } if package == package_id))
+        .with_context(|| format!("package {package_id} has no durable completion"))?;
+    events[..completion]
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            DriverEvent::WorkerDone { package, issuance } if package == package_id => {
+                Some(*issuance)
+            }
+            _ => None,
+        })
+        .with_context(|| format!("package {package_id} completion has no worker issuance"))
+}
+
+fn package_branch(graph: &WorkPackageGraph, package: &str, issuance: u64) -> String {
+    format!("pce/{}/{package}/attempt-{issuance}", graph.vision())
+}
+
+fn driver_package_base_refs(
+    command: &DriverRunCommand,
+    package_id: &str,
+) -> Result<BTreeMap<String, String>> {
+    let events = read_driver_journal(&command.journal_path)?;
+    let refs = events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::PackageBaseComposed {
+                package,
+                repository,
+                base_oid,
+                ..
+            } if package == package_id => Some((repository.clone(), base_oid.clone())),
+            _ => None,
+        })
+        .collect();
+    Ok(refs)
+}
+
+fn composition_component(value: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(value.as_bytes());
+    digest.finalize()[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn compose_git_commits(
+    journal: &Path,
+    label: &str,
+    source: &Path,
+    authored_base: &str,
+    inputs: &[CompositionInput],
+) -> Result<String> {
+    if inputs.is_empty() {
+        return git_oid(source, authored_base);
+    }
+    let root = journal
+        .parent()
+        .context("driver journal has no parent")?
+        .join(".pce/compositions");
+    fs::create_dir_all(&root)?;
+    let worktree = root.join(format!(
+        "{}-{}-{}",
+        std::process::id(),
+        composition_component(label),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .context("clock precedes epoch")?
+            .as_nanos()
+    ));
+    let add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(source)
+        .args(["worktree", "add", "--quiet", "--detach"])
+        .arg(&worktree)
+        .arg(authored_base)
+        .output()?;
+    if !add.status.success() {
+        bail!(
+            "failed to create composition worktree: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        );
+    }
+    let result = (|| {
+        for input in inputs {
+            let merge = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&worktree)
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                .args([
+                    "-c",
+                    "user.name=PCE composition",
+                    "-c",
+                    "user.email=pce@localhost",
+                    "merge",
+                    "--no-edit",
+                    "--no-ff",
+                ])
+                .arg(&input.oid)
+                .output()?;
+            if !merge.status.success() {
+                bail!(
+                    "failed to combine package {} commit {}: {}",
+                    input.package,
+                    input.oid,
+                    String::from_utf8_lossy(&merge.stderr).trim()
+                );
+            }
+        }
+        git_oid(&worktree, "HEAD")
+    })();
+    let removal = std::process::Command::new("git")
+        .arg("-C")
+        .arg(source)
+        .args(["worktree", "remove", "--force"])
+        .arg(&worktree)
+        .output()?;
+    if !removal.status.success() && result.is_ok() {
+        bail!(
+            "failed to remove composition worktree: {}",
+            String::from_utf8_lossy(&removal.stderr).trim()
+        );
+    }
+    result
+}
+
+fn ensure_driver_package_bases(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    package_id: &str,
+) -> Result<bool> {
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == package_id)
+        .with_context(|| format!("package {package_id} is absent from graph"))?;
+    let events = read_driver_journal(&command.journal_path)?;
+    for repository in package.repositories() {
+        if events.iter().any(|event| {
+            matches!(event,
+            DriverEvent::PackageBaseComposed { package, repository: recorded, .. }
+                if package == package_id && recorded == repository)
+        }) {
+            continue;
+        }
+        let source = command
+            .repositories
+            .iter()
+            .find(|(name, _)| name == repository)
+            .map(|(_, path)| path)
+            .with_context(|| format!("missing repository mapping for `{repository}`"))?;
+        let mut dependencies = Vec::new();
+        for dependency in package
+            .depends_on()
+            .iter()
+            .filter(|dependency| dependency.kind().is_binding())
+        {
+            let dependency_package = graph
+                .packages()
+                .iter()
+                .find(|candidate| candidate.id() == dependency.id())
+                .with_context(|| format!("dependency {} is absent", dependency.id().as_str()))?;
+            if !dependency_package.repositories().contains(repository) {
+                continue;
+            }
+            let issuance = completed_package_issuance(&events, dependency.id().as_str())?;
+            dependencies.push(CompositionInput {
+                package: dependency.id().as_str().to_owned(),
+                oid: git_oid(
+                    source,
+                    &package_branch(graph, dependency.id().as_str(), issuance),
+                )?,
+            });
+        }
+        match compose_git_commits(
+            &command.journal_path,
+            &format!("package-{package_id}-{repository}"),
+            source,
+            graph.authored_at_ref(),
+            &dependencies,
+        ) {
+            Ok(base_oid) => append_driver_event(
+                &command.journal_path,
+                &DriverEvent::PackageBaseComposed {
+                    package: package_id.to_owned(),
+                    repository: repository.clone(),
+                    base_oid,
+                    dependencies,
+                },
+            )?,
+            Err(source) => {
+                append_driver_event(
+                    &command.journal_path,
+                    &DriverEvent::PackageCompositionFailed {
+                        package: package_id.to_owned(),
+                        repository: repository.clone(),
+                        dependencies,
+                        reason: format!("{source:#}"),
+                    },
+                )?;
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn driver_package_worktrees(
     command: &DriverRunCommand,
     graph: &WorkPackageGraph,
@@ -2225,6 +2440,7 @@ fn driver_package_worktrees(
         .find(|package| package.id().as_str() == package_id)
         .with_context(|| format!("package {package_id} is absent from graph"))?;
     let vision = DispatchVisionSource::parse(graph.vision().to_owned())?;
+    let base_refs = driver_package_base_refs(command, package_id)?;
     let inputs = command
         .repositories
         .iter()
@@ -2233,7 +2449,10 @@ fn driver_package_worktrees(
             RepositoryDispatchInput::parse(
                 name.clone(),
                 root.clone(),
-                graph.authored_at_ref().to_owned(),
+                base_refs
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| graph.authored_at_ref().to_owned()),
             )
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2388,6 +2607,7 @@ fn issue_driver_package_dispatch(
         attempt: Some(DispatchAttempt::parse(issuance)?),
         required_artifact_path: AbsoluteRequiredArtifactPath::parse(outcome_path)?,
         repositories,
+        base_refs: driver_package_base_refs(command, package_id)?,
         environment: route_environment()?,
         worker_arguments,
     })?;
@@ -2484,6 +2704,214 @@ fn reconcile_completed_dispatch_panes(journal: &Path, events: &[DriverEvent]) ->
     Ok(pending.len())
 }
 
+fn ensure_assembly_checkout(source: &Path, path: &Path, oid: &str) -> Result<()> {
+    if path.is_dir() && git_oid(path, "HEAD").is_ok_and(|current| current == oid) {
+        return Ok(());
+    }
+    if path.exists() {
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(source)
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .output();
+        let _ = fs::remove_dir_all(path);
+    }
+    fs::create_dir_all(path.parent().context("assembly checkout has no parent")?)?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(source)
+        .args(["worktree", "add", "--quiet", "--detach"])
+        .arg(path)
+        .arg(oid)
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "failed to materialize assembly checkout: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> Result<()> {
+    let mut events = read_driver_journal(&command.journal_path)?;
+    let assembly_root = command
+        .journal_path
+        .parent()
+        .context("driver journal has no parent")?
+        .join(".pce/assembly");
+    let mut assembly_refs = events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::AssemblyRepositoryComposed {
+                repository,
+                base_oid,
+                ..
+            } => Some((repository.clone(), base_oid.clone())),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (repository, source) in &command.repositories {
+        let touched = graph
+            .packages()
+            .iter()
+            .filter(|package| package.repositories().contains(repository))
+            .collect::<Vec<_>>();
+        if touched.is_empty() {
+            continue;
+        }
+        let mut packages = Vec::new();
+        for package in touched {
+            let oid = if command.worker_override.is_some() {
+                git_oid(source, "HEAD")?
+            } else {
+                let issuance = completed_package_issuance(&events, package.id().as_str())?;
+                git_oid(
+                    source,
+                    &package_branch(graph, package.id().as_str(), issuance),
+                )?
+            };
+            packages.push(CompositionInput {
+                package: package.id().as_str().to_owned(),
+                oid,
+            });
+        }
+        let oid = if let Some(oid) = assembly_refs.get(repository) {
+            oid.clone()
+        } else {
+            match compose_git_commits(
+                &command.journal_path,
+                &format!("assembly-{repository}"),
+                source,
+                graph.authored_at_ref(),
+                &packages,
+            ) {
+                Ok(base_oid) => {
+                    append_driver_event(
+                        &command.journal_path,
+                        &DriverEvent::AssemblyRepositoryComposed {
+                            repository: repository.clone(),
+                            base_oid: base_oid.clone(),
+                            packages: packages.clone(),
+                        },
+                    )?;
+                    assembly_refs.insert(repository.clone(), base_oid.clone());
+                    base_oid
+                }
+                Err(error) => {
+                    append_driver_event(
+                        &command.journal_path,
+                        &DriverEvent::AssemblyCompositionFailed {
+                            repository: repository.clone(),
+                            packages,
+                            reason: format!("{error:#}"),
+                        },
+                    )?;
+                    return Ok(());
+                }
+            }
+        };
+        ensure_assembly_checkout(
+            source,
+            &assembly_root.join(composition_component(repository)),
+            &oid,
+        )?;
+    }
+
+    events = read_driver_journal(&command.journal_path)?;
+    let mut remaining_executed = events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::AssemblyCriterionExecuted {
+                package,
+                name,
+                origin,
+                ..
+            } => Some((package.clone(), name.clone(), origin.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut failed = events.iter().any(|event| {
+        matches!(event,
+        DriverEvent::AssemblyCriterionExecuted { execution, .. }
+            if !execution.exit_status().is_success())
+    });
+    for package in graph.packages() {
+        let sources = package_repository_sources(package, &command.repositories)?;
+        let refs = sources
+            .iter()
+            .map(|(name, _)| {
+                assembly_refs
+                    .get(name)
+                    .cloned()
+                    .map(|oid| (name.clone(), oid))
+                    .with_context(|| format!("assembly omitted repository `{name}`"))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let materialization = materialize_driver_state(
+            &command.journal_path,
+            &format!("assembly-{}", package.id().as_str()),
+            &sources,
+            &refs,
+        )?;
+        let paths = materialization.paths()?;
+        for (repository, checkout) in materialization.named_paths(&sources) {
+            if let Some(preparation) = command.preparations.get(&repository) {
+                let preparation_execution = shell_execution_at(preparation, &checkout, &paths)?;
+                if !preparation_execution.exit_status().is_success() {
+                    append_driver_event(
+                        &command.journal_path,
+                        &DriverEvent::AssemblyFailed {
+                            reason: format!(
+                                "assembly environment preparation failed for repository {repository}: {preparation}"
+                            ),
+                        },
+                    )?;
+                    return Ok(());
+                }
+            }
+        }
+        let current_events = read_driver_journal(&command.journal_path)?;
+        for criterion in effective_criteria(graph, package.id().as_str(), &current_events)? {
+            if let Some(position) =
+                remaining_executed
+                    .iter()
+                    .position(|(recorded_package, name, origin)| {
+                        recorded_package == package.id().as_str()
+                            && name == &criterion.name
+                            && origin == &criterion.origin
+                    })
+            {
+                remaining_executed.remove(position);
+                continue;
+            }
+            let execution = shell_execution(&criterion.command, &paths)?;
+            failed |= !execution.exit_status().is_success();
+            append_driver_event(
+                &command.journal_path,
+                &DriverEvent::AssemblyCriterionExecuted {
+                    package: package.id().as_str().to_owned(),
+                    name: criterion.name,
+                    origin: criterion.origin,
+                    execution,
+                },
+            )?;
+        }
+    }
+    if failed {
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::AssemblyFailed {
+                reason: "one or more effective criteria failed against the composed assembly"
+                    .to_owned(),
+            },
+        )
+    } else {
+        append_driver_event(&command.journal_path, &DriverEvent::AssemblyCompleted)
+    }
+}
+
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
     let initial_events = read_driver_journal(&command.journal_path)?;
     ensure_recovery_configuration(&command, &initial_events)?;
@@ -2495,6 +2923,19 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
         }
         let snapshot = derive_driver_snapshot(&graph, &events, command.override_risk_ordering)
             .context("failed to derive driver loop state")?;
+        let all_packages_complete = snapshot
+            .packages()
+            .iter()
+            .all(|(_, state)| matches!(state, pce_core::DriverPackageState::Complete));
+        if all_packages_complete
+            && matches!(
+                snapshot.assembly(),
+                DriverAssemblyState::Pending | DriverAssemblyState::Gating
+            )
+        {
+            run_driver_assembly(&graph, &command)?;
+            continue;
+        }
         let exhausted = snapshot
             .packages()
             .iter()
@@ -2655,6 +3096,11 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                 .saturating_add(u64::try_from(offset).context("ready set exceeds u64")?);
             let outcome = driver_outcome_path(&command.journal_path, package_id, issuance)?;
             fs::create_dir_all(outcome.parent().context("outcome path has no parent")?)?;
+            if command.worker_override.is_none()
+                && !ensure_driver_package_bases(&graph, &command, package_id)?
+            {
+                continue;
+            }
             let charged = charged_failure_count(&events, package_id);
             let base_brief = recovery_base_brief(&graph, package_id)?;
             let (rung_name, worker_brief) = if charged == 0 {
@@ -3857,7 +4303,11 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             RepositoryDispatchInput::parse(
                 name.clone(),
                 root.clone(),
-                graph.authored_at_ref().to_owned(),
+                command
+                    .base_refs
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| graph.authored_at_ref().to_owned()),
             )
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
