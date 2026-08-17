@@ -2681,27 +2681,18 @@ fn crashed_test_process_leaves_no_recorded_dispatch_group_alive() {
         .continuation_process_identity()
         .expect("current sidecars record continuation identity");
     let process_number = continuation.process_number().get();
-    let expected = continuation.process_start_identity();
-    let expected = format!(
-        "{} {}",
-        expected.seconds_since_unix_epoch(),
-        expected.microseconds()
-    )
-    .into_bytes();
-    let process_number_text = process_number.to_string();
-    let leaked =
-        process_start_identity(&process_number_text).as_deref() == Some(expected.as_slice());
-    if leaked {
+    let group_is_alive = unsafe { libc::kill(-(process_number as i32), 0) } == 0;
+    if group_is_alive {
         unsafe {
             libc::kill(-(process_number as i32), libc::SIGKILL);
         }
         let deadline = Instant::now() + Duration::from_secs(5);
-        while process_start_identity(&process_number_text).is_some() && Instant::now() < deadline {
+        while unsafe { libc::kill(-(process_number as i32), 0) } == 0 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
     }
     assert!(
-        !leaked,
+        !group_is_alive,
         "panicking test left recorded dispatch process group {process_number} alive"
     );
 }

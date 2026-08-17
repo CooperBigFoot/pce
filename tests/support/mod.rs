@@ -362,11 +362,19 @@ fn observe_recorded_process(
 #[cfg(target_os = "macos")]
 fn collect_harness_process_records(
     root: &Path,
-) -> Result<(Vec<RecordedProcessIdentity>, BTreeSet<u32>), String> {
+) -> Result<
+    (
+        Vec<(RecordedProcessIdentity, RecordedProcessIdentity)>,
+        BTreeSet<u32>,
+        usize,
+    ),
+    String,
+> {
     fn visit(
         directory: &Path,
-        identities: &mut Vec<RecordedProcessIdentity>,
+        identities: &mut Vec<(RecordedProcessIdentity, RecordedProcessIdentity)>,
         shim_processes: &mut BTreeSet<u32>,
+        dispatch_issuances: &mut usize,
     ) -> Result<(), String> {
         let entries = fs::read_dir(directory)
             .map_err(|error| format!("failed to read {}: {error}", directory.display()))?;
@@ -385,11 +393,19 @@ fn collect_harness_process_records(
             }
             let path = entry.path();
             if file_type.is_dir() {
-                visit(&path, identities, shim_processes)?;
+                visit(&path, identities, shim_processes, dispatch_issuances)?;
                 continue;
             }
             if !file_type.is_file() {
                 continue;
+            }
+            let file_name = path.file_name().map(OsStr::as_bytes).unwrap_or_default();
+            if file_name.ends_with(b".stderr")
+                && file_name
+                    .windows(b".dispatch-".len())
+                    .any(|window| window == b".dispatch-")
+            {
+                *dispatch_issuances += 1;
             }
             let is_sidecar = path.extension() == Some(OsStr::new("json"))
                 && path
@@ -401,7 +417,7 @@ fn collect_harness_process_records(
                 && let Ok(identity) = parse_dispatch_process_identity(&bytes)
                 && let Some(continuation) = identity.continuation_process_identity()
             {
-                identities.push(continuation);
+                identities.push((continuation, identity.child_process_identity()));
             }
             let is_shim_pid = path.file_name() == Some(OsStr::new("pid"))
                 && path.parent().and_then(Path::file_name) == Some(OsStr::new("invocation"));
@@ -418,8 +434,14 @@ fn collect_harness_process_records(
 
     let mut identities = Vec::new();
     let mut shim_processes = BTreeSet::new();
-    visit(root, &mut identities, &mut shim_processes)?;
-    Ok((identities, shim_processes))
+    let mut dispatch_issuances = 0;
+    visit(
+        root,
+        &mut identities,
+        &mut shim_processes,
+        &mut dispatch_issuances,
+    )?;
+    Ok((identities, shim_processes, dispatch_issuances))
 }
 
 #[cfg(target_os = "macos")]
@@ -457,15 +479,43 @@ fn process_exists(process_number: u32) -> Result<bool, String> {
 }
 
 #[cfg(target_os = "macos")]
+fn process_is_direct_test_child(process_number: u32) -> Result<bool, String> {
+    let pid = i32::try_from(process_number)
+        .map_err(|_| format!("process number {process_number} exceeds pid_t"))?;
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+        .map_err(|_| "proc_bsdinfo size exceeds i32".to_owned())?;
+    let observed = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::from_mut(&mut info).cast(),
+            size,
+        )
+    };
+    if observed == 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return Ok(false);
+    }
+    if observed != size || info.pbi_pid != process_number {
+        return Err(format!(
+            "failed to inspect possible agent shim process {process_number}"
+        ));
+    }
+    Ok(info.pbi_ppid == std::process::id())
+}
+
+#[cfg(target_os = "macos")]
 fn terminate_harness_dispatches(root: &Path) -> Result<(), String> {
     let publication_deadline = Instant::now() + Duration::from_secs(2);
-    let (identities, shim_processes) = loop {
+    let (identities, shim_processes, _dispatch_issuances) = loop {
         let records = collect_harness_process_records(root)?;
         let recorded_groups = records
             .0
             .iter()
-            .map(|identity| identity.process_number().get())
+            .map(|(continuation, _child)| continuation.process_number().get())
             .collect::<BTreeSet<_>>();
+        let unpublished_dispatch_exists = records.0.len() < records.2;
         let unmatched_live_shim_exists = records.1.iter().any(|process_number| {
             if !process_exists(*process_number).unwrap_or(true) {
                 return false;
@@ -476,14 +526,20 @@ fn terminate_harness_dispatches(root: &Path) -> Result<(), String> {
             let process_group = unsafe { libc::getpgid(pid) };
             process_group <= 0 || !recorded_groups.contains(&(process_group as u32))
         });
-        if !unmatched_live_shim_exists || Instant::now() >= publication_deadline {
+        if (!unpublished_dispatch_exists && !unmatched_live_shim_exists)
+            || Instant::now() >= publication_deadline
+        {
             break records;
         }
         thread::sleep(Duration::from_millis(10));
     };
+    let child_identities = identities
+        .iter()
+        .map(|(_continuation, child)| *child)
+        .collect::<Vec<_>>();
     let mut recorded_groups = BTreeSet::new();
     let mut failures = Vec::new();
-    for identity in identities {
+    for (identity, _child) in identities {
         let process_group = identity.process_number().get();
         match observe_recorded_process(identity) {
             Ok(RecordedProcessObservation::AbsentOrReused) => continue,
@@ -515,23 +571,7 @@ fn terminate_harness_dispatches(root: &Path) -> Result<(), String> {
         if !recorded_groups.insert(process_group) {
             continue;
         }
-        if unsafe { libc::kill(-pgid, libc::SIGTERM) } != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                failures.push(format!(
-                    "failed to terminate recorded dispatch process group {process_group}: {error}"
-                ));
-                continue;
-            }
-        }
-        let term_deadline = Instant::now() + Duration::from_millis(500);
-        while process_group_exists(process_group).unwrap_or(true) && Instant::now() < term_deadline
-        {
-            thread::sleep(Duration::from_millis(10));
-        }
-        if process_group_exists(process_group).unwrap_or(true)
-            && unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0
-        {
+        if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
                 failures.push(format!(
@@ -561,11 +601,17 @@ fn terminate_harness_dispatches(root: &Path) -> Result<(), String> {
         }
     }
     for process_number in shim_processes {
-        match process_exists(process_number) {
-            Ok(true) => failures.push(format!(
-                "agent shim process {process_number} is alive without a reaped recorded dispatch group"
-            )),
-            Ok(false) => {}
+        let recorded_child_is_live = child_identities
+            .iter()
+            .filter(|identity| identity.process_number().get() == process_number)
+            .any(|identity| {
+                observe_recorded_process(*identity) == Ok(RecordedProcessObservation::Exact)
+            });
+        match process_is_direct_test_child(process_number) {
+            Ok(is_direct_child) if recorded_child_is_live || is_direct_child => failures.push(
+                format!("agent shim process {process_number} is still owned by this test harness"),
+            ),
+            Ok(_) => {}
             Err(error) => failures.push(error),
         }
     }
@@ -586,9 +632,9 @@ impl Drop for CliHarness {
             );
             if thread::panicking() {
                 eprintln!("{diagnostic}");
-            } else {
-                panic!("{diagnostic}");
+                std::process::abort();
             }
+            panic!("{diagnostic}");
         }
     }
 }
