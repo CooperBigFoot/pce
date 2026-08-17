@@ -2681,8 +2681,24 @@ fn crashed_test_process_leaves_no_recorded_dispatch_group_alive() {
         .continuation_process_identity()
         .expect("current sidecars record continuation identity");
     let process_number = continuation.process_number().get();
+    let identity_is_exact = |identity: pce_core::RecordedProcessIdentity| {
+        let pid = identity.process_number().get();
+        let start = identity.process_start_identity();
+        let expected = format!(
+            "{} {}",
+            start.seconds_since_unix_epoch(),
+            start.microseconds()
+        )
+        .into_bytes();
+        process_start_identity(&pid.to_string()).as_deref() == Some(expected.as_slice())
+    };
+    let child = identity.child_process_identity();
+    let continuation_proves_group = identity_is_exact(continuation)
+        && unsafe { libc::getpgid(process_number as i32) } == process_number as i32;
+    let child_proves_group = identity_is_exact(child)
+        && unsafe { libc::getpgid(child.process_number().get() as i32) } == process_number as i32;
     let group_is_alive = unsafe { libc::kill(-(process_number as i32), 0) } == 0;
-    if group_is_alive {
+    if group_is_alive && (continuation_proves_group || child_proves_group) {
         unsafe {
             libc::kill(-(process_number as i32), libc::SIGKILL);
         }
@@ -2731,7 +2747,14 @@ fn harness_drop_reports_unrecorded_live_shim_helper() {
         &pid_path,
         "unrecorded shim PID was not readable within five seconds",
     );
-    fs::write(snapshot_path, process_number).expect("copy unrecorded shim PID");
+    let start_identity = process_start_identity(&process_number)
+        .expect("read unrecorded shim start identity before dropping harness");
+    let snapshot = format!(
+        "{} {}",
+        process_number,
+        String::from_utf8(start_identity).expect("Darwin start identity is ASCII")
+    );
+    fs::write(snapshot_path, snapshot).expect("copy unrecorded shim identity");
     drop(harness);
 }
 
@@ -2749,13 +2772,21 @@ fn unrecorded_live_shim_fails_and_names_the_test() {
         .env("PCE_HARNESS_UNRECORDED_PID", &snapshot_path)
         .output()
         .expect("run unrecorded-shim helper subprocess");
-    let process_number = fs::read_to_string(&snapshot_path)
-        .expect("read copied shim PID")
-        .trim()
+    let snapshot = fs::read_to_string(&snapshot_path).expect("read copied shim identity");
+    let mut fields = snapshot.split_whitespace();
+    let process_number = fields
+        .next()
+        .expect("copied shim PID")
         .parse::<i32>()
         .expect("parse copied shim PID");
-    unsafe {
-        libc::kill(-process_number, libc::SIGKILL);
+    let expected_start_identity = fields.collect::<Vec<_>>().join(" ").into_bytes();
+    let exact_group_leader = process_start_identity(&process_number.to_string()).as_deref()
+        == Some(expected_start_identity.as_slice())
+        && unsafe { libc::getpgid(process_number) } == process_number;
+    if exact_group_leader {
+        unsafe {
+            libc::kill(-process_number, libc::SIGKILL);
+        }
     }
     assert!(
         !output.status.success(),
