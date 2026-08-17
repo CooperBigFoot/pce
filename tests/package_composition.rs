@@ -130,6 +130,8 @@ fi
     assert_eq!(status["assembly"]["state"], "complete");
     let events = fs::read_to_string(&journal).expect("journal");
     assert!(events.contains("package-base-composed"));
+    assert!(!events.contains("package-join-conflicted"));
+    assert!(!events.contains("join-criterion-executed"));
     assert_eq!(events.matches("assembly-criterion-executed").count(), 3);
     assert!(events.contains("assembly-completed"));
     let worktrees = fs::read_to_string(temp.path().join("herdr-worktrees")).expect("herdr log");
@@ -161,7 +163,7 @@ fi
 }
 
 #[test]
-fn conflicting_dependency_composition_is_terminal_without_dispatch_or_recovery_charge() {
+fn conflicting_dependency_composition_dispatches_owner_and_reproves_parents() {
     let temp = tempdir().expect("tempdir");
     let repository = temp.path().join("repo");
     fs::create_dir(&repository).expect("repository");
@@ -216,13 +218,18 @@ fi
         &bin.join("prime-agent"),
         r#"#!/bin/sh
 set -eu
-cat >/dev/null
+cat > "$HOME/last-brief"
 if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
   branch=$(git branch --show-current)
   case "$branch" in
     */A/*) printf 'A\n' > shared.txt;;
     */B/*) printf 'B\n' > shared.txt;;
-    */C/*) printf C > "$HOME/unexpected-c-dispatch"; exit 81;;
+    */C/*)
+      git diff --name-only --diff-filter=U | grep -qx shared.txt
+      grep -q 'shared.txt' "$HOME/last-brief"
+      printf 'A\nB\n' > shared.txt
+      git add shared.txt
+      ;;
     *) exit 80;;
   esac
   git add .; git commit -m implementation >/dev/null
@@ -260,47 +267,58 @@ fi
     );
 
     let status: Value = serde_json::from_slice(&output.stdout).expect("status");
-    assert_eq!(status["outcome"], "blocked");
-    let c = status["packages"]
-        .as_array()
-        .expect("packages")
-        .iter()
-        .find(|entry| entry[0] == "C")
-        .expect("C package");
-    assert_eq!(c[1]["state"], "composition-failed");
-    let c_budget = status["recovery"]
-        .as_array()
-        .expect("recovery")
-        .iter()
-        .find(|entry| entry[0] == "C")
-        .expect("C recovery");
-    assert_eq!(c_budget[1]["retry_remaining"], 1);
-    assert_eq!(c_budget[1]["local_patch_remaining"], 1);
+    assert_eq!(
+        status["outcome"],
+        "finished",
+        "{}",
+        fs::read_to_string(&journal).expect("journal")
+    );
 
     let events = journal_events(&journal);
-    let failure = events
+    let conflict = events
         .iter()
-        .find(|event| event["event"] == "package-composition-failed")
-        .expect("typed composition failure event");
-    assert_eq!(failure["package"], "C");
-    assert_eq!(failure["repository"], "repo");
+        .find(|event| event["event"] == "package-join-conflicted")
+        .expect("typed conflicted join event");
+    assert_eq!(conflict["package"], "C");
+    assert_eq!(conflict["repository"], "repo");
+    assert!(
+        conflict["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("shared.txt")
+    );
+    assert_eq!(conflict["conflicted_paths"], json!(["shared.txt"]));
     assert_eq!(
-        failure["dependencies"]
+        conflict["dependencies"]
             .as_array()
-            .expect("dependencies")
+            .expect("parent refs")
             .len(),
         2
     );
     assert!(
-        !events
+        events
             .iter()
             .any(|event| { event["event"] == "worker-dispatched" && event["package"] == "C" })
     );
+    let parent_proofs = events
+        .iter()
+        .filter(|event| event["event"] == "join-criterion-executed")
+        .collect::<Vec<_>>();
+    assert_eq!(parent_proofs.len(), 2);
     assert!(
-        !events.iter().any(|event| {
-            event["event"] == "recovery-rung-attempted" && event["package"] == "C"
-        })
+        parent_proofs
+            .iter()
+            .all(|event| { event["execution"]["exit_status"]["code"] == 0 })
     );
+    let last_parent_proof = events
+        .iter()
+        .rposition(|event| event["event"] == "join-criterion-executed")
+        .expect("parent proof");
+    let dependent_criterion = events
+        .iter()
+        .position(|event| event["event"] == "criterion-executed" && event["package"] == "C")
+        .expect("dependent criterion");
+    assert!(last_parent_proof < dependent_criterion);
     assert!(!temp.path().join("unexpected-c-dispatch").exists());
 }
 

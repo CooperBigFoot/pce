@@ -264,6 +264,7 @@ struct PackageDispatchCommand {
     required_artifact_path: AbsoluteRequiredArtifactPath,
     repositories: Vec<(String, PathBuf)>,
     base_refs: BTreeMap<String, String>,
+    conflicted_joins: BTreeMap<String, (CompositionInput, Vec<String>)>,
     environment: BTreeMap<String, String>,
     worker_arguments: Vec<String>,
 }
@@ -1586,6 +1587,7 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
         required_artifact_path,
         repositories,
         base_refs: BTreeMap::new(),
+        conflicted_joins: BTreeMap::new(),
         environment,
         worker_arguments,
     }))
@@ -2024,6 +2026,7 @@ fn run_composed_driver_gate(
             .cloned()
             .collect(),
         base_refs: BTreeMap::new(),
+        conflicted_joins: BTreeMap::new(),
         environment: route_environment()?,
         worker_arguments,
     })?;
@@ -2112,6 +2115,110 @@ fn run_composed_driver_gate(
     remove_clean_driver_worktrees(command, graph, package_id, issuance)
 }
 
+fn run_join_parent_criteria(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    package_id: &str,
+    issuance: u64,
+) -> Result<bool> {
+    let events = read_driver_journal(&command.journal_path)?;
+    let conflicted_repositories = events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::PackageJoinConflicted {
+                package,
+                repository,
+                ..
+            } if package == package_id => Some(repository.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if conflicted_repositories.is_empty() {
+        return Ok(true);
+    }
+    let dependent = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == package_id)
+        .with_context(|| format!("package {package_id} is absent from graph"))?;
+    let worktrees = driver_package_worktrees(command, graph, package_id, issuance)?;
+    let mut failed = Vec::new();
+    for dependency in dependent
+        .depends_on()
+        .iter()
+        .filter(|dependency| dependency.kind().is_binding())
+    {
+        let parent = graph
+            .packages()
+            .iter()
+            .find(|candidate| candidate.id() == dependency.id())
+            .with_context(|| format!("dependency {} is absent", dependency.id().as_str()))?;
+        if !parent
+            .repositories()
+            .iter()
+            .any(|repository| conflicted_repositories.contains(repository.as_str()))
+        {
+            continue;
+        }
+        let sources = worktrees
+            .iter()
+            .filter(|worktree| {
+                parent
+                    .repositories()
+                    .contains(&worktree.repository().to_owned())
+            })
+            .map(|worktree| {
+                (
+                    worktree.repository().to_owned(),
+                    worktree.path().to_path_buf(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let refs = sources
+            .iter()
+            .map(|(repository, path)| Ok((repository.clone(), git_oid(path, "HEAD")?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let materialization = materialize_driver_state(
+            &command.journal_path,
+            &format!("join-{package_id}-{}-{issuance}", parent.id().as_str()),
+            &sources,
+            &refs,
+        )?;
+        let paths = materialization.paths()?;
+        for criterion in effective_criteria(graph, parent.id().as_str(), &events)? {
+            let execution = shell_execution(&criterion.command, &paths)?;
+            if !execution.exit_status().is_success() {
+                failed.push(format!("{}:{}", parent.id().as_str(), criterion.name));
+            }
+            append_driver_event(
+                &command.journal_path,
+                &DriverEvent::JoinCriterionExecuted {
+                    package: package_id.to_owned(),
+                    parent: parent.id().as_str().to_owned(),
+                    name: criterion.name,
+                    origin: criterion.origin,
+                    execution,
+                },
+            )?;
+        }
+    }
+    if failed.is_empty() {
+        Ok(true)
+    } else {
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::PackageFailed {
+                package: package_id.to_owned(),
+                reason: format!(
+                    "conflicted join broke parent criteria: {}",
+                    failed.join(", ")
+                ),
+            },
+        )?;
+        Ok(false)
+    }
+}
+
 fn observe_driver_worker_outcome(
     graph: &WorkPackageGraph,
     command: &DriverRunCommand,
@@ -2146,6 +2253,10 @@ fn observe_driver_worker_outcome(
                         *path = worktree.path().to_path_buf();
                     }
                 }
+            }
+            if !run_join_parent_criteria(graph, command, &package_id, issuance)? {
+                park_if_recovery_exhausted(command, &package_id)?;
+                return Ok(true);
             }
             let _ = execute_driver_criteria(DriverCriteriaCommand {
                 graph_path: command.graph_path.clone(),
@@ -2271,6 +2382,12 @@ fn driver_package_base_refs(
                 repository,
                 base_oid,
                 ..
+            }
+            | DriverEvent::PackageJoinConflicted {
+                package,
+                repository,
+                base_oid,
+                ..
             } if package == package_id => Some((repository.clone(), base_oid.clone())),
             _ => None,
         })
@@ -2287,15 +2404,67 @@ fn composition_component(value: &str) -> String {
         .collect()
 }
 
+#[derive(Debug)]
+enum GitComposition {
+    Clean {
+        base_oid: String,
+    },
+    Conflicted {
+        base_oid: String,
+        conflicting_input: CompositionInput,
+        remaining_inputs: Vec<CompositionInput>,
+        conflicted_paths: Vec<String>,
+        reason: String,
+    },
+}
+
+fn maximal_composition_inputs(
+    source: &Path,
+    inputs: Vec<CompositionInput>,
+) -> Result<Vec<CompositionInput>> {
+    let mut maximal = Vec::new();
+    for (index, input) in inputs.iter().enumerate() {
+        let mut ancestor = false;
+        for (other_index, other) in inputs.iter().enumerate() {
+            if index == other_index {
+                continue;
+            }
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(source)
+                .args(["merge-base", "--is-ancestor", &input.oid, &other.oid])
+                .status()?;
+            match status.code() {
+                Some(0) => {
+                    ancestor = true;
+                    break;
+                }
+                Some(1) => {}
+                _ => bail!(
+                    "failed to compare composition commits {} and {}",
+                    input.oid,
+                    other.oid
+                ),
+            }
+        }
+        if !ancestor {
+            maximal.push(input.clone());
+        }
+    }
+    Ok(maximal)
+}
+
 fn compose_git_commits(
     journal: &Path,
     label: &str,
     source: &Path,
     authored_base: &str,
     inputs: &[CompositionInput],
-) -> Result<String> {
+) -> Result<GitComposition> {
     if inputs.is_empty() {
-        return git_oid(source, authored_base);
+        return Ok(GitComposition::Clean {
+            base_oid: git_oid(source, authored_base)?,
+        });
     }
     let root = journal
         .parent()
@@ -2325,7 +2494,7 @@ fn compose_git_commits(
         );
     }
     let result = (|| {
-        for input in inputs {
+        for (index, input) in inputs.iter().enumerate() {
             let merge = std::process::Command::new("git")
                 .arg("-C")
                 .arg(&worktree)
@@ -2343,15 +2512,68 @@ fn compose_git_commits(
                 .arg(&input.oid)
                 .output()?;
             if !merge.status.success() {
-                bail!(
-                    "failed to combine package {} commit {}: {}",
-                    input.package,
-                    input.oid,
-                    String::from_utf8_lossy(&merge.stderr).trim()
-                );
+                let paths = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&worktree)
+                    .args(["diff", "--name-only", "--diff-filter=U"])
+                    .output()?;
+                if !paths.status.success() {
+                    bail!(
+                        "failed to inspect unsuccessful merge of package {} commit {}: {}",
+                        input.package,
+                        input.oid,
+                        String::from_utf8_lossy(&paths.stderr).trim()
+                    );
+                }
+                let conflicted_paths = String::from_utf8_lossy(&paths.stdout)
+                    .lines()
+                    .map(str::to_owned)
+                    .filter(|path| !path.is_empty())
+                    .collect::<Vec<_>>();
+                let stdout = String::from_utf8_lossy(&merge.stdout);
+                let stderr = String::from_utf8_lossy(&merge.stderr);
+                let reason = [stdout.trim(), stderr.trim()]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(
+                        "
+",
+                    );
+                if conflicted_paths.is_empty() {
+                    bail!(
+                        "failed to combine package {} commit {}: {}",
+                        input.package,
+                        input.oid,
+                        reason
+                    );
+                }
+                let base_oid = git_oid(&worktree, "HEAD")?;
+                let abort = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&worktree)
+                    .args(["merge", "--abort"])
+                    .output()?;
+                if !abort.status.success() {
+                    bail!(
+                        "failed to abort inspected conflict for package {} commit {}: {}",
+                        input.package,
+                        input.oid,
+                        String::from_utf8_lossy(&abort.stderr).trim()
+                    );
+                }
+                return Ok(GitComposition::Conflicted {
+                    base_oid,
+                    conflicting_input: input.clone(),
+                    remaining_inputs: inputs[index.saturating_add(1)..].to_vec(),
+                    conflicted_paths,
+                    reason,
+                });
             }
         }
-        git_oid(&worktree, "HEAD")
+        Ok(GitComposition::Clean {
+            base_oid: git_oid(&worktree, "HEAD")?,
+        })
     })();
     let removal = std::process::Command::new("git")
         .arg("-C")
@@ -2372,6 +2594,7 @@ fn ensure_driver_package_bases(
     graph: &WorkPackageGraph,
     command: &DriverRunCommand,
     package_id: &str,
+    issuance: u64,
 ) -> Result<bool> {
     let package = graph
         .packages()
@@ -2383,6 +2606,7 @@ fn ensure_driver_package_bases(
         if events.iter().any(|event| {
             matches!(event,
             DriverEvent::PackageBaseComposed { package, repository: recorded, .. }
+                | DriverEvent::PackageJoinConflicted { package, repository: recorded, .. }
                 if package == package_id && recorded == repository)
         }) {
             continue;
@@ -2423,7 +2647,7 @@ fn ensure_driver_package_bases(
             graph.authored_at_ref(),
             &dependencies,
         ) {
-            Ok(base_oid) => append_driver_event(
+            Ok(GitComposition::Clean { base_oid }) => append_driver_event(
                 &command.journal_path,
                 &DriverEvent::PackageBaseComposed {
                     package: package_id.to_owned(),
@@ -2432,15 +2656,48 @@ fn ensure_driver_package_bases(
                     dependencies,
                 },
             )?,
+            Ok(GitComposition::Conflicted {
+                base_oid,
+                conflicting_input,
+                remaining_inputs,
+                conflicted_paths,
+                reason,
+            }) => append_driver_event(
+                &command.journal_path,
+                &DriverEvent::PackageJoinConflicted {
+                    package: package_id.to_owned(),
+                    repository: repository.clone(),
+                    base_oid,
+                    dependencies,
+                    conflicting_input,
+                    remaining_inputs,
+                    conflicted_paths,
+                    reason,
+                },
+            )?,
             Err(source) => {
+                let reason = format!("{source:#}");
                 append_driver_event(
                     &command.journal_path,
                     &DriverEvent::PackageCompositionFailed {
                         package: package_id.to_owned(),
                         repository: repository.clone(),
                         dependencies,
-                        reason: format!("{source:#}"),
+                        reason: reason.clone(),
                     },
+                )?;
+                append_driver_event(
+                    &command.journal_path,
+                    &DriverEvent::WorkerDispatched {
+                        package: package_id.to_owned(),
+                        issuance,
+                    },
+                )?;
+                append_worker_environment_outcome(
+                    command,
+                    package_id.to_owned(),
+                    issuance,
+                    format!("package composition infrastructure failed in {repository}: {reason}"),
                 )?;
                 return Ok(false);
             }
@@ -2513,8 +2770,72 @@ fn compose_driver_worker_brief(
     let criteria =
         parse_acceptance_criteria(&vision).context("failed to parse acceptance criteria")?;
     let worktrees = driver_package_worktrees(command, graph, package_id, issuance)?;
-    let brief = compose_package_worker_brief(&goal, &criteria, graph, package_id, &worktrees)
+    let mut brief = compose_package_worker_brief(&goal, &criteria, graph, package_id, &worktrees)
         .context("failed to compose driver-owned worker brief")?;
+    let events = read_driver_journal(&command.journal_path)?;
+    let conflicts = events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::PackageJoinConflicted {
+                package,
+                repository,
+                dependencies,
+                conflicting_input,
+                remaining_inputs,
+                conflicted_paths,
+                reason,
+                ..
+            } if package == package_id => Some(json!({
+                "repository": repository,
+                "dependencies": dependencies,
+                "conflicting_input": conflicting_input,
+                "remaining_inputs": remaining_inputs,
+                "conflicted_paths": conflicted_paths,
+                "reason": reason,
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !conflicts.is_empty() {
+        brief.push_str("
+
+## Conflicted join: resolve before dependent work
+
+This worktree intentionally starts with an unresolved dependency merge. Resolve it first, retain every parent's guarantee, commit the merge, then perform this package's authored work. After completion, the driver will re-run every parent criterion before judging this package.
+");
+        for conflict in conflicts {
+            brief.push_str(
+                "
+<!-- pce-conflicted-join:",
+            );
+            brief.push_str(&serde_json::to_string(&conflict)?);
+            brief.push_str(
+                " -->
+",
+            );
+            brief.push_str(&format!(
+                "
+Git conflict evidence:
+```text
+{}
+```
+",
+                conflict["reason"]
+                    .as_str()
+                    .unwrap_or("conflict details unavailable")
+            ));
+            brief.push_str(&format!(
+                "Conflicted paths: `{}`. Parent refs: `{}`.
+",
+                conflict["conflicted_paths"], conflict["dependencies"]
+            ));
+            let remaining = conflict["remaining_inputs"].as_array().map_or(0, Vec::len);
+            if remaining > 0 {
+                brief.push_str("After committing this resolution, merge each remaining parent ref listed in the machine record above, resolving any further conflict before dependent work.
+");
+            }
+        }
+    }
     Ok(local_patch_evidence.map_or(brief.clone(), |evidence| {
         compose_local_patch_brief(&brief, evidence)
     }))
@@ -2629,6 +2950,21 @@ fn issue_driver_package_dispatch(
         required_artifact_path: AbsoluteRequiredArtifactPath::parse(outcome_path)?,
         repositories,
         base_refs: driver_package_base_refs(command, package_id)?,
+        conflicted_joins: read_driver_journal(&command.journal_path)?
+            .into_iter()
+            .filter_map(|event| match event {
+                DriverEvent::PackageJoinConflicted {
+                    package,
+                    repository,
+                    conflicting_input,
+                    conflicted_paths,
+                    ..
+                } if package == package_id => {
+                    Some((repository, (conflicting_input, conflicted_paths)))
+                }
+                _ => None,
+            })
+            .collect(),
         environment: route_environment()?,
         worker_arguments,
     })?;
@@ -2755,6 +3091,121 @@ fn ensure_assembly_checkout(source: &Path, path: &Path, oid: &str) -> Result<()>
     Ok(())
 }
 
+fn resolve_assembly_conflict(
+    command: &DriverRunCommand,
+    repository: &str,
+    source: &Path,
+    checkout: &Path,
+    base_oid: &str,
+    conflicting_input: &CompositionInput,
+    conflicted_paths: &[String],
+    reason: &str,
+    packages: &[CompositionInput],
+) -> Result<String> {
+    ensure_assembly_checkout(source, checkout, base_oid)?;
+    let merge = std::process::Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["merge", "--no-edit", "--no-ff"])
+        .arg(&conflicting_input.oid)
+        .output()?;
+    let actual_paths = std::process::Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["diff", "--name-only", "--diff-filter=U"])
+        .output()?;
+    let actual_paths = String::from_utf8_lossy(&actual_paths.stdout)
+        .lines()
+        .map(str::to_owned)
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    if merge.status.success() || actual_paths != conflicted_paths {
+        bail!(
+            "assembly conflict for repository {repository} did not reproduce: expected {:?}, observed {:?}",
+            conflicted_paths,
+            actual_paths
+        );
+    }
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::AssemblyResolutionDispatched {
+            repository: repository.to_owned(),
+        },
+    )?;
+    let prompt = format!(
+        "Resolve this conflicted assembly join before any other work. Repository: {repository}. Conflicted paths: {conflicted_paths:?}. Package refs: {packages:?}. Git evidence:
+{reason}
+Retain every package guarantee, resolve all unmerged entries, and commit the merge. Do not implement unrelated changes."
+    );
+    let mut child = std::process::Command::new("prime-agent")
+        .arg("-p")
+        .current_dir(checkout)
+        .env("PCE_ASSEMBLY_RESOLUTION", repository)
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("failed to spawn assembly resolution worker")?;
+    child
+        .stdin
+        .as_mut()
+        .context("assembly resolution worker stdin unavailable")?
+        .write_all(prompt.as_bytes())?;
+    drop(child.stdin.take());
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("assembly resolution worker exited with {status}");
+    }
+    let unresolved = std::process::Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["diff", "--name-only", "--diff-filter=U"])
+        .output()?;
+    if !unresolved.stdout.is_empty() {
+        bail!(
+            "assembly resolution worker left unmerged paths: {}",
+            String::from_utf8_lossy(&unresolved.stdout).trim()
+        );
+    }
+    let oid = git_oid(checkout, "HEAD")?;
+    if oid == base_oid {
+        let add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args(["add", "-A"])
+            .output()?;
+        if !add.status.success() {
+            bail!("failed to stage assembly resolution");
+        }
+        let commit = std::process::Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args([
+                "-c",
+                "user.name=PCE assembly resolution",
+                "-c",
+                "user.email=pce@localhost",
+                "commit",
+                "-m",
+                "Resolve assembly join",
+            ])
+            .output()?;
+        if !commit.status.success() {
+            bail!(
+                "assembly resolution worker produced no committable resolution: {}",
+                String::from_utf8_lossy(&commit.stderr).trim()
+            );
+        }
+    }
+    let base_oid = git_oid(checkout, "HEAD")?;
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::AssemblyResolutionDone {
+            repository: repository.to_owned(),
+            base_oid: base_oid.clone(),
+        },
+    )?;
+    Ok(base_oid)
+}
+
 fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> Result<()> {
     let mut events = read_driver_journal(&command.journal_path)?;
     let assembly_root = command
@@ -2798,6 +3249,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                 oid,
             });
         }
+        let packages = maximal_composition_inputs(source, packages)?;
         let oid = if let Some(oid) = assembly_refs.get(repository) {
             oid.clone()
         } else {
@@ -2808,7 +3260,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                 graph.authored_at_ref(),
                 &packages,
             ) {
-                Ok(base_oid) => {
+                Ok(GitComposition::Clean { base_oid }) => {
                     append_driver_event(
                         &command.journal_path,
                         &DriverEvent::AssemblyRepositoryComposed {
@@ -2819,6 +3271,69 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                     )?;
                     assembly_refs.insert(repository.clone(), base_oid.clone());
                     base_oid
+                }
+                Ok(GitComposition::Conflicted {
+                    base_oid,
+                    conflicting_input,
+                    remaining_inputs,
+                    conflicted_paths,
+                    reason,
+                }) => {
+                    append_driver_event(
+                        &command.journal_path,
+                        &DriverEvent::AssemblyJoinConflicted {
+                            repository: repository.clone(),
+                            packages: packages.clone(),
+                            base_oid: base_oid.clone(),
+                            conflicting_input: conflicting_input.clone(),
+                            remaining_inputs: remaining_inputs.clone(),
+                            conflicted_paths: conflicted_paths.clone(),
+                            reason: reason.clone(),
+                        },
+                    )?;
+                    let checkout = assembly_root.join(composition_component(repository));
+                    let mut resolved_oid = resolve_assembly_conflict(
+                        command,
+                        repository,
+                        source,
+                        &checkout,
+                        &base_oid,
+                        &conflicting_input,
+                        &conflicted_paths,
+                        &reason,
+                        &packages,
+                    )?;
+                    if !remaining_inputs.is_empty() {
+                        match compose_git_commits(
+                            &command.journal_path,
+                            &format!("assembly-{repository}-remaining"),
+                            source,
+                            &resolved_oid,
+                            &remaining_inputs,
+                        )? {
+                            GitComposition::Clean { base_oid } => resolved_oid = base_oid,
+                            GitComposition::Conflicted {
+                                conflicted_paths,
+                                reason,
+                                ..
+                            } => bail!(
+                                "assembly resolution exposed a further conflict in {}: {}; {}",
+                                repository,
+                                conflicted_paths.join(", "),
+                                reason
+                            ),
+                        }
+                    }
+                    append_driver_event(
+                        &command.journal_path,
+                        &DriverEvent::AssemblyRepositoryComposed {
+                            repository: repository.clone(),
+                            base_oid: resolved_oid.clone(),
+                            packages: packages.clone(),
+                        },
+                    )?;
+                    assembly_refs.insert(repository.clone(), resolved_oid.clone());
+                    resolved_oid
                 }
                 Err(error) => {
                     append_driver_event(
@@ -3116,7 +3631,7 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
             let outcome = driver_outcome_path(&command.journal_path, package_id, issuance)?;
             fs::create_dir_all(outcome.parent().context("outcome path has no parent")?)?;
             if command.worker_override.is_none()
-                && !ensure_driver_package_bases(&graph, &command, package_id)?
+                && !ensure_driver_package_bases(&graph, &command, package_id, issuance)?
             {
                 continue;
             }
@@ -4399,6 +4914,45 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             "path": worktree.path(),
             "response": response,
         }));
+    }
+    for worktree in plan.worktrees() {
+        let Some((input, expected_paths)) = command.conflicted_joins.get(worktree.repository())
+        else {
+            continue;
+        };
+        let merge = std::process::Command::new("git")
+            .arg("-C")
+            .arg(worktree.path())
+            .args(["merge", "--no-edit", "--no-ff"])
+            .arg(&input.oid)
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to prepare conflicted join in repository {}",
+                    worktree.repository()
+                )
+            })?;
+        let paths = std::process::Command::new("git")
+            .arg("-C")
+            .arg(worktree.path())
+            .args(["diff", "--name-only", "--diff-filter=U"])
+            .output()?;
+        let actual_paths = String::from_utf8_lossy(&paths.stdout)
+            .lines()
+            .map(str::to_owned)
+            .filter(|path| !path.is_empty())
+            .collect::<Vec<_>>();
+        if merge.status.success() || actual_paths != *expected_paths {
+            record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+            bail!(
+                "conflicted join for repository {} did not reproduce: expected {:?}, observed {:?}; stdout: {}; stderr: {}",
+                worktree.repository(),
+                expected_paths,
+                actual_paths,
+                String::from_utf8_lossy(&merge.stdout).trim(),
+                String::from_utf8_lossy(&merge.stderr).trim()
+            );
+        }
     }
     let location = match first_location.context("package dispatch composed no worktree") {
         Ok(location) => location,
