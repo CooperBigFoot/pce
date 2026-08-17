@@ -217,8 +217,9 @@ pub use workflow_coverage::{
 };
 
 pub use work_package_graph::{
-    ClassifiedWorkPackage, DependencyKind, ReadyWorkPackages, RiskOrdering, WorkPackage,
-    WorkPackageClassification, WorkPackageCriterion, WorkPackageDependency, WorkPackageGraph,
-    WorkPackageGraphError, WorkPackageId, WorkPackageMergeObservation, parse_work_package_graph,
+    ClassifiedWorkPackage, CriteriaInvarianceViolation, DependencyKind, ReadyWorkPackages,
+    RiskOrdering, WorkPackage, WorkPackageClassification, WorkPackageCriterion,
+    WorkPackageDependency, WorkPackageGraph, WorkPackageGraphError, WorkPackageId,
+    WorkPackageMergeObservation, criteria_invariance_violation, parse_work_package_graph,
     ready_work_packages, unchanged_package_ids,
 };
