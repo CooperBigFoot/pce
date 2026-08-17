@@ -242,7 +242,18 @@ pub enum DriverEvent {
         base_oid: String,
         dependencies: Vec<CompositionInput>,
     },
-    /// The dependencies for one package repository could not be composed.
+    /// A textual merge conflict became the dependent worker's starting condition.
+    PackageJoinConflicted {
+        package: String,
+        repository: String,
+        base_oid: String,
+        dependencies: Vec<CompositionInput>,
+        conflicting_input: CompositionInput,
+        remaining_inputs: Vec<CompositionInput>,
+        conflicted_paths: Vec<String>,
+        reason: String,
+    },
+    /// An infrastructure fault prevented dependency composition from producing a worker base.
     PackageCompositionFailed {
         package: String,
         repository: String,
@@ -302,6 +313,14 @@ pub enum DriverEvent {
         outcome: EnvironmentPreparationOutcome,
         execution: CriterionExecution,
     },
+    /// One parent criterion was re-executed after the dependent worker resolved a join.
+    JoinCriterionExecuted {
+        package: String,
+        parent: String,
+        name: String,
+        origin: CriterionOrigin,
+        execution: CriterionExecution,
+    },
     /// One authored or amended criterion was executed.
     CriterionExecuted {
         package: String,
@@ -341,7 +360,24 @@ pub enum DriverEvent {
         base_oid: String,
         packages: Vec<CompositionInput>,
     },
-    /// Completed package commits could not be composed in one assembly repository.
+    /// A textual assembly merge conflict was assigned to a resolution worker.
+    AssemblyJoinConflicted {
+        repository: String,
+        packages: Vec<CompositionInput>,
+        base_oid: String,
+        conflicting_input: CompositionInput,
+        remaining_inputs: Vec<CompositionInput>,
+        conflicted_paths: Vec<String>,
+        reason: String,
+    },
+    /// The assembly conflict worker was started without synthesizing a graph package.
+    AssemblyResolutionDispatched { repository: String },
+    /// The assembly conflict worker resolved and committed the join.
+    AssemblyResolutionDone {
+        repository: String,
+        base_oid: String,
+    },
+    /// Completed package commits could not be composed because of infrastructure failure.
     AssemblyCompositionFailed {
         repository: String,
         packages: Vec<CompositionInput>,
@@ -619,7 +655,6 @@ pub fn derive_driver_snapshot(
             state,
             DriverPackageState::Complete
                 | DriverPackageState::Failed { .. }
-                | DriverPackageState::CompositionFailed { .. }
                 | DriverPackageState::EnvironmentPreparationFailed { .. }
                 | DriverPackageState::EnvironmentBlocked { .. }
                 | DriverPackageState::Parked { .. }
@@ -684,6 +719,20 @@ pub fn derive_driver_snapshot(
                     return Err(PackageDriverError::AssemblyEventAfterTerminal);
                 }
                 assembly = DriverAssemblyState::Gating;
+                continue;
+            }
+            DriverEvent::AssemblyJoinConflicted { .. }
+            | DriverEvent::AssemblyResolutionDispatched { .. }
+            | DriverEvent::AssemblyResolutionDone { .. } => {
+                if !all_packages_complete() {
+                    return Err(PackageDriverError::AssemblyBeforePackagesComplete);
+                }
+                if matches!(
+                    assembly,
+                    DriverAssemblyState::Complete | DriverAssemblyState::Failed { .. }
+                ) {
+                    return Err(PackageDriverError::AssemblyEventAfterTerminal);
+                }
                 continue;
             }
             DriverEvent::AssemblyCompositionFailed { reason, .. } => {
@@ -766,6 +815,7 @@ pub fn derive_driver_snapshot(
             DriverEvent::PackageParkOverruled { package, .. }
             | DriverEvent::RecoveryRungAttempted { package, .. }
             | DriverEvent::PackageBaseComposed { package, .. }
+            | DriverEvent::PackageJoinConflicted { package, .. }
             | DriverEvent::PackageCompositionFailed { package, .. }
             | DriverEvent::WorkerEnvironmentFailed { package, .. }
             | DriverEvent::PackageEnvironmentBlocked { package, .. }
@@ -780,6 +830,7 @@ pub fn derive_driver_snapshot(
             | DriverEvent::WorkerFailed { package, .. }
             | DriverEvent::PackageParked { package, .. }
             | DriverEvent::EnvironmentPreparationExecuted { package, .. }
+            | DriverEvent::JoinCriterionExecuted { package, .. }
             | DriverEvent::CriterionExecuted { package, .. }
             | DriverEvent::FindingRejected { package, .. }
             | DriverEvent::FindingReplayed { package, .. }
@@ -787,6 +838,9 @@ pub fn derive_driver_snapshot(
             | DriverEvent::PackageCompleted { package }
             | DriverEvent::PackageFailed { package, .. } => package,
             DriverEvent::AssemblyRepositoryComposed { .. }
+            | DriverEvent::AssemblyJoinConflicted { .. }
+            | DriverEvent::AssemblyResolutionDispatched { .. }
+            | DriverEvent::AssemblyResolutionDone { .. }
             | DriverEvent::AssemblyCompositionFailed { .. }
             | DriverEvent::AssemblyCriterionExecuted { .. }
             | DriverEvent::AssemblyCompleted
@@ -830,25 +884,19 @@ pub fn derive_driver_snapshot(
                 consumed_overrules.insert(package.clone());
                 *state = DriverPackageState::Pending;
             }
-            DriverEvent::PackageBaseComposed { .. } => {
+            DriverEvent::PackageBaseComposed { .. } | DriverEvent::PackageJoinConflicted { .. } => {
                 if !matches!(state, DriverPackageState::Pending) {
                     return Err(PackageDriverError::EventAfterTerminal {
                         package: package.clone(),
                     });
                 }
             }
-            DriverEvent::PackageCompositionFailed {
-                repository, reason, ..
-            } => {
+            DriverEvent::PackageCompositionFailed { .. } => {
                 if !matches!(state, DriverPackageState::Pending) {
                     return Err(PackageDriverError::EventAfterTerminal {
                         package: package.clone(),
                     });
                 }
-                *state = DriverPackageState::CompositionFailed {
-                    repository: repository.clone(),
-                    reason: reason.clone(),
-                };
             }
             DriverEvent::RecoveryRungAttempted { .. } => {
                 if !matches!(state, DriverPackageState::Pending) {
@@ -1034,7 +1082,9 @@ pub fn derive_driver_snapshot(
                     };
                 }
             }
-            DriverEvent::CriterionExecuted { .. } | DriverEvent::GateFinished { .. } => {
+            DriverEvent::JoinCriterionExecuted { .. }
+            | DriverEvent::CriterionExecuted { .. }
+            | DriverEvent::GateFinished { .. } => {
                 if !matches!(state, DriverPackageState::Judging { .. }) {
                     return Err(PackageDriverError::EventAfterTerminal {
                         package: package.clone(),
@@ -1117,6 +1167,9 @@ pub fn derive_driver_snapshot(
                 }
             }
             DriverEvent::AssemblyRepositoryComposed { .. }
+            | DriverEvent::AssemblyJoinConflicted { .. }
+            | DriverEvent::AssemblyResolutionDispatched { .. }
+            | DriverEvent::AssemblyResolutionDone { .. }
             | DriverEvent::AssemblyCompositionFailed { .. }
             | DriverEvent::AssemblyCriterionExecuted { .. }
             | DriverEvent::AssemblyCompleted
@@ -1350,6 +1403,23 @@ pub fn charged_failure_count(events: &[DriverEvent], package_id: &str) -> usize 
         .count()
 }
 
+fn failed_criterion_evidence(
+    criterion: String,
+    execution: &CriterionExecution,
+) -> Option<RecoveryCriterionEvidence> {
+    let exit_status = match execution.exit_status() {
+        CommandExitStatus::Exited { code } => format!("exited {code}"),
+        CommandExitStatus::Signaled { signal } => format!("signaled {signal}"),
+    };
+    Some(RecoveryCriterionEvidence {
+        criterion,
+        command: execution.command().to_owned(),
+        exit_status,
+        stdout: execution.stdout().to_owned(),
+        stderr: execution.stderr().to_owned(),
+    })
+}
+
 /// Return the most recent failed criterion executions for a package.
 pub fn latest_criterion_failure_evidence(
     events: &[DriverEvent],
@@ -1372,17 +1442,16 @@ pub fn latest_criterion_failure_evidence(
                 execution,
                 ..
             } if package == package_id && !execution.exit_status().is_success() => {
-                let exit_status = match execution.exit_status() {
-                    CommandExitStatus::Exited { code } => format!("exited {code}"),
-                    CommandExitStatus::Signaled { signal } => format!("signaled {signal}"),
-                };
-                Some(RecoveryCriterionEvidence {
-                    criterion: name.clone(),
-                    command: execution.command().to_owned(),
-                    exit_status,
-                    stdout: execution.stdout().to_owned(),
-                    stderr: execution.stderr().to_owned(),
-                })
+                failed_criterion_evidence(name.clone(), execution)
+            }
+            DriverEvent::JoinCriterionExecuted {
+                package,
+                parent,
+                name,
+                execution,
+                ..
+            } if package == package_id && !execution.exit_status().is_success() => {
+                failed_criterion_evidence(format!("parent:{parent}:{name}"), execution)
             }
             _ => None,
         })
@@ -1796,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn package_composition_events_are_typed_terminal_and_uncharged() {
+    fn composition_observations_remain_restart_dispatchable_and_uncharged() {
         let graph = graph();
         let base = vec![DriverEvent::PackageBaseComposed {
             package: "A".to_owned(),
@@ -1823,11 +1892,35 @@ mod tests {
         let snapshot = derive_driver_snapshot(&graph, &failed, false).expect("failed composition");
         assert!(matches!(
             &snapshot.packages()[0].1,
-            DriverPackageState::CompositionFailed { repository, reason }
-                if repository == "r" && reason == "merge conflict"
+            DriverPackageState::Pending
         ));
-        assert_eq!(snapshot.outcome(), DriverLoopOutcome::Blocked);
+        assert_eq!(snapshot.ready(), &["A"]);
+        assert_eq!(snapshot.outcome(), DriverLoopOutcome::Running);
         assert_eq!(charged_failure_count(&failed, "A"), 0);
+
+        let conflicted = vec![DriverEvent::PackageJoinConflicted {
+            package: "A".to_owned(),
+            repository: "r".to_owned(),
+            base_oid: "base".to_owned(),
+            dependencies: vec![CompositionInput {
+                package: "dependency".to_owned(),
+                oid: "deadbeef".to_owned(),
+            }],
+            conflicting_input: CompositionInput {
+                package: "dependency".to_owned(),
+                oid: "deadbeef".to_owned(),
+            },
+            remaining_inputs: Vec::new(),
+            conflicted_paths: vec!["src/lib.rs".to_owned()],
+            reason: "CONFLICT (content): Merge conflict in src/lib.rs".to_owned(),
+        }];
+        let snapshot = derive_driver_snapshot(&graph, &conflicted, false).expect("conflict fold");
+        assert!(matches!(
+            snapshot.packages()[0].1,
+            DriverPackageState::Pending
+        ));
+        assert_eq!(snapshot.ready(), &["A"]);
+        assert_eq!(charged_failure_count(&conflicted, "A"), 0);
     }
 
     #[test]
