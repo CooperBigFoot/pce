@@ -86,10 +86,10 @@ use pce_core::{
     rebase_gate_stimulus, recovery_attempt_records, recovery_base_brief, recovery_budget,
     render_dispatch_projection, render_human_snapshot, render_package_run,
     seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
-    serialize_package_worker_result, serialize_tracked_repository_contract, validate_artifact,
-    validate_package_gate_finding_repositories, validate_package_gate_repositories,
-    validate_verdict_references, validate_workflow_coverage, validated_dispatch_completion_payload,
-    verify_criterion_change, worker_environment_outcome,
+    serialize_package_worker_result, serialize_tracked_repository_contract, unchanged_package_ids,
+    validate_artifact, validate_package_gate_finding_repositories,
+    validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
+    validated_dispatch_completion_payload, verify_criterion_change, worker_environment_outcome,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -111,6 +111,7 @@ const USAGE: &str = concat!(
     "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
     "       pce package render --graph <GRAPH_PATH> [--journal <DRIVER_JOURNAL>] --output <HTML_PATH>\n",
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
+    "       pce package driver-overrule --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --rationale <TEXT>\n",
     "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
@@ -304,6 +305,14 @@ struct DriverReplayCommand {
 }
 
 #[derive(Debug)]
+struct DriverOverruleCommand {
+    graph_path: PathBuf,
+    journal_path: PathBuf,
+    package_id: String,
+    rationale: String,
+}
+
+#[derive(Debug)]
 struct DriverRunCommand {
     graph_path: PathBuf,
     journal_path: PathBuf,
@@ -334,6 +343,7 @@ enum Command {
     DriverStatus(DriverStatusCommand),
     DriverCriteria(DriverCriteriaCommand),
     DriverReplay(DriverReplayCommand),
+    DriverOverrule(DriverOverruleCommand),
     DriverRun(DriverRunCommand),
     PackageWorker {
         result_path: PathBuf,
@@ -738,6 +748,7 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::DriverStatus(command) => run_driver_status(command),
         Command::DriverCriteria(command) => run_driver_criteria(command),
         Command::DriverReplay(command) => run_driver_replay(command),
+        Command::DriverOverrule(command) => run_driver_overrule(command),
         Command::DriverRun(command) => run_driver_loop(command),
         Command::PackageWorker {
             result_path,
@@ -900,6 +911,9 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         }
         [verb, action, rest @ ..] if verb == "package" && action == "replay-finding" => {
             parse_driver_replay(rest)
+        }
+        [verb, action, rest @ ..] if verb == "package" && action == "driver-overrule" => {
+            parse_driver_overrule(rest)
         }
         [verb, action, rest @ ..] if verb == "package" && action == "driver-run" => {
             parse_driver_run(rest)
@@ -1803,6 +1817,41 @@ fn parse_driver_replay(rest: &[String]) -> Result<Command> {
     }))
 }
 
+fn parse_driver_overrule(rest: &[String]) -> Result<Command> {
+    let [
+        graph_flag,
+        graph,
+        journal_flag,
+        journal,
+        package_flag,
+        package,
+        rationale_flag,
+        rationale,
+    ] = rest
+    else {
+        bail!(USAGE);
+    };
+    if graph_flag != "--graph"
+        || journal_flag != "--journal"
+        || package_flag != "--package"
+        || rationale_flag != "--rationale"
+    {
+        bail!(USAGE);
+    }
+    if package.trim().is_empty() {
+        bail!("driver overrule package must be non-empty");
+    }
+    if rationale.trim().is_empty() {
+        bail!("driver overrule rationale must be non-empty");
+    }
+    Ok(Command::DriverOverrule(DriverOverruleCommand {
+        graph_path: PathBuf::from(graph),
+        journal_path: PathBuf::from(journal),
+        package_id: package.clone(),
+        rationale: rationale.clone(),
+    }))
+}
+
 fn parse_driver_run(rest: &[String]) -> Result<Command> {
     let delimiter = rest.iter().position(|value| value == "--");
     let (options, worker_override) = match delimiter {
@@ -2237,6 +2286,13 @@ fn route_environment() -> Result<BTreeMap<String, String>> {
         .collect()
 }
 
+fn active_driver_events(events: &[DriverEvent]) -> &[DriverEvent] {
+    events
+        .iter()
+        .rposition(|event| matches!(event, DriverEvent::PlanVersionAdvanced { .. }))
+        .map_or(events, |index| &events[index..])
+}
+
 fn completed_package_issuance(events: &[DriverEvent], package_id: &str) -> Result<u64> {
     let completion = events
         .iter()
@@ -2263,7 +2319,7 @@ fn driver_package_base_refs(
     package_id: &str,
 ) -> Result<BTreeMap<String, String>> {
     let events = read_driver_journal(&command.journal_path)?;
-    let refs = events
+    let refs = active_driver_events(&events)
         .iter()
         .filter_map(|event| match event {
             DriverEvent::PackageBaseComposed {
@@ -2380,7 +2436,7 @@ fn ensure_driver_package_bases(
         .with_context(|| format!("package {package_id} is absent from graph"))?;
     let events = read_driver_journal(&command.journal_path)?;
     for repository in package.repositories() {
-        if events.iter().any(|event| {
+        if active_driver_events(&events).iter().any(|event| {
             matches!(event,
             DriverEvent::PackageBaseComposed { package, repository: recorded, .. }
                 if package == package_id && recorded == repository)
@@ -2762,7 +2818,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
         .parent()
         .context("driver journal has no parent")?
         .join(".pce/assembly");
-    let mut assembly_refs = events
+    let mut assembly_refs = active_driver_events(&events)
         .iter()
         .filter_map(|event| match event {
             DriverEvent::AssemblyRepositoryComposed {
@@ -2841,7 +2897,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
     }
 
     events = read_driver_journal(&command.journal_path)?;
-    let mut remaining_executed = events
+    let mut remaining_executed = active_driver_events(&events)
         .iter()
         .filter_map(|event| match event {
             DriverEvent::AssemblyCriterionExecuted {
@@ -2853,7 +2909,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
             _ => None,
         })
         .collect::<Vec<_>>();
-    let mut failed = events.iter().any(|event| {
+    let mut failed = active_driver_events(&events).iter().any(|event| {
         matches!(event,
         DriverEvent::AssemblyCriterionExecuted { execution, .. }
             if !execution.exit_status().is_success())
@@ -2933,12 +2989,140 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
     }
 }
 
+fn ensure_driver_plan_version(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    events: &[DriverEvent],
+) -> Result<bool> {
+    let latest_version = events.iter().rev().find_map(|event| match event {
+        DriverEvent::PlanVersionAdvanced {
+            to_plan_version, ..
+        } => Some(*to_plan_version),
+        _ => None,
+    });
+    let has_plan_work = events.iter().any(|event| {
+        !matches!(
+            event,
+            DriverEvent::RecoveryConfigured { .. } | DriverEvent::PlanVersionAdvanced { .. }
+        )
+    });
+    let Some(from_plan_version) = latest_version
+        .or(has_plan_work.then_some(1))
+        .or((graph.plan_version() > 1).then_some(graph.plan_version() - 1))
+    else {
+        return Ok(false);
+    };
+    if graph.plan_version() < from_plan_version {
+        bail!(
+            "driver journal is already at plan version {}, newer than supplied graph version {}",
+            from_plan_version,
+            graph.plan_version()
+        );
+    }
+    if graph.plan_version() == from_plan_version {
+        return Ok(false);
+    }
+    let to_plan_version = from_plan_version
+        .checked_add(1)
+        .context("driver plan version overflow")?;
+    let directory = command
+        .graph_path
+        .parent()
+        .context("driver graph has no parent directory")?;
+    let previous_path = directory.join(format!("graph.v{from_plan_version}.json"));
+    let previous = read_driver_graph(&previous_path).with_context(|| {
+        format!(
+            "cannot advance driver journal without frozen predecessor {}",
+            previous_path.display()
+        )
+    })?;
+    if previous.plan_version() != from_plan_version || previous.vision() != graph.vision() {
+        bail!("frozen predecessor does not match the active driver plan");
+    }
+    let next = if to_plan_version == graph.plan_version() {
+        graph.clone()
+    } else {
+        let next_path = directory.join(format!("graph.v{to_plan_version}.json"));
+        read_driver_graph(&next_path).with_context(|| {
+            format!(
+                "cannot advance through missing frozen graph {}",
+                next_path.display()
+            )
+        })?
+    };
+    if next.plan_version() != to_plan_version || next.vision() != graph.vision() {
+        bail!("next frozen graph does not form a sequential plan version");
+    }
+    let previous_snapshot =
+        derive_driver_snapshot(&previous, events, command.override_risk_ordering)
+            .context("failed to derive predecessor plan before advancing")?;
+    if previous_snapshot.packages().iter().any(|(_, state)| {
+        matches!(
+            state,
+            pce_core::DriverPackageState::Running { .. }
+                | pce_core::DriverPackageState::Judging { .. }
+        )
+    }) {
+        bail!("cannot advance a driver plan while a package attempt is running or judging");
+    }
+    let mut unchanged = unchanged_package_ids(&previous, &next)
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    loop {
+        let revised_dependents = next
+            .packages()
+            .iter()
+            .filter(|package| unchanged.contains(package.id().as_str()))
+            .filter(|package| {
+                package
+                    .depends_on()
+                    .iter()
+                    .any(|dependency| !unchanged.contains(dependency.id().as_str()))
+            })
+            .map(|package| package.id().as_str().to_owned())
+            .collect::<Vec<_>>();
+        if revised_dependents.is_empty() {
+            break;
+        }
+        for package in revised_dependents {
+            unchanged.remove(&package);
+        }
+    }
+    let carried_completions: Vec<String> = previous_snapshot
+        .packages()
+        .iter()
+        .filter(|(package, state)| {
+            unchanged.contains(package) && matches!(state, pce_core::DriverPackageState::Complete)
+        })
+        .map(|(package, _)| package.clone())
+        .collect();
+    let carried_amendments = previous_snapshot
+        .amendments()
+        .iter()
+        .filter(|(package, _)| carried_completions.contains(package))
+        .cloned()
+        .collect();
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::PlanVersionAdvanced {
+            from_plan_version,
+            to_plan_version,
+            carried_completions,
+            carried_amendments,
+        },
+    )?;
+    Ok(true)
+}
+
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
     let initial_events = read_driver_journal(&command.journal_path)?;
     ensure_recovery_configuration(&command, &initial_events)?;
     loop {
         let graph = read_driver_graph(&command.graph_path)?;
         let events = read_driver_journal(&command.journal_path)?;
+        if ensure_driver_plan_version(&graph, &command, &events)? {
+            continue;
+        }
         if reconcile_completed_dispatch_panes(&command.journal_path, &events)? > 0 {
             continue;
         }
@@ -3105,14 +3289,34 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
             })
             .max()
             .unwrap_or(0)
-            .saturating_add(1);
+            .checked_add(1)
+            .context("driver issuance space is exhausted")?;
+        for (offset, package_id) in ready.iter().enumerate() {
+            let issuance = next_issuance
+                .checked_add(u64::try_from(offset).context("ready set exceeds u64")?)
+                .context("driver issuance space is exhausted")?;
+            let outcome = driver_outcome_path(&command.journal_path, package_id, issuance)?;
+            match fs::symlink_metadata(&outcome) {
+                Ok(_) => bail!(
+                    "refusing to dispatch package {package_id} issuance {issuance}: outcome path already exists at {}",
+                    outcome.display()
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to inspect outcome path {}", outcome.display())
+                    });
+                }
+            }
+        }
         let mut override_children = Vec::new();
         let mut composed_dispatches = Vec::new();
         let mut spawn_failed = false;
         // The full ready antichain is issued before waiting for any member.
         for (offset, package_id) in ready.iter().enumerate() {
             let issuance = next_issuance
-                .saturating_add(u64::try_from(offset).context("ready set exceeds u64")?);
+                .checked_add(u64::try_from(offset).context("ready set exceeds u64")?)
+                .context("driver issuance space is exhausted")?;
             let outcome = driver_outcome_path(&command.journal_path, package_id, issuance)?;
             fs::create_dir_all(outcome.parent().context("outcome path has no parent")?)?;
             if command.worker_override.is_none()
@@ -3413,6 +3617,41 @@ fn run_driver_status(command: DriverStatusCommand) -> Result<()> {
     let snapshot = derive_driver_snapshot(&graph, &events, command.override_risk_ordering)
         .context("failed to derive driver state")?;
     write_json_stdout(&serde_json::to_value(snapshot).context("failed to serialize driver state")?)
+}
+
+fn run_driver_overrule(command: DriverOverruleCommand) -> Result<()> {
+    let graph = read_driver_graph(&command.graph_path)?;
+    let events = read_driver_journal(&command.journal_path)?;
+    if graph.plan_version() > 1 {
+        let active_version = events.iter().rev().find_map(|event| match event {
+            DriverEvent::PlanVersionAdvanced {
+                to_plan_version, ..
+            } => Some(*to_plan_version),
+            _ => None,
+        });
+        if active_version != Some(graph.plan_version()) {
+            bail!(
+                "plan version {} is not active in the journal; run driver-run before adjudicating",
+                graph.plan_version()
+            );
+        }
+    }
+    let event = DriverEvent::PackageParkOverruled {
+        package: command.package_id,
+        plan_version: graph.plan_version(),
+        rationale: command.rationale,
+    };
+    let mut candidate = events;
+    candidate.push(event.clone());
+    derive_driver_snapshot(&graph, &candidate, false).context(
+        "park overrule refused; graph revision is the only exit after a repeated dispute",
+    )?;
+    append_driver_event(&command.journal_path, &event)?;
+    run_driver_status(DriverStatusCommand {
+        graph_path: command.graph_path,
+        journal_path: command.journal_path,
+        override_risk_ordering: false,
+    })
 }
 
 fn package_repository_sources(

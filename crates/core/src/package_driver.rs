@@ -187,6 +187,19 @@ pub enum PaneCleanupOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DriverEvent {
+    /// A newer immutable plan became active and names the prior completions it carries forward.
+    PlanVersionAdvanced {
+        from_plan_version: u64,
+        to_plan_version: u64,
+        carried_completions: Vec<String>,
+        carried_amendments: Vec<(String, EffectiveCriterion)>,
+    },
+    /// A human ruled that one disputed package definition stands for one fresh attempt.
+    PackageParkOverruled {
+        package: String,
+        plan_version: u64,
+        rationale: String,
+    },
     /// The named spending limits selected once for this graph run.
     RecoveryConfigured { limits: RecoveryLimits },
     /// A recovery dispatch and the exact augmented brief supplied to it.
@@ -435,9 +448,40 @@ pub enum PackageDriverError {
     /// An event names no package in the frozen graph.
     #[error("driver event names unknown package `{package}`")]
     UnknownPackage { package: String },
+    /// The active journal plan does not match the graph supplied for replay.
+    #[error(
+        "driver journal plan version {journal_version} does not match graph plan version {graph_version}"
+    )]
+    PlanVersionMismatch {
+        journal_version: u64,
+        graph_version: u64,
+    },
+    /// A plan transition did not advance by exactly one immutable version.
+    #[error(
+        "driver plan transition must advance from version {from_plan_version} to {to_plan_version}"
+    )]
+    InvalidPlanTransition {
+        from_plan_version: u64,
+        to_plan_version: u64,
+    },
+    /// An overrule did not name the active plan version or a non-empty rationale.
+    #[error("park overrule for package `{package}` is invalid for plan version {plan_version}")]
+    InvalidParkOverrule { package: String, plan_version: u64 },
+    /// The package was not parked by a worker's specification dispute.
+    #[error("package `{package}` has no specification-dispute park to overrule")]
+    NoDisputedPark { package: String },
+    /// One human overrule has already been consumed for this package definition.
+    #[error("package `{package}` was already overruled; graph revision is the only exit")]
+    RepeatedParkOverrule { package: String },
+    /// A plan transition claimed completion without prior journal proof.
+    #[error("plan transition carries package `{package}` without prior completion proof")]
+    UnprovenCarriedCompletion { package: String },
     /// One issuance is zero, which cannot identify an attempt.
     #[error("driver issuance for package `{package}` must be positive")]
     ZeroIssuance { package: String },
+    /// A dispatch issuance did not increase strictly across the append-only journal.
+    #[error("worker dispatch issuance {issuance} is not greater than prior issuance {prior}")]
+    NonMonotonicIssuance { issuance: u64, prior: u64 },
     /// A completion event follows no matching running attempt.
     #[error("driver outcome for package `{package}` issuance {issuance} has no matching dispatch")]
     UnmatchedOutcome { package: String, issuance: u64 },
@@ -487,7 +531,23 @@ pub fn derive_driver_snapshot(
     override_risk_ordering: bool,
 ) -> Result<DriverSnapshot, PackageDriverError> {
     let mut configured_limits = None;
+    let mut prior_issuance = 0_u64;
     for event in events {
+        if let DriverEvent::WorkerDispatched { package, issuance } = event {
+            if *issuance == 0 {
+                return Err(PackageDriverError::ZeroIssuance {
+                    package: package.clone(),
+                });
+            }
+            if *issuance <= prior_issuance {
+                return Err(PackageDriverError::NonMonotonicIssuance {
+                    issuance: *issuance,
+                    prior: prior_issuance,
+                });
+            }
+            prior_issuance = *issuance;
+        }
+
         if let DriverEvent::RecoveryConfigured { limits } = event {
             if configured_limits.is_some_and(|configured| configured != *limits) {
                 return Err(PackageDriverError::ConflictingRecoveryLimits);
@@ -495,11 +555,56 @@ pub fn derive_driver_snapshot(
             configured_limits = Some(*limits);
         }
     }
+    let mut proven_completions = HashSet::<String>::new();
+    for event in events {
+        match event {
+            DriverEvent::PlanVersionAdvanced {
+                carried_completions,
+                ..
+            } => {
+                for package in carried_completions {
+                    if !proven_completions.contains(package) {
+                        return Err(PackageDriverError::UnprovenCarriedCompletion {
+                            package: package.clone(),
+                        });
+                    }
+                }
+                proven_completions = carried_completions.iter().cloned().collect();
+            }
+            DriverEvent::WorkerDispatched { package, .. } => {
+                proven_completions.remove(package);
+            }
+            DriverEvent::PackageCompleted { package } => {
+                proven_completions.insert(package.clone());
+            }
+            _ => {}
+        }
+    }
     let known = graph
         .packages()
         .iter()
         .map(|p| p.id().as_str())
         .collect::<HashSet<_>>();
+    let active_events = if let Some(index) = events
+        .iter()
+        .rposition(|event| matches!(event, DriverEvent::PlanVersionAdvanced { .. }))
+    {
+        let DriverEvent::PlanVersionAdvanced {
+            to_plan_version, ..
+        } = &events[index]
+        else {
+            unreachable!("transition index names a transition");
+        };
+        if *to_plan_version != graph.plan_version() {
+            return Err(PackageDriverError::PlanVersionMismatch {
+                journal_version: *to_plan_version,
+                graph_version: graph.plan_version(),
+            });
+        }
+        &events[index..]
+    } else {
+        events
+    };
     let mut states = graph
         .packages()
         .iter()
@@ -507,6 +612,8 @@ pub fn derive_driver_snapshot(
         .collect::<HashMap<_, _>>();
     let mut amendments = Vec::new();
     let mut assembly = DriverAssemblyState::Pending;
+    let mut disputed_parks = HashSet::new();
+    let mut consumed_overrules = HashSet::new();
     let terminal = |state: &DriverPackageState| {
         matches!(
             state,
@@ -518,13 +625,54 @@ pub fn derive_driver_snapshot(
                 | DriverPackageState::Parked { .. }
         )
     };
-    for (event_index, event) in events.iter().enumerate() {
+    for (event_index, event) in active_events.iter().enumerate() {
         let all_packages_complete = || {
             states
                 .values()
                 .all(|state| matches!(state, DriverPackageState::Complete))
         };
         match event {
+            DriverEvent::PlanVersionAdvanced {
+                from_plan_version,
+                to_plan_version,
+                carried_completions,
+                carried_amendments,
+            } => {
+                if from_plan_version.checked_add(1) != Some(*to_plan_version)
+                    || *to_plan_version != graph.plan_version()
+                {
+                    return Err(PackageDriverError::InvalidPlanTransition {
+                        from_plan_version: *from_plan_version,
+                        to_plan_version: *to_plan_version,
+                    });
+                }
+                let mut carried = HashSet::new();
+                for package in carried_completions {
+                    if !known.contains(package.as_str()) {
+                        return Err(PackageDriverError::UnknownPackage {
+                            package: package.clone(),
+                        });
+                    }
+                    if !carried.insert(package.as_str()) {
+                        return Err(PackageDriverError::EventAfterTerminal {
+                            package: package.clone(),
+                        });
+                    }
+                    states.insert(package.clone(), DriverPackageState::Complete);
+                }
+                for (package, criterion) in carried_amendments {
+                    if !carried.contains(package.as_str()) {
+                        return Err(PackageDriverError::EventAfterTerminal {
+                            package: package.clone(),
+                        });
+                    }
+                    amendments.push((package.clone(), criterion.clone()));
+                }
+                assembly = DriverAssemblyState::Pending;
+                disputed_parks.clear();
+                consumed_overrules.clear();
+                continue;
+            }
             DriverEvent::AssemblyRepositoryComposed { .. } => {
                 if !all_packages_complete() {
                     return Err(PackageDriverError::AssemblyBeforePackagesComplete);
@@ -612,8 +760,11 @@ pub fn derive_driver_snapshot(
             _ => {}
         }
         let package = match event {
-            DriverEvent::RecoveryConfigured { .. } => continue,
-            DriverEvent::RecoveryRungAttempted { package, .. }
+            DriverEvent::PlanVersionAdvanced { .. } | DriverEvent::RecoveryConfigured { .. } => {
+                continue;
+            }
+            DriverEvent::PackageParkOverruled { package, .. }
+            | DriverEvent::RecoveryRungAttempted { package, .. }
             | DriverEvent::PackageBaseComposed { package, .. }
             | DriverEvent::PackageCompositionFailed { package, .. }
             | DriverEvent::WorkerEnvironmentFailed { package, .. }
@@ -650,7 +801,35 @@ pub fn derive_driver_snapshot(
             .get_mut(package)
             .unwrap_or_else(|| unreachable!("known package initialized"));
         match event {
-            DriverEvent::RecoveryConfigured { .. } => unreachable!("configuration handled above"),
+            DriverEvent::PlanVersionAdvanced { .. } | DriverEvent::RecoveryConfigured { .. } => {
+                unreachable!("configuration handled above")
+            }
+            DriverEvent::PackageParkOverruled {
+                plan_version,
+                rationale,
+                ..
+            } => {
+                if *plan_version != graph.plan_version() || rationale.trim().is_empty() {
+                    return Err(PackageDriverError::InvalidParkOverrule {
+                        package: package.clone(),
+                        plan_version: *plan_version,
+                    });
+                }
+                if consumed_overrules.contains(package) {
+                    return Err(PackageDriverError::RepeatedParkOverrule {
+                        package: package.clone(),
+                    });
+                }
+                if !matches!(state, DriverPackageState::Parked { .. })
+                    || !disputed_parks.contains(package)
+                {
+                    return Err(PackageDriverError::NoDisputedPark {
+                        package: package.clone(),
+                    });
+                }
+                consumed_overrules.insert(package.clone());
+                *state = DriverPackageState::Pending;
+            }
             DriverEvent::PackageBaseComposed { .. } => {
                 if !matches!(state, DriverPackageState::Pending) {
                     return Err(PackageDriverError::EventAfterTerminal {
@@ -793,7 +972,7 @@ pub fn derive_driver_snapshot(
                 issuance, reason, ..
             } => match state {
                 DriverPackageState::Running { issuance: running } if running == issuance => {
-                    let charged = charged_failure_count(&events[..=event_index], package);
+                    let charged = charged_failure_count(&active_events[..=event_index], package);
                     if configured_limits.is_some_and(|limits| {
                         recovery_budget(limits, charged).next_rung != RecoveryRung::Replan
                     }) {
@@ -817,7 +996,8 @@ pub fn derive_driver_snapshot(
                 DriverPackageState::Running { issuance: running } if running == issuance => {
                     *state = DriverPackageState::Parked {
                         reason: reason.clone(),
-                    }
+                    };
+                    disputed_parks.insert(package.clone());
                 }
                 _ => {
                     return Err(PackageDriverError::UnmatchedOutcome {
@@ -925,7 +1105,7 @@ pub fn derive_driver_snapshot(
                         package: package.clone(),
                     });
                 }
-                let charged = charged_failure_count(&events[..=event_index], package);
+                let charged = charged_failure_count(&active_events[..=event_index], package);
                 if configured_limits.is_some_and(|limits| {
                     recovery_budget(limits, charged).next_rung != RecoveryRung::Replan
                 }) {
@@ -982,7 +1162,7 @@ pub fn derive_driver_snapshot(
         .packages()
         .iter()
         .map(|package| {
-            let charged = charged_failure_count(events, package.id().as_str());
+            let charged = charged_failure_count(active_events, package.id().as_str());
             (
                 package.id().as_str().to_owned(),
                 recovery_budget(configured_limits.unwrap_or_default(), charged),
@@ -1104,7 +1284,7 @@ pub fn worker_environment_outcome(
     reason: String,
 ) -> DriverEvent {
     let mut prior_identical = 0_usize;
-    for event in events.iter().rev() {
+    for event in events_for_active_plan(events).iter().rev() {
         match event {
             DriverEvent::WorkerEnvironmentFailed {
                 package: observed_package,
@@ -1151,9 +1331,16 @@ pub fn worker_environment_outcome(
     }
 }
 
+fn events_for_active_plan(events: &[DriverEvent]) -> &[DriverEvent] {
+    events
+        .iter()
+        .rposition(|event| matches!(event, DriverEvent::PlanVersionAdvanced { .. }))
+        .map_or(events, |index| &events[index..])
+}
+
 /// Count only worker-reported or criterion-judgement failures attributed to package work.
 pub fn charged_failure_count(events: &[DriverEvent], package_id: &str) -> usize {
-    events
+    events_for_active_plan(events)
         .iter()
         .filter(|event| {
             matches!(event,
@@ -1168,6 +1355,7 @@ pub fn latest_criterion_failure_evidence(
     events: &[DriverEvent],
     package_id: &str,
 ) -> Vec<RecoveryCriterionEvidence> {
+    let events = events_for_active_plan(events);
     let start = events
         .iter()
         .rposition(|event| {
@@ -1207,7 +1395,7 @@ pub fn recovery_attempt_records(
     package_id: &str,
     final_evidence: Vec<RecoveryCriterionEvidence>,
 ) -> Vec<RecoveryAttemptRecord> {
-    let mut records = events.iter().filter_map(|event| match event {
+    let mut records = events_for_active_plan(events).iter().filter_map(|event| match event {
         DriverEvent::RecoveryRungAttempted { package, issuance, rung, evidence, .. }
             if package == package_id => Some(RecoveryAttemptRecord {
                 rung: *rung, issuance: Some(*issuance),
@@ -1306,17 +1494,17 @@ mod tests {
     }
 
     fn completed_packages() -> Vec<DriverEvent> {
-        ["A", "B"]
+        [("A", 1), ("B", 2)]
             .into_iter()
-            .flat_map(|package| {
+            .flat_map(|(package, issuance)| {
                 [
                     DriverEvent::WorkerDispatched {
                         package: package.to_owned(),
-                        issuance: 1,
+                        issuance,
                     },
                     DriverEvent::WorkerDone {
                         package: package.to_owned(),
-                        issuance: 1,
+                        issuance,
                     },
                     DriverEvent::PackageCompleted {
                         package: package.to_owned(),

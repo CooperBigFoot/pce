@@ -498,6 +498,33 @@ fn validate_soft_reduction(graph: &WorkPackageGraph) -> Result<(), WorkPackageGr
     Ok(())
 }
 
+/// Return package identifiers whose complete authored definitions are identical across plans.
+///
+/// Identity covers every package field other than its already-matched identifier. A carried proof
+/// therefore cannot cross a title, repository scope, criterion, or dependency change.
+pub fn unchanged_package_ids(
+    previous: &WorkPackageGraph,
+    current: &WorkPackageGraph,
+) -> Vec<String> {
+    let previous_by_id = previous
+        .packages()
+        .iter()
+        .map(|package| (package.id().as_str(), package))
+        .collect::<HashMap<_, _>>();
+    current
+        .packages()
+        .iter()
+        .filter_map(|package| {
+            let prior = previous_by_id.get(package.id().as_str())?;
+            (prior.title == package.title
+                && prior.repositories == package.repositories
+                && prior.criteria == package.criteria
+                && prior.depends_on == package.depends_on)
+                .then(|| package.id().as_str().to_owned())
+        })
+        .collect()
+}
+
 /// Whether advisory risk-ordering dependencies constrain readiness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RiskOrdering {

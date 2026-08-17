@@ -220,5 +220,5 @@ pub use work_package_graph::{
     ClassifiedWorkPackage, DependencyKind, ReadyWorkPackages, RiskOrdering, WorkPackage,
     WorkPackageClassification, WorkPackageCriterion, WorkPackageDependency, WorkPackageGraph,
     WorkPackageGraphError, WorkPackageId, WorkPackageMergeObservation, parse_work_package_graph,
-    ready_work_packages,
+    ready_work_packages, unchanged_package_ids,
 };
