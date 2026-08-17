@@ -9,6 +9,7 @@ use std::net::Shutdown;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, mpsc};
@@ -2620,6 +2621,200 @@ fn detached_codex_fixture(
         release_path,
         log_path,
         argv,
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn harness_drop_cleans_blocked_dispatch_when_test_panics_helper() {
+    let Some(snapshot_path) = std::env::var_os("PCE_HARNESS_CLEANUP_SNAPSHOT") else {
+        return;
+    };
+    let fixture = detached_codex_fixture("panic-cleanup", Some("never-release"), None);
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(&fixture.argv)
+        .env_clear()
+        .env("PATH", fixture.harness.shim_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("start blocked dispatch");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_for_path(&fixture.record_root.join("invocation/pid"));
+    let sidecar = fixture
+        .harness
+        .path()
+        .join("events.jsonl.dispatches/1.json");
+    wait_for_path(&sidecar);
+    fs::copy(sidecar, snapshot_path).expect("copy dispatch identity outside harness tempdir");
+    panic!("intentional panic after blocked dispatch");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn crashed_test_process_leaves_no_recorded_dispatch_group_alive() {
+    let snapshot_dir = tempfile::tempdir().expect("create cleanup snapshot directory");
+    let snapshot_path = snapshot_dir.path().join("dispatch-identity.json");
+    let output = Command::new(std::env::current_exe().expect("resolve test executable"))
+        .args([
+            "--exact",
+            "harness_drop_cleans_blocked_dispatch_when_test_panics_helper",
+            "--nocapture",
+        ])
+        .env("PCE_HARNESS_CLEANUP_SNAPSHOT", &snapshot_path)
+        .output()
+        .expect("run intentionally panicking test subprocess");
+    assert!(
+        !output.status.success(),
+        "helper must exercise panic unwinding"
+    );
+    let identity = parse_dispatch_process_identity(
+        &fs::read(&snapshot_path).expect("read copied dispatch identity"),
+    )
+    .expect("parse copied dispatch identity");
+    let continuation = identity
+        .continuation_process_identity()
+        .expect("current sidecars record continuation identity");
+    let process_number = continuation.process_number().get();
+    let expected = continuation.process_start_identity();
+    let expected = format!(
+        "{} {}",
+        expected.seconds_since_unix_epoch(),
+        expected.microseconds()
+    )
+    .into_bytes();
+    let process_number_text = process_number.to_string();
+    let leaked =
+        process_start_identity(&process_number_text).as_deref() == Some(expected.as_slice());
+    if leaked {
+        unsafe {
+            libc::kill(-(process_number as i32), libc::SIGKILL);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_start_identity(&process_number_text).is_some() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert!(
+        !leaked,
+        "panicking test left recorded dispatch process group {process_number} alive"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[allow(clippy::zombie_processes)]
+fn harness_drop_reports_unrecorded_live_shim_helper() {
+    let Some(snapshot_path) = std::env::var_os("PCE_HARNESS_UNRECORDED_PID") else {
+        return;
+    };
+    let harness = CliHarness::new().expect("create unrecorded-shim harness");
+    let record_root = harness.path().join("unrecorded-records");
+    fs::create_dir(&record_root).expect("create unrecorded record root");
+    let stdout_path = harness.path().join("unrecorded.stdout");
+    let stderr_path = harness.path().join("unrecorded.stderr");
+    fs::write(&stdout_path, []).expect("write shim stdout");
+    fs::write(&stderr_path, []).expect("write shim stderr");
+    let mut command = Command::new("codex");
+    command
+        .env_clear()
+        .env("PATH", harness.shim_path())
+        .env("TMPDIR", harness.path())
+        .env("PCE_CODEX_RECORD_ROOT", &record_root)
+        .env("PCE_CODEX_STDOUT_FILE", &stdout_path)
+        .env("PCE_CODEX_STDERR_FILE", &stderr_path)
+        .env("PCE_CODEX_EXIT_CODE", "0")
+        .env("PCE_CODEX_BLOCK_FILE", harness.path().join("never-created"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let _shim = command.spawn().expect("spawn unrecorded shim group");
+    let pid_path = record_root.join("invocation/pid");
+    let process_number = wait_for_non_empty_trimmed_file(
+        &pid_path,
+        "unrecorded shim PID was not readable within five seconds",
+    );
+    fs::write(snapshot_path, process_number).expect("copy unrecorded shim PID");
+    drop(harness);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn unrecorded_live_shim_fails_and_names_the_test() {
+    let snapshot_dir = tempfile::tempdir().expect("create unrecorded PID directory");
+    let snapshot_path = snapshot_dir.path().join("shim-pid");
+    let output = Command::new(std::env::current_exe().expect("resolve test executable"))
+        .args([
+            "--exact",
+            "harness_drop_reports_unrecorded_live_shim_helper",
+            "--nocapture",
+        ])
+        .env("PCE_HARNESS_UNRECORDED_PID", &snapshot_path)
+        .output()
+        .expect("run unrecorded-shim helper subprocess");
+    let process_number = fs::read_to_string(&snapshot_path)
+        .expect("read copied shim PID")
+        .trim()
+        .parse::<i32>()
+        .expect("parse copied shim PID");
+    unsafe {
+        libc::kill(-process_number, libc::SIGKILL);
+    }
+    assert!(
+        !output.status.success(),
+        "live unrecorded shim must fail its test"
+    );
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains(
+            "test harness_drop_reports_unrecorded_live_shim_helper leaked a test agent process"
+        ),
+        "leak diagnostic did not name the test: {diagnostic}"
+    );
+}
+
+#[test]
+fn agent_shims_exit_at_their_block_iteration_ceiling() {
+    for program in ["codex", "claude"] {
+        let harness = CliHarness::new().expect("create self-limiting shim harness");
+        let record_root = harness.path().join(format!("{program}-ceiling-records"));
+        fs::create_dir(&record_root).expect("create ceiling record root");
+        let stdout_path = harness.path().join(format!("{program}.stdout"));
+        let stderr_path = harness.path().join(format!("{program}.stderr"));
+        let output_path = harness.path().join(format!("{program}.output"));
+        fs::write(&stdout_path, []).expect("write shim stdout");
+        fs::write(&stderr_path, []).expect("write shim stderr");
+        let prefix = program.to_ascii_uppercase();
+        let started = Instant::now();
+        let output = Command::new(program)
+            .env_clear()
+            .env("PATH", harness.shim_path())
+            .env("TMPDIR", harness.path())
+            .env(format!("PCE_{prefix}_RECORD_ROOT"), &record_root)
+            .env(format!("PCE_{prefix}_STDOUT_FILE"), &stdout_path)
+            .env(format!("PCE_{prefix}_STDERR_FILE"), &stderr_path)
+            .env(format!("PCE_{prefix}_EXIT_CODE"), "0")
+            .env(format!("PCE_{prefix}_OUTPUT_PATH"), &output_path)
+            .env(
+                format!("PCE_{prefix}_BLOCK_FILE"),
+                harness.path().join("never-created"),
+            )
+            .env("PCE_SHIM_BLOCK_MAX_POLLS", "2")
+            .env("PCE_SHIM_BLOCK_POLL_SECONDS", "0.01")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run self-limiting shim");
+        assert_eq!(output.status.code(), Some(124), "{program} ceiling status");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{program} did not honor its block iteration ceiling"
+        );
     }
 }
 
