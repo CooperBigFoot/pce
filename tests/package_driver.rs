@@ -689,3 +689,417 @@ fn mixed_valid_and_structurally_malformed_findings_credit_only_valid_finding() {
         1
     );
 }
+
+#[test]
+fn human_overrule_appends_rationale_and_unparks_once() {
+    let temp = TempDir::new().expect("tempdir");
+    let graph_path = temp.path().join("graph.v1.json");
+    let journal = temp.path().join("driver.jsonl");
+    graph(
+        &graph_path,
+        &["repo"],
+        json!([{"name":"floor","input":"repo","observation":"zero","command":"true"}]),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"package-parked","package":"A","issuance":1,"reason":"replan: criterion: floor"}),
+    );
+    let before = fs::read(&journal).expect("journal prefix");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-overrule".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--package".into(),
+            "A".into(),
+            "--rationale".into(),
+            "the criterion stands".into(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = fs::read(&journal).expect("journal after overrule");
+    assert!(after.starts_with(&before));
+    let text = String::from_utf8(after).expect("journal UTF-8");
+    assert!(text.contains("package-park-overruled"));
+    assert!(text.contains("the criterion stands"));
+
+    let status = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-status".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+        ],
+    );
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let snapshot: Value = serde_json::from_slice(&status.stdout).expect("snapshot");
+    assert_eq!(snapshot["packages"][0][1]["state"], "pending");
+    assert_eq!(snapshot["ready"], json!(["A"]));
+
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":2}),
+    );
+    append(
+        &journal,
+        json!({"event":"package-parked","package":"A","issuance":2,"reason":"replan: criterion: floor"}),
+    );
+    let second = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-overrule".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--package".into(),
+            "A".into(),
+            "--rationale".into(),
+            "try again".into(),
+        ],
+    );
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("graph revision is the only exit"));
+}
+
+#[test]
+fn stale_next_outcome_refuses_dispatch_before_worker_testimony() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "base");
+    let graph_path = temp.path().join("graph.v1.json");
+    let journal = temp.path().join("driver.jsonl");
+    graph(
+        &graph_path,
+        &["repo"],
+        json!([{"name":"floor","input":"repo","observation":"zero","command":"true"}]),
+    );
+    let stale = temp.path().join("package-outcomes/A/1.json");
+    fs::create_dir_all(stale.parent().expect("outcome parent")).expect("outcome directory");
+    fs::write(&stale, r#"{"outcome":"done"}"#).expect("stale outcome");
+    let marker = temp.path().join("worker-ran");
+    let worker = temp.path().join("worker.sh");
+    fs::write(
+        &worker,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '%s' '{{\"outcome\":\"done\"}}' > \"$PCE_PACKAGE_OUTCOME\"\n",
+            marker.display()
+        ),
+    )
+    .expect("worker");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-run".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--repository".into(),
+            format!("repo={}", repo.display()),
+            "--worker-override".into(),
+            "--".into(),
+            "/bin/sh".into(),
+            worker.display().to_string(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("outcome path already exists"));
+    assert!(!marker.exists());
+    assert_eq!(
+        fs::read_to_string(&stale).expect("stale preserved"),
+        r#"{"outcome":"done"}"#
+    );
+    let journal_text = fs::read_to_string(&journal).expect("configuration journal");
+    assert!(!journal_text.contains("worker-dispatched"));
+}
+
+#[test]
+fn revised_plan_carries_only_unchanged_completions_and_uses_fresh_issuance() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "base");
+    let journal = temp.path().join("driver.jsonl");
+    let v1_path = temp.path().join("graph.v1.json");
+    let v2_path = temp.path().join("graph.v2.json");
+    let package = |id: &str, command: &str| {
+        json!({
+            "id":id,"title":id,"repositories":["repo"],
+            "criteria":[{"name":"criterion","input":"repo","observation":"zero","command":command}],
+            "depends_on":[]
+        })
+    };
+    fs::write(
+        &v1_path,
+        serde_json::to_vec(&json!({"vision":"driver-test","plan_version":1,"authored_at_ref":"HEAD","packages":[package("A", "true"),package("B", "false")]})).expect("v1"),
+    ).expect("v1 write");
+    fs::write(
+        &v2_path,
+        serde_json::to_vec(&json!({"vision":"driver-test","plan_version":2,"authored_at_ref":"HEAD","packages":[package("A", "true"),package("B", "true")]})).expect("v2"),
+    ).expect("v2 write");
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-done","package":"A","issuance":1}),
+    );
+    append(&journal, json!({"event":"package-completed","package":"A"}));
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"B","issuance":2}),
+    );
+    append(
+        &journal,
+        json!({"event":"package-parked","package":"B","issuance":2,"reason":"replan: criterion: criterion"}),
+    );
+    let prefix = fs::read(&journal).expect("prefix");
+    let invocations = temp.path().join("invocations");
+    let worker = temp.path().join("worker.sh");
+    fs::write(&worker, format!(r#"#!/bin/sh
+printf '%s:%s\n' "$PCE_PACKAGE" "$PCE_PACKAGE_OUTCOME" >> '{}'
+printf '%s' '{{"outcome":"mis-specified","fault":{{"kind":"criterion","name":"criterion"}}}}' > "$PCE_PACKAGE_OUTCOME"
+"#, invocations.display())).expect("worker");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-run".into(),
+            "--graph".into(),
+            v2_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--repository".into(),
+            format!("repo={}", repo.display()),
+            "--worker-override".into(),
+            "--".into(),
+            "/bin/sh".into(),
+            worker.display().to_string(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = fs::read(&journal).expect("journal");
+    assert!(after.starts_with(&prefix));
+    let journal_text = String::from_utf8(after).expect("journal UTF-8");
+    assert!(journal_text.contains(r#""event":"plan-version-advanced"#));
+    assert!(journal_text.contains(r#""carried_completions":["A"]"#));
+    assert!(journal_text.contains(r#""package":"B","issuance":3"#));
+    assert_eq!(
+        fs::read_to_string(&invocations)
+            .expect("invocations")
+            .lines()
+            .count(),
+        1
+    );
+    assert!(
+        fs::read_to_string(&invocations)
+            .expect("invocations")
+            .starts_with("B:")
+    );
+    let snapshot: Value = serde_json::from_slice(&output.stdout).expect("snapshot");
+    assert_eq!(snapshot["packages"][0][1]["state"], "complete");
+    assert_eq!(snapshot["packages"][1][1]["state"], "parked");
+}
+
+#[test]
+fn revised_completed_package_is_new_work_not_carried_proof() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "base");
+    let journal = temp.path().join("driver.jsonl");
+    let v1_path = temp.path().join("graph.v1.json");
+    let v2_path = temp.path().join("graph.v2.json");
+    let make_graph = |version: u64, a_command: &str| {
+        json!({
+            "vision":"driver-test","plan_version":version,"authored_at_ref":"HEAD","packages":[
+                {"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"a","input":"repo","observation":"zero","command":a_command}],"depends_on":[]},
+                {"id":"B","title":"B","repositories":["repo"],"criteria":[{"name":"b","input":"repo","observation":"zero","command":"true"}],"depends_on":[]}
+            ]
+        })
+    };
+    fs::write(
+        &v1_path,
+        serde_json::to_vec(&make_graph(1, "true")).expect("v1"),
+    )
+    .expect("v1 write");
+    fs::write(
+        &v2_path,
+        serde_json::to_vec(&make_graph(2, "printf revised")).expect("v2"),
+    )
+    .expect("v2 write");
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-done","package":"A","issuance":1}),
+    );
+    append(&journal, json!({"event":"package-completed","package":"A"}));
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"B","issuance":2}),
+    );
+    append(
+        &journal,
+        json!({"event":"package-parked","package":"B","issuance":2,"reason":"replan: criterion: b"}),
+    );
+    let invoked = temp.path().join("invoked");
+    let worker = temp.path().join("worker.sh");
+    fs::write(&worker, format!(r#"#!/bin/sh
+printf '%s\n' "$PCE_PACKAGE" >> '{}'
+printf '%s' '{{"outcome":"mis-specified","fault":{{"kind":"criterion","name":"again"}}}}' > "$PCE_PACKAGE_OUTCOME"
+"#, invoked.display())).expect("worker");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-run".into(),
+            "--graph".into(),
+            v2_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--repository".into(),
+            format!("repo={}", repo.display()),
+            "--worker-override".into(),
+            "--".into(),
+            "/bin/sh".into(),
+            worker.display().to_string(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let names = fs::read_to_string(&invoked).expect("invocations");
+    assert!(
+        names.lines().any(|name| name == "A"),
+        "revised A was not dispatched: {names}"
+    );
+    let text = fs::read_to_string(&journal).expect("journal");
+    assert!(text.contains(r#""carried_completions":[]"#));
+}
+
+#[test]
+fn overruled_attempt_completes_and_replays_without_redispatch() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "base");
+    let graph_path = temp.path().join("graph.v1.json");
+    let journal = temp.path().join("driver.jsonl");
+    graph(
+        &graph_path,
+        &["repo"],
+        json!([{"name":"floor","input":"repo","observation":"zero","command":"true"}]),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"package-parked","package":"A","issuance":1,"reason":"replan: criterion: floor"}),
+    );
+    let prefix = fs::read(&journal).expect("parked prefix");
+    let overrule = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-overrule".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--package".into(),
+            "A".into(),
+            "--rationale".into(),
+            "criterion stands".into(),
+        ],
+    );
+    assert!(
+        overrule.status.success(),
+        "{}",
+        String::from_utf8_lossy(&overrule.stderr)
+    );
+    let invocations = temp.path().join("invocations");
+    let worker = temp.path().join("worker.sh");
+    fs::write(
+        &worker,
+        format!(
+            r#"#!/bin/sh
+printf '%s:%s\n' "$PCE_PACKAGE" "$PCE_PACKAGE_OUTCOME" >> '{}'
+printf '%s' '{{"outcome":"done"}}' > "$PCE_PACKAGE_OUTCOME"
+"#,
+            invocations.display()
+        ),
+    )
+    .expect("worker");
+    let args = vec![
+        "package".into(),
+        "driver-run".into(),
+        "--graph".into(),
+        graph_path.display().to_string(),
+        "--journal".into(),
+        journal.display().to_string(),
+        "--repository".into(),
+        format!("repo={}", repo.display()),
+        "--worker-override".into(),
+        "--".into(),
+        "/bin/sh".into(),
+        worker.display().to_string(),
+    ];
+    let first = run(temp.path(), &args);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_snapshot: Value = serde_json::from_slice(&first.stdout).expect("first snapshot");
+    assert_eq!(first_snapshot["outcome"], "finished");
+    let after_first = fs::read(&journal).expect("completed journal");
+    assert!(after_first.starts_with(&prefix));
+    let text = String::from_utf8(after_first.clone()).expect("journal UTF-8");
+    assert!(text.contains(r#""package":"A","issuance":2"#));
+    let count = fs::read_to_string(&invocations)
+        .expect("invocations")
+        .lines()
+        .count();
+
+    let second = run(temp.path(), &args);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(fs::read(&journal).expect("replayed journal"), after_first);
+    assert_eq!(
+        fs::read_to_string(&invocations)
+            .expect("invocations")
+            .lines()
+            .count(),
+        count
+    );
+}
