@@ -97,6 +97,26 @@ pub struct AmendmentRepositoryRefs {
     pub repair_ref: String,
 }
 
+/// Counterfactual evidence for an amendment executed against a composed tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum AmendmentProof {
+    /// Reverting every repair diff succeeded and the criterion was executed in that state.
+    Reverted { execution: CriterionExecution },
+    /// At least one repair diff could not be reverted from the composed tree.
+    Unconstructable {
+        repository: String,
+        repair_ref: String,
+        detail: String,
+    },
+}
+impl AmendmentProof {
+    /// Whether the counterfactual state was constructed and made the amendment fail.
+    pub fn proves_guard(&self) -> bool {
+        matches!(self, Self::Reverted { execution } if !execution.exit_status().is_success())
+    }
+}
+
 /// One criterion visible to a re-run, either authored or durably amended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -320,6 +340,8 @@ pub enum DriverEvent {
         name: String,
         origin: CriterionOrigin,
         execution: CriterionExecution,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amendment_proof: Option<AmendmentProof>,
     },
     /// One authored or amended criterion was executed.
     CriterionExecuted {
@@ -350,6 +372,26 @@ pub enum DriverEvent {
     },
     /// The gate finished, including the zero-findings case.
     GateFinished { package: String, gate: String },
+    /// A credited repair was fast-forwarded into its package's durable lineage.
+    PackageRepairMerged {
+        package: String,
+        repository: String,
+        gate: String,
+        finding: u64,
+        repair_ref: String,
+        previous_oid: String,
+        hardened_oid: String,
+    },
+    /// Assembly could not reconstruct a credited finding after this package rewrote its source.
+    PackageHardeningInvalidated {
+        package: String,
+        hardened_package: String,
+        repository: String,
+        gate: String,
+        finding: u64,
+        repair_ref: String,
+        detail: String,
+    },
     /// All effective criteria and the gate accepted this package.
     PackageCompleted { package: String },
     /// Driver judgement failed; dependents remain blocked.
@@ -389,6 +431,8 @@ pub enum DriverEvent {
         name: String,
         origin: CriterionOrigin,
         execution: CriterionExecution,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amendment_proof: Option<AmendmentProof>,
     },
     /// Every effective criterion passed against the composed assembly.
     AssemblyCompleted,
@@ -708,6 +752,9 @@ pub fn derive_driver_snapshot(
                 consumed_overrules.clear();
                 continue;
             }
+            DriverEvent::PackageHardeningInvalidated { .. } => {
+                assembly = DriverAssemblyState::Pending;
+            }
             DriverEvent::AssemblyRepositoryComposed { .. } => {
                 if !all_packages_complete() {
                     return Err(PackageDriverError::AssemblyBeforePackagesComplete);
@@ -835,6 +882,8 @@ pub fn derive_driver_snapshot(
             | DriverEvent::FindingRejected { package, .. }
             | DriverEvent::FindingReplayed { package, .. }
             | DriverEvent::GateFinished { package, .. }
+            | DriverEvent::PackageRepairMerged { package, .. }
+            | DriverEvent::PackageHardeningInvalidated { package, .. }
             | DriverEvent::PackageCompleted { package }
             | DriverEvent::PackageFailed { package, .. } => package,
             DriverEvent::AssemblyRepositoryComposed { .. }
@@ -1141,6 +1190,21 @@ pub fn derive_driver_snapshot(
                     ));
                 }
             }
+            DriverEvent::PackageRepairMerged { .. } => {
+                if !matches!(state, DriverPackageState::Complete) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+            }
+            DriverEvent::PackageHardeningInvalidated { .. } => {
+                if !matches!(state, DriverPackageState::Complete) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+                *state = DriverPackageState::Pending;
+            }
             DriverEvent::PackageCompleted { .. } => {
                 if !matches!(state, DriverPackageState::Judging { .. }) {
                     return Err(PackageDriverError::EventAfterTerminal {
@@ -1397,7 +1461,9 @@ pub fn charged_failure_count(events: &[DriverEvent], package_id: &str) -> usize 
         .iter()
         .filter(|event| {
             matches!(event,
-        DriverEvent::WorkerFailed { package, .. } | DriverEvent::PackageFailed { package, .. }
+        DriverEvent::WorkerFailed { package, .. }
+            | DriverEvent::PackageFailed { package, .. }
+            | DriverEvent::PackageHardeningInvalidated { package, .. }
         if package == package_id)
         })
         .count()
@@ -1449,10 +1515,31 @@ pub fn latest_criterion_failure_evidence(
                 parent,
                 name,
                 execution,
+                amendment_proof,
                 ..
-            } if package == package_id && !execution.exit_status().is_success() => {
+            } if package == package_id
+                && (!execution.exit_status().is_success()
+                    || amendment_proof
+                        .as_ref()
+                        .is_some_and(|proof| !proof.proves_guard())) =>
+            {
                 failed_criterion_evidence(format!("parent:{parent}:{name}"), execution)
             }
+            DriverEvent::PackageHardeningInvalidated {
+                package,
+                hardened_package,
+                gate,
+                finding,
+                repair_ref,
+                detail,
+                ..
+            } if package == package_id => Some(RecoveryCriterionEvidence {
+                criterion: format!("gate:{gate}:finding:{finding}:restore-provability"),
+                command: format!("restore repair {repair_ref} credited to {hardened_package}"),
+                exit_status: "revert unconstructable".to_owned(),
+                stdout: String::new(),
+                stderr: detail.clone(),
+            }),
             _ => None,
         })
         .collect()
@@ -1956,6 +2043,7 @@ mod tests {
                 String::new(),
                 String::new(),
             ),
+            amendment_proof: None,
         });
         let gating = derive_driver_snapshot(&graph, &events, false).expect("assembly gating");
         assert_eq!(gating.assembly(), &DriverAssemblyState::Gating);

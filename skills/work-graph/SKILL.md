@@ -1,6 +1,6 @@
 ---
 name: work-graph
-description: Supervise one frozen work-package graph through repeated driver runs. Use `/work-graph <vision-dir>` to resolve the active frozen graph, persist launch configuration, watch and render the journal, preserve failure evidence, apply only goal-preserving recovery, and notify the human when a ruling or terminal result requires attention.
+description: Supervise and mechanically promote one frozen work-package graph. Use `/work-graph <vision-dir>` to resolve the active graph, persist launch configuration, preserve failure evidence, apply only goal-preserving recovery, notify the human at ruling boundaries, and merge only an assembly-completed run.
 ---
 
 # Work a frozen graph
@@ -196,28 +196,131 @@ pce graph freeze --vision-dir <vision-dir>
 
 The skill never runs that command.
 
-## 7. Notify and stop at the boundary
+## 7. Notify or promote at the terminal boundary
 
 When the driver exits, run `driver-status` with the same `<frozen-graph>` and journal and the stored
 `--override-risk-ordering` when enabled, render once, and append the terminal interpretation before
-any notification. Use:
+any notification or repository mutation.
+
+A blocked, parked, partially complete, `assembly-failed`, or otherwise non-finished status never
+pushes a ref, opens a pull request, or invokes a merge command. Notify and stop as before:
 
 ```bash
-herdr notification show "pce graph stopped" --body "<vision>: <package and reason, or finished>" --sound request
+herdr notification show "pce graph stopped" --body "<vision>: <package and reason>" --sound request
 ```
 
-Use `--sound done` for `Finished`. Also notify immediately when a criterion ruling or recurring
-repository-contract defect needs the human. Record the notification command and result. Then stop
-polling. Do not silently relaunch a blocked driver.
-
-If notification delivery fails, retain the failure in `supervision.md` and report it in chat; do not
+Also notify immediately when a criterion ruling or recurring repository-contract defect needs the
+human. Record the notification command and result. Do not silently relaunch a blocked driver. If
+notification delivery fails, retain the failure in `supervision.md` and report it in chat; do not
 claim that a push arrived.
 
-## 8. Preserve the boundary
+Only a journal whose active plan version ends in `assembly-completed`, and whose `driver-status` is
+`Finished`, enters sections 8 through 10. This is a mechanical consequence of completed proof, not
+another human ruling.
 
-This skill may draft only a goal-preserving graph repartition under section 6. It does not write
-`vision.md`, invoke `/to-graph`, weaken or rename criteria, freeze a graph, land branches or pull
-requests, or invoke `/land-ticket`.
+## 8. Establish the exact promotion inputs
+
+Promotion currently supports exactly one repository. Require the union of graph repository names to
+contain one name and `run.json` to map exactly that name to one source worktree. Refuse before any
+push otherwise. Resolve all of the following once and append them to `supervision.md`:
+
+- repository identity from `gh repo view --json nameWithOwner,defaultBranchRef,url` executed in the
+  source worktree;
+- remote `origin` and the authenticated actor from `gh api user --jq .login`;
+- the frozen graph's and journal's SHA-256 digests computed from their bytes with
+  `shasum -a 256`;
+- the final `AssemblyRepositoryComposed.base_oid` for the repository in the active plan version;
+- every package input named by the final assembly event, its final issuance, local branch
+  `pce/<vision>/<package>/attempt-<issuance>`, and the event's exact oid; and
+- assembly branch `pce/<vision>/assembly-v<plan_version>` at the recorded assembly oid.
+
+Every package-input branch must resolve locally to the oid proved by the journal. The assembly oid
+must resolve to a commit and equal the final recorded assembly oid. A missing or mismatched ref is a
+terminal promotion failure, not a reason to reconstruct history.
+
+Fetch the remote default branch immediately before promotion. Require the fetched default-branch oid
+to be an ancestor of the assembly oid. This check proves that the already-executed assembly is the
+tree being proposed rather than a stale authored-base composition. If it is not an ancestor, append
+the two oids, notify the human that default-branch movement requires the driver to compose and prove
+a successor assembly, and stop without pushing. Never rebase, merge, or resolve this difference in
+the skill.
+
+Create `<vision-dir>/.pce/promotion-state.json` atomically before the first external mutation. It
+records schema version 1, repository identity, default branch and fetched oid, graph path and digest,
+journal path, assembly and attempt refs with oids, authenticated actor, current phase, pull-request
+URL when known, merge oid when known, and a chronological operation list. Reconcile it only with
+read-only `git` and `gh` observations. If it records any failed operation, report the recorded partial
+state and stop; an invocation never retries a failed promotion.
+
+## 9. Render the pull request as the proof record
+
+Write `<vision-dir>/.pce/promotion-pr-body.md` atomically from the frozen graph versions and typed
+journal records. The body is generated evidence, not a diff summary or review request. Include:
+
+1. vision name, repository, journal repository-relative path and SHA-256, frozen graph path and
+   SHA-256, and all plan versions traversed;
+2. one row per package naming its final attempt ref when it is a retained assembly input, each
+   authored and amended criterion, and the final corresponding command and exit status;
+3. every accepted gate finding with gate and finding ids, command, witness and repair exit statuses,
+   and every repository witness/repair ref;
+4. every `package-park-overruled` rationale verbatim in a fence longer than any fence contained in
+   the rationale;
+5. every `plan-version-advanced` event, its carried completions and amendments, plus a structural
+   diff of the adjacent frozen graphs stating which package definitions and dependency edges were
+   revised; and
+6. every final `assembly-criterion-executed` command and exit status against the composed whole,
+   including paired amendment proof, followed by the terminal `assembly-completed` event.
+
+Quote journal text without paraphrasing. Successful stdout/stderr and transient absolute working
+paths stay in the hashed journal rather than bloating or leaking machine paths into the PR. Include
+failure output only where a carried recovery or overrule needs it to remain intelligible. Refuse if
+any referenced graph version is absent, if a final package/assembly proof cannot be correlated, or
+if the UTF-8 body exceeds GitHub's 65,536-byte body limit. These refusals happen before pushing. The
+PR title is `<vision>: promote proven assembly`.
+
+## 10. Push, wait for required checks, and merge once
+
+Push the assembly ref and all package-attempt refs retained as final assembly inputs to `origin` in
+one `git push --atomic` invocation using explicit `<oid>:refs/heads/<name>` refspecs. Never force-push and never push any
+other ref. Record the exact refspecs and command result in `promotion-state.json` and
+`supervision.md` before proceeding.
+
+Open the pull request with `gh pr create --base <default> --head <assembly-branch> --title ...
+--body-file <promotion-pr-body>`. Record its URL. The authenticated GitHub actor is the committer;
+do not synthesize or override an identity.
+
+Inspect required checks with `gh pr checks <url> --required`. If any are pending, wait with
+`gh pr checks <url> --required --watch --fail-fast`. A failed, cancelled, or timed-out required check
+is a terminal promotion failure: record the exact check output, notify the human, and stop. The
+absence of required checks permits immediate merge. Approval is never requested or awaited.
+
+Fetch the default branch again after required checks and require its oid to equal the oid recorded
+in `promotion-state.json`. Movement is a terminal promotion failure; do not merge an assembly whose
+base changed while CI ran.
+
+Merge exactly once with merge-commit mechanics:
+
+```bash
+gh pr merge <url> --merge --subject '<vision>: promote proven assembly' \
+  --body 'Proof: <journal-path>
+Frozen graph sha256: <digest>'
+```
+
+Do not squash, rebase, enable auto-merge, delete archaeology branches, or bypass branch protection.
+After the command, observe the PR with `gh pr view --json state,mergedAt,mergeCommit,url`; only
+`state=MERGED` is success. Record the merge oid and mark the promotion state `merged`. If push, PR
+creation, check waiting, or merge fails, record exactly which prior operations succeeded, mark the
+state `failed`, notify the human, and stop. Never retry, force, or continue into a different route.
+
+On success, send the done notification, append it and its result, then report the merged PR URL as
+the run's final line. No prose follows that URL.
+
+## 11. Preserve the boundary
+
+This skill may draft only a goal-preserving graph repartition under section 6 and may promote only
+through sections 7 through 10. It does not write `vision.md`, invoke `/to-graph`, weaken or rename
+criteria, freeze a graph, edit the journal, invoke `/land-ticket`, or land any non-assembly branch.
+Freeze and park-overrule remain human rulings; promotion after proof is mechanical.
 
 The append-only driver journal is the admissible run proof. `supervision.md` is explanation and
 captured evidence, never a substitute for or repair of that proof. No important fact may exist only

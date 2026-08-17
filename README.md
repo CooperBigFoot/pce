@@ -19,11 +19,16 @@ Post-run orchestrator reviews can be recorded using the
   drives plan, critique, execution, PR review, and merge, appends durable events,
   and derives current status on read from the event log, git, and GitHub
   authorities. A rewritable `state.json` is not the resumable source of truth.
+- `/work-graph` supervises a frozen work-package graph. Human rulings remain at
+  freeze and explicit park overrules; when the journal reaches
+  `assembly-completed`, the skill mechanically pushes the proven assembly,
+  records its proof in a pull request, waits for required checks, and merges it.
 - `install.sh` builds the release binary, symlinks it to `~/.local/bin/pce`,
   installs the rehydration hook, and symlinks and verifies the current
-  seven-skill set in
+  eight-skill set in
   `~/.claude/skills/`: `pce`, `to-vision`, `domain-modeling`,
-  `grill-with-docs`, `chart-program`, `work-ticket`, and `land-ticket`.
+  `grill-with-docs`, `chart-program`, `work-ticket`, `land-ticket`, and
+  `work-graph`.
 
 ## Rehydration hook activation
 

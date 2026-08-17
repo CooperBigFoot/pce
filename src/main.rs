@@ -22,23 +22,24 @@ use pce_core::{
     AbsoluteDispatchTemporaryDirectory, AbsoluteGateExecClientPath,
     AbsoluteGateExecutionEvidencePath, AbsoluteGateExecutionSocketPath, AbsoluteOutputPath,
     AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
-    AbsoluteWorktreeRoot, AcceptanceCriteria, ActReversibility, AmendmentRepositoryRefs,
-    AppendError, AppendableCategory, AppendableFinding, ArgumentVector, ArtifactOutcome,
-    ArtifactPath, ArtifactProduction, AuthorityFailure, BranchState, BuiltArtifactRef,
-    CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
-    CodexTerminalObservation, CodexTerminalUsage, CommandExitStatus, CompletionCriterionStatus,
-    CompletionDecision, CompositionInput, CreationDate, CriterionChangeDecision,
-    CriterionExecution, CurrentArtifactObservation, CurrentArtifactState, DispatchAdmission,
-    DispatchAttempt, DispatchCandidate, DispatchCompletionPayload, DispatchDuration,
-    DispatchEnvelope, DispatchExitStatus, DispatchIdentityObservation, DispatchLedger,
-    DispatchLedgerCompletion, DispatchLogging, DispatchPayload, DispatchProcessIdentity,
-    DispatchProjectionInput, DispatchRef, DispatchRequiredArtifactObservation, DispatchRole,
-    DispatchRoleClass, DispatchRootCause, DispatchTarget, DispatchTokenUsage, DispatchVisionSource,
-    DispatchabilityResult, DriverAssemblyState, DriverEvent, EnvironmentFailureLimit,
-    EnvironmentPreparationOutcome, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
-    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
-    ExactPullRequestState, ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable,
-    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FindingRejectionReason,
+    AbsoluteWorktreeRoot, AcceptanceCriteria, ActReversibility, AmendmentProof,
+    AmendmentRepositoryRefs, AppendError, AppendableCategory, AppendableFinding, ArgumentVector,
+    ArtifactOutcome, ArtifactPath, ArtifactProduction, AuthorityFailure, BranchState,
+    BuiltArtifactRef, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage,
+    ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage, CommandExitStatus,
+    CompletionCriterionStatus, CompletionDecision, CompositionInput, CreationDate,
+    CriterionChangeDecision, CriterionExecution, CurrentArtifactObservation, CurrentArtifactState,
+    DispatchAdmission, DispatchAttempt, DispatchCandidate, DispatchCompletionPayload,
+    DispatchDuration, DispatchEnvelope, DispatchExitStatus, DispatchIdentityObservation,
+    DispatchLedger, DispatchLedgerCompletion, DispatchLogging, DispatchPayload,
+    DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
+    DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass, DispatchRootCause,
+    DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchabilityResult,
+    DriverAssemblyState, DriverEvent, EnvironmentFailureLimit, EnvironmentPreparationOutcome,
+    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
+    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState,
+    ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable, ExitCode,
+    ExpectedVerdictOutcome, FileObservation, FindingAdmission, FindingRejectionReason,
     FindingReplayDecision, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
     GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
     GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
@@ -2235,9 +2236,14 @@ fn run_join_parent_criteria(
             &refs,
         )?;
         let paths = materialization.paths()?;
+        let named_paths = materialization
+            .named_paths(&sources)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
         for criterion in effective_criteria(graph, parent.id().as_str(), &events)? {
-            let execution = shell_execution(&criterion.command, &paths)?;
-            if !execution.exit_status().is_success() {
+            let (execution, amendment_proof, passed) =
+                execute_effective_criterion(&criterion, &paths, &named_paths)?;
+            if !passed {
                 failed.push(format!("{}:{}", parent.id().as_str(), criterion.name));
             }
             append_driver_event(
@@ -2248,6 +2254,7 @@ fn run_join_parent_criteria(
                     name: criterion.name,
                     origin: criterion.origin,
                     execution,
+                    amendment_proof,
                 },
             )?;
         }
@@ -2405,6 +2412,19 @@ fn active_driver_events(events: &[DriverEvent]) -> &[DriverEvent] {
         .map_or(events, |index| &events[index..])
 }
 
+fn active_assembly_events(events: &[DriverEvent]) -> &[DriverEvent] {
+    events
+        .iter()
+        .rposition(|event| {
+            matches!(
+                event,
+                DriverEvent::PlanVersionAdvanced { .. }
+                    | DriverEvent::PackageHardeningInvalidated { .. }
+            )
+        })
+        .map_or(events, |index| &events[index.saturating_add(1)..])
+}
+
 fn completed_package_issuance(events: &[DriverEvent], package_id: &str) -> Result<u64> {
     let completion = events
         .iter()
@@ -2424,6 +2444,93 @@ fn completed_package_issuance(events: &[DriverEvent], package_id: &str) -> Resul
 
 fn package_branch(graph: &WorkPackageGraph, package: &str, issuance: u64) -> String {
     format!("pce/{}/{package}/attempt-{issuance}", graph.vision())
+}
+
+fn git_is_ancestor(source: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(source)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .status()?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("failed to compare git commits {ancestor} and {descendant}"),
+    }
+}
+
+fn ensure_hardened_package_lineage(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    package_id: &str,
+) -> Result<()> {
+    let events = read_driver_journal(&command.journal_path)?;
+    let issuance = completed_package_issuance(&events, package_id)?;
+    let branch = package_branch(graph, package_id, issuance);
+    for criterion in effective_criteria(graph, package_id, &events)? {
+        let pce_core::CriterionOrigin::Amendment { gate, finding } = &criterion.origin else {
+            continue;
+        };
+        for repository_refs in &criterion.repository_refs {
+            let source = command
+                .repositories
+                .iter()
+                .find(|(name, _)| name == &repository_refs.repository)
+                .map(|(_, path)| path)
+                .with_context(|| {
+                    format!(
+                        "missing repository mapping for amendment repository `{}`",
+                        repository_refs.repository
+                    )
+                })?;
+            let repair_oid = git_oid(source, &repository_refs.repair_ref)?;
+            let previous_oid = git_oid(source, &branch)?;
+            if git_is_ancestor(source, &repair_oid, &previous_oid)? {
+                continue;
+            }
+            if !git_is_ancestor(source, &previous_oid, &repair_oid)? {
+                bail!(
+                    "credited repair {} for {} finding {} is not a fast-forward of package {} lineage {}",
+                    repair_oid,
+                    gate,
+                    finding,
+                    package_id,
+                    previous_oid
+                );
+            }
+            let update = std::process::Command::new("git")
+                .arg("-C")
+                .arg(source)
+                .args([
+                    "update-ref",
+                    &format!("refs/heads/{branch}"),
+                    &repair_oid,
+                    &previous_oid,
+                ])
+                .output()?;
+            if !update.status.success() {
+                bail!(
+                    "failed to fast-forward package {} repair {}: {}",
+                    package_id,
+                    repair_oid,
+                    String::from_utf8_lossy(&update.stderr).trim()
+                );
+            }
+            append_driver_event(
+                &command.journal_path,
+                &DriverEvent::PackageRepairMerged {
+                    package: package_id.to_owned(),
+                    repository: repository_refs.repository.clone(),
+                    gate: gate.clone(),
+                    finding: *finding,
+                    repair_ref: repair_oid.clone(),
+                    previous_oid,
+                    hardened_oid: repair_oid,
+                },
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn driver_package_base_refs(
@@ -2688,6 +2795,7 @@ fn ensure_driver_package_bases(
             if !dependency_package.repositories().contains(repository) {
                 continue;
             }
+            ensure_hardened_package_lineage(graph, command, dependency.id().as_str())?;
             let issuance = completed_package_issuance(&events, dependency.id().as_str())?;
             dependencies.push(CompositionInput {
                 package: dependency.id().as_str().to_owned(),
@@ -3263,6 +3371,66 @@ Retain every package guarantee, resolve all unmerged entries, and commit the mer
     Ok(base_oid)
 }
 
+fn assembly_rewrite_author(
+    source: &Path,
+    inputs: &[CompositionInput],
+    hardened_package: &str,
+    repair_ref: &str,
+) -> Result<Option<String>> {
+    let paths = std::process::Command::new("git")
+        .arg("-C")
+        .arg(source)
+        .args([
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            repair_ref,
+        ])
+        .output()?;
+    if !paths.status.success() {
+        bail!(
+            "failed to inspect repair {} paths: {}",
+            repair_ref,
+            String::from_utf8_lossy(&paths.stderr).trim()
+        );
+    }
+    let changed_paths = String::from_utf8_lossy(&paths.stdout)
+        .lines()
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for input in inputs
+        .iter()
+        .rev()
+        .filter(|input| input.package != hardened_package)
+    {
+        let mut command = std::process::Command::new("git");
+        command
+            .arg("-C")
+            .arg(source)
+            .args(["log", "-1", "--format=%H", &input.oid, "--"])
+            .args(&changed_paths);
+        let latest = command.output()?;
+        if !latest.status.success() {
+            bail!(
+                "failed to inspect package {} history for repair {}: {}",
+                input.package,
+                repair_ref,
+                String::from_utf8_lossy(&latest.stderr).trim()
+            );
+        }
+        let oid = String::from_utf8(latest.stdout)
+            .context("git returned non-UTF-8 rewrite oid")?
+            .trim()
+            .to_owned();
+        if !oid.is_empty() && !git_is_ancestor(source, &oid, repair_ref)? {
+            return Ok(Some(input.package.clone()));
+        }
+    }
+    Ok(None)
+}
+
 fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> Result<()> {
     let mut events = read_driver_journal(&command.journal_path)?;
     let assembly_root = command
@@ -3270,7 +3438,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
         .parent()
         .context("driver journal has no parent")?
         .join(".pce/assembly");
-    let mut assembly_refs = active_driver_events(&events)
+    let mut assembly_refs = active_assembly_events(&events)
         .iter()
         .filter_map(|event| match event {
             DriverEvent::AssemblyRepositoryComposed {
@@ -3292,6 +3460,9 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
         }
         let mut packages = Vec::new();
         for package in touched {
+            if command.worker_override.is_none() {
+                ensure_hardened_package_lineage(graph, command, package.id().as_str())?;
+            }
             let oid = if command.worker_override.is_some() {
                 git_oid(source, "HEAD")?
             } else {
@@ -3413,23 +3584,39 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
     }
 
     events = read_driver_journal(&command.journal_path)?;
-    let mut remaining_executed = active_driver_events(&events)
+    let mut remaining_executed = active_assembly_events(&events)
         .iter()
         .filter_map(|event| match event {
             DriverEvent::AssemblyCriterionExecuted {
                 package,
                 name,
                 origin,
+                amendment_proof,
                 ..
-            } => Some((package.clone(), name.clone(), origin.clone())),
+            } if matches!(origin, pce_core::CriterionOrigin::Authored)
+                || amendment_proof.is_some() =>
+            {
+                Some((package.clone(), name.clone(), origin.clone()))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
-    let mut failed = active_driver_events(&events).iter().any(|event| {
-        matches!(event,
-        DriverEvent::AssemblyCriterionExecuted { execution, .. }
-            if !execution.exit_status().is_success())
-    });
+    let mut failed = active_assembly_events(&events)
+        .iter()
+        .any(|event| match event {
+            DriverEvent::AssemblyCriterionExecuted {
+                origin: pce_core::CriterionOrigin::Authored,
+                execution,
+                ..
+            } => !execution.exit_status().is_success(),
+            DriverEvent::AssemblyCriterionExecuted {
+                origin: pce_core::CriterionOrigin::Amendment { .. },
+                execution,
+                amendment_proof: Some(proof),
+                ..
+            } => !execution.exit_status().is_success() || !proof.proves_guard(),
+            _ => false,
+        });
     for package in graph.packages() {
         let sources = package_repository_sources(package, &command.repositories)?;
         let refs = sources
@@ -3449,6 +3636,10 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
             &refs,
         )?;
         let paths = materialization.paths()?;
+        let named_paths = materialization
+            .named_paths(&sources)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
         for (repository, checkout) in materialization.named_paths(&sources) {
             if let Some(preparation) = command.preparations.get(&repository) {
                 let preparation_execution = shell_execution_at(preparation, &checkout, &paths)?;
@@ -3479,8 +3670,26 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                 remaining_executed.remove(position);
                 continue;
             }
-            let execution = shell_execution(&criterion.command, &paths)?;
-            failed |= !execution.exit_status().is_success();
+            let (execution, amendment_proof, passed) =
+                execute_effective_criterion(&criterion, &paths, &named_paths)?;
+            failed |= !passed;
+            let unconstructable = match (&criterion.origin, &amendment_proof) {
+                (
+                    pce_core::CriterionOrigin::Amendment { gate, finding },
+                    Some(AmendmentProof::Unconstructable {
+                        repository,
+                        repair_ref,
+                        detail,
+                    }),
+                ) => Some((
+                    gate.clone(),
+                    *finding,
+                    repository.clone(),
+                    repair_ref.clone(),
+                    detail.clone(),
+                )),
+                _ => None,
+            };
             append_driver_event(
                 &command.journal_path,
                 &DriverEvent::AssemblyCriterionExecuted {
@@ -3488,8 +3697,56 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                     name: criterion.name,
                     origin: criterion.origin,
                     execution,
+                    amendment_proof,
                 },
             )?;
+            if let Some((gate, finding, repository, repair_ref, detail)) = unconstructable {
+                let source = command
+                    .repositories
+                    .iter()
+                    .find(|(name, _)| name == &repository)
+                    .map(|(_, path)| path)
+                    .with_context(|| format!("missing repository mapping for `{repository}`"))?;
+                let composition = active_assembly_events(&current_events)
+                    .iter()
+                    .rev()
+                    .find_map(|event| match event {
+                        DriverEvent::AssemblyRepositoryComposed {
+                            repository: recorded,
+                            packages,
+                            ..
+                        } if recorded == &repository => Some(packages.as_slice()),
+                        _ => None,
+                    })
+                    .with_context(|| {
+                        format!("assembly omitted composition inputs for `{repository}`")
+                    })?;
+                let author = assembly_rewrite_author(
+                    source,
+                    composition,
+                    package.id().as_str(),
+                    &repair_ref,
+                )?
+                .with_context(|| {
+                    format!(
+                        "could not attribute unconstructable repair {repair_ref} for {}",
+                        package.id().as_str()
+                    )
+                })?;
+                append_driver_event(
+                    &command.journal_path,
+                    &DriverEvent::PackageHardeningInvalidated {
+                        package: author,
+                        hardened_package: package.id().as_str().to_owned(),
+                        repository,
+                        gate,
+                        finding,
+                        repair_ref,
+                        detail,
+                    },
+                )?;
+                return Ok(());
+            }
         }
     }
     if failed {
@@ -4431,6 +4688,101 @@ fn materialize_driver_state(
         }
     }
     Ok(materialization)
+}
+
+fn restore_counterfactual_checkouts(originals: &[(PathBuf, String)]) -> Result<()> {
+    for (checkout, oid) in originals {
+        let reset = std::process::Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args(["reset", "--hard", oid])
+            .output()?;
+        if !reset.status.success() {
+            bail!(
+                "failed to restore amendment checkout {}: {}",
+                checkout.display(),
+                String::from_utf8_lossy(&reset.stderr).trim()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn amendment_counterfactual(
+    criterion: &pce_core::EffectiveCriterion,
+    paths: &[PathBuf],
+    named_paths: &BTreeMap<String, PathBuf>,
+) -> Result<AmendmentProof> {
+    let mut originals = Vec::new();
+    for refs in &criterion.repository_refs {
+        let Some(checkout) = named_paths.get(&refs.repository) else {
+            restore_counterfactual_checkouts(&originals)?;
+            return Ok(AmendmentProof::Unconstructable {
+                repository: refs.repository.clone(),
+                repair_ref: refs.repair_ref.clone(),
+                detail: "composed materialization omitted amendment repository".to_owned(),
+            });
+        };
+        originals.push((checkout.clone(), git_oid(checkout, "HEAD")?));
+        let revert = std::process::Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .env("GIT_EDITOR", "true")
+            .args(["revert", "--no-commit", &refs.repair_ref])
+            .output()?;
+        if !revert.status.success() {
+            let detail = [
+                String::from_utf8_lossy(&revert.stdout).trim().to_owned(),
+                String::from_utf8_lossy(&revert.stderr).trim().to_owned(),
+            ]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+            restore_counterfactual_checkouts(&originals)?;
+            return Ok(AmendmentProof::Unconstructable {
+                repository: refs.repository.clone(),
+                repair_ref: refs.repair_ref.clone(),
+                detail,
+            });
+        }
+    }
+    let execution = shell_execution(&criterion.command, paths);
+    restore_counterfactual_checkouts(&originals)?;
+    Ok(AmendmentProof::Reverted {
+        execution: execution?,
+    })
+}
+
+fn execute_effective_criterion(
+    criterion: &pce_core::EffectiveCriterion,
+    paths: &[PathBuf],
+    named_paths: &BTreeMap<String, PathBuf>,
+) -> Result<(CriterionExecution, Option<AmendmentProof>, bool)> {
+    let amendment = matches!(
+        criterion.origin,
+        pce_core::CriterionOrigin::Amendment { .. }
+    );
+    let originals = amendment
+        .then(|| {
+            named_paths
+                .values()
+                .map(|checkout| Ok((checkout.clone(), git_oid(checkout, "HEAD")?)))
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?;
+    let execution = shell_execution(&criterion.command, paths)?;
+    if let Some(originals) = &originals {
+        restore_counterfactual_checkouts(originals)?;
+    }
+    let amendment_proof = amendment
+        .then(|| amendment_counterfactual(criterion, paths, named_paths))
+        .transpose()?;
+    let passed = execution.exit_status().is_success()
+        && amendment_proof
+            .as_ref()
+            .is_none_or(AmendmentProof::proves_guard);
+    Ok((execution, amendment_proof, passed))
 }
 
 fn shell_execution(command: &str, paths: &[PathBuf]) -> Result<CriterionExecution> {
@@ -14112,21 +14464,22 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use pce_core::{
-        AcceptanceCriteria, AppendableFinding, ArtifactPath, BranchState, CachedInputTokens,
-        CodexTerminalObservation, CurrentArtifactObservation, CurrentArtifactState,
-        DispatchExitStatus, DispatchTokenUsage, EventBodyRef, EventKindName, EventRecord,
-        EventRecordFilter, ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
-        ExceptionalMergeChainObservation, ExitCode, GitAuthorityObservation,
-        GitHubAuthorityObservation, GitHubPullRequestObservation, GitMergeObservation, InputTokens,
-        KnownPayload, MilestoneMergeSubject, MilestoneNode, NESTED_SEATBELT_SKIP_MARKER, NodeId,
-        ObservedExitStatus, OutputTokens, PullRequestAuthorityObservation, PullRequestNumber,
-        ReadKind, ReadPayload, ReasoningOutputTokens, RecoveryLogPath, RepositoryBranchName,
-        RepositoryFetchObservation, RepositoryName, RepositoryObservation,
-        RepositoryObservationFailure, RunSnapshot, SeatbeltCapability, Sha256Digest,
-        SquashCommitOid, StepAuthorityObservation, StepNode, TagName, TagState, VersionPolicy,
-        VisionSlug, WorktreeIdentity, WorktreeState, WriteKind, classify_codex_terminal_usage,
-        derive_run_state, derive_run_state_with_exceptional_merge_chains,
-        parse_acceptance_criteria, parse_event_line, render_human_snapshot,
+        AcceptanceCriteria, AmendmentRepositoryRefs, AppendableFinding, ArtifactPath, BranchState,
+        CachedInputTokens, CodexTerminalObservation, CriterionOrigin, CurrentArtifactObservation,
+        CurrentArtifactState, DispatchExitStatus, DispatchTokenUsage, EffectiveCriterion,
+        EventBodyRef, EventKindName, EventRecord, EventRecordFilter, ExactPullRequestIdentity,
+        ExactPullRequestState, ExceptionalMergeChain, ExceptionalMergeChainObservation, ExitCode,
+        GitAuthorityObservation, GitHubAuthorityObservation, GitHubPullRequestObservation,
+        GitMergeObservation, InputTokens, KnownPayload, MilestoneMergeSubject, MilestoneNode,
+        NESTED_SEATBELT_SKIP_MARKER, NodeId, ObservedExitStatus, OutputTokens,
+        PullRequestAuthorityObservation, PullRequestNumber, ReadKind, ReadPayload,
+        ReasoningOutputTokens, RecoveryLogPath, RepositoryBranchName, RepositoryFetchObservation,
+        RepositoryName, RepositoryObservation, RepositoryObservationFailure, RunSnapshot,
+        SeatbeltCapability, Sha256Digest, SquashCommitOid, StepAuthorityObservation, StepNode,
+        TagName, TagState, VersionPolicy, VisionSlug, WorktreeIdentity, WorktreeState, WriteKind,
+        classify_codex_terminal_usage, derive_run_state,
+        derive_run_state_with_exceptional_merge_chains, parse_acceptance_criteria,
+        parse_event_line, render_human_snapshot,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -14134,13 +14487,13 @@ mod tests {
     use crate::{
         BranchFetch, Command, DispatchGraphNode, DispatchLoggingMode, DispatchNode,
         FORMAT_BOOTSTRAP_CANDIDATES, FetchResult, RepositoryContract, RepositoryRuntime,
-        StatusFormat, USAGE, already_dispatched, github_pull_request_list_args,
-        lexically_normalized_repository_root, measure_tracked_contract_at_root, observe_git,
-        observe_terminal_line, parse_command, parse_dispatch_graph, parse_tracked_contract,
-        read_at_default_branch_head, read_event_log, read_ratified_acceptance_criteria,
-        readiness_version_policies, render_seatbelt_profile, repository_contracts, run,
-        run_log_read, seatbelt_execution_capability, select_bootstrap_candidate,
-        validated_snapshot_value,
+        StatusFormat, USAGE, already_dispatched, execute_effective_criterion,
+        github_pull_request_list_args, lexically_normalized_repository_root,
+        measure_tracked_contract_at_root, observe_git, observe_terminal_line, parse_command,
+        parse_dispatch_graph, parse_tracked_contract, read_at_default_branch_head, read_event_log,
+        read_ratified_acceptance_criteria, readiness_version_policies, render_seatbelt_profile,
+        repository_contracts, run, run_log_read, seatbelt_execution_capability,
+        select_bootstrap_candidate, validated_snapshot_value,
     };
 
     fn ratified_floor() -> AcceptanceCriteria {
@@ -18571,6 +18924,67 @@ None.
                 & 0o777,
             0o700
         );
+    }
+
+    #[test]
+    fn amendment_with_deleted_guard_cannot_pass_on_zero_executed_tests() {
+        let temp = tempdir().expect("tempdir");
+        let repository = temp.path().join("repository");
+        initialize_git_repository(&repository);
+        fs::write(repository.join("defect"), "broken\n").expect("defect");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-m", "base"]);
+        fs::write(
+            repository.join("guard.sh"),
+            "#!/bin/sh\nif grep -qx hardened defect; then echo '1 passed'; exit 0; fi\necho failed; exit 1\n",
+        )
+        .expect("guard");
+        let mut permissions = fs::metadata(repository.join("guard.sh"))
+            .expect("guard metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(repository.join("guard.sh"), permissions).expect("guard mode");
+        git(&repository, &["add", "guard.sh"]);
+        git(&repository, &["commit", "-m", "witness"]);
+        fs::write(repository.join("defect"), "hardened\n").expect("repair");
+        git(&repository, &["add", "defect"]);
+        git(&repository, &["commit", "-m", "repair"]);
+        let repair = crate::git_oid(&repository, "HEAD").expect("repair oid");
+        fs::write(
+            repository.join("guard.sh"),
+            "#!/bin/sh\necho 'running 0 tests ... test result: ok'\nexit 0\n",
+        )
+        .expect("deleted guard");
+        git(&repository, &["add", "guard.sh"]);
+        git(&repository, &["commit", "-m", "delete guarded case"]);
+        let criterion = EffectiveCriterion {
+            name: "gate:g:finding:0".to_owned(),
+            command: "./guard.sh".to_owned(),
+            origin: CriterionOrigin::Amendment {
+                gate: "g".to_owned(),
+                finding: 0,
+            },
+            repository_refs: vec![AmendmentRepositoryRefs {
+                repository: "repo".to_owned(),
+                witness_ref: "HEAD~2".to_owned(),
+                repair_ref: repair,
+            }],
+        };
+        let paths = vec![repository.clone()];
+        let named_paths = [("repo".to_owned(), repository)].into_iter().collect();
+        let (execution, proof, passed) =
+            execute_effective_criterion(&criterion, &paths, &named_paths).expect("paired proof");
+        assert!(execution.exit_status().is_success());
+        assert!(execution.stdout().contains("0 tests"));
+        let pce_core::AmendmentProof::Reverted {
+            execution: reverted,
+        } = proof.expect("amendment proof")
+        else {
+            panic!("revert should construct");
+        };
+        assert!(reverted.exit_status().is_success());
+        assert!(reverted.stdout().contains("0 tests"));
+        assert!(!passed);
     }
 
     #[test]
