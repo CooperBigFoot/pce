@@ -1,4 +1,5 @@
 //! readiness : WorkPackageGraph × RepositoryMergeObservations × RiskOrdering → ReadyReport
+//! criterion_floor : WorkPackageGraph × WorkPackageGraph → Option<CriteriaInvarianceViolation>
 //!
 //! A validated graph is a finite DAG whose hard ancestry remains connected when advisory edges
 //! are overridden.
@@ -496,6 +497,55 @@ fn validate_soft_reduction(graph: &WorkPackageGraph) -> Result<(), WorkPackageGr
         }
     }
     Ok(())
+}
+
+/// A predecessor criterion absent byte-for-byte from its successor plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CriteriaInvarianceViolation<'a> {
+    previous_package: &'a WorkPackageId,
+    criterion: &'a WorkPackageCriterion,
+}
+
+impl<'a> CriteriaInvarianceViolation<'a> {
+    /// Return the package that owned the criterion in the predecessor plan.
+    pub const fn previous_package(self) -> &'a WorkPackageId {
+        self.previous_package
+    }
+
+    /// Return the predecessor criterion that did not survive unchanged.
+    pub const fn criterion(self) -> &'a WorkPackageCriterion {
+        self.criterion
+    }
+}
+
+/// Return the first predecessor criterion that does not survive byte-identically in the successor.
+///
+/// Successor packaging and additional criteria are deliberately ignored. Matching consumes one
+/// successor occurrence so duplicate criteria in a predecessor must survive with equal multiplicity.
+pub fn criteria_invariance_violation<'a>(
+    previous: &'a WorkPackageGraph,
+    successor: &WorkPackageGraph,
+) -> Option<CriteriaInvarianceViolation<'a>> {
+    let mut unmatched_successor_criteria = successor
+        .packages()
+        .iter()
+        .flat_map(WorkPackage::criteria)
+        .collect::<Vec<_>>();
+    for package in previous.packages() {
+        for criterion in package.criteria() {
+            let Some(position) = unmatched_successor_criteria
+                .iter()
+                .position(|candidate| *candidate == criterion)
+            else {
+                return Some(CriteriaInvarianceViolation {
+                    previous_package: package.id(),
+                    criterion,
+                });
+            };
+            unmatched_successor_criteria.swap_remove(position);
+        }
+    }
+    None
 }
 
 /// Return package identifiers whose complete authored definitions are identical across plans.

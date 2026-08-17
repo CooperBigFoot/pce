@@ -854,7 +854,7 @@ fn revised_plan_carries_only_unchanged_completions_and_uses_fresh_issuance() {
     ).expect("v1 write");
     fs::write(
         &v2_path,
-        serde_json::to_vec(&json!({"vision":"driver-test","plan_version":2,"authored_at_ref":"HEAD","packages":[package("A", "true"),package("B", "true")]})).expect("v2"),
+        serde_json::to_vec(&json!({"vision":"driver-test","plan_version":2,"authored_at_ref":"HEAD","packages":[package("A", "true"),package("B", "false")]})).expect("v2"),
     ).expect("v2 write");
     append(
         &journal,
@@ -926,28 +926,183 @@ printf '%s' '{{"outcome":"mis-specified","fault":{{"kind":"criterion","name":"cr
 }
 
 #[test]
+fn revised_plan_refuses_weakened_criterion_before_advancing() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "base");
+    let journal = temp.path().join("driver.jsonl");
+    let v1_path = temp.path().join("graph.v1.json");
+    let v2_path = temp.path().join("graph.v2.json");
+    let graph = |version: u64, command: &str| {
+        json!({
+            "vision":"driver-test","plan_version":version,"authored_at_ref":"HEAD","packages":[
+                {"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"full suite","input":"repo","observation":"all tests pass","command":command}],"depends_on":[]}
+            ]
+        })
+    };
+    fs::write(
+        &v1_path,
+        serde_json::to_vec(&graph(1, "cargo test --workspace")).expect("v1"),
+    )
+    .expect("v1 write");
+    fs::write(
+        &v2_path,
+        serde_json::to_vec(&graph(2, "cargo test --package passing-package")).expect("v2"),
+    )
+    .expect("v2 write");
+    append(
+        &journal,
+        json!({"event":"recovery-configured","limits":{"retry_attempts":1,"local_patch_attempts":1,"environment_failures":6}}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"package-parked","package":"A","issuance":1,"reason":"replan: criterion: full suite"}),
+    );
+    let prefix = fs::read(&journal).expect("journal prefix");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-run".into(),
+            "--graph".into(),
+            v2_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--repository".into(),
+            format!("repo={}", repo.display()),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("full suite"), "{stderr}");
+    assert!(stderr.contains("package A"), "{stderr}");
+    assert!(
+        stderr.contains("freezing the revised version is the human's ruling"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(&journal).expect("unchanged journal"), prefix);
+}
+
+#[test]
+fn revised_plan_admits_repartition_and_carries_no_split_package_completion() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "base");
+    let journal = temp.path().join("driver.jsonl");
+    let v1_path = temp.path().join("graph.v1.json");
+    let v2_path = temp.path().join("graph.v2.json");
+    let criterion =
+        |name: &str| json!({"name":name,"input":"repo","observation":"zero","command":"true"});
+    fs::write(
+        &v1_path,
+        serde_json::to_vec(&json!({
+            "vision":"driver-test","plan_version":1,"authored_at_ref":"HEAD","packages":[
+                {"id":"A","title":"A","repositories":["repo"],"criteria":[criterion("alpha"),criterion("beta")],"depends_on":[]},
+                {"id":"B","title":"B","repositories":["repo"],"criteria":[criterion("stable")],"depends_on":[]}
+            ]
+        }))
+        .expect("v1"),
+    )
+    .expect("v1 write");
+    fs::write(
+        &v2_path,
+        serde_json::to_vec(&json!({
+            "vision":"driver-test","plan_version":2,"authored_at_ref":"HEAD","packages":[
+                {"id":"A1","title":"A one","repositories":["repo"],"criteria":[criterion("alpha")],"depends_on":[]},
+                {"id":"A2","title":"A two","repositories":["repo"],"criteria":[criterion("beta")],"depends_on":[]},
+                {"id":"B","title":"B","repositories":["repo"],"criteria":[criterion("stable")],"depends_on":[]}
+            ]
+        }))
+        .expect("v2"),
+    )
+    .expect("v2 write");
+    for (package, issuance) in [("A", 1), ("B", 2)] {
+        append(
+            &journal,
+            json!({"event":"worker-dispatched","package":package,"issuance":issuance}),
+        );
+        append(
+            &journal,
+            json!({"event":"worker-done","package":package,"issuance":issuance}),
+        );
+        append(
+            &journal,
+            json!({"event":"package-completed","package":package}),
+        );
+    }
+    let invocations = temp.path().join("invocations");
+    let worker = temp.path().join("worker.sh");
+    fs::write(
+        &worker,
+        format!(
+            r#"#!/bin/sh
+printf '%s
+' "$PCE_PACKAGE" >> '{}'
+printf '%s' '{{"outcome":"mis-specified","fault":{{"kind":"criterion","name":"blocked"}}}}' > "$PCE_PACKAGE_OUTCOME"
+"#,
+            invocations.display()
+        ),
+    )
+    .expect("worker");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-run".into(),
+            "--graph".into(),
+            v2_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--repository".into(),
+            format!("repo={}", repo.display()),
+            "--worker-override".into(),
+            "--".into(),
+            "/bin/sh".into(),
+            worker.display().to_string(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let journal_text = fs::read_to_string(&journal).expect("journal");
+    assert!(journal_text.contains(r#""carried_completions":["B"]"#));
+    assert!(!journal_text.contains(r#""carried_completions":["A""#));
+    let mut dispatched = fs::read_to_string(&invocations)
+        .expect("invocations")
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    dispatched.sort();
+    assert_eq!(dispatched, ["A1", "A2"]);
+}
+
+#[test]
 fn revised_completed_package_is_new_work_not_carried_proof() {
     let temp = TempDir::new().expect("tempdir");
     let repo = repository(temp.path(), "repo", "base");
     let journal = temp.path().join("driver.jsonl");
     let v1_path = temp.path().join("graph.v1.json");
     let v2_path = temp.path().join("graph.v2.json");
-    let make_graph = |version: u64, a_command: &str| {
+    let make_graph = |version: u64, a_title: &str| {
         json!({
             "vision":"driver-test","plan_version":version,"authored_at_ref":"HEAD","packages":[
-                {"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"a","input":"repo","observation":"zero","command":a_command}],"depends_on":[]},
+                {"id":"A","title":a_title,"repositories":["repo"],"criteria":[{"name":"a","input":"repo","observation":"zero","command":"true"}],"depends_on":[]},
                 {"id":"B","title":"B","repositories":["repo"],"criteria":[{"name":"b","input":"repo","observation":"zero","command":"true"}],"depends_on":[]}
             ]
         })
     };
     fs::write(
         &v1_path,
-        serde_json::to_vec(&make_graph(1, "true")).expect("v1"),
+        serde_json::to_vec(&make_graph(1, "A")).expect("v1"),
     )
     .expect("v1 write");
     fs::write(
         &v2_path,
-        serde_json::to_vec(&make_graph(2, "printf revised")).expect("v2"),
+        serde_json::to_vec(&make_graph(2, "A revised")).expect("v2"),
     )
     .expect("v2 write");
     append(

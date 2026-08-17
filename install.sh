@@ -241,7 +241,7 @@ esac
 SKILLS_DIR="$HOME/.claude/skills"
 mkdir -p "$SKILLS_DIR"
 
-for skill in pce to-vision domain-modeling grill-with-docs chart-program work-ticket land-ticket; do
+for skill in pce to-vision domain-modeling grill-with-docs chart-program work-ticket land-ticket work-graph; do
     src="$REPO_ROOT/skills/$skill"
     dst="$SKILLS_DIR/$skill"
     if [ -e "$dst" ] && [ ! -L "$dst" ]; then
@@ -283,7 +283,7 @@ else
 fi
 
 # --- Post-install verification ---------------------------------------------------
-for link in "$BIN_DIR/pce" "$HOOK_LINK" "$HOOK_PROTECTION_LINK" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DIR/domain-modeling" "$SKILLS_DIR/grill-with-docs" "$SKILLS_DIR/chart-program" "$SKILLS_DIR/work-ticket" "$SKILLS_DIR/land-ticket"; do
+for link in "$BIN_DIR/pce" "$HOOK_LINK" "$HOOK_PROTECTION_LINK" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DIR/domain-modeling" "$SKILLS_DIR/grill-with-docs" "$SKILLS_DIR/chart-program" "$SKILLS_DIR/work-ticket" "$SKILLS_DIR/land-ticket" "$SKILLS_DIR/work-graph"; do
     if [ -L "$link" ] && [ -e "$link" ]; then
         echo "OK: $link resolves"
     else
@@ -307,7 +307,7 @@ if [ "$python_executable" -eq 1 ]; then
     fi
 fi
 
-for skill in domain-modeling grill-with-docs chart-program work-ticket land-ticket; do
+for skill in domain-modeling grill-with-docs chart-program work-ticket land-ticket work-graph; do
     skill_path="$SKILLS_DIR/$skill/SKILL.md"
     if [ -f "$skill_path" ]; then
         echo "OK: skill definition present at $skill_path"

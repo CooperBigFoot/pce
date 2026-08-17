@@ -70,22 +70,23 @@ use pce_core::{
     classify_seatbelt_capability, compose_gate_arguments, compose_herdr_work_package_dispatch,
     compose_local_patch_brief, compose_package_gate_brief, compose_package_worker_argv,
     compose_package_worker_brief, compose_planning_role_frame, compute_dispatchability,
-    create_vision, derive_dispatch_outcome_state, derive_driver_snapshot, derive_merge_status,
-    derive_milestone_merge_status, derive_package_result_path, derive_run_state,
-    derive_run_state_with_dispatch_artifacts, derive_run_state_with_exceptional_merge_chains,
-    derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
-    dispatch_payload, effective_criteria, evaluate_completion, evaluate_landing_readiness,
-    event_record_matches, fold_dispatch_ledger, fold_paired_execution_proof, fold_replay_runs,
-    judge_finding_replay, latest_criterion_failure_evidence, measure_contract_snapshot,
-    meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
-    parse_acceptance_criteria, parse_claude_result, parse_dispatch_process_identity,
-    parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
-    parse_package_gate_outcome, parse_package_worker_result, parse_paired_falsification_verdict,
-    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
-    parse_work_package_graph, pending_completed_pane_cleanups, ready_work_packages,
-    rebase_gate_stimulus, recovery_attempt_records, recovery_base_brief, recovery_budget,
-    render_dispatch_projection, render_human_snapshot, render_package_run,
-    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    create_vision, criteria_invariance_violation, derive_dispatch_outcome_state,
+    derive_driver_snapshot, derive_merge_status, derive_milestone_merge_status,
+    derive_package_result_path, derive_run_state, derive_run_state_with_dispatch_artifacts,
+    derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
+    dispatch_completion_payload, dispatch_invocation, dispatch_payload, effective_criteria,
+    evaluate_completion, evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
+    fold_paired_execution_proof, fold_replay_runs, judge_finding_replay,
+    latest_criterion_failure_evidence, measure_contract_snapshot, meter_dispatches,
+    normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
+    parse_claude_result, parse_dispatch_process_identity, parse_event_line,
+    parse_gate_execution_evidence, parse_gate_stimulus, parse_package_gate_outcome,
+    parse_package_worker_result, parse_paired_falsification_verdict, parse_replay_output_path,
+    parse_replay_schema_path, parse_tracked_repository_contract, parse_work_package_graph,
+    pending_completed_pane_cleanups, ready_work_packages, rebase_gate_stimulus,
+    recovery_attempt_records, recovery_base_brief, recovery_budget, render_dispatch_projection,
+    render_human_snapshot, render_package_run, seatbelt_capability_probe,
+    serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_package_worker_result, serialize_tracked_repository_contract, unchanged_package_ids,
     validate_artifact, validate_package_gate_finding_repositories,
     validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
@@ -3567,6 +3568,13 @@ fn ensure_driver_plan_version(
     };
     if next.plan_version() != to_plan_version || next.vision() != graph.vision() {
         bail!("next frozen graph does not form a sequential plan version");
+    }
+    if let Some(violation) = criteria_invariance_violation(&previous, &next) {
+        bail!(
+            "criterion {:?} from predecessor package {} was changed or removed; freezing the revised version is the human's ruling",
+            violation.criterion().name(),
+            violation.previous_package().as_str()
+        );
     }
     let previous_snapshot =
         derive_driver_snapshot(&previous, events, command.override_risk_ordering)
