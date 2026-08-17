@@ -80,6 +80,11 @@ Rules that decide the hard cases:
   criterion is right.
 - **Fixtures beat real inputs.** A criterion runnable against a committed fixture belongs to an
   earlier package than one needing a real source, even when the vision groups them together.
+- **Every name needs an owner.** If any package's data or metadata names a thing — a file format
+  detail, a binding, a dataset version, a validation rule — some package's criteria must own
+  making it real. A name whose owner is nobody is discovered as a mid-run park: the first worker
+  that needs the named thing refuses to invent it. The incidence run stalled three workers on one
+  unowned name before the graph was revised to add its owning package.
 
 Give each package an id, a title, the repositories it touches, and its criteria.
 
@@ -93,6 +98,22 @@ A criterion with no command that could be written is a defect to report, not a c
 approximate. Do not invent a weaker command that passes. Say which criterion cannot be expressed
 and what would make it expressible — an injectable probe, a controlled environment, a seam that
 does not exist yet — and let step 6 fail on it.
+
+**Every command re-executes.** The driver runs a criterion command at package judgement, again for
+each parent when a conflicted join is re-verified, again against the final assembly, and again
+after any plan-version carry-forward. A command must therefore be re-runnable and read-only toward
+anything outside its clone: a verb that refuses to run twice, or whose second run would mutate or
+double-register external state, can never be a criterion command. When the observed thing was
+produced by a one-shot act, the package must deliver a read-only re-verification verb and the
+criterion runs that — recomputing the observation, never reading a receipt.
+
+**Author for the driver's failure model.** A worker process can die *after* performing its act but
+before reporting; the driver records an environment failure and dispatches a fresh worker
+automatically. For any package containing a hard-to-reverse act — minting an immutable artifact,
+registering, publishing — the criteria's `input`/`observation` prose must license the successor to
+resume by verification: finding the act already performed and provably correct is success to
+attest, not an obstacle to fail on. A one-shot act with no stated resume protocol turns the
+driver's ordinary retry into a guaranteed park.
 
 ## 5. Derive the edges, typed
 
@@ -114,7 +135,12 @@ Do not use `buildability` for an ordering you merely prefer, and do not use `ris
 anything whose violation destroys data. Conflating the three is how a scheduler runs an
 irreversible act in parallel with the thing that was supposed to protect it.
 
-Omit transitively implied edges.
+Omit transitively implied edges — with one exception. **Declare `buildability` for direct API
+consumption even when the provider is transitively present.** Workers are boundary-disciplined:
+one whose package consumes an upstream package's API without a declared edge refuses and parks
+with a missing-dependency claim rather than crossing the boundary. If package B calls what
+package A built, the edge exists whether or not A's work would already be in B's composed base.
+Two of the incidence run's parks were exactly this.
 
 ## 6. Write the graph, then run the mechanical check
 
@@ -238,6 +264,9 @@ Never implement a package, dispatch a worker, run a criterion command as if it w
 mark a package complete. Leave the graph frozen and unstarted.
 
 Conclude at intent altitude: what the vision now says it is building and which package is worth
-taking first, in plain language, and the command that would run it. Then, marked as skippable: the
-artifact URL, the vision and graph paths, the frozen plan version, the ready set, the edge kinds
-used, and anything the check could not express.
+taking first, in plain language, and the command that would run it. That command's `--graph` names
+the frozen artifact — `graph.v<N>.json` — never `graph.json`; the working copy is never run. Give
+it one `--repository` and one `--prepare` flag for every repository the graph names, and none for
+any repository it does not. Then, marked as skippable: the artifact URL, the vision and graph
+paths, the frozen plan version, the ready set, the edge kinds used, and anything the check could
+not express.
