@@ -225,3 +225,135 @@ printf '%s' '{{"outcome":"done"}}' > "$PCE_PACKAGE_OUTCOME"
     assert_eq!(log.matches("worker-environment-failed").count(), 5);
     assert!(!log.contains("recovery-rung-attempted"));
 }
+
+#[test]
+fn crashing_gate_retries_judgment_without_redispatching_or_charging_worker() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = TempDir::new().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    fs::write(repo.join("value"), "green").expect("value");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "base"]);
+    let base = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&repo)
+        .output()
+        .expect("base");
+    let base = String::from_utf8(base.stdout)
+        .expect("base utf8")
+        .trim()
+        .to_owned();
+
+    fs::write(temp.path().join("vision.md"), "# Vision: gate failure\n\n## Goal / Why\n\nJudge green work.\n\n## Acceptance criteria (vision-level \"done\")\n\n```json\n{\"criteria\":[{\"name\":\"green\",\"input\":\"repo\",\"observation\":\"zero\"}]}\n```\n").expect("vision");
+    let graph_path = temp.path().join("graph.json");
+    fs::write(&graph_path, serde_json::to_vec(&json!({"vision":"gate-failure","plan_version":1,"authored_at_ref":"HEAD","packages":[
+        {"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"green","input":"repo","observation":"zero","command":"true"}],"depends_on":[]}
+    ]})).expect("graph")).expect("graph write");
+
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).expect("bin");
+    let herdr = bin.join("herdr");
+    fs::write(&herdr, r#"#!/bin/sh
+set -eu
+if [ "$1 $2" = "worktree create" ]; then
+  shift 2; cwd= path= branch= base=
+  while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
+  git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"}}}'
+else
+  shift 2; agent_cwd=
+  while [ "$1" != "--" ]; do if [ "$1" = "--cwd" ]; then agent_cwd=$2; shift 2; else shift; fi; done; shift
+  (cd "$agent_cwd" && "$@") &
+  printf '%s\n' '{}'
+fi
+"#).expect("herdr");
+    let gate = bin.join("prime-agent");
+    fs::write(
+        &gate,
+        r#"#!/bin/sh
+cat >/dev/null
+if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
+  printf '%s' '{"outcome":"done"}' > "$PCE_PACKAGE_OUTCOME"
+  exit 0
+fi
+exit 1
+"#,
+    )
+    .expect("gate");
+    for executable in [&herdr, &gate] {
+        let mut permissions = fs::metadata(executable).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(executable, permissions).expect("permissions");
+    }
+    let journal = temp.path().join("journal.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "driver-run", "--graph"])
+        .arg(&graph_path)
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository"])
+        .arg(format!("repo={}", repo.display()))
+        .args(["--gate-failure-limit", "3"])
+        .env("HERDR_ENV", "1")
+        .env(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+            temp.path().join("worktrees"),
+        )
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
+        )
+        .env("HOME", temp.path())
+        .env("USER", "tester")
+        .current_dir(temp.path())
+        .output()
+        .expect("driver");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status");
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert_eq!(
+        status["packages"][0][1]["state"], "gate-blocked",
+        "{events}"
+    );
+    assert_eq!(status["packages"][0][1]["identical_failures"], 3);
+    assert_eq!(status["recovery"][0][1]["retry_remaining"], 1);
+    assert_eq!(status["recovery"][0][1]["local_patch_remaining"], 1);
+
+    assert_eq!(events.matches("worker-dispatched").count(), 1);
+    assert_eq!(events.matches("gate-dispatched").count(), 3);
+    assert_eq!(events.matches("gate-failed").count(), 2);
+    assert_eq!(events.matches("package-gate-blocked").count(), 1);
+    assert_eq!(
+        events
+            .matches("gate dispatch stopped without an outcome")
+            .count(),
+        3
+    );
+    assert!(!events.contains("package-failed"));
+    assert!(!events.contains("package-completed"));
+    assert!(!events.contains("recovery-parked"));
+    assert!(events.contains("package-gate-1-1"));
+    assert!(events.contains("package-gate-1-2"));
+    assert!(events.contains("package-gate-1-3"));
+    let implementation = Command::new("git")
+        .args(["rev-parse", "pce/gate-failure/A/attempt-1"])
+        .current_dir(&repo)
+        .output()
+        .expect("implementation ref");
+    assert!(implementation.status.success());
+    assert_eq!(
+        String::from_utf8(implementation.stdout)
+            .expect("head utf8")
+            .trim(),
+        base
+    );
+}

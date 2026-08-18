@@ -83,6 +83,7 @@ fn state_identity(
         DriverPackageState::EnvironmentBlocked { .. } => {
             ("environment", "⚑", "Worker environment unavailable")
         }
+        DriverPackageState::GateBlocked { .. } => ("environment", "⚑", "Gate unavailable"),
     }
 }
 
@@ -447,6 +448,7 @@ pub fn render_package_run(
                 command,
                 reason,
                 detail,
+                ..
             } = event
                 && event_package == package.id().as_str()
             {

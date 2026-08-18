@@ -58,18 +58,21 @@ pub use package_driver::{
     DriverPackageState, DriverSnapshot, EffectiveCriterion, EnvironmentPreparationOutcome,
     FindingRejectionReason, FindingReplayDecision, PackageDriverError, PaneCleanupOutcome,
     PendingPaneCleanup, RecoveryAttemptRecord, charged_failure_count, derive_driver_snapshot,
-    effective_criteria, judge_finding_replay, latest_criterion_failure_evidence,
-    pending_completed_pane_cleanups, recovery_attempt_records, recovery_base_brief,
+    effective_criteria, gate_failure_outcome, judge_finding_replay,
+    latest_criterion_failure_evidence, next_gate_attempt, pending_completed_pane_cleanups,
+    pending_gate_challenges, recovery_attempt_records, recovery_base_brief,
     worker_environment_outcome,
 };
 pub use package_gate::{
-    BuiltArtifactRef, PackageGateError, PackageGateFinding, PackageGateRepositoryRefs,
-    ParsedPackageGateOutcome, compose_package_gate_brief, parse_package_gate_outcome,
-    validate_package_gate_finding_repositories, validate_package_gate_repositories,
+    BuiltArtifactRef, PackageGateChallenge, PackageGateError, PackageGateFinding,
+    PackageGateRepositoryRefs, ParsedPackageGateOutcome, compose_package_gate_brief,
+    parse_package_gate_outcome, validate_package_gate_finding_repositories,
+    validate_package_gate_repositories,
 };
 pub use package_recovery::{
-    EnvironmentFailureLimit, LocalPatchLimit, RecoveryBudget, RecoveryCriterionEvidence,
-    RecoveryLimits, RecoveryRung, RetryLimit, compose_local_patch_brief, recovery_budget,
+    EnvironmentFailureLimit, GateFailureLimit, LocalPatchLimit, RecoveryBudget,
+    RecoveryCriterionEvidence, RecoveryLimits, RecoveryRung, RetryLimit, compose_local_patch_brief,
+    recovery_budget,
 };
 pub use package_worker::{
     MisSpecificationFault, PackageOutcome, PackageWorkerError, RepositoryWorktree, VisionGoal,

@@ -42,17 +42,17 @@ use pce_core::{
     ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FindingRejectionReason,
     FindingReplayDecision, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
     GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
-    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
-    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
+    GateFailureLimit, GateObservedResult, GateProcessObservation, GateProcessStimulus,
+    GateStimulus, GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
     HerdrPaneId, HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, KnownPayload,
     LandingReadinessDecision, LegacyRepositoryContractPayload, LocalPatchLimit,
     MeasuredContractSnapshot, MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode,
     NamedReplayRef, NodeId, NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus,
-    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PackageWorkerResult,
-    PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
-    PaneCleanupOutcome, ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
-    PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
+    ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PackageGateChallenge,
+    PackageWorkerResult, PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError,
+    PairedReplayClassification, PaneCleanupOutcome, ProcessIdentityObservation, ProcessNumber,
+    ProcessStartIdentity, PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
     RecoveryLimits, RecoveryLogPath, RecoveryRung, ReferenceValidation, ReplayArtifactObservation,
     ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
@@ -78,20 +78,21 @@ use pce_core::{
     derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
     dispatch_payload, effective_criteria, evaluate_completion, evaluate_landing_readiness,
     event_record_matches, fold_dispatch_ledger, fold_paired_execution_proof, fold_replay_runs,
-    judge_finding_replay, latest_criterion_failure_evidence, measure_contract_snapshot,
-    meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
-    parse_acceptance_criteria, parse_claude_result, parse_dispatch_process_identity,
-    parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
-    parse_package_gate_outcome, parse_package_worker_result, parse_paired_falsification_verdict,
-    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
-    parse_work_package_graph, pending_completed_pane_cleanups, ready_work_packages,
-    rebase_gate_stimulus, recovery_attempt_records, recovery_base_brief, recovery_budget,
-    render_dispatch_projection, render_human_snapshot, render_package_run,
-    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
-    serialize_package_worker_result, serialize_tracked_repository_contract, unchanged_package_ids,
-    validate_artifact, validate_package_gate_finding_repositories,
-    validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
-    validated_dispatch_completion_payload, verify_criterion_change, worker_environment_outcome,
+    gate_failure_outcome, judge_finding_replay, latest_criterion_failure_evidence,
+    measure_contract_snapshot, meter_dispatches, next_gate_attempt, normalize_replay_observation,
+    paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result,
+    parse_dispatch_process_identity, parse_event_line, parse_gate_execution_evidence,
+    parse_gate_stimulus, parse_package_gate_outcome, parse_package_worker_result,
+    parse_paired_falsification_verdict, parse_replay_output_path, parse_replay_schema_path,
+    parse_tracked_repository_contract, parse_work_package_graph, pending_completed_pane_cleanups,
+    pending_gate_challenges, ready_work_packages, rebase_gate_stimulus, recovery_attempt_records,
+    recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
+    render_package_run, seatbelt_capability_probe, serialize_dispatch_check_in,
+    serialize_dispatch_process_identity, serialize_package_worker_result,
+    serialize_tracked_repository_contract, unchanged_package_ids, validate_artifact,
+    validate_package_gate_finding_repositories, validate_package_gate_repositories,
+    validate_verdict_references, validate_workflow_coverage, validated_dispatch_completion_payload,
+    verify_criterion_change, worker_environment_outcome,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -110,11 +111,11 @@ const USAGE: &str = concat!(
     "       pce package brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> [--brief <ABSOLUTE_BRIEF_PATH>] -- <WORKER_ARG>...\n",
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
-    "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> -- <WORKER_ARG>...\n",
+    "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> [--issuance <N>] [--attempt <N>] [--challenges <ABSOLUTE_PATH>] [--defer-finding-validation] -- <WORKER_ARG>...\n",
     "       pce package render --graph <GRAPH_PATH> [--journal <DRIVER_JOURNAL>] --output <HTML_PATH>\n",
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
     "       pce package driver-overrule --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --rationale <TEXT>\n",
-    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
+    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--gate-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
@@ -253,6 +254,9 @@ struct PackageGateAgentCommand {
     artifact_ref: BuiltArtifactRef,
     outcome_path: PathBuf,
     defer_finding_validation: bool,
+    issuance: u64,
+    attempt: u32,
+    challenges_path: Option<PathBuf>,
     worker_arguments: Vec<String>,
 }
 
@@ -982,11 +986,41 @@ fn parse_package_gate_agent(rest: &[String]) -> Result<Command> {
     else {
         bail!(USAGE);
     };
-    let defer_finding_validation = match trailing {
-        [] => false,
-        [flag] if flag == "--defer-finding-validation" => true,
-        _ => bail!(USAGE),
-    };
+    let mut defer_finding_validation = false;
+    let mut issuance = 1_u64;
+    let mut attempt = 1_u32;
+    let mut challenges_path = None;
+    let mut trailing_index = 0;
+    while trailing_index < trailing.len() {
+        match trailing[trailing_index].as_str() {
+            "--defer-finding-validation" => {
+                defer_finding_validation = true;
+                trailing_index += 1;
+            }
+            "--issuance" | "--attempt" | "--challenges" => {
+                let value = trailing.get(trailing_index + 1).context(USAGE)?;
+                match trailing[trailing_index].as_str() {
+                    "--issuance" => {
+                        issuance = value
+                            .parse()
+                            .context("gate issuance must be an unsigned integer")?
+                    }
+                    "--attempt" => {
+                        attempt = value
+                            .parse()
+                            .context("gate attempt must be an unsigned integer")?
+                    }
+                    "--challenges" => challenges_path = Some(PathBuf::from(value)),
+                    _ => unreachable!(),
+                }
+                trailing_index += 2;
+            }
+            _ => bail!(USAGE),
+        }
+    }
+    if issuance == 0 || attempt == 0 {
+        bail!("gate issuance and attempt must be positive");
+    }
     if vision_flag != "--vision"
         || graph_flag != "--graph"
         || package_flag != "--package"
@@ -1009,6 +1043,9 @@ fn parse_package_gate_agent(rest: &[String]) -> Result<Command> {
         artifact_ref: BuiltArtifactRef::parse(artifact_ref.clone())?,
         outcome_path,
         defer_finding_validation,
+        issuance,
+        attempt,
+        challenges_path,
         worker_arguments: worker.to_vec(),
     }))
 }
@@ -1051,6 +1088,19 @@ fn run_package_gate_agent(command: PackageGateAgentCommand) -> Result<()> {
     let goal = VisionGoal::parse_document(&vision).context("failed to parse vision goal")?;
     let criteria =
         parse_acceptance_criteria(&vision).context("failed to parse vision acceptance criteria")?;
+    let challenges = command
+        .challenges_path
+        .as_ref()
+        .map(|path| {
+            fs::read(path)
+                .with_context(|| format!("failed to read gate challenges {}", path.display()))
+                .and_then(|bytes| {
+                    serde_json::from_slice::<Vec<PackageGateChallenge>>(&bytes)
+                        .context("failed to parse gate challenges")
+                })
+        })
+        .transpose()?
+        .unwrap_or_default();
     let brief = compose_package_gate_brief(
         &goal,
         &criteria,
@@ -1058,6 +1108,7 @@ fn run_package_gate_agent(command: PackageGateAgentCommand) -> Result<()> {
         &command.package_id,
         &worktrees,
         &command.artifact_ref,
+        &challenges,
     )
     .context("failed to compose package gate brief")?;
     let (program, arguments) = command
@@ -1099,6 +1150,18 @@ fn run_package_gate_agent(command: PackageGateAgentCommand) -> Result<()> {
     })?;
     let outcome = parse_package_gate_outcome(&outcome_bytes)
         .context("failed to parse package gate outcome")?;
+    if !command.defer_finding_validation {
+        validate_package_gate_repositories(&outcome, package.repositories())
+            .context("package gate outcome exceeded package repository scope")?;
+    }
+    anchor_package_gate_refs(
+        &outcome,
+        &worktrees,
+        &command.package_id,
+        command.issuance,
+        command.attempt,
+        command.defer_finding_validation,
+    )?;
     if command.defer_finding_validation {
         return Ok(());
     }
@@ -1107,7 +1170,7 @@ fn run_package_gate_agent(command: PackageGateAgentCommand) -> Result<()> {
     validate_package_gate_refs(&outcome, &worktrees)
 }
 
-fn resolve_package_gate_commit(worktree: &Path, reference: &str) -> Result<String> {
+fn resolve_package_gate_commit_oid(worktree: &Path, reference: &str) -> Result<String> {
     let commit = format!("{reference}^{{commit}}");
     let output = std::process::Command::new("git")
         .args(["-C"])
@@ -1128,10 +1191,66 @@ fn resolve_package_gate_commit(worktree: &Path, reference: &str) -> Result<Strin
     if oid.is_empty() {
         bail!("git returned an empty commit id for package gate ref `{reference}`");
     }
+    Ok(oid.to_owned())
+}
+
+fn anchor_package_gate_refs(
+    outcome: &pce_core::ParsedPackageGateOutcome,
+    worktrees: &[RepositoryWorktree],
+    package: &str,
+    issuance: u64,
+    attempt: u32,
+    defer_invalid: bool,
+) -> Result<()> {
+    let by_repository = worktrees
+        .iter()
+        .map(|worktree| (worktree.repository(), worktree.path()))
+        .collect::<BTreeMap<_, _>>();
+    for (finding_index, finding) in outcome.findings().iter().enumerate() {
+        for refs in finding.repository_refs() {
+            let Some(worktree) = by_repository.get(refs.repository()) else {
+                if defer_invalid {
+                    continue;
+                }
+                bail!("no assigned worktree for `{}`", refs.repository());
+            };
+            let witness = match resolve_package_gate_commit_oid(worktree, refs.witness_ref()) {
+                Ok(oid) => oid,
+                Err(_) if defer_invalid => continue,
+                Err(source) => return Err(source),
+            };
+            let repair = match resolve_package_gate_commit_oid(worktree, refs.repair_ref()) {
+                Ok(oid) => oid,
+                Err(_) if defer_invalid => continue,
+                Err(source) => return Err(source),
+            };
+            for (kind, oid) in [("witness", witness), ("repair", repair)] {
+                let reference =
+                    format!("refs/pce-gate/{package}/{issuance}/{attempt}/{finding_index}/{kind}");
+                let update = std::process::Command::new("git")
+                    .args(["-C"])
+                    .arg(worktree)
+                    .args(["update-ref", &reference, &oid])
+                    .output()
+                    .with_context(|| format!("failed to anchor package gate ref `{reference}`"))?;
+                if !update.status.success() {
+                    bail!(
+                        "failed to anchor package gate ref `{reference}`: {}",
+                        String::from_utf8_lossy(&update.stderr).trim()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_package_gate_commit(worktree: &Path, reference: &str) -> Result<String> {
+    let oid = resolve_package_gate_commit_oid(worktree, reference)?;
     let reachable = std::process::Command::new("git")
         .args(["-C"])
         .arg(worktree)
-        .args(["for-each-ref", "--contains", oid, "--format=%(refname)"])
+        .args(["for-each-ref", "--contains", &oid, "--format=%(refname)"])
         .output()
         .with_context(|| {
             format!("failed to inspect reachability of package gate ref `{reference}`")
@@ -1147,7 +1266,7 @@ fn resolve_package_gate_commit(worktree: &Path, reference: &str) -> Result<Strin
         let from_head = std::process::Command::new("git")
             .args(["-C"])
             .arg(worktree)
-            .args(["merge-base", "--is-ancestor", oid, "HEAD"])
+            .args(["merge-base", "--is-ancestor", &oid, "HEAD"])
             .output()
             .with_context(|| format!("failed to inspect HEAD reachability of `{reference}`"))?;
         if from_head.status.code() != Some(0) {
@@ -1325,6 +1444,7 @@ fn run_package_gate_brief(command: PackageGateBriefCommand) -> Result<()> {
         &command.package_id,
         &worktrees,
         &command.artifact_ref,
+        &[],
     )
     .context("failed to compose package gate brief")?;
     std::io::stdout()
@@ -1886,6 +2006,7 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
     let mut retry_limit = 1_u32;
     let mut local_patch_limit = 1_u32;
     let mut environment_failure_limit = 6_u32;
+    let mut gate_failure_limit = 3_u32;
     let mut wait_timeout = None;
     let mut mapping_args = Vec::new();
     let mut index = 4;
@@ -1896,6 +2017,7 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
         } else if options[index] == "--retry-limit"
             || options[index] == "--local-patch-limit"
             || options[index] == "--environment-failure-limit"
+            || options[index] == "--gate-failure-limit"
         {
             let value = options
                 .get(index + 1)
@@ -1906,8 +2028,10 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
                 retry_limit = value;
             } else if options[index] == "--local-patch-limit" {
                 local_patch_limit = value;
-            } else {
+            } else if options[index] == "--environment-failure-limit" {
                 environment_failure_limit = value;
+            } else {
+                gate_failure_limit = value;
             }
             index += 2;
         } else if options[index] == "--wait-timeout-ms" {
@@ -1937,7 +2061,8 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
             RetryLimit::new(retry_limit),
             LocalPatchLimit::new(local_patch_limit),
         )
-        .with_environment_failure_limit(EnvironmentFailureLimit::new(environment_failure_limit)),
+        .with_environment_failure_limit(EnvironmentFailureLimit::new(environment_failure_limit))
+        .with_gate_failure_limit(GateFailureLimit::new(gate_failure_limit)),
         worker_override,
         wait_timeout,
     }))
@@ -1958,13 +2083,15 @@ fn ensure_recovery_configuration(command: &DriverRunCommand, events: &[DriverEve
     });
     match configured {
         Some(limits) if limits != command.recovery_limits => bail!(
-            "driver limits are already retry={} local-patch={} environment-failure={}, not retry={} local-patch={} environment-failure={}",
+            "driver limits are already retry={} local-patch={} environment-failure={} gate-failure={}, not retry={} local-patch={} environment-failure={} gate-failure={}",
             limits.retry_attempts(),
             limits.local_patch_attempts(),
             limits.environment_failures(),
+            limits.gate_failures(),
             command.recovery_limits.retry_attempts(),
             command.recovery_limits.local_patch_attempts(),
-            command.recovery_limits.environment_failures()
+            command.recovery_limits.environment_failures(),
+            command.recovery_limits.gate_failures()
         ),
         Some(_) => Ok(()),
         None => append_driver_event(
@@ -2009,22 +2136,77 @@ fn park_if_recovery_exhausted(command: &DriverRunCommand, package_id: &str) -> R
     )
 }
 
+const GATE_STOPPED_REASON: &str = "gate dispatch stopped without an outcome";
+const GATE_INCOMPLETE_REASON: &str = "gate outcome incomplete";
+
+fn append_gate_failure_outcome(
+    command: &DriverRunCommand,
+    package: &str,
+    issuance: u64,
+    gate: String,
+    reason: &'static str,
+    detail: String,
+    challenges: Vec<PackageGateChallenge>,
+) -> Result<()> {
+    let events = read_driver_journal(&command.journal_path)?;
+    let event = gate_failure_outcome(
+        &events,
+        command.recovery_limits,
+        package.to_owned(),
+        issuance,
+        gate,
+        reason.to_owned(),
+        detail,
+        challenges,
+    );
+    append_driver_event(&command.journal_path, &event)
+}
+
 fn run_composed_driver_gate(
     graph: &WorkPackageGraph,
     command: &DriverRunCommand,
     package_id: &str,
     issuance: u64,
 ) -> Result<()> {
+    let events = read_driver_journal(&command.journal_path)?;
+    let attempt = next_gate_attempt(&events, package_id, issuance);
+    let gate_name = format!("package-gate-{issuance}-{attempt}");
+    let challenges = pending_gate_challenges(&events, package_id, issuance);
     let implementation_worktrees = driver_package_worktrees(command, graph, package_id, issuance)?;
+    let package_ref = package_branch(graph, package_id, issuance);
+    let gate_base_refs = implementation_worktrees
+        .iter()
+        .map(|worktree| {
+            let source = command
+                .repositories
+                .iter()
+                .find(|(repository, _)| repository == worktree.repository())
+                .map(|(_, path)| path)
+                .with_context(|| {
+                    format!(
+                        "missing source repository for gate worktree `{}`",
+                        worktree.repository()
+                    )
+                })?;
+            Ok((
+                worktree.repository().to_owned(),
+                git_oid(source, &package_ref)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     let first = implementation_worktrees
         .first()
         .context("package gate has no implementation worktree")?;
-    let artifact_ref = git_oid(first.path(), "HEAD")?;
+    let artifact_ref = gate_base_refs
+        .get(first.repository())
+        .cloned()
+        .context("package gate has no artifact ref for its first repository")?;
     let vision_dir = driver_vision_directory(command)?;
     let gate_outcome = vision_dir
         .join(".pce/package-gate-outcomes")
         .join(package_id)
-        .join(format!("{issuance}.json"));
+        .join(issuance.to_string())
+        .join(format!("{attempt}.json"));
     fs::create_dir_all(
         gate_outcome
             .parent()
@@ -2035,18 +2217,31 @@ fn run_composed_driver_gate(
         &fs::read(&command.graph_path).context("failed to read gate dispatch graph")?,
     )
     .context("failed to parse gate dispatch graph JSON")?;
-    dispatch_graph["vision"] = Value::String(format!("{}-gate-{issuance}", graph.vision()));
+    dispatch_graph["vision"] =
+        Value::String(format!("{}-gate-{issuance}-{attempt}", graph.vision()));
     dispatch_graph["authored_at_ref"] = Value::String("HEAD".to_owned());
     let dispatch_graph_path = vision_dir
         .join(".pce/gate-dispatch-graphs")
         .join(package_id)
-        .join(format!("{issuance}.json"));
+        .join(issuance.to_string())
+        .join(format!("{attempt}.json"));
     fs::create_dir_all(
         dispatch_graph_path
             .parent()
             .context("gate dispatch graph has no parent")?,
     )?;
     fs::write(&dispatch_graph_path, serde_json::to_vec(&dispatch_graph)?)?;
+    let challenges_path = vision_dir
+        .join(".pce/package-gate-challenges")
+        .join(package_id)
+        .join(issuance.to_string())
+        .join(format!("{attempt}.json"));
+    fs::create_dir_all(
+        challenges_path
+            .parent()
+            .context("gate challenges have no parent")?,
+    )?;
+    fs::write(&challenges_path, serde_json::to_vec(&challenges)?)?;
 
     let executable = std::env::current_exe().context("failed to resolve gate driver executable")?;
     let worker_arguments = vec![
@@ -2063,11 +2258,26 @@ fn run_composed_driver_gate(
         artifact_ref,
         "--outcome".to_owned(),
         gate_outcome.display().to_string(),
+        "--issuance".to_owned(),
+        issuance.to_string(),
+        "--attempt".to_owned(),
+        attempt.to_string(),
+        "--challenges".to_owned(),
+        challenges_path.display().to_string(),
         "--defer-finding-validation".to_owned(),
         "--".to_owned(),
         "prime-agent".to_owned(),
         "-p".to_owned(),
     ];
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::GateDispatched {
+            package: package_id.to_owned(),
+            issuance,
+            attempt,
+            gate: gate_name.clone(),
+        },
+    )?;
     let response = issue_package_dispatch(PackageDispatchCommand {
         log_path: driver_dispatch_log(command)?,
         vision_dir: vision_dir.clone(),
@@ -2086,7 +2296,7 @@ fn run_composed_driver_gate(
             })
             .cloned()
             .collect(),
-        base_refs: BTreeMap::new(),
+        base_refs: gate_base_refs,
         conflicted_joins: BTreeMap::new(),
         environment: route_environment()?,
         worker_arguments,
@@ -2104,22 +2314,20 @@ fn run_composed_driver_gate(
     let healthy = matches!(result.exit_status(), DispatchExitStatus::Exited { code } if code.get() == 0)
         && result.required_artifact_presence() == RequiredArtifactPresence::Present;
     if !healthy {
-        append_driver_event(
-            &command.journal_path,
-            &DriverEvent::PackageFailed {
-                package: package_id.to_owned(),
-                reason: format!(
-                    "gate dispatch stopped without an outcome: {:?}",
-                    result.exit_status()
-                ),
-            },
+        append_gate_failure_outcome(
+            command,
+            package_id,
+            issuance,
+            gate_name,
+            GATE_STOPPED_REASON,
+            format!("gate dispatch exit status: {:?}", result.exit_status()),
+            challenges,
         )?;
         return Ok(());
     }
     let outcome = parse_package_gate_outcome(&fs::read(&gate_outcome)?)
         .context("failed to parse composed gate outcome")?;
-    let gate_name = format!("package-gate-{issuance}");
-    let mut structurally_usable = 0_usize;
+    let mut rejected_challenges = Vec::new();
     for finding in 0..outcome.findings().len() {
         let disposition = replay_driver_finding(
             DriverReplayCommand {
@@ -2142,27 +2350,31 @@ fn run_composed_driver_gate(
             },
             false,
         )?;
-        if matches!(disposition, DriverFindingDisposition::StructurallyUsable) {
-            structurally_usable = structurally_usable.saturating_add(1);
+        if matches!(disposition, DriverFindingDisposition::StructurallyMalformed) {
+            let finding = &outcome.findings()[finding];
+            rejected_challenges.push(PackageGateChallenge::from_finding(finding));
         }
     }
     append_driver_event(
         &command.journal_path,
         &DriverEvent::GateFinished {
             package: package_id.to_owned(),
-            gate: gate_name,
+            gate: gate_name.clone(),
         },
     )?;
-    if !outcome.findings().is_empty() && structurally_usable == 0 {
-        append_driver_event(
-            &command.journal_path,
-            &DriverEvent::PackageFailed {
-                package: package_id.to_owned(),
-                reason: format!(
-                    "gate produced {} findings; all were structurally malformed",
-                    outcome.findings().len()
-                ),
-            },
+    if !rejected_challenges.is_empty() {
+        harden_package_lineage_for_issuance(graph, command, package_id, issuance)?;
+        append_gate_failure_outcome(
+            command,
+            package_id,
+            issuance,
+            gate_name,
+            GATE_INCOMPLETE_REASON,
+            format!(
+                "gate outcome contained {} structurally rejected findings",
+                rejected_challenges.len()
+            ),
+            rejected_challenges,
         )?;
         return Ok(());
     }
@@ -2476,6 +2688,16 @@ fn ensure_hardened_package_lineage(
 ) -> Result<()> {
     let events = read_driver_journal(&command.journal_path)?;
     let issuance = completed_package_issuance(&events, package_id)?;
+    harden_package_lineage_for_issuance(graph, command, package_id, issuance)
+}
+
+fn harden_package_lineage_for_issuance(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    package_id: &str,
+    issuance: u64,
+) -> Result<()> {
+    let events = read_driver_journal(&command.journal_path)?;
     let branch = package_branch(graph, package_id, issuance);
     for criterion in effective_criteria(graph, package_id, &events)? {
         let pce_core::CriterionOrigin::Amendment { gate, finding } = &criterion.origin else {
