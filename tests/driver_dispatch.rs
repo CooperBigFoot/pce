@@ -211,13 +211,33 @@ fn deliberate_wait_bound_leaves_issuance_running_and_unaccounted() {
         &bin.join("herdr"),
         r#"#!/bin/sh
 set -eu
+if [ -e "$HOME/herdr-unreachable" ]; then
+  echo 'herdr socket unreachable' >&2
+  exit 70
+fi
 if [ "$1 $2" = "worktree create" ]; then
   shift 2; cwd= path= branch= base=
   while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
   git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
-  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"}}}'
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"root-pane","workspace_id":"w1"}}}'
+elif [ "$1 $2" = "agent start" ]; then
+  name=$3; printf '%s' "$name" > "$HOME/agent-name"
+  printf '{"result":{"type":"agent_started","agent":{"name":"%s","pane_id":"worker-pane","workspace_id":"w1"}}}\n' "$name"
+elif [ "$1 $2" = "agent get" ]; then
+  if [ -e "$HOME/herdr-unreachable" ]; then echo 'herdr socket unreachable' >&2; exit 70; fi
+  name=$(cat "$HOME/agent-name")
+  printf '{"result":{"type":"agent_info","agent":{"name":"%s","pane_id":"worker-pane","workspace_id":"w1"}}}\n' "$name"
+elif [ "$1 $2" = "pane process-info" ]; then
+  if [ -e "$HOME/herdr-unreachable" ] && [ ! -e "$HOME/first-inconclusive-read" ]; then
+    : > "$HOME/first-inconclusive-read"; echo 'herdr socket unreachable' >&2; exit 70
+  fi
+  if [ -e "$HOME/herdr-unreachable" ]; then
+    printf '%s\n' '{"result":{"process_info":{"shell_pid":41,"foreground_processes":[]}}}' 
+  else
+    printf '{"result":{"process_info":{"shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"worker","argv":["worker"]}]}}}\n' "$$" "$$"
+  fi
 else
-  printf '%s\n' '{}'
+  printf '%s\n' '{"result":{"type":"ok"}}'
 fi
 "#,
     );
@@ -231,12 +251,13 @@ fi
         .args(["--repository"])
         .arg(format!("repo={}", repository.display()))
         .args(["--wait-timeout-ms", "100"])
+        .args(["--environment-failure-limit", "2"])
         .env("HERDR_ENV", "1")
         .env(
             "PCE_WORK_PACKAGE_WORKTREE_ROOT",
             temp.path().join("worktrees"),
         )
-        .env("PATH", path)
+        .env("PATH", &path)
         .env("HOME", temp.path())
         .env("USER", "tester")
         .output()
@@ -250,12 +271,86 @@ fi
     assert_eq!(snapshot["outcome"], "running");
     let events = fs::read_to_string(&journal).expect("journal");
     assert!(events.contains("driver-stopped-waiting"));
+    assert!(events.contains("dispatch-worker-identified"));
+    assert!(events.contains("worker-pane"));
+    assert!(events.contains("root-pane"));
     assert!(!events.contains("worker-failed"));
     assert!(!events.contains("worker-environment-failed"));
     let dispatch =
         fs::read_to_string(temp.path().join(".pce/package-dispatch.jsonl")).expect("dispatch");
     assert_eq!(dispatch.matches("\"kind\":\"dispatch\"").count(), 1);
     assert!(!dispatch.contains("dispatch-completion"));
+
+    let live_restart = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "driver-run", "--graph"])
+        .arg(&graph)
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository"])
+        .arg(format!("repo={}", repository.display()))
+        .args(["--wait-timeout-ms", "100"])
+        .args(["--environment-failure-limit", "2"])
+        .env("HERDR_ENV", "1")
+        .env(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+            temp.path().join("worktrees"),
+        )
+        .env("PATH", &path)
+        .env("HOME", temp.path())
+        .env("USER", "tester")
+        .output()
+        .expect("restarted live driver");
+    assert!(
+        live_restart.status.success(),
+        "{}",
+        String::from_utf8_lossy(&live_restart.stderr)
+    );
+    let after_live_restart = fs::read_to_string(&journal).expect("journal after restart");
+    assert_eq!(after_live_restart.matches("worker-dispatched").count(), 1);
+    assert_eq!(
+        after_live_restart.matches("driver-stopped-waiting").count(),
+        2
+    );
+    assert!(!after_live_restart.contains("worker-environment-failed"));
+
+    fs::write(temp.path().join("herdr-unreachable"), "unreachable").expect("marker");
+    let inconclusive_restart = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "driver-run", "--graph"])
+        .arg(&graph)
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository"])
+        .arg(format!("repo={}", repository.display()))
+        .args(["--wait-timeout-ms", "100"])
+        .args(["--environment-failure-limit", "2"])
+        .env("HERDR_ENV", "1")
+        .env(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+            temp.path().join("worktrees"),
+        )
+        .env("PATH", &path)
+        .env("HOME", temp.path())
+        .env("USER", "tester")
+        .output()
+        .expect("inconclusive restart");
+    assert!(
+        inconclusive_restart.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inconclusive_restart.stderr)
+    );
+    let repaired = fs::read_to_string(&journal).expect("repaired journal");
+    assert!(repaired.contains("worker environment liveness evidence was inconclusive"));
+    assert!(repaired.contains("dispatch-environment-observed"));
+    assert_eq!(repaired.matches("worker-dispatched").count(), 2);
+    let successor_brief = fs::read_to_string(temp.path().join(".pce/package-briefs/A/2.md"))
+        .expect("successor brief");
+    assert!(successor_brief.contains(
+        "An earlier attempt was killed by the environment before finishing; nothing it produced was judged"
+    ));
+    assert!(!successor_brief.contains("attempt-1"));
+    let repaired_dispatch =
+        fs::read_to_string(temp.path().join(".pce/package-dispatch.jsonl")).expect("dispatch");
+    assert!(repaired_dispatch.contains("reconciled-dead"));
 }
 
 #[test]

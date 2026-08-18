@@ -119,6 +119,11 @@ fn live_herdr_package_dispatch_records_sleep_then_exit_three() {
     let response: Value = serde_json::from_slice(&output.stdout).expect("dispatch JSON");
     assert_eq!(response["issuance_sequence"], 1);
     assert_eq!(response["agent_start"]["result"]["type"], "agent_started");
+    assert_eq!(
+        response["dispatch_identity"]["pane_id"],
+        response["agent_start"]["result"]["agent"]["pane_id"]
+    );
+    assert!(response["dispatch_identity"]["process"].is_object());
     let result_path =
         std::path::PathBuf::from(response["result_path"].as_str().expect("result path"));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

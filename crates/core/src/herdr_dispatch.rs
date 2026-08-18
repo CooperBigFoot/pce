@@ -449,7 +449,7 @@ pub enum HerdrDispatchPlanError {
 }
 
 /// Derive the stable agent name from length-framed vision and package identity.
-fn derive_agent_name(
+pub fn derive_herdr_agent_name(
     vision: &DispatchVisionSource,
     package: &WorkPackageId,
     attempt: DispatchAttempt,
@@ -526,7 +526,7 @@ pub fn compose_herdr_work_package_dispatch(
         }
     }
 
-    let agent_name = derive_agent_name(vision, package.id(), attempt);
+    let agent_name = derive_herdr_agent_name(vision, package.id(), attempt);
     let package_root = worktree_root.0.join(agent_name.as_str());
     let mut worktrees = Vec::with_capacity(package.repositories().len());
     for (index, repository_name) in package.repositories().iter().enumerate() {
@@ -569,6 +569,10 @@ pub fn compose_herdr_work_package_dispatch(
     let mut environment = environment.0;
     environment.insert(
         "TMPDIR".to_owned(),
+        temporary_directory.0.display().to_string(),
+    );
+    environment.insert(
+        "PCE_DISPATCH_TMPDIR".to_owned(),
         temporary_directory.0.display().to_string(),
     );
     let paths = worktrees
@@ -686,6 +690,7 @@ mod tests {
             &BTreeMap::from([
                 ("HOME".to_owned(), "/home/worker".to_owned()),
                 ("PATH".to_owned(), "/usr/bin".to_owned()),
+                ("PCE_DISPATCH_TMPDIR".to_owned(), "/binary/tmp".to_owned()),
                 ("PCE_WORKTREES".to_owned(), format!("[\"{target}\"]")),
                 ("PCE_WORKTREE_0".to_owned(), target.clone()),
                 ("TMPDIR".to_owned(), "/binary/tmp".to_owned()),
@@ -715,6 +720,7 @@ mod tests {
                 "-i",
                 "HOME=/home/worker",
                 "PATH=/usr/bin",
+                "PCE_DISPATCH_TMPDIR=/binary/tmp",
                 &format!("PCE_WORKTREES=[\"{target}\"]"),
                 &format!("PCE_WORKTREE_0={target}"),
                 "TMPDIR=/binary/tmp",
