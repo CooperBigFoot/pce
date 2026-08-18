@@ -117,6 +117,19 @@ impl<'de> Deserialize<'de> for PackageWorkerStoppedAt {
     }
 }
 
+/// Whether processes in the isolated package-worker process group survived direct-child exit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SurvivingProcesses {
+    /// A pre-observation result carried no surviving-process measurement.
+    #[default]
+    Unknown,
+    /// No process remained in the isolated worker process group.
+    Absent,
+    /// At least one process remained in the isolated worker process group.
+    Present,
+}
+
 /// The complete durable observation written after a package worker stops.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,6 +138,8 @@ pub struct PackageWorkerResult {
     stopped_at: PackageWorkerStoppedAt,
     exit_status: DispatchExitStatus,
     required_artifact_presence: RequiredArtifactPresence,
+    #[serde(default)]
+    surviving_processes: SurvivingProcesses,
 }
 
 impl PackageWorkerResult {
@@ -134,12 +149,14 @@ impl PackageWorkerResult {
         stopped_at: PackageWorkerStoppedAt,
         exit_status: DispatchExitStatus,
         required_artifact_presence: RequiredArtifactPresence,
+        surviving_processes: SurvivingProcesses,
     ) -> Self {
         Self {
             duration_ms,
             stopped_at,
             exit_status,
             required_artifact_presence,
+            surviving_processes,
         }
     }
 
@@ -161,6 +178,11 @@ impl PackageWorkerResult {
     /// Return whether the required artifact was a regular file at worker exit.
     pub const fn required_artifact_presence(&self) -> RequiredArtifactPresence {
         self.required_artifact_presence
+    }
+
+    /// Return whether any process survived in the isolated worker process group.
+    pub const fn surviving_processes(&self) -> SurvivingProcesses {
+        self.surviving_processes
     }
 }
 
@@ -335,8 +357,9 @@ mod tests {
     };
 
     use super::{
-        AbsolutePackageResultPath, PackageCompletionError, compose_package_worker_argv,
-        derive_package_result_path, parse_package_worker_result, serialize_package_worker_result,
+        AbsolutePackageResultPath, PackageCompletionError, SurvivingProcesses,
+        compose_package_worker_argv, derive_package_result_path, parse_package_worker_result,
+        serialize_package_worker_result,
     };
 
     fn package() -> crate::WorkPackageId {
@@ -383,7 +406,7 @@ mod tests {
 
     #[test]
     fn parses_both_exit_status_carriers_and_rejects_unknown_fields() {
-        let exited = parse_package_worker_result(br#"{"duration_ms":9,"stopped_at":"2026-08-12T10:11:12Z","exit_status":{"kind":"exited","code":3},"required_artifact_presence":"present"}"#)
+        let exited = parse_package_worker_result(br#"{"duration_ms":9,"stopped_at":"2026-08-12T10:11:12Z","exit_status":{"kind":"exited","code":3},"required_artifact_presence":"present","surviving_processes":"absent"}"#)
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             exited.exit_status(),
@@ -395,8 +418,9 @@ mod tests {
             exited.required_artifact_presence(),
             RequiredArtifactPresence::Present
         );
+        assert_eq!(exited.surviving_processes(), SurvivingProcesses::Absent);
 
-        let signaled = parse_package_worker_result(br#"{"duration_ms":10,"stopped_at":"2026-08-12T10:11:12+00:00","exit_status":{"kind":"signaled","signal":15},"required_artifact_presence":"absent"}"#)
+        let signaled = parse_package_worker_result(br#"{"duration_ms":10,"stopped_at":"2026-08-12T10:11:12+00:00","exit_status":{"kind":"signaled","signal":15},"required_artifact_presence":"absent","surviving_processes":"present"}"#)
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             signaled.exit_status(),
@@ -404,14 +428,18 @@ mod tests {
                 signal: SignalNumber::new(15)
             }
         );
+        assert_eq!(signaled.surviving_processes(), SurvivingProcesses::Present);
         let serialized =
             serialize_package_worker_result(&signaled).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             parse_package_worker_result(&serialized).unwrap_or_else(|error| panic!("{error}")),
             signaled
         );
+        let legacy = parse_package_worker_result(br#"{"duration_ms":9,"stopped_at":"2026-08-12T10:11:12Z","exit_status":{"kind":"exited","code":0},"required_artifact_presence":"present"}"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(legacy.surviving_processes(), SurvivingProcesses::Unknown);
 
-        assert!(parse_package_worker_result(br#"{"duration_ms":9,"stopped_at":"2026-08-12T10:11:12Z","exit_status":{"kind":"exited","code":0},"required_artifact_presence":"present","extra":true}"#).is_err());
+        assert!(parse_package_worker_result(br#"{"duration_ms":9,"stopped_at":"2026-08-12T10:11:12Z","exit_status":{"kind":"exited","code":0},"required_artifact_presence":"present","surviving_processes":"absent","extra":true}"#).is_err());
     }
 
     #[test]

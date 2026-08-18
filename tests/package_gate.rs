@@ -157,6 +157,9 @@ Create one known file.
         )
     );
     assert!(piped.contains("Do not treat any claim as established"));
+    assert!(piped.contains("Ending your turn is exiting"));
+    assert!(piped.contains("keep the turn open and wait on that same invocation"));
+    assert!(piped.contains("never leave one running"));
 }
 
 fn initialize_gate_validation_fixture(
