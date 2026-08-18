@@ -4,7 +4,7 @@
 //! A validated graph is a finite DAG whose hard ancestry remains connected when advisory edges
 //! are overridden.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -19,7 +19,7 @@ pub struct WorkPackageGraph {
     schema: Option<String>,
     vision: String,
     plan_version: u64,
-    authored_at_ref: String,
+    authored_at_refs: BTreeMap<String, String>,
     packages: Vec<WorkPackage>,
 }
 
@@ -32,9 +32,13 @@ impl WorkPackageGraph {
     pub const fn plan_version(&self) -> u64 {
         self.plan_version
     }
-    /// Return the source ref against which the plan was authored.
-    pub fn authored_at_ref(&self) -> &str {
-        &self.authored_at_ref
+    /// Return the source ref against which one repository was authored.
+    pub fn authored_ref(&self, repository: &str) -> Option<&str> {
+        self.authored_at_refs.get(repository).map(String::as_str)
+    }
+    /// Return every repository-specific authored ref in repository-name order.
+    pub const fn authored_refs(&self) -> &BTreeMap<String, String> {
+        &self.authored_at_refs
     }
     /// Return the packages in author order.
     pub fn packages(&self) -> &[WorkPackage] {
@@ -158,7 +162,10 @@ struct RawGraph {
     schema: Option<String>,
     vision: String,
     plan_version: u64,
-    authored_at_ref: String,
+    #[serde(default)]
+    authored_at_ref: Option<String>,
+    #[serde(default)]
+    authored_at_refs: Option<BTreeMap<String, String>>,
     packages: Vec<RawPackage>,
 }
 #[derive(Debug, Deserialize)]
@@ -201,6 +208,15 @@ pub enum WorkPackageGraphError {
     /// The plan version is zero.
     #[error("plan_version must be greater than zero")]
     ZeroPlanVersion,
+    /// Neither or both authored-ref wire forms were supplied.
+    #[error("graph must declare exactly one of authored_at_ref or authored_at_refs")]
+    InvalidAuthoredRefForm,
+    /// A package repository has no repository-specific authored ref.
+    #[error("repository {repository} has no authored ref")]
+    MissingAuthoredRef { repository: String },
+    /// An authored ref names no repository used by a package.
+    #[error("authored ref names unknown repository {repository}")]
+    UnknownAuthoredRefRepository { repository: String },
     /// A package owns no executable criterion.
     #[error("package {package} has no criteria")]
     NoCriteria { package: String },
@@ -273,7 +289,6 @@ pub fn parse_work_package_graph(bytes: &[u8]) -> Result<WorkPackageGraph, WorkPa
         nonempty(schema, "$schema", "graph")?;
     }
     nonempty(&raw.vision, "vision", "graph")?;
-    nonempty(&raw.authored_at_ref, "authored_at_ref", "graph")?;
     if raw.packages.is_empty() {
         return Err(WorkPackageGraphError::EmptyField {
             field: "packages",
@@ -321,6 +336,44 @@ pub fn parse_work_package_graph(bytes: &[u8]) -> Result<WorkPackageGraph, WorkPa
             nonempty(&criterion.command, "command", &location)?;
         }
     }
+    let repositories = raw
+        .packages
+        .iter()
+        .flat_map(|package| package.repositories.iter().cloned())
+        .collect::<HashSet<_>>();
+    let authored_at_refs = match (&raw.authored_at_ref, &raw.authored_at_refs) {
+        (Some(authored_ref), None) => {
+            nonempty(authored_ref, "authored_at_ref", "graph")?;
+            repositories
+                .iter()
+                .map(|repository| (repository.clone(), authored_ref.clone()))
+                .collect::<BTreeMap<_, _>>()
+        }
+        (None, Some(authored_refs)) => {
+            for (repository, authored_ref) in authored_refs {
+                nonempty(repository, "repository", "authored_at_refs")?;
+                nonempty(
+                    authored_ref,
+                    "authored ref",
+                    format!("repository {repository}"),
+                )?;
+                if !repositories.contains(repository) {
+                    return Err(WorkPackageGraphError::UnknownAuthoredRefRepository {
+                        repository: repository.clone(),
+                    });
+                }
+            }
+            for repository in &repositories {
+                if !authored_refs.contains_key(repository) {
+                    return Err(WorkPackageGraphError::MissingAuthoredRef {
+                        repository: repository.clone(),
+                    });
+                }
+            }
+            authored_refs.clone()
+        }
+        _ => return Err(WorkPackageGraphError::InvalidAuthoredRefForm),
+    };
     let known = raw
         .packages
         .iter()
@@ -367,7 +420,7 @@ pub fn parse_work_package_graph(bytes: &[u8]) -> Result<WorkPackageGraph, WorkPa
         schema: raw.schema,
         vision: raw.vision,
         plan_version: raw.plan_version,
-        authored_at_ref: raw.authored_at_ref,
+        authored_at_refs,
         packages: raw
             .packages
             .into_iter()

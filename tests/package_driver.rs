@@ -838,6 +838,11 @@ fn stale_next_outcome_refuses_dispatch_before_worker_testimony() {
 fn revised_plan_carries_only_unchanged_completions_and_uses_fresh_issuance() {
     let temp = TempDir::new().expect("tempdir");
     let repo = repository(temp.path(), "repo", "base");
+    let v1_ref = git(&repo, &["rev-parse", "HEAD"]);
+    fs::write(repo.join("new-ground"), "v2").expect("new ground");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "new authored ground"]);
+    let v2_ref = git(&repo, &["rev-parse", "HEAD"]);
     let journal = temp.path().join("driver.jsonl");
     let v1_path = temp.path().join("graph.v1.json");
     let v2_path = temp.path().join("graph.v2.json");
@@ -850,11 +855,11 @@ fn revised_plan_carries_only_unchanged_completions_and_uses_fresh_issuance() {
     };
     fs::write(
         &v1_path,
-        serde_json::to_vec(&json!({"vision":"driver-test","plan_version":1,"authored_at_ref":"HEAD","packages":[package("A", "true"),package("B", "false")]})).expect("v1"),
+        serde_json::to_vec(&json!({"vision":"driver-test","plan_version":1,"authored_at_refs":{"repo":v1_ref},"packages":[package("A", "true"),package("B", "false")]})).expect("v1"),
     ).expect("v1 write");
     fs::write(
         &v2_path,
-        serde_json::to_vec(&json!({"vision":"driver-test","plan_version":2,"authored_at_ref":"HEAD","packages":[package("A", "true"),package("B", "false")]})).expect("v2"),
+        serde_json::to_vec(&json!({"vision":"driver-test","plan_version":2,"authored_at_refs":{"repo":v2_ref},"packages":[package("A", "true"),package("B", "false")]})).expect("v2"),
     ).expect("v2 write");
     append(
         &journal,
@@ -1257,4 +1262,171 @@ printf '%s' '{{"outcome":"done"}}' > "$PCE_PACKAGE_OUTCOME"
             .count(),
         count
     );
+}
+
+#[test]
+fn driver_refuses_unresolvable_repository_ref_before_recording_failure() {
+    let temp = TempDir::new().expect("tempdir");
+    let first = repository(temp.path(), "first", "first");
+    let second = repository(temp.path(), "second", "second");
+    let graph_path = temp.path().join("graph.json");
+    let journal = temp.path().join("driver.jsonl");
+    let graph = json!({
+        "vision":"driver-test", "plan_version":1,
+        "authored_at_refs":{"first":"HEAD","second":"ref-that-does-not-exist"},
+        "packages":[{"id":"A","title":"A","repositories":["first","second"],
+          "criteria":[{"name":"a","input":"repos","observation":"works","command":"true"}],"depends_on":[]}]
+    });
+    fs::write(&graph_path, serde_json::to_vec(&graph).expect("graph JSON")).expect("graph write");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-run".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--repository".into(),
+            format!("first={}", first.display()),
+            "--repository".into(),
+            format!("second={}", second.display()),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("second"), "{stderr}");
+    assert!(stderr.contains("ref-that-does-not-exist"), "{stderr}");
+    let events = fs::read_to_string(&journal).unwrap_or_default();
+    assert!(!events.contains("package-composition-failed"), "{events}");
+    assert!(!events.contains("worker-dispatched"), "{events}");
+}
+
+#[test]
+fn changed_per_repository_refs_carry_lineage_and_recompose_each_assembly_base() {
+    let temp = TempDir::new().expect("tempdir");
+    let first = repository(temp.path(), "first", "first-old");
+    let second = repository(temp.path(), "second", "second-old");
+    let vision = "driver-test";
+    let branch = format!("pce/{vision}/A/attempt-1");
+
+    let prepare_repository = |repo: &Path, package_file: &str, new_file: &str| {
+        let original_branch = git(repo, &["branch", "--show-current"]);
+        let old_ref = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-qb", &branch, &old_ref]);
+        fs::write(repo.join(package_file), "package").expect("package file");
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "package lineage"]);
+        git(repo, &["checkout", "-q", &original_branch]);
+        fs::write(repo.join(new_file), "new ground").expect("new ground file");
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "new authored ground"]);
+        let new_ref = git(repo, &["rev-parse", "HEAD"]);
+        (old_ref, new_ref)
+    };
+    let (first_old, first_new) = prepare_repository(&first, "first-package", "first-new-ground");
+    let (second_old, second_new) =
+        prepare_repository(&second, "second-package", "second-new-ground");
+
+    let package = json!({
+        "id":"A", "title":"A", "repositories":["first","second"],
+        "criteria":[{
+            "name":"combined ground", "input":"both repositories",
+            "observation":"carried lineage is composed on each new ground",
+            "command":"test -f first-package && test -f first-new-ground && test -f \"$PCE_WORKTREE_1/second-package\" && test -f \"$PCE_WORKTREE_1/second-new-ground\""
+        }],
+        "depends_on":[]
+    });
+    let v1_path = temp.path().join("graph.v1.json");
+    let v2_path = temp.path().join("graph.v2.json");
+    fs::write(
+        &v1_path,
+        serde_json::to_vec(&json!({
+            "vision":vision, "plan_version":1,
+            "authored_at_refs":{"first":first_old,"second":second_old},
+            "packages":[package.clone()]
+        }))
+        .expect("v1 JSON"),
+    )
+    .expect("v1 write");
+    fs::write(
+        &v2_path,
+        serde_json::to_vec(&json!({
+            "vision":vision, "plan_version":2,
+            "authored_at_refs":{"first":first_new,"second":second_new},
+            "packages":[package]
+        }))
+        .expect("v2 JSON"),
+    )
+    .expect("v2 write");
+    let journal = temp.path().join("driver.jsonl");
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-done","package":"A","issuance":1}),
+    );
+    append(&journal, json!({"event":"package-completed","package":"A"}));
+
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-run".into(),
+            "--graph".into(),
+            v2_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--repository".into(),
+            format!("first={}", first.display()),
+            "--repository".into(),
+            format!("second={}", second.display()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let snapshot: Value = serde_json::from_slice(&output.stdout).expect("snapshot JSON");
+    assert_eq!(snapshot["outcome"], "finished");
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(events.contains(r#""carried_completions":["A"]"#));
+    assert!(events.contains(r#""event":"assembly-criterion-executed"#));
+    assert!(events.contains(r#""event":"assembly-completed"#));
+
+    let composed = events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("event JSON"))
+        .filter(|event| event["event"] == "assembly-repository-composed")
+        .map(|event| {
+            (
+                event["repository"].as_str().expect("repository").to_owned(),
+                event["base_oid"].as_str().expect("base oid").to_owned(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(composed.len(), 2);
+    let first_tree = git(
+        &first,
+        &[
+            "ls-tree",
+            "--name-only",
+            composed.get("first").expect("first oid"),
+        ],
+    );
+    assert!(first_tree.lines().any(|path| path == "first-package"));
+    assert!(first_tree.lines().any(|path| path == "first-new-ground"));
+    let second_tree = git(
+        &second,
+        &[
+            "ls-tree",
+            "--name-only",
+            composed.get("second").expect("second oid"),
+        ],
+    );
+    assert!(second_tree.lines().any(|path| path == "second-package"));
+    assert!(second_tree.lines().any(|path| path == "second-new-ground"));
 }

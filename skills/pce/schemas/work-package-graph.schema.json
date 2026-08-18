@@ -7,7 +7,6 @@
   "required": [
     "vision",
     "plan_version",
-    "authored_at_ref",
     "packages"
   ],
   "properties": {
@@ -31,6 +30,16 @@
         "$ref": "#/$defs/package"
       },
       "minItems": 1
+    },
+    "authored_at_refs": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/nonempty"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/nonempty"
+      }
     }
   },
   "$defs": {
@@ -127,5 +136,17 @@
         }
       }
     }
-  }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "authored_at_ref"
+      ]
+    },
+    {
+      "required": [
+        "authored_at_refs"
+      ]
+    }
+  ]
 }

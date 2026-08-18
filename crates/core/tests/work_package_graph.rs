@@ -262,3 +262,94 @@ fn merge_observations_must_cover_each_exact_package_repository_pair() {
         .expect_err("duplicate repository observation must fail");
     assert!(error.to_string().contains("duplicate merge observation"));
 }
+
+fn one_package_graph(authored_refs: serde_json::Value) -> serde_json::Value {
+    let mut graph = serde_json::json!({
+        "vision":"authored-refs", "plan_version":1,
+        "packages":[{"id":"A","title":"A","repositories":["first","second"],
+          "criteria":[{"name":"proof","input":"repositories","observation":"works","command":"true"}],
+          "depends_on":[]}]
+    });
+    graph.as_object_mut().expect("graph object").extend(
+        authored_refs
+            .as_object()
+            .expect("authored-ref fields")
+            .clone(),
+    );
+    graph
+}
+
+#[test]
+fn repository_specific_authored_refs_are_complete_and_addressable() {
+    let graph = one_package_graph(serde_json::json!({
+        "authored_at_refs":{"first":"first-oid","second":"second-oid"}
+    }));
+    let parsed = parse_work_package_graph(&serde_json::to_vec(&graph).expect("serialize graph"))
+        .expect("per-repository refs parse");
+    assert_eq!(parsed.authored_ref("first"), Some("first-oid"));
+    assert_eq!(parsed.authored_ref("second"), Some("second-oid"));
+    assert_eq!(parsed.authored_ref("unknown"), None);
+}
+
+#[test]
+fn legacy_authored_ref_applies_to_every_package_repository() {
+    let graph = one_package_graph(serde_json::json!({"authored_at_ref":"shared-oid"}));
+    let parsed = parse_work_package_graph(&serde_json::to_vec(&graph).expect("serialize graph"))
+        .expect("legacy scalar parses");
+    assert_eq!(parsed.authored_ref("first"), Some("shared-oid"));
+    assert_eq!(parsed.authored_ref("second"), Some("shared-oid"));
+    assert_eq!(parsed.authored_ref("unknown"), None);
+}
+
+#[test]
+fn authored_ref_forms_are_exclusive_and_repository_exact() {
+    for (fields, expected) in [
+        (serde_json::json!({}), "exactly one"),
+        (
+            serde_json::json!({
+                "authored_at_ref":"shared",
+                "authored_at_refs":{"first":"one","second":"two"}
+            }),
+            "exactly one",
+        ),
+        (
+            serde_json::json!({"authored_at_refs":{"first":"one"}}),
+            "second",
+        ),
+        (
+            serde_json::json!({
+                "authored_at_refs":{"first":"one","second":"two","third":"three"}
+            }),
+            "third",
+        ),
+    ] {
+        let graph = one_package_graph(fields);
+        let error = parse_work_package_graph(&serde_json::to_vec(&graph).expect("serialize graph"))
+            .expect_err("invalid authored refs must fail");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn committed_schema_accepts_either_authored_ref_form_but_not_both() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../skills/pce/schemas/work-package-graph.schema.json"
+    ))
+    .expect("schema JSON");
+    let validator = jsonschema::Validator::new(&schema).expect("schema compiles");
+    for fields in [
+        serde_json::json!({"authored_at_ref":"shared"}),
+        serde_json::json!({"authored_at_refs":{"first":"one","second":"two"}}),
+    ] {
+        assert!(validator.validate(&one_package_graph(fields)).is_ok());
+    }
+    for fields in [
+        serde_json::json!({}),
+        serde_json::json!({
+            "authored_at_ref":"shared",
+            "authored_at_refs":{"first":"one","second":"two"}
+        }),
+    ] {
+        assert!(validator.validate(&one_package_graph(fields)).is_err());
+    }
+}
