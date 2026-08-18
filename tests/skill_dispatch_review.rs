@@ -5800,7 +5800,7 @@ fn review_preserves_installed_skill_symlink_target() {
     );
 }
 
-const BINARY_OWNED_ORCHESTRATION_PARAGRAPH: &str = "`pce dispatch` appends issuance and returns while the binary-owned continuation retains the child without a runtime or spend ceiling and appends exactly one observed completion when the child exits. The orchestrator observes every issuance with bounded `pce dispatch check-in`, which reports running, finished, or dead state and required-artifact production without signaling or killing a child, appending a completion, reconciling, or closing anything. Only `pce dispatch reconcile` durably closes a dead incomplete issuance, and it refuses wherever a real completion could still land. A missing product alone neither closes a dispatch nor licenses a completion or accounting claim; all-accounted requires the issuance-ordered unaccounted ledger to be empty. Never append a `delta` or invent a result to close a dispatch.";
+const BINARY_OWNED_ORCHESTRATION_PARAGRAPH: &str = "`pce dispatch` appends issuance and returns while the binary-owned continuation retains the child without a runtime or spend ceiling and appends exactly one observed completion when the child exits. The orchestrator observes every issuance with bounded `pce dispatch check-in`, which reports unknown, running, finished, or dead state and required-artifact production without signaling or killing a child, appending a completion, reconciling, or closing anything. Only `pce dispatch reconcile` durably closes a dead incomplete issuance, and it refuses wherever a real completion could still land. A missing product alone neither closes a dispatch nor licenses a completion or accounting claim; all-accounted requires the issuance-ordered unaccounted ledger to be empty. Never append a `delta` or invent a result to close a dispatch.";
 
 const COLD_RULES_HEADING: &str = "## Cold-orchestrator falsification rules";
 
@@ -6306,7 +6306,7 @@ fn binary_owned_check_in_reconcile_contract_is_exact() {
         1
     );
     for clause in [
-        "reports running, finished, or dead state and required-artifact production",
+        "reports unknown, running, finished, or dead state and required-artifact production",
         "without signaling or killing a child, appending a completion, reconciling, or closing anything",
         "Only `pce dispatch reconcile` durably closes a dead incomplete issuance",
         "it refuses wherever a real completion could still land",

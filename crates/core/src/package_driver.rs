@@ -203,6 +203,30 @@ pub enum PaneCleanupOutcome {
     Failed,
 }
 
+/// The process found in the worker pane immediately after Herdr accepted the dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum DispatchWorkerProcessObservation {
+    /// One foreground process supplied a stable identity for later comparison.
+    Observed {
+        process_id: u32,
+        name: String,
+        argv: Vec<String>,
+    },
+    /// Herdr accepted the agent but did not supply a usable foreground process observation.
+    Inconclusive { detail: String },
+}
+
+/// The driver's conclusion from one attempted read of its dispatch environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DispatchEnvironmentObservation {
+    /// The recorded worker was absent and the pane had returned to its shell.
+    Dead,
+    /// The available Herdr evidence could not identify a live or dead worker.
+    Inconclusive,
+}
+
 /// One append-only fact in the driver journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
@@ -289,6 +313,24 @@ pub enum DriverEvent {
         pane_id: String,
         workspace_id: String,
     },
+    /// Herdr identified the pane occupied by the worker and the process observed there at spawn.
+    DispatchWorkerIdentified {
+        package: String,
+        issuance: u64,
+        dispatch_sequence: u64,
+        agent_name: String,
+        pane_id: String,
+        workspace_id: String,
+        process: DispatchWorkerProcessObservation,
+    },
+    /// The driver recorded the evidence used to close one environment-lost dispatch.
+    DispatchEnvironmentObserved {
+        package: String,
+        issuance: u64,
+        dispatch_sequence: u64,
+        observation: DispatchEnvironmentObservation,
+        detail: String,
+    },
     /// Best-effort cleanup was attempted only after this package attempt completed.
     DispatchPaneCleanup {
         package: String,
@@ -304,7 +346,7 @@ pub enum DriverEvent {
         issuance: u64,
         detail: String,
     },
-    /// A caller-supplied observation bound elapsed; the worker remains running and unaccounted.
+    /// A caller-supplied observation bound elapsed after the worker was verified alive.
     DriverStoppedWaiting {
         package: String,
         issuance: u64,
@@ -870,6 +912,8 @@ pub fn derive_driver_snapshot(
             | DriverEvent::WorkerSpawnFailed { package, .. }
             | DriverEvent::WorkerDispatched { package, .. }
             | DriverEvent::DispatchPaneOpened { package, .. }
+            | DriverEvent::DispatchWorkerIdentified { package, .. }
+            | DriverEvent::DispatchEnvironmentObserved { package, .. }
             | DriverEvent::DispatchPaneCleanup { package, .. }
             | DriverEvent::DispatchPaneOwnershipUnresolved { package, .. }
             | DriverEvent::DriverStoppedWaiting { package, .. }
@@ -1024,6 +1068,8 @@ pub fn derive_driver_snapshot(
                 };
             }
             DriverEvent::DispatchPaneOpened { issuance, .. }
+            | DriverEvent::DispatchWorkerIdentified { issuance, .. }
+            | DriverEvent::DispatchEnvironmentObserved { issuance, .. }
             | DriverEvent::DispatchPaneOwnershipUnresolved { issuance, .. } => match state {
                 DriverPackageState::Running { issuance: active }
                 | DriverPackageState::Judging { issuance: active }

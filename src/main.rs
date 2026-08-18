@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{CString, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -30,16 +30,16 @@ use pce_core::{
     CompletionCriterionStatus, CompletionDecision, CompositionInput, CreationDate,
     CriterionChangeDecision, CriterionExecution, CurrentArtifactObservation, CurrentArtifactState,
     DispatchAdmission, DispatchAttempt, DispatchCandidate, DispatchCompletionPayload,
-    DispatchDuration, DispatchEnvelope, DispatchExitStatus, DispatchIdentityObservation,
-    DispatchLedger, DispatchLedgerCompletion, DispatchLogging, DispatchPayload,
-    DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
+    DispatchDuration, DispatchEnvelope, DispatchEnvironmentObservation, DispatchExitStatus,
+    DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion, DispatchLogging,
+    DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
     DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass, DispatchRootCause,
-    DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchabilityResult,
-    DriverAssemblyState, DriverEvent, EnvironmentFailureLimit, EnvironmentPreparationOutcome,
-    EventBodyRef, EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter,
-    EventTimestamp, Evidence, ExactPullRequestIdentity, ExactPullRequestState,
-    ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable, ExitCode,
-    ExpectedVerdictOutcome, FileObservation, FindingAdmission, FindingRejectionReason,
+    DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchWorkerProcessObservation,
+    DispatchabilityResult, DriverAssemblyState, DriverEvent, EnvironmentFailureLimit,
+    EnvironmentPreparationOutcome, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
+    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
+    ExactPullRequestState, ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable,
+    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FindingRejectionReason,
     FindingReplayDecision, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
     GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
     GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
@@ -72,22 +72,22 @@ use pce_core::{
     compose_local_patch_brief, compose_package_gate_brief, compose_package_worker_argv,
     compose_package_worker_brief, compose_planning_role_frame, compute_dispatchability,
     create_vision, criteria_invariance_violation, derive_dispatch_outcome_state,
-    derive_driver_snapshot, derive_merge_status, derive_milestone_merge_status,
-    derive_package_result_path, derive_run_state, derive_run_state_with_dispatch_artifacts,
-    derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
-    dispatch_completion_payload, dispatch_invocation, dispatch_payload, effective_criteria,
-    evaluate_completion, evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
-    fold_paired_execution_proof, fold_replay_runs, judge_finding_replay,
-    latest_criterion_failure_evidence, measure_contract_snapshot, meter_dispatches,
-    normalize_replay_observation, paired_stimulus_identity, parse_acceptance_criteria,
-    parse_claude_result, parse_dispatch_process_identity, parse_event_line,
-    parse_gate_execution_evidence, parse_gate_stimulus, parse_package_gate_outcome,
-    parse_package_worker_result, parse_paired_falsification_verdict, parse_replay_output_path,
-    parse_replay_schema_path, parse_tracked_repository_contract, parse_work_package_graph,
-    pending_completed_pane_cleanups, ready_work_packages, rebase_gate_stimulus,
-    recovery_attempt_records, recovery_base_brief, recovery_budget, render_dispatch_projection,
-    render_human_snapshot, render_package_run, seatbelt_capability_probe,
-    serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    derive_driver_snapshot, derive_herdr_agent_name, derive_merge_status,
+    derive_milestone_merge_status, derive_package_result_path, derive_run_state,
+    derive_run_state_with_dispatch_artifacts, derive_run_state_with_exceptional_merge_chains,
+    derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
+    dispatch_payload, effective_criteria, evaluate_completion, evaluate_landing_readiness,
+    event_record_matches, fold_dispatch_ledger, fold_paired_execution_proof, fold_replay_runs,
+    judge_finding_replay, latest_criterion_failure_evidence, measure_contract_snapshot,
+    meter_dispatches, normalize_replay_observation, paired_stimulus_identity,
+    parse_acceptance_criteria, parse_claude_result, parse_dispatch_process_identity,
+    parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
+    parse_package_gate_outcome, parse_package_worker_result, parse_paired_falsification_verdict,
+    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
+    parse_work_package_graph, pending_completed_pane_cleanups, ready_work_packages,
+    rebase_gate_stimulus, recovery_attempt_records, recovery_base_brief, recovery_budget,
+    render_dispatch_projection, render_human_snapshot, render_package_run,
+    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_package_worker_result, serialize_tracked_repository_contract, unchanged_package_ids,
     validate_artifact, validate_package_gate_finding_repositories,
     validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
@@ -1027,7 +1027,12 @@ fn run_package_gate_agent(command: PackageGateAgentCommand) -> Result<()> {
         .find(|package| package.id().as_str() == command.package_id)
         .with_context(|| format!("package {} is absent from graph", command.package_id))?;
     let vision_identity = DispatchVisionSource::parse(graph.vision().to_owned())?;
-    let temporary_directory = package_temporary_directory(&vision_identity, package.id());
+    let temporary_directory = std::env::var_os("PCE_DISPATCH_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or(standalone_package_temporary_directory(
+            &vision_identity,
+            package.id(),
+        ));
     fs::create_dir_all(&temporary_directory).context("failed to create binary-owned TMPDIR")?;
     let worktrees = package
         .repositories()
@@ -1384,7 +1389,12 @@ fn run_package_agent(command: PackageAgentCommand) -> Result<()> {
         .find(|package| package.id().as_str() == command.package_id)
         .with_context(|| format!("package {} is absent from graph", command.package_id))?;
     let vision_identity = DispatchVisionSource::parse(graph.vision().to_owned())?;
-    let temporary_directory = package_temporary_directory(&vision_identity, package.id());
+    let temporary_directory = std::env::var_os("PCE_DISPATCH_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or(standalone_package_temporary_directory(
+            &vision_identity,
+            package.id(),
+        ));
     fs::create_dir_all(&temporary_directory).context("failed to create binary-owned TMPDIR")?;
     let worktrees = package
         .repositories()
@@ -2908,6 +2918,7 @@ fn driver_package_worktrees(
         &AbsoluteDispatchTemporaryDirectory::parse(package_temporary_directory(
             &vision,
             package.id(),
+            DispatchAttempt::parse(issuance)?,
         ))?,
         WorkerEnvironment::parse(route_environment()?)?,
         WorkerArgumentVector::parse(vec!["prime-agent".to_owned(), "-p".to_owned()])?,
@@ -3001,6 +3012,32 @@ Git conflict evidence:
             }
         }
     }
+    let follows_environment_closure = events.iter().any(|event| {
+        matches!(
+            event,
+            DriverEvent::WorkerEnvironmentFailed {
+                package,
+                issuance: failed_issuance,
+                reason,
+            } if package == package_id
+                && *failed_issuance < issuance
+                && matches!(
+                    reason.as_str(),
+                    OBSERVED_DEAD_DISPATCH_REASON | INCONCLUSIVE_DISPATCH_REASON
+                )
+        )
+    });
+    if follows_environment_closure {
+        brief.push_str(
+            "
+
+## Earlier environment-killed attempt
+
+",
+        );
+        brief.push_str(KILLED_PREDECESSOR_SENTENCE);
+        brief.push('\n');
+    }
     Ok(local_patch_evidence.map_or(brief.clone(), |evidence| {
         compose_local_patch_brief(&brief, evidence)
     }))
@@ -3046,6 +3083,52 @@ fn record_driver_dispatch_panes(
         )?;
     }
     Ok(())
+}
+
+fn record_driver_dispatch_identity(
+    journal: &Path,
+    package: &str,
+    issuance: u64,
+    response: &Value,
+) -> Result<()> {
+    let identity = response
+        .get("dispatch_identity")
+        .context("package dispatch omitted dispatch_identity")?;
+    let dispatch_sequence = response
+        .get("issuance_sequence")
+        .and_then(Value::as_u64)
+        .context("package dispatch omitted issuance_sequence")?;
+    let agent_name = identity
+        .get("agent_name")
+        .and_then(Value::as_str)
+        .context("package dispatch identity omitted agent_name")?;
+    let pane_id = identity
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .context("package dispatch identity omitted pane_id")?;
+    let workspace_id = identity
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .context("package dispatch identity omitted workspace_id")?;
+    let process = serde_json::from_value(
+        identity
+            .get("process")
+            .cloned()
+            .context("package dispatch identity omitted process observation")?,
+    )
+    .context("package dispatch process observation is invalid")?;
+    append_driver_event(
+        journal,
+        &DriverEvent::DispatchWorkerIdentified {
+            package: package.to_owned(),
+            issuance,
+            dispatch_sequence,
+            agent_name: agent_name.to_owned(),
+            pane_id: pane_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            process,
+        },
+    )
 }
 
 fn issue_driver_package_dispatch(
@@ -3133,11 +3216,321 @@ fn issue_driver_package_dispatch(
         environment: route_environment()?,
         worker_arguments,
     })?;
+    record_driver_dispatch_identity(&command.journal_path, package_id, issuance, &response)?;
     record_driver_dispatch_panes(&command.journal_path, package_id, issuance, &response)?;
     let result_path = response["result_path"]
         .as_str()
         .context("composed package dispatch omitted result_path")?;
     Ok(PathBuf::from(result_path))
+}
+
+const OBSERVED_DEAD_DISPATCH_REASON: &str =
+    "worker environment ended the dispatch before completion";
+const INCONCLUSIVE_DISPATCH_REASON: &str = "worker environment liveness evidence was inconclusive";
+const KILLED_PREDECESSOR_SENTENCE: &str = "An earlier attempt was killed by the environment before finishing; nothing it produced was judged, and any durable side effects it may have left outside the repository must be verified against this package's own criteria rather than treated as corruption or redone.";
+
+#[derive(Debug)]
+enum DriverDispatchEnvironmentLiveness {
+    Unknown,
+    Alive,
+    Dead { detail: String },
+    Inconclusive { detail: String },
+}
+
+#[derive(Debug)]
+struct DriverDispatchRuntimeIdentity {
+    agent_name: String,
+    pane_id: String,
+    workspace_id: String,
+    process: Option<DispatchWorkerProcessObservation>,
+}
+
+fn driver_dispatch_runtime_identity(
+    graph: &WorkPackageGraph,
+    events: &[DriverEvent],
+    package: &str,
+    issuance: u64,
+) -> Result<Option<DriverDispatchRuntimeIdentity>> {
+    if let Some(identity) = events.iter().rev().find_map(|event| match event {
+        DriverEvent::DispatchWorkerIdentified {
+            package: event_package,
+            issuance: event_issuance,
+            agent_name,
+            pane_id,
+            workspace_id,
+            process,
+            ..
+        } if event_package == package && *event_issuance == issuance => {
+            Some(DriverDispatchRuntimeIdentity {
+                agent_name: agent_name.clone(),
+                pane_id: pane_id.clone(),
+                workspace_id: workspace_id.clone(),
+                process: Some(process.clone()),
+            })
+        }
+        _ => None,
+    }) {
+        return Ok(Some(identity));
+    }
+    let Some((pane_id, workspace_id)) = events.iter().rev().find_map(|event| match event {
+        DriverEvent::DispatchPaneOpened {
+            package: event_package,
+            issuance: event_issuance,
+            pane_id,
+            workspace_id,
+        } if event_package == package && *event_issuance == issuance => {
+            Some((pane_id.clone(), workspace_id.clone()))
+        }
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let work_package = graph
+        .packages()
+        .iter()
+        .find(|candidate| candidate.id().as_str() == package)
+        .with_context(|| format!("package {package} is absent from graph"))?;
+    let vision = DispatchVisionSource::parse(graph.vision().to_owned())?;
+    let agent_name = derive_herdr_agent_name(
+        &vision,
+        work_package.id(),
+        DispatchAttempt::parse(issuance)?,
+    );
+    Ok(Some(DriverDispatchRuntimeIdentity {
+        agent_name: agent_name.as_str().to_owned(),
+        pane_id,
+        workspace_id,
+        process: None,
+    }))
+}
+
+fn herdr_command_output(arguments: &[&str]) -> Result<Value> {
+    let output = std::process::Command::new("herdr")
+        .args(arguments)
+        .output()
+        .context("failed to execute herdr liveness observation")?;
+    if !output.status.success() {
+        bail!(
+            "herdr liveness observation {:?} failed with {}: {}",
+            arguments,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout)
+        .context("herdr liveness observation returned invalid JSON")
+}
+
+fn foreground_is_only_shell(response: &Value) -> bool {
+    let processes = response
+        .pointer("/result/process_info/foreground_processes")
+        .and_then(Value::as_array);
+    let Some(processes) = processes else {
+        return false;
+    };
+    if processes.is_empty() {
+        return true;
+    }
+    let shell_pid = response
+        .pointer("/result/process_info/shell_pid")
+        .and_then(Value::as_u64);
+    processes.iter().all(|process| {
+        let pid = process.get("pid").and_then(Value::as_u64);
+        let name = process
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| process.get("argv0").and_then(Value::as_str));
+        pid == shell_pid || matches!(name, Some("sh" | "bash" | "zsh" | "fish" | "dash" | "nu"))
+    })
+}
+
+fn process_observation_matches(
+    recorded: &DispatchWorkerProcessObservation,
+    response: &Value,
+) -> bool {
+    let DispatchWorkerProcessObservation::Observed { process_id, .. } = recorded else {
+        return false;
+    };
+    response
+        .pointer("/result/process_info/foreground_processes")
+        .and_then(Value::as_array)
+        .is_some_and(|processes| {
+            processes.iter().any(|process| {
+                process.get("pid").and_then(Value::as_u64) == Some(u64::from(*process_id))
+            })
+        })
+}
+
+fn observe_driver_dispatch_environment(
+    graph: &WorkPackageGraph,
+    events: &[DriverEvent],
+    package: &str,
+    issuance: u64,
+) -> Result<DriverDispatchEnvironmentLiveness> {
+    let Some(identity) = driver_dispatch_runtime_identity(graph, events, package, issuance)? else {
+        return Ok(DriverDispatchEnvironmentLiveness::Unknown);
+    };
+    let agent = herdr_command_output(&["agent", "get", &identity.agent_name]);
+    let agent_matches = agent.as_ref().is_ok_and(|response| {
+        let observed = response.pointer("/result/agent");
+        observed.is_some_and(|observed| {
+            observed.get("pane_id").and_then(Value::as_str) == Some(identity.pane_id.as_str())
+                && observed.get("workspace_id").and_then(Value::as_str)
+                    == Some(identity.workspace_id.as_str())
+                && observed
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .or_else(|| observed.get("agent").and_then(Value::as_str))
+                    == Some(identity.agent_name.as_str())
+        })
+    });
+    if agent_matches {
+        return Ok(DriverDispatchEnvironmentLiveness::Alive);
+    }
+    let process = herdr_command_output(&["pane", "process-info", "--pane", &identity.pane_id]);
+    let process = match process {
+        Ok(response) => response,
+        Err(source) => {
+            let detail = format!("{source:#}");
+            if detail.contains("pane_not_found") {
+                return Ok(DriverDispatchEnvironmentLiveness::Dead { detail });
+            }
+            return Ok(DriverDispatchEnvironmentLiveness::Inconclusive { detail });
+        }
+    };
+    if foreground_is_only_shell(&process) {
+        return Ok(DriverDispatchEnvironmentLiveness::Dead {
+            detail: format!(
+                "worker pane {} contains only its login shell; agent lookup: absent or mismatched",
+                identity.pane_id,
+            ),
+        });
+    }
+    if identity
+        .process
+        .as_ref()
+        .is_some_and(|recorded| process_observation_matches(recorded, &process))
+    {
+        return Ok(DriverDispatchEnvironmentLiveness::Alive);
+    }
+    if identity.process.is_none() && agent_matches {
+        return Ok(DriverDispatchEnvironmentLiveness::Alive);
+    }
+    Ok(DriverDispatchEnvironmentLiveness::Inconclusive {
+        detail: format!(
+            "worker pane {} contains no process matching the recorded dispatch identity; agent lookup: {}",
+            identity.pane_id,
+            agent.map_or_else(|error| format!("{error:#}"), |_| "mismatched".to_owned())
+        ),
+    })
+}
+
+fn close_driver_lost_dispatch(
+    command: &DriverRunCommand,
+    package: &str,
+    issuance: u64,
+    dispatch_sequence: Sequence,
+    observation: DispatchEnvironmentObservation,
+    detail: String,
+    reason: &'static str,
+) -> Result<()> {
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::DispatchEnvironmentObserved {
+            package: package.to_owned(),
+            issuance,
+            dispatch_sequence: dispatch_sequence.get(),
+            observation,
+            detail,
+        },
+    )?;
+    close_dispatch_conditionally(
+        &driver_dispatch_log(command)?,
+        DispatchClosureTarget {
+            issuance_sequence: dispatch_sequence,
+            node: NodeId::parse(package)?,
+        },
+        |_| {
+            Ok(DispatchCompletionPayload::ReconciledDead(
+                ReconciledDeadDispatchCompletionPayload {
+                    issuance_sequence: dispatch_sequence,
+                    outcome: ReconciledDispatchOutcome::ReconciledDead,
+                    artifact_production: ArtifactProduction::NotProduced,
+                },
+            ))
+        },
+    )?;
+    append_worker_environment_outcome(command, package.to_owned(), issuance, reason.to_owned())
+}
+
+fn repair_driver_environment_closures(
+    command: &DriverRunCommand,
+    events: &[DriverEvent],
+) -> Result<usize> {
+    let dispatch_log = driver_dispatch_log(command)?;
+    if !dispatch_log.is_file() {
+        return Ok(0);
+    }
+    let records = read_event_log(&dispatch_log)?
+        .into_iter()
+        .map(|line| line.record)
+        .collect::<Vec<_>>();
+    let ledger = fold_dispatch_ledger(&records)
+        .context("failed to derive dispatch ledger while repairing driver closure")?;
+    let mut repaired = 0;
+    for event in events {
+        let DriverEvent::DispatchEnvironmentObserved {
+            package,
+            issuance,
+            dispatch_sequence,
+            observation,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        let already_recorded = events.iter().any(|candidate| match candidate {
+            DriverEvent::WorkerEnvironmentFailed {
+                package: candidate_package,
+                issuance: candidate_issuance,
+                reason,
+            }
+            | DriverEvent::PackageEnvironmentBlocked {
+                package: candidate_package,
+                issuance: candidate_issuance,
+                reason,
+                ..
+            } => {
+                candidate_package == package
+                    && candidate_issuance == issuance
+                    && matches!(
+                        reason.as_str(),
+                        OBSERVED_DEAD_DISPATCH_REASON | INCONCLUSIVE_DISPATCH_REASON
+                    )
+            }
+            _ => false,
+        });
+        if already_recorded {
+            continue;
+        }
+        let sequence = Sequence::parse(*dispatch_sequence)?;
+        let driver_closed = ledger.issuance(sequence).is_some_and(|entry| {
+            matches!(
+                entry.completion(),
+                Some(DispatchLedgerCompletion::ReconciledDead { .. })
+            )
+        });
+        if !driver_closed {
+            continue;
+        }
+        let reason = match observation {
+            DispatchEnvironmentObservation::Dead => OBSERVED_DEAD_DISPATCH_REASON,
+            DispatchEnvironmentObservation::Inconclusive => INCONCLUSIVE_DISPATCH_REASON,
+        };
+        append_worker_environment_outcome(command, package.clone(), *issuance, reason.to_owned())?;
+        repaired += 1;
+    }
+    Ok(repaired)
 }
 
 fn wait_for_driver_results(paths: &[PathBuf], timeout: Option<Duration>) -> Result<bool> {
@@ -3897,10 +4290,14 @@ fn ensure_driver_plan_version(
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
     let initial_events = read_driver_journal(&command.journal_path)?;
     ensure_recovery_configuration(&command, &initial_events)?;
+    let mut issued_this_launch = HashSet::new();
     loop {
         let graph = read_driver_graph(&command.graph_path)?;
         let events = read_driver_journal(&command.journal_path)?;
         if ensure_driver_plan_version(&graph, &command, &events)? {
+            continue;
+        }
+        if repair_driver_environment_closures(&command, &events)? > 0 {
             continue;
         }
         if reconcile_completed_dispatch_panes(&command.journal_path, &events)? > 0 {
@@ -3967,31 +4364,128 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                         running_results.push((
                             package.clone(),
                             *issuance,
+                            entry.sequence(),
                             driver_outcome_path(&command.journal_path, package, *issuance)?,
                             package_result_path(&vision_dir, entry.node(), entry.sequence())?,
                         ));
                     }
                 }
                 if !running_results.is_empty() {
-                    let paths = running_results
+                    let events = read_driver_journal(&command.journal_path)?;
+                    let mut retained = Vec::new();
+                    let mut closed = false;
+                    for (package, issuance, dispatch_sequence, outcome, result_path) in
+                        running_results
+                    {
+                        if result_path.is_file()
+                            || issued_this_launch.contains(&(package.clone(), issuance))
+                        {
+                            retained.push((
+                                package,
+                                issuance,
+                                dispatch_sequence,
+                                outcome,
+                                result_path,
+                            ));
+                            continue;
+                        }
+                        match observe_driver_dispatch_environment(
+                            &graph, &events, &package, issuance,
+                        )? {
+                            DriverDispatchEnvironmentLiveness::Unknown
+                            | DriverDispatchEnvironmentLiveness::Alive => retained.push((
+                                package,
+                                issuance,
+                                dispatch_sequence,
+                                outcome,
+                                result_path,
+                            )),
+                            DriverDispatchEnvironmentLiveness::Dead { detail } => {
+                                close_driver_lost_dispatch(
+                                    &command,
+                                    &package,
+                                    issuance,
+                                    dispatch_sequence,
+                                    DispatchEnvironmentObservation::Dead,
+                                    detail,
+                                    OBSERVED_DEAD_DISPATCH_REASON,
+                                )?;
+                                closed = true;
+                            }
+                            DriverDispatchEnvironmentLiveness::Inconclusive { detail } => {
+                                close_driver_lost_dispatch(
+                                    &command,
+                                    &package,
+                                    issuance,
+                                    dispatch_sequence,
+                                    DispatchEnvironmentObservation::Inconclusive,
+                                    detail,
+                                    INCONCLUSIVE_DISPATCH_REASON,
+                                )?;
+                                closed = true;
+                            }
+                        }
+                    }
+                    if closed {
+                        continue;
+                    }
+                    let paths = retained
                         .iter()
-                        .map(|(_, _, _, path)| path.clone())
+                        .map(|(_, _, _, _, path)| path.clone())
                         .collect::<Vec<_>>();
                     if !wait_for_driver_results(&paths, command.wait_timeout)? {
                         let waited_ms =
                             u64::try_from(command.wait_timeout.unwrap_or_default().as_millis())
                                 .context("driver wait timeout exceeds u64")?;
-                        for (package, issuance, _, path) in &running_results {
-                            if !path.is_file() {
-                                append_driver_event(
+                        let timeout_events = read_driver_journal(&command.journal_path)?;
+                        let mut timeout_closed = false;
+                        for (package, issuance, dispatch_sequence, _, path) in &retained {
+                            if path.is_file() {
+                                continue;
+                            }
+                            match observe_driver_dispatch_environment(
+                                &graph,
+                                &timeout_events,
+                                package,
+                                *issuance,
+                            )? {
+                                DriverDispatchEnvironmentLiveness::Unknown => {}
+                                DriverDispatchEnvironmentLiveness::Alive => append_driver_event(
                                     &command.journal_path,
                                     &DriverEvent::DriverStoppedWaiting {
                                         package: package.clone(),
                                         issuance: *issuance,
                                         waited_ms,
                                     },
-                                )?;
+                                )?,
+                                DriverDispatchEnvironmentLiveness::Dead { detail } => {
+                                    close_driver_lost_dispatch(
+                                        &command,
+                                        package,
+                                        *issuance,
+                                        *dispatch_sequence,
+                                        DispatchEnvironmentObservation::Dead,
+                                        detail,
+                                        OBSERVED_DEAD_DISPATCH_REASON,
+                                    )?;
+                                    timeout_closed = true;
+                                }
+                                DriverDispatchEnvironmentLiveness::Inconclusive { detail } => {
+                                    close_driver_lost_dispatch(
+                                        &command,
+                                        package,
+                                        *issuance,
+                                        *dispatch_sequence,
+                                        DispatchEnvironmentObservation::Inconclusive,
+                                        detail,
+                                        INCONCLUSIVE_DISPATCH_REASON,
+                                    )?;
+                                    timeout_closed = true;
+                                }
                             }
+                        }
+                        if timeout_closed {
+                            continue;
                         }
                         return run_driver_status(DriverStatusCommand {
                             graph_path: command.graph_path,
@@ -4000,7 +4494,7 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                         });
                     }
                     let _completions = collect_package_completions(&dispatch_log, &vision_dir)?;
-                    for (package, issuance, outcome, result_path) in running_results {
+                    for (package, issuance, _, outcome, result_path) in retained {
                         let result = read_package_result(&result_path)?
                             .context("durable dispatch result vanished")?;
                         let healthy = matches!(result.exit_status(), DispatchExitStatus::Exited { code } if code.get() == 0)
@@ -4191,6 +4685,7 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
                     &composed_brief,
                 ) {
                     Ok(result) => {
+                        issued_this_launch.insert((package_id.clone(), issuance));
                         composed_dispatches.push((package_id.clone(), issuance, outcome, result));
                     }
                     Err(source) => {
@@ -5302,6 +5797,75 @@ fn execute_herdr_agent_start(invocation: &HerdrInvocation) -> HerdrAgentStartOut
     }
 }
 
+fn parse_herdr_foreground_process(response: &Value) -> Option<DispatchWorkerProcessObservation> {
+    let process = response
+        .pointer("/result/process_info/foreground_processes")?
+        .as_array()?
+        .first()?;
+    let process_id = u32::try_from(process.get("pid")?.as_u64()?).ok()?;
+    let name = process
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| process.get("argv0").and_then(Value::as_str))?
+        .to_owned();
+    let argv = process
+        .get("argv")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            process
+                .get("cmdline")
+                .and_then(Value::as_str)
+                .map_or_else(Vec::new, |line| vec![line.to_owned()])
+        });
+    Some(DispatchWorkerProcessObservation::Observed {
+        process_id,
+        name,
+        argv,
+    })
+}
+
+fn observe_spawned_herdr_process(pane_id: &str) -> DispatchWorkerProcessObservation {
+    let started = Instant::now();
+    let mut detail = "worker pane had no foreground process".to_owned();
+    while started.elapsed() < Duration::from_millis(500) {
+        match std::process::Command::new("herdr")
+            .args(["pane", "process-info", "--pane", pane_id])
+            .output()
+        {
+            Ok(output) if output.status.success() => match serde_json::from_slice(&output.stdout) {
+                Ok(response) => {
+                    if let Some(process) = parse_herdr_foreground_process(&response) {
+                        return process;
+                    }
+                    detail =
+                        "worker pane process-info contained no identifiable foreground process"
+                            .to_owned();
+                }
+                Err(source) => {
+                    detail = format!("worker pane process-info returned invalid JSON: {source}")
+                }
+            },
+            Ok(output) => {
+                detail = format!(
+                    "worker pane process-info failed with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            Err(source) => detail = format!("failed to execute herdr pane process-info: {source}"),
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    DispatchWorkerProcessObservation::Inconclusive { detail }
+}
+
 fn record_dispatch_spawn_failure(
     log_path: &Path,
     node: &NodeId,
@@ -5370,12 +5934,34 @@ fn package_worktree_root() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn package_temporary_directory(vision: &DispatchVisionSource, package: &WorkPackageId) -> PathBuf {
+fn standalone_package_temporary_directory(
+    vision: &DispatchVisionSource,
+    package: &WorkPackageId,
+) -> PathBuf {
     let mut digest = Sha256::new();
     digest.update(vision.as_str().len().to_be_bytes());
     digest.update(vision.as_str().as_bytes());
     digest.update(package.as_str().len().to_be_bytes());
     digest.update(package.as_str().as_bytes());
+    let bytes = digest.finalize();
+    let suffix = bytes[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    PathBuf::from("/tmp/pce-tmp").join(suffix)
+}
+
+fn package_temporary_directory(
+    vision: &DispatchVisionSource,
+    package: &WorkPackageId,
+    attempt: DispatchAttempt,
+) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(vision.as_str().len().to_be_bytes());
+    digest.update(vision.as_str().as_bytes());
+    digest.update(package.as_str().len().to_be_bytes());
+    digest.update(package.as_str().as_bytes());
+    digest.update(attempt.get().to_be_bytes());
     let bytes = digest.finalize();
     let suffix = bytes[..6]
         .iter()
@@ -5441,7 +6027,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let worktree_root = package_worktree_root()?;
-    let temporary_directory = package_temporary_directory(&vision, package.id());
+    let temporary_directory = package_temporary_directory(&vision, package.id(), attempt);
     fs::create_dir_all(&worktree_root).context("failed to create binary-owned worktree root")?;
     fs::create_dir_all(&temporary_directory).context("failed to create binary-owned TMPDIR")?;
     let worktree_root = AbsoluteWorktreeRoot::parse(worktree_root)?;
@@ -5571,6 +6157,42 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             return Err(Error::new(SpawnObservedDispatchError { source }));
         }
     };
+    let (worker_pane_id, worker_workspace_id, worker_process) = if let Some(started_agent) =
+        start_response.pointer("/result/agent")
+    {
+        let started_name = started_agent
+            .get("name")
+            .and_then(Value::as_str)
+            .context("herdr agent-start response omitted result.agent.name")?;
+        if started_name != plan.agent_name().as_str() {
+            return Err(Error::new(SpawnObservedDispatchError {
+                source: anyhow!(
+                    "herdr agent-start returned name {started_name}; expected {}",
+                    plan.agent_name().as_str()
+                ),
+            }));
+        }
+        let pane_id = started_agent
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .context("herdr agent-start response omitted result.agent.pane_id")?
+            .to_owned();
+        let workspace_id = started_agent
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .context("herdr agent-start response omitted result.agent.workspace_id")?
+            .to_owned();
+        let process = observe_spawned_herdr_process(&pane_id);
+        (pane_id, workspace_id, process)
+    } else {
+        (
+            "unrecorded-worker-pane".to_owned(),
+            location.workspace_id().to_owned(),
+            DispatchWorkerProcessObservation::Inconclusive {
+                detail: "herdr agent-start response omitted the worker pane identity".to_owned(),
+            },
+        )
+    };
     let mut pane_cleanup_targets = Vec::new();
     let mut pane_ownership_errors = Vec::new();
     for item in &created {
@@ -5605,6 +6227,12 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
         "agent_name": plan.agent_name().as_str(),
         "issuance_sequence": issuance.sequence().get(),
         "result_path": result_path.as_str(),
+        "dispatch_identity": {
+            "agent_name": plan.agent_name().as_str(),
+            "pane_id": worker_pane_id,
+            "workspace_id": worker_workspace_id,
+            "process": worker_process,
+        },
         "pane_cleanup_targets": pane_cleanup_targets,
         "pane_ownership_error": pane_ownership_error,
         "worktrees": created,
@@ -18887,7 +19515,33 @@ None.
     }
 
     #[test]
-    fn package_tmpdir_leaves_darwin_socket_headroom() {
+    fn herdr_shell_only_process_info_is_dead_evidence() {
+        let shell = serde_json::json!({
+            "result": {"process_info": {
+                "shell_pid": 41,
+                "foreground_processes": [{"pid": 41, "name": "zsh", "argv": ["-zsh"]}]
+            }}
+        });
+        assert!(crate::foreground_is_only_shell(&shell));
+        let worker = serde_json::json!({
+            "result": {"process_info": {
+                "shell_pid": 41,
+                "foreground_processes": [{"pid": 42, "name": "pce", "argv": ["pce", "package"]}]
+            }}
+        });
+        assert!(!crate::foreground_is_only_shell(&worker));
+        assert!(crate::process_observation_matches(
+            &pce_core::DispatchWorkerProcessObservation::Observed {
+                process_id: 42,
+                name: "pce".to_owned(),
+                argv: vec!["pce".to_owned()],
+            },
+            &worker,
+        ));
+    }
+
+    #[test]
+    fn package_tmpdir_is_attempt_scoped_and_leaves_darwin_socket_headroom() {
         let vision = pce_core::DispatchVisionSource::parse(
             "2026-08-11-the-store-is-the-only-copy".to_owned(),
         )
@@ -18901,7 +19555,17 @@ None.
             .iter()
             .find(|package| package.id().as_str() == "RR2")
             .expect("RR2");
-        let path = crate::package_temporary_directory(&vision, package.id());
+        let path = crate::package_temporary_directory(
+            &vision,
+            package.id(),
+            pce_core::DispatchAttempt::parse(1).expect("attempt"),
+        );
+        let retry_path = crate::package_temporary_directory(
+            &vision,
+            package.id(),
+            pce_core::DispatchAttempt::parse(2).expect("attempt"),
+        );
+        assert_ne!(path, retry_path);
         let rendered = path.to_str().expect("ASCII temporary path");
         assert!(rendered.starts_with("/tmp/pce-tmp/"));
         assert_eq!(rendered.len(), 25);

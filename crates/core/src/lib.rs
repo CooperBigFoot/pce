@@ -53,7 +53,8 @@ pub use package_completion::{
 };
 pub use package_driver::{
     AmendmentProof, AmendmentRepositoryRefs, CommandExitStatus, CompositionInput,
-    CriterionExecution, CriterionOrigin, DriverAssemblyState, DriverEvent, DriverLoopOutcome,
+    CriterionExecution, CriterionOrigin, DispatchEnvironmentObservation,
+    DispatchWorkerProcessObservation, DriverAssemblyState, DriverEvent, DriverLoopOutcome,
     DriverPackageState, DriverSnapshot, EffectiveCriterion, EnvironmentPreparationOutcome,
     FindingRejectionReason, FindingReplayDecision, PackageDriverError, PaneCleanupOutcome,
     PendingPaneCleanup, RecoveryAttemptRecord, charged_failure_count, derive_driver_snapshot,
@@ -157,7 +158,7 @@ pub use herdr_dispatch::{
     DispatchVisionSource, HerdrAgentLocation, HerdrAgentName, HerdrDispatchPlanError,
     HerdrInvocation, HerdrPaneId, HerdrTabId, HerdrWorkPackageDispatchPlan, HerdrWorkspaceId,
     HerdrWorktreeSpec, RepositoryDispatchInput, WorkerArgumentVector, WorkerEnvironment,
-    compose_herdr_work_package_dispatch,
+    compose_herdr_work_package_dispatch, derive_herdr_agent_name,
 };
 pub use landing_readiness::{
     CompletionCriterionIndex, LandingCriterionEvidence, LandingReadinessDecision,

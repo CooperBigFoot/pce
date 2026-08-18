@@ -66,6 +66,8 @@ impl DispatchIdentityObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DispatchLiveness {
+    /// No process identity was recorded, so liveness cannot be inferred.
+    Unknown,
     /// The exact recorded process identity is still present.
     Running,
     /// A valid completion has been recorded.
@@ -211,6 +213,11 @@ pub fn classify_dispatch_check_in(
                     DispatchLiveness::Running,
                     DispatchCompletionAccounting::Unaccounted,
                 )
+            } else if observation.recorded_start_identity.is_none() {
+                (
+                    DispatchLiveness::Unknown,
+                    DispatchCompletionAccounting::Unaccounted,
+                )
             } else {
                 (
                     DispatchLiveness::Dead,
@@ -336,7 +343,7 @@ mod tests {
     };
     use crate::{ProcessStartIdentity, Sequence, parse_event_line};
 
-    const CANONICAL: &[u8] = b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"accounting\":{\"state\":\"unaccounted\",\"issuance_sequences\":[3,4,5,6,7]},\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"finished\",\"completion\":\"observed-child\",\"artifact_production\":\"produced\"},{\"issuance_sequence\":3,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":4,\"state\":\"running\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":5,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":6,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":7,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":8,\"state\":\"finished\",\"completion\":\"observed-child\",\"artifact_production\":\"not-produced\"}]}\n";
+    const CANONICAL: &[u8] = b"{\"schema_id\":\"pce.dispatch-check-in\",\"schema_version\":1,\"accounting\":{\"state\":\"unaccounted\",\"issuance_sequences\":[3,4,5,6,7]},\"dispatches\":[{\"issuance_sequence\":1,\"state\":\"finished\",\"completion\":\"observed-child\",\"artifact_production\":\"produced\"},{\"issuance_sequence\":3,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":4,\"state\":\"running\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":5,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":6,\"state\":\"unknown\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":7,\"state\":\"dead\",\"completion\":\"unaccounted\",\"artifact_production\":\"not-produced\"},{\"issuance_sequence\":8,\"state\":\"finished\",\"completion\":\"observed-child\",\"artifact_production\":\"not-produced\"}]}\n";
 
     fn record(sequence: u64, kind: &str, node: &str, payload: &str) -> crate::EventRecord {
         parse_event_line(&format!(
@@ -468,7 +475,7 @@ mod tests {
             report.dispatches[3].artifact_production(),
             ArtifactProduction::NotProduced
         );
-        assert_eq!(report.dispatches[4].liveness(), DispatchLiveness::Dead);
+        assert_eq!(report.dispatches[4].liveness(), DispatchLiveness::Unknown);
         assert_eq!(report.dispatches[5].liveness(), DispatchLiveness::Dead);
         assert_eq!(report.dispatches[6].liveness(), DispatchLiveness::Finished);
         assert_eq!(
@@ -513,7 +520,7 @@ mod tests {
                 ),
                 (
                     6,
-                    DispatchLiveness::Dead,
+                    DispatchLiveness::Unknown,
                     DispatchCompletionAccounting::Unaccounted,
                     ArtifactProduction::NotProduced,
                 ),
