@@ -15,6 +15,23 @@ fn pce() -> Command {
     Command::new(env!("CARGO_BIN_EXE_pce"))
 }
 
+fn git(root: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("UTF-8")
+        .trim()
+        .to_owned()
+}
+
 #[test]
 fn committed_fixture_conforms_to_committed_schema() {
     let schema: Value = serde_json::from_str(SCHEMA).expect("schema JSON");
@@ -26,15 +43,39 @@ fn committed_fixture_conforms_to_committed_schema() {
 #[test]
 fn freezing_version_two_preserves_readable_version_one_bytes() {
     let directory = tempdir().expect("temporary directory");
+    let repository = directory.path().join("repository");
+    fs::create_dir(&repository).expect("repository directory");
+    git(&repository, &["init", "-q"]);
+    git(&repository, &["config", "user.email", "test@example.com"]);
+    git(&repository, &["config", "user.name", "Test"]);
+    fs::write(repository.join("seed"), "seed").expect("seed");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "seed"]);
+    let authored_ref = git(&repository, &["rev-parse", "HEAD"]);
+    let mapping = format!("RivRetrieve={}", repository.display());
+
     let vision_dir = directory
         .path()
         .join("2026-08-11-the-store-is-the-only-copy");
     fs::create_dir(&vision_dir).expect("vision directory");
     let source = vision_dir.join("graph.json");
-    fs::write(&source, FIXTURE).expect("seed graph v1");
+    let mut v1: Value = serde_json::from_slice(FIXTURE).expect("fixture JSON");
+    v1["authored_at_ref"] = Value::from(authored_ref);
+    let v1_source = serde_json::to_vec_pretty(&v1).expect("serialize v1");
+    fs::write(&source, &v1_source).expect("seed graph v1");
+
+    let omitted = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .output()
+        .expect("unverified freeze executes");
+    assert!(!omitted.status.success());
+    assert!(!vision_dir.join("graph.v1.json").exists());
+
     let first = pce()
         .args(["graph", "freeze", "--vision-dir"])
         .arg(&vision_dir)
+        .args(["--repository", &mapping])
         .output()
         .expect("freeze v1 executes");
     assert!(
@@ -44,9 +85,9 @@ fn freezing_version_two_preserves_readable_version_one_bytes() {
     );
     let frozen_v1 = vision_dir.join("graph.v1.json");
     let v1_bytes = fs::read(&frozen_v1).expect("frozen v1 readable");
-    assert_eq!(v1_bytes, FIXTURE);
+    assert_eq!(v1_bytes, v1_source);
 
-    let mut v2: Value = serde_json::from_slice(FIXTURE).expect("fixture JSON");
+    let mut v2 = v1;
     v2["plan_version"] = Value::from(2);
     v2["packages"][0]["title"] = Value::from("shared store reader v2");
     fs::write(
@@ -57,6 +98,7 @@ fn freezing_version_two_preserves_readable_version_one_bytes() {
     let second = pce()
         .args(["graph", "freeze", "--vision-dir"])
         .arg(&vision_dir)
+        .args(["--repository", &mapping])
         .output()
         .expect("freeze v2 executes");
     assert!(
@@ -76,6 +118,7 @@ fn freezing_version_two_preserves_readable_version_one_bytes() {
     let rewrite = pce()
         .args(["graph", "freeze", "--vision-dir"])
         .arg(&vision_dir)
+        .args(["--repository", &mapping])
         .output()
         .expect("rewrite executes");
     assert!(!rewrite.status.success());
@@ -86,6 +129,7 @@ fn freezing_version_two_preserves_readable_version_one_bytes() {
         let checked = pce()
             .args(["graph", "check", "--file"])
             .arg(path)
+            .args(["--repository", &mapping])
             .output()
             .expect("check executes");
         assert!(
@@ -138,4 +182,55 @@ fn schema_and_runtime_reject_shared_boundary_mutations() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn graph_check_verifies_each_repository_authored_ref() {
+    let directory = tempdir().expect("temporary directory");
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    for repository in [&first, &second] {
+        fs::create_dir(repository).expect("repository directory");
+        git(repository, &["init", "-q"]);
+        git(repository, &["config", "user.email", "test@example.com"]);
+        git(repository, &["config", "user.name", "Test"]);
+        fs::write(repository.join("seed"), repository.display().to_string()).expect("seed");
+        git(repository, &["add", "."]);
+        git(repository, &["commit", "-qm", "seed"]);
+    }
+    let first_oid = git(&first, &["rev-parse", "HEAD"]);
+    let graph = serde_json::json!({
+        "vision":"per-repository-refs", "plan_version":1,
+        "authored_at_refs":{"first":first_oid,"second":"missing-ref"},
+        "packages":[{"id":"A","title":"A","repositories":["first","second"],
+          "criteria":[{"name":"a","input":"repos","observation":"works","command":"true"}],"depends_on":[]}]
+    });
+    let vision_dir = directory.path().join("per-repository-refs");
+    fs::create_dir(&vision_dir).expect("vision directory");
+    let graph_path = vision_dir.join("graph.json");
+    fs::write(&graph_path, serde_json::to_vec(&graph).expect("graph JSON")).expect("graph write");
+    let output = pce()
+        .args(["graph", "check", "--file"])
+        .arg(&graph_path)
+        .args(["--repository", &format!("first={}", first.display())])
+        .args(["--repository", &format!("second={}", second.display())])
+        .output()
+        .expect("check executes");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("second"), "{stderr}");
+    assert!(stderr.contains("missing-ref"), "{stderr}");
+
+    let frozen = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .args(["--repository", &format!("first={}", first.display())])
+        .args(["--repository", &format!("second={}", second.display())])
+        .output()
+        .expect("freeze executes");
+    assert!(!frozen.status.success());
+    let stderr = String::from_utf8_lossy(&frozen.stderr);
+    assert!(stderr.contains("second"), "{stderr}");
+    assert!(stderr.contains("missing-ref"), "{stderr}");
+    assert!(!vision_dir.join("graph.v1.json").exists());
 }

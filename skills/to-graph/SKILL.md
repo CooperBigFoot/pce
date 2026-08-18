@@ -45,14 +45,18 @@ Nodes present in the event log but absent from any approved graph are runtime de
 carry real work and no durable representation. Fold that work into the package it belongs to and
 discard the stub; never reproduce it as a package.
 
-## 2. Read the source at a ref
+## 2. Read each repository's source at its ref
 
-The graph is grounded in what the code is, not in what the vision says about it. Before
-partitioning, read the source at a named ref for every claim the packages will depend on — the
-modules a criterion names, the interfaces an edge will cite, the paths a package will delete.
+The graph is grounded in what each repository's code is, not in what the vision says about it.
+Before partitioning, resolve and record one exact commit OID for every repository the graph will
+name. Read each repository at its own recorded OID for every claim the packages will depend on —
+the modules a criterion names, the interfaces an edge will cite, and the paths a package will
+delete. Never use one repository's ref as the ground for another repository.
 
-A package or an edge that cannot cite a file and a ref is not yet authored. This is the descent
-obligation and it is not optional.
+A package or an edge that cannot cite a repository, a file, and that repository's recorded ref is
+not yet authored. This is the descent obligation and it is not optional. The repository names
+recorded here must match the names in package `repositories` and the keys in `authored_at_refs`
+exactly.
 
 ## 3. Partition the acceptance criteria
 
@@ -153,8 +157,15 @@ Write the draft to `<vision-dir>/graph.json` in the shape given in step 8. It is
 frozen; nothing reads it as authority yet.
 
 ```bash
-pce graph check --file <vision-dir>/graph.json
+pce graph check --file <vision-dir>/graph.json \
+  --repository <NAME>=<ABSOLUTE_PATH> \
+  [--repository <NAME>=<ABSOLUTE_PATH> ...]
 ```
+
+Supply exactly one path for every repository named by the graph. The check resolves each
+repository's authored ref in that repository. A missing path, unknown path name, or unresolvable
+ref is one graph error naming the repository and ref. The driver repeats this preflight before it
+can dispatch work or spend an environment-failure attempt.
 
 The graph is not reviewed for taste. It is checked against a predicate that terminates:
 
@@ -218,7 +229,9 @@ Only once the human is settled. The frozen shape is:
 {
   "vision": "<vision-dir-name>",
   "plan_version": 1,
-  "authored_at_ref": "<sha>",
+  "authored_at_refs": {
+    "RivRetrieve": "5e2bf7fc51177f63ca670218accbc27ba8d8c4ec"
+  },
   "packages": [
     {
       "id": "RR1",
@@ -238,7 +251,14 @@ Only once the human is settled. The frozen shape is:
       "id": "RR2",
       "title": "The certification harness",
       "repositories": ["RivRetrieve"],
-      "criteria": [],
+      "criteria": [
+        {
+          "name": "Verification catches a mutated store",
+          "input": "Alter one staged value after writing and before verification",
+          "observation": "Read-back fails and the staged store is not published",
+          "command": "uv run pytest tests/store/test_certification.py -k mutated_store"
+        }
+      ],
       "depends_on": [
         {
           "id": "RR1",
@@ -251,17 +271,33 @@ Only once the human is settled. The frozen shape is:
 }
 ```
 
+`authored_at_refs` has exactly one entry for every repository named by any package and no extra
+entries. Each key is the exact repository name used in package `repositories`; each value is the
+exact commit OID recorded while reading that repository in step 2. Use this map even for a
+single-repository graph. Never author a new graph with the legacy scalar `authored_at_ref`. Frozen
+legacy graphs that carry that scalar remain readable: the scalar applies to every repository they
+name. Do not rewrite one merely to change its shape.
+
 `kind` is one of `buildability`, `safety`, `risk-ordering`. Freeze it:
 
 ```bash
-pce graph freeze --vision-dir <vision-dir>
+pce graph freeze --vision-dir <vision-dir> \
+  --repository <NAME>=<ABSOLUTE_PATH> \
+  [--repository <NAME>=<ABSOLUTE_PATH> ...]
 pce log --file <vision-dir>/events.jsonl --kind planning-artifact-approved --node graph
 ```
 
-A frozen plan version is immutable. A structural change mints version `n+1` by re-entering step 3
-for the affected region; it never edits a frozen graph in place. Re-render every new version. Notify
-the human only when the new version changes **which vision criteria are covered** — that is
-checkable, and it is the only deviation they need to see.
+Freeze repeats repository-ref resolution; it never freezes a map whose repository set and
+authored-ref key set differ. Repository names supplied here and to the driver must be byte-for-byte
+identical to `authored_at_refs` keys.
+
+A frozen plan version is immutable. A structural change, including a change to any repository's
+authored ref, mints version `n+1` by re-entering step 3 for the affected region; it never edits a
+frozen graph in place. A ref-only change does **not** invalidate an otherwise unchanged completed
+package. The journal's recorded `base_oid` preserves the exact historical ground; assembly
+recomposes the carried package branches at the new repository ref and re-runs every effective
+criterion. Re-render every new version. Notify the human only when the new version changes **which
+vision criteria are covered** — that is checkable, and it is the only deviation they need to see.
 
 ## 9. Resolve nothing
 

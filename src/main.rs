@@ -106,8 +106,8 @@ const USAGE: &str = concat!(
     "       pce log meter\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] [--override-risk-ordering]\n",
-    "       pce graph check --file <GRAPH_PATH>\n",
-    "       pce graph freeze --vision-dir <VISION_DIR>\n",
+    "       pce graph check --file <GRAPH_PATH> [--repository <NAME=SOURCE_WORKTREE>]...\n",
+    "       pce graph freeze --vision-dir <VISION_DIR> --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
     "       pce package brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> [--brief <ABSOLUTE_BRIEF_PATH>] -- <WORKER_ARG>...\n",
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
@@ -379,9 +379,11 @@ enum Command {
     VisionCheck,
     GraphCheck {
         path: PathBuf,
+        repositories: Vec<(String, PathBuf)>,
     },
     GraphFreeze {
         vision_dir: PathBuf,
+        repositories: Vec<(String, PathBuf)>,
     },
     LogWrite {
         path: PathBuf,
@@ -798,8 +800,11 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         } => run_dispatch_reconcile(&log_path, issuance_sequence, node),
         Command::VisionNew { name } => run_vision_new(&name),
         Command::VisionCheck => run_vision_check(input),
-        Command::GraphCheck { path } => run_graph_check(&path),
-        Command::GraphFreeze { vision_dir } => run_graph_freeze(&vision_dir),
+        Command::GraphCheck { path, repositories } => run_graph_check(&path, &repositories),
+        Command::GraphFreeze {
+            vision_dir,
+            repositories,
+        } => run_graph_freeze(&vision_dir, &repositories),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
             let stdout = std::io::stdout();
@@ -2219,7 +2224,17 @@ fn run_composed_driver_gate(
     .context("failed to parse gate dispatch graph JSON")?;
     dispatch_graph["vision"] =
         Value::String(format!("{}-gate-{issuance}-{attempt}", graph.vision()));
-    dispatch_graph["authored_at_ref"] = Value::String("HEAD".to_owned());
+    if dispatch_graph.get("authored_at_refs").is_some() {
+        dispatch_graph["authored_at_refs"] = serde_json::to_value(
+            graph
+                .authored_refs()
+                .keys()
+                .map(|repository| (repository.clone(), "HEAD".to_owned()))
+                .collect::<BTreeMap<_, _>>(),
+        )?;
+    } else {
+        dispatch_graph["authored_at_ref"] = Value::String("HEAD".to_owned());
+    }
     let dispatch_graph_path = vision_dir
         .join(".pce/gate-dispatch-graphs")
         .join(package_id)
@@ -3041,7 +3056,7 @@ fn ensure_driver_package_bases(
             &command.journal_path,
             &format!("package-{package_id}-{repository}"),
             source,
-            graph.authored_at_ref(),
+            graph_authored_ref(graph, repository)?,
             &dependencies,
         ) {
             Ok(GitComposition::Clean { base_oid }) => append_driver_event(
@@ -3120,17 +3135,18 @@ fn driver_package_worktrees(
         .repositories
         .iter()
         .filter(|(name, _)| package.repositories().contains(name))
-        .map(|(name, root)| {
-            RepositoryDispatchInput::parse(
+        .map(|(name, root)| -> Result<RepositoryDispatchInput> {
+            let base_ref = match base_refs.get(name) {
+                Some(base_ref) => base_ref.clone(),
+                None => graph_authored_ref(graph, name)?.to_owned(),
+            };
+            Ok(RepositoryDispatchInput::parse(
                 name.clone(),
                 root.clone(),
-                base_refs
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_else(|| graph.authored_at_ref().to_owned()),
-            )
+                base_ref,
+            )?)
         })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>>>()?;
     let plan = compose_herdr_work_package_dispatch(
         &vision,
         package,
@@ -4100,7 +4116,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                 &command.journal_path,
                 &format!("assembly-{repository}"),
                 source,
-                graph.authored_at_ref(),
+                graph_authored_ref(graph, repository)?,
                 &packages,
             ) {
                 Ok(GitComposition::Clean { base_oid }) => {
@@ -4510,11 +4526,14 @@ fn ensure_driver_plan_version(
 }
 
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
+    let initial_graph = read_driver_graph(&command.graph_path)?;
+    verify_graph_repository_refs(&initial_graph, &command.repositories)?;
     let initial_events = read_driver_journal(&command.journal_path)?;
     ensure_recovery_configuration(&command, &initial_events)?;
     let mut issued_this_launch = HashSet::new();
     loop {
         let graph = read_driver_graph(&command.graph_path)?;
+        verify_graph_repository_refs(&graph, &command.repositories)?;
         let events = read_driver_journal(&command.journal_path)?;
         if ensure_driver_plan_version(&graph, &command, &events)? {
             continue;
@@ -5172,6 +5191,55 @@ fn package_repository_sources(
                 .with_context(|| format!("driver omitted repository mapping `{name}`"))
         })
         .collect()
+}
+
+fn graph_authored_ref<'a>(graph: &'a WorkPackageGraph, repository: &str) -> Result<&'a str> {
+    graph
+        .authored_ref(repository)
+        .with_context(|| format!("repository `{repository}` has no authored ref"))
+}
+
+fn package_authored_refs(
+    graph: &WorkPackageGraph,
+    package: &pce_core::WorkPackage,
+) -> Result<String> {
+    package
+        .repositories()
+        .iter()
+        .map(|repository| {
+            graph_authored_ref(graph, repository)
+                .map(|authored_ref| format!("{repository}={authored_ref}"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|refs| refs.join(","))
+}
+
+fn verify_graph_repository_refs(
+    graph: &WorkPackageGraph,
+    repositories: &[(String, PathBuf)],
+) -> Result<()> {
+    if repositories.is_empty() {
+        return Ok(());
+    }
+    for (name, _) in repositories {
+        if !graph.authored_refs().contains_key(name) {
+            bail!("repository mapping `{name}` is not named by the graph");
+        }
+    }
+    for name in graph.authored_refs().keys() {
+        let source = repositories
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, path)| path)
+            .with_context(|| format!("missing repository mapping for `{name}`"))?;
+        let authored_ref = graph
+            .authored_ref(name)
+            .with_context(|| format!("repository `{name}` has no authored ref"))?;
+        git_oid(source, authored_ref).with_context(|| {
+            format!("repository `{name}` authored ref `{authored_ref}` does not resolve")
+        })?;
+    }
+    Ok(())
 }
 
 fn git_oid(repository: &Path, reference: &str) -> Result<String> {
@@ -6248,7 +6316,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     let metadata = DispatchLogging {
         node: node.clone(),
         role: DispatchRole::new("work-package-worker"),
-        dispatch_ref: DispatchRef::new(graph.authored_at_ref()),
+        dispatch_ref: DispatchRef::new(package_authored_refs(&graph, package)?),
         evidence: Evidence::parse("pce-composed herdr work-package dispatch")?,
         required_artifact_path: command.required_artifact_path.clone(),
     };
@@ -6261,18 +6329,18 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     let repository_inputs = command
         .repositories
         .iter()
-        .map(|(name, root)| {
-            RepositoryDispatchInput::parse(
+        .map(|(name, root)| -> Result<RepositoryDispatchInput> {
+            let base_ref = match command.base_refs.get(name) {
+                Some(base_ref) => base_ref.clone(),
+                None => graph_authored_ref(&graph, name)?.to_owned(),
+            };
+            Ok(RepositoryDispatchInput::parse(
                 name.clone(),
                 root.clone(),
-                command
-                    .base_refs
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_else(|| graph.authored_at_ref().to_owned()),
-            )
+                base_ref,
+            )?)
         })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>>>()?;
     let worktree_root = package_worktree_root()?;
     let temporary_directory = package_temporary_directory(&vision, package.id(), attempt);
     fs::create_dir_all(&worktree_root).context("failed to create binary-owned worktree root")?;
@@ -8563,18 +8631,42 @@ fn parse_ready_command(args: &[String]) -> Result<Command> {
     })
 }
 
+fn parse_graph_repositories(args: &[String]) -> Result<Vec<(String, PathBuf)>> {
+    let mut repositories = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] != "--repository" || index + 1 >= args.len() {
+            bail!(USAGE);
+        }
+        let Some((name, path)) = args[index + 1].split_once('=') else {
+            bail!("repository mapping must be NAME=SOURCE_WORKTREE");
+        };
+        if name.trim().is_empty() || path.trim().is_empty() {
+            bail!("repository mapping must contain a non-empty name and path");
+        }
+        if repositories.iter().any(|(existing, _)| existing == name) {
+            bail!("repository mapping `{name}` was supplied more than once");
+        }
+        repositories.push((name.to_owned(), PathBuf::from(path)));
+        index += 2;
+    }
+    Ok(repositories)
+}
+
 fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
-    match (action, args) {
-        ("check", [flag, raw_path]) if flag == "--file" && is_value(raw_path) => {
-            Ok(Command::GraphCheck {
-                path: PathBuf::from(raw_path),
-            })
-        }
-        ("freeze", [flag, raw_dir]) if flag == "--vision-dir" && is_value(raw_dir) => {
-            Ok(Command::GraphFreeze {
-                vision_dir: PathBuf::from(raw_dir),
-            })
-        }
+    let [flag, raw_value, trailing @ ..] = args else {
+        bail!(USAGE);
+    };
+    let repositories = parse_graph_repositories(trailing)?;
+    match action {
+        "check" if flag == "--file" && is_value(raw_value) => Ok(Command::GraphCheck {
+            path: PathBuf::from(raw_value),
+            repositories,
+        }),
+        "freeze" if flag == "--vision-dir" && is_value(raw_value) => Ok(Command::GraphFreeze {
+            vision_dir: PathBuf::from(raw_value),
+            repositories,
+        }),
         _ => bail!(USAGE),
     }
 }
@@ -8684,13 +8776,15 @@ fn run_vision_check(input: &mut dyn Read) -> Result<()> {
     .context("failed to check vision acceptance criteria")
 }
 
-fn run_graph_check(path: &Path) -> Result<()> {
+fn run_graph_check(path: &Path, repositories: &[(String, PathBuf)]) -> Result<()> {
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read work-package graph {}", path.display()))?;
     let graph = parse_work_package_graph(&bytes)
         .with_context(|| format!("failed to validate work-package graph {}", path.display()))?;
+    verify_graph_repository_refs(&graph, repositories)?;
     write_json_stdout(&json!({
         "valid": true,
+        "refs_verified": !repositories.is_empty(),
         "vision": graph.vision(),
         "plan_version": graph.plan_version(),
         "packages": graph.packages().len(),
@@ -8795,12 +8889,18 @@ fn publish_frozen_graph(path: &Path, bytes: &[u8]) -> Result<bool> {
     Ok(linked)
 }
 
-fn run_graph_freeze(vision_dir: &Path) -> Result<()> {
+fn run_graph_freeze(vision_dir: &Path, repositories: &[(String, PathBuf)]) -> Result<()> {
+    if repositories.is_empty() {
+        bail!(
+            "graph freeze requires one --repository NAME=SOURCE_WORKTREE mapping per graph repository"
+        );
+    }
     let source = vision_dir.join("graph.json");
     let bytes = fs::read(&source)
         .with_context(|| format!("failed to read work-package graph {}", source.display()))?;
     let graph = parse_work_package_graph(&bytes)
         .with_context(|| format!("failed to validate work-package graph {}", source.display()))?;
+    verify_graph_repository_refs(&graph, repositories)?;
     let version = graph.plan_version();
     let expected_vision = vision_dir
         .file_name()

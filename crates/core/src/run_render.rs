@@ -491,10 +491,16 @@ pub fn render_package_run(
     } else {
         "Run state reconstructed from the driver journal"
     };
+    let authored_refs = graph
+        .authored_refs()
+        .iter()
+        .map(|(repository, authored_ref)| format!("{repository}={authored_ref}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     Ok(format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{vision} · work-package run</title><style>{STYLE}</style></head><body><div class=\"wrap\"><header class=\"mast\"><p class=\"eyebrow\">Plan v{version} · authored at {authored}</p><h1>{vision}</h1><p class=\"thesis\">{run_copy}. The highlighted binding chain is the computed critical path.</p></header><main><section><h2>The run, rendered</h2><p class=\"sub\">Dependency depth flows left to right</p><div class=\"graph-scroll\">{svg}</div><div class=\"legend\"><div><b>━━ B · Buildability</b><p>Solid code fact. Binding.</p></div><div><b>━━━━ S · Safety</b><p>Heavy irreversible-act guard. Binding.</p></div><div><b>┄┄ R · Risk ordering</b><p>Overridable choice, not a fact.</p></div></div></section><section><h2>Packages and evidence</h2><p class=\"sub\">Last criterion executions and every gate finding</p><div class=\"packages\">{details}</div></section></main><footer>Deterministic rendering · no clock or external assets</footer></div></body></html>",
         vision = escaped(graph.vision()),
         version = graph.plan_version(),
-        authored = escaped(graph.authored_at_ref())
+        authored = escaped(&authored_refs)
     ))
 }
