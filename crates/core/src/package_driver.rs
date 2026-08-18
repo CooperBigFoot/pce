@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    DependencyKind, RecoveryBudget, RecoveryCriterionEvidence, RecoveryLimits, RecoveryRung,
-    WorkPackageGraph, recovery_budget,
+    DependencyKind, PackageGateChallenge, RecoveryBudget, RecoveryCriterionEvidence,
+    RecoveryLimits, RecoveryRung, WorkPackageGraph, recovery_budget,
 };
 
 /// One shell termination observation.
@@ -259,6 +259,32 @@ pub enum DriverEvent {
         package: String,
         issuance: u64,
         reason: String,
+    },
+    /// A gate attempt failed to deliver a complete judgment without charging package work.
+    GateFailed {
+        package: String,
+        issuance: u64,
+        gate: String,
+        reason: String,
+        detail: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        challenges: Vec<PackageGateChallenge>,
+    },
+    /// One distinct gate attempt was issued while the package remained in judgment.
+    GateDispatched {
+        package: String,
+        issuance: u64,
+        attempt: u32,
+        gate: String,
+    },
+    /// Repetition established that this package's gate is persistently unavailable.
+    PackageGateBlocked {
+        package: String,
+        issuance: u64,
+        gate: String,
+        reason: String,
+        detail: String,
+        identical_failures: u32,
     },
     /// Repetition established that this package's worker environment is persistently unavailable.
     PackageEnvironmentBlocked {
@@ -509,6 +535,11 @@ pub enum DriverPackageState {
         reason: String,
         identical_failures: u32,
     },
+    GateBlocked {
+        gate: String,
+        reason: String,
+        identical_failures: u32,
+    },
     Parked {
         reason: String,
     },
@@ -743,6 +774,7 @@ pub fn derive_driver_snapshot(
                 | DriverPackageState::Failed { .. }
                 | DriverPackageState::EnvironmentPreparationFailed { .. }
                 | DriverPackageState::EnvironmentBlocked { .. }
+                | DriverPackageState::GateBlocked { .. }
                 | DriverPackageState::Parked { .. }
         )
     };
@@ -906,6 +938,9 @@ pub fn derive_driver_snapshot(
             | DriverEvent::PackageBaseComposed { package, .. }
             | DriverEvent::PackageJoinConflicted { package, .. }
             | DriverEvent::PackageCompositionFailed { package, .. }
+            | DriverEvent::GateFailed { package, .. }
+            | DriverEvent::GateDispatched { package, .. }
+            | DriverEvent::PackageGateBlocked { package, .. }
             | DriverEvent::WorkerEnvironmentFailed { package, .. }
             | DriverEvent::PackageEnvironmentBlocked { package, .. }
             | DriverEvent::RecoveryParked { package, .. }
@@ -998,6 +1033,37 @@ pub fn derive_driver_snapshot(
                     });
                 }
             }
+            DriverEvent::GateDispatched { issuance, .. }
+            | DriverEvent::GateFailed { issuance, .. } => match state {
+                DriverPackageState::Judging { issuance: judging } if judging == issuance => {}
+                _ => {
+                    return Err(PackageDriverError::UnmatchedOutcome {
+                        package: package.clone(),
+                        issuance: *issuance,
+                    });
+                }
+            },
+            DriverEvent::PackageGateBlocked {
+                issuance,
+                gate,
+                reason,
+                identical_failures,
+                ..
+            } => match state {
+                DriverPackageState::Judging { issuance: judging } if judging == issuance => {
+                    *state = DriverPackageState::GateBlocked {
+                        gate: gate.clone(),
+                        reason: reason.clone(),
+                        identical_failures: *identical_failures,
+                    };
+                }
+                _ => {
+                    return Err(PackageDriverError::UnmatchedOutcome {
+                        package: package.clone(),
+                        issuance: *issuance,
+                    });
+                }
+            },
             DriverEvent::WorkerEnvironmentFailed { issuance, .. } => match state {
                 DriverPackageState::Running { issuance: running } if running == issuance => {
                     *state = DriverPackageState::Pending;
@@ -1237,7 +1303,10 @@ pub fn derive_driver_snapshot(
                 }
             }
             DriverEvent::PackageRepairMerged { .. } => {
-                if !matches!(state, DriverPackageState::Complete) {
+                if !matches!(
+                    state,
+                    DriverPackageState::Complete | DriverPackageState::Judging { .. }
+                ) {
                     return Err(PackageDriverError::EventAfterTerminal {
                         package: package.clone(),
                     });
@@ -1432,6 +1501,81 @@ pub fn pending_completed_pane_cleanups(events: &[DriverEvent]) -> Vec<PendingPan
             _ => None,
         })
         .collect()
+}
+
+/// Construct the zero-charge outcome for one incomplete gate judgment from durable history.
+pub fn gate_failure_outcome(
+    events: &[DriverEvent],
+    limits: RecoveryLimits,
+    package: String,
+    issuance: u64,
+    gate: String,
+    reason: String,
+    detail: String,
+    challenges: Vec<PackageGateChallenge>,
+) -> DriverEvent {
+    let prior_identical = events_for_active_plan(events)
+        .iter()
+        .filter(|event| matches!(
+            event,
+            DriverEvent::GateFailed { package: observed_package, issuance: observed_issuance, reason: observed_reason, .. }
+                if observed_package == &package && observed_issuance == &issuance && observed_reason == &reason
+        ))
+        .count();
+    let identical_failures = u32::try_from(prior_identical)
+        .unwrap_or(u32::MAX)
+        .saturating_add(1);
+    if identical_failures >= limits.gate_failures() {
+        DriverEvent::PackageGateBlocked {
+            package,
+            issuance,
+            gate,
+            reason,
+            detail,
+            identical_failures,
+        }
+    } else {
+        DriverEvent::GateFailed {
+            package,
+            issuance,
+            gate,
+            reason,
+            detail,
+            challenges,
+        }
+    }
+}
+
+/// Return the next durable gate-attempt identity for one judging issuance.
+pub fn next_gate_attempt(events: &[DriverEvent], package: &str, issuance: u64) -> u32 {
+    events_for_active_plan(events)
+        .iter()
+        .filter(|event| matches!(event, DriverEvent::GateDispatched { package: observed, issuance: observed_issuance, .. } if observed == package && observed_issuance == &issuance))
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX)
+        .saturating_add(1)
+}
+
+/// Return challenges retained by the latest failed gate attempt in this judging issuance.
+pub fn pending_gate_challenges(
+    events: &[DriverEvent],
+    package: &str,
+    issuance: u64,
+) -> Vec<PackageGateChallenge> {
+    events_for_active_plan(events)
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            DriverEvent::GateFailed {
+                package: observed,
+                issuance: observed_issuance,
+                challenges,
+                ..
+            } if observed == package && observed_issuance == &issuance => Some(challenges.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Construct the zero-charge outcome for one worker-environment report from durable history.
@@ -1714,6 +1858,63 @@ mod tests {
                 ]
             })
             .collect()
+    }
+
+    #[test]
+    fn gate_failures_preserve_judging_without_spending_package_recovery() {
+        let graph = graph();
+        let limits = RecoveryLimits::new(RetryLimit::new(1), LocalPatchLimit::new(1))
+            .with_gate_failure_limit(crate::GateFailureLimit::new(2));
+        let mut events = vec![
+            DriverEvent::RecoveryConfigured { limits },
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::WorkerDone {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+        ];
+        events.push(super::gate_failure_outcome(
+            &events,
+            limits,
+            "A".to_owned(),
+            1,
+            "package-gate-1-1".to_owned(),
+            "gate dispatch stopped without an outcome".to_owned(),
+            "exited 1".to_owned(),
+            Vec::new(),
+        ));
+        let snapshot = derive_driver_snapshot(&graph, &events, false).expect("snapshot");
+        assert!(matches!(
+            snapshot.packages()[0].1,
+            DriverPackageState::Judging { issuance: 1 }
+        ));
+        assert_eq!(charged_failure_count(&events, "A"), 0);
+
+        events.push(super::gate_failure_outcome(
+            &events,
+            limits,
+            "A".to_owned(),
+            1,
+            "package-gate-1-2".to_owned(),
+            "gate dispatch stopped without an outcome".to_owned(),
+            "exited 1 again".to_owned(),
+            Vec::new(),
+        ));
+        let snapshot = derive_driver_snapshot(&graph, &events, false).expect("blocked snapshot");
+        assert!(matches!(
+            &snapshot.packages()[0].1,
+            DriverPackageState::GateBlocked { gate, reason, identical_failures: 2 }
+                if gate == "package-gate-1-2" && reason == "gate dispatch stopped without an outcome"
+        ));
+        assert_eq!(charged_failure_count(&events, "A"), 0);
+        assert_eq!(snapshot.outcome(), DriverLoopOutcome::Blocked);
+        assert!(matches!(
+            snapshot.packages()[1].1,
+            DriverPackageState::Pending
+        ));
     }
 
     #[test]

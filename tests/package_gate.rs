@@ -63,7 +63,8 @@ fn rr2_gate_brief_marks_passed_criteria_as_floor_and_binds_repair_scope() {
     assert!(brief.contains("Do not expand scope"));
     assert!(brief.contains("witness commit that introduces the falsifier and nothing else"));
     assert!(brief.contains("repair commit, descending from the witness"));
-    assert!(brief.contains("Do not push, merge, or tag"));
+    assert!(brief.contains("Do not push, merge, tag, or create refs yourself"));
+    assert!(brief.contains("the binary retains submitted witness and repair commits"));
     assert!(brief.contains("RivRetrieve: /worktrees/rivretrieve"));
 }
 
@@ -122,10 +123,13 @@ Create one known file.
     let marker = directory.path().join("criterion-ran");
     fs::write(&graph, format!(r#"{{"vision":"trivial","plan_version":1,"authored_at_ref":"main","packages":[{{"id":"T1","title":"create known file","repositories":["repo"],"criteria":[{{"name":"file exists","input":"worktree","observation":"exists","command":"touch {}"}}],"depends_on":[]}}]}}"#, marker.display())).expect("graph");
     let outcome = directory.path().join("gate-outcome.json");
+    let challenges = directory.path().join("challenges.json");
+    fs::write(&challenges, r#"[{"description":"ancestor lookup is broad","repair":"restrict the canonical path","proposed_criterion_command":"test canonical"}]"#).expect("challenges");
     let output = pce()
         .args(["package", "gate-agent", "--vision"]).arg(&vision)
         .args(["--graph"]).arg(&graph)
         .args(["--package", "T1", "--artifact-ref", "built-ref", "--outcome"]).arg(&outcome)
+        .args(["--challenges"]).arg(&challenges)
         .args(["--", "/bin/sh", "-c", "cat > \"$PCE_PACKAGE_GATE_OUTCOME.brief\"; printf %s \"$TMPDIR\" > \"$PCE_PACKAGE_GATE_OUTCOME.tmpdir\"; printf '{\"findings\":[]}' > \"$PCE_PACKAGE_GATE_OUTCOME\""])
         .env("PCE_WORKTREE_0", directory.path().join("repo-worktree"))
         .output().expect("gate agent");
@@ -145,6 +149,14 @@ Create one known file.
     let piped = fs::read_to_string(format!("{}.brief", outcome.display())).expect("piped brief");
     assert!(piped.contains("built-ref"));
     assert!(piped.contains("floor, not targets"));
+    assert!(piped.contains("ancestor lookup is broad"));
+    assert!(piped.contains("test canonical"));
+    assert!(
+        piped.contains(
+            "Independently confirm it with a valid witness and repair pair, or refute it"
+        )
+    );
+    assert!(piped.contains("Do not treat any claim as established"));
 }
 
 fn initialize_gate_validation_fixture(
@@ -289,8 +301,24 @@ fn gate_agent_rejects_untouched_unresolved_and_nonancestor_repository_refs() {
         r#"{{"findings":[{{"description":"bad","repair":"fixed","proposed_criterion_command":"false","repository_refs":[{{"repository":"repo","witness_ref":"HEAD","repair_ref":"{dangling}"}}]}}]}}"#
     );
     let unreachable = run_gate_with_outcome(&repository, &vision, &graph, &unreachable_document);
-    assert!(!unreachable.status.success());
-    assert!(String::from_utf8_lossy(&unreachable.stderr).contains("not reachable from any ref"));
+    assert!(
+        unreachable.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unreachable.stderr)
+    );
+    let anchored = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--contains",
+            &dangling,
+            "--format=%(refname)",
+            "refs/pce-gate/T1/1/1",
+        ])
+        .current_dir(&repository)
+        .output()
+        .expect("anchored refs");
+    assert!(anchored.status.success());
+    assert!(String::from_utf8_lossy(&anchored.stdout).contains("/repair"));
 
     let seed = Command::new("git")
         .args(["rev-parse", "HEAD"])

@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{AcceptanceCriteria, DependencyKind, RepositoryWorktree, VisionGoal, WorkPackageGraph};
@@ -84,6 +84,7 @@ pub fn compose_package_gate_brief(
     package_id: &str,
     worktrees: &[RepositoryWorktree],
     artifact_ref: &BuiltArtifactRef,
+    challenges: &[PackageGateChallenge],
 ) -> Result<String, PackageGateError> {
     let package = graph
         .packages()
@@ -189,7 +190,21 @@ pub fn compose_package_gate_brief(
     output.push_str("\nThese criteria already passed. Do not merely repeat them. Attack the built artifact to find material defects that this known floor misses. Do not execute the listed criteria; the driver owns mechanical judgement.\n");
 
     output.push_str("\n## 4. Repair and scope boundary\n\n");
-    output.push_str("You may repair a defect that you find, using exactly two commits in order in each repository the finding touches. Treat the repository-local commits as one coordinated witness phase followed by one coordinated repair phase. First author a witness commit that introduces the falsifier and nothing else; the proposed command must fail there. Second author a repair commit, descending from the witness, containing only the bounded fix; the same command must pass there. Repair only the defect you named and proved with the witness. A repair without its preceding witness cannot be reported as a finding. Do not refactor or make adjacent improvements. Do not expand scope or change another package. Do not push, merge, or tag. If a repair requires cross-package work, report that necessity instead of performing it. Do not execute the proposed command at either commit; the driver owns that semantic replay.\n");
+    output.push_str("You may repair a defect that you find, using exactly two commits in order in each repository the finding touches. Treat the repository-local commits as one coordinated witness phase followed by one coordinated repair phase. First author a witness commit that introduces the falsifier and nothing else; the proposed command must fail there. Second author a repair commit, descending from the witness, containing only the bounded fix; the same command must pass there. Repair only the defect you named and proved with the witness. A repair without its preceding witness cannot be reported as a finding. Do not refactor or make adjacent improvements. Do not expand scope or change another package. Do not push, merge, tag, or create refs yourself; the binary retains submitted witness and repair commits in its own ref namespace. If a repair requires cross-package work, report that necessity instead of performing it. Do not execute the proposed command at either commit; the driver owns that semantic replay.\n");
+
+    if !challenges.is_empty() {
+        output.push_str("\n## 5. Challenged findings from prior attempts\n\n");
+        output.push_str("A previous gate attempt reported each claim below but could not prove it. Independently confirm it with a valid witness and repair pair, or refute it. Do not treat any claim as established.\n");
+        for challenge in challenges {
+            let _ = writeln!(output, "\n- Description: {}", challenge.description());
+            let _ = writeln!(output, "  Claimed repair: {}", challenge.repair());
+            let _ = writeln!(
+                output,
+                "  Proposed command: {}",
+                challenge.proposed_criterion_command()
+            );
+        }
+    }
 
     output.push_str("\n## Required outcome\n\n");
     output.push_str("Write exactly one strict JSON outcome document to the path in `PCE_PACKAGE_GATE_OUTCOME` before exiting. Finding nothing is valid and must be written as `{");
@@ -197,7 +212,7 @@ pub fn compose_package_gate_brief(
     Ok(output)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 struct NonEmptyString(String);
 
@@ -268,6 +283,35 @@ impl PackageGateFinding {
     /// Return the witness/repair pair for every repository changed by this finding.
     pub fn repository_refs(&self) -> &[PackageGateRepositoryRefs] {
         &self.repository_refs
+    }
+}
+
+/// One structurally rejected claim carried into a fresh gate judgment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageGateChallenge {
+    description: NonEmptyString,
+    repair: NonEmptyString,
+    proposed_criterion_command: NonEmptyString,
+}
+
+impl PackageGateChallenge {
+    /// Retain the substantive claim from one parsed finding without its unusable refs.
+    pub fn from_finding(finding: &PackageGateFinding) -> Self {
+        Self {
+            description: finding.description.clone(),
+            repair: finding.repair.clone(),
+            proposed_criterion_command: finding.proposed_criterion_command.clone(),
+        }
+    }
+    pub fn description(&self) -> &str {
+        &self.description.0
+    }
+    pub fn repair(&self) -> &str {
+        &self.repair.0
+    }
+    pub fn proposed_criterion_command(&self) -> &str {
+        &self.proposed_criterion_command.0
     }
 }
 

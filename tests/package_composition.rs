@@ -227,17 +227,21 @@ if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
 else
   case "$branch" in
     */A/*)
-      implementation=$(git for-each-ref --format='%(refname:short)' refs/heads/pce | grep '/A/attempt-1$' | grep -v -- '-gate-' | head -n 1)
-      git reset --hard "$implementation" >/dev/null
-      printf '#!/bin/sh\ngrep -q "^hardened" defect.txt\n' > amendment-guard.sh
-      chmod +x amendment-guard.sh
-      git add amendment-guard.sh; git commit -m witness >/dev/null
-      witness=$(git rev-parse HEAD)
-      printf 'hardened\n' > defect.txt
-      git add defect.txt; git commit -m repair >/dev/null
-      repair=$(git rev-parse HEAD)
-      printf '%s\n' "$repair" > "$HOME/repair-oid"
-      printf '{"findings":[{"description":"defect is unhardened","repair":"harden it","proposed_criterion_command":"./amendment-guard.sh","repository_refs":[{"repository":"repo","witness_ref":"%s","repair_ref":"%s"}]}]}' "$witness" "$repair" > "$PCE_PACKAGE_GATE_OUTCOME";;
+      if [ ! -f "$HOME/a-gate-ran" ]; then
+        touch "$HOME/a-gate-ran"
+        printf '#!/bin/sh\ngrep -q "^hardened" defect.txt\n' > amendment-guard.sh
+        chmod +x amendment-guard.sh
+        git add amendment-guard.sh; git commit -m witness >/dev/null
+        witness=$(git rev-parse HEAD)
+        printf 'hardened\n' > defect.txt
+        git add defect.txt; git commit -m repair >/dev/null
+        repair=$(git rev-parse HEAD)
+        printf '%s\n' "$repair" > "$HOME/repair-oid"
+        printf '{"findings":[{"description":"defect is unhardened","repair":"harden it","proposed_criterion_command":"./amendment-guard.sh","repository_refs":[{"repository":"repo","witness_ref":"%s","repair_ref":"%s"}]},{"description":"unproved sibling","repair":"unknown","proposed_criterion_command":"false","repository_refs":[{"repository":"repo","witness_ref":"missing-witness","repair_ref":"HEAD"}]}]}' "$witness" "$repair" > "$PCE_PACKAGE_GATE_OUTCOME"
+      else
+        git rev-parse HEAD > "$HOME/second-gate-head"
+        printf '%s' '{"findings":[]}' > "$PCE_PACKAGE_GATE_OUTCOME"
+      fi;;
     *) printf '%s' '{"findings":[]}' > "$PCE_PACKAGE_GATE_OUTCOME";;
   esac
 fi
@@ -272,6 +276,9 @@ fi
     let status: Value = serde_json::from_slice(&output.stdout).expect("status");
     assert_eq!(status["outcome"], "finished");
     let repair = fs::read_to_string(temp.path().join("repair-oid")).expect("repair");
+    let second_gate_head =
+        fs::read_to_string(temp.path().join("second-gate-head")).expect("second gate head");
+    assert_eq!(second_gate_head.trim(), repair.trim());
     let branch = format!(
         "pce/{}/A/attempt-1",
         graph["vision"].as_str().expect("vision")
@@ -282,8 +289,11 @@ fi
     );
     let events = fs::read_to_string(&journal).expect("journal");
     assert_eq!(events.matches("package-repair-merged").count(), 1);
+    assert_eq!(events.matches("gate-dispatched").count(), 4);
+    assert_eq!(events.matches("gate-failed").count(), 1);
+    assert!(events.contains("package-gate-1-2"));
     assert_eq!(events.matches("package-hardening-invalidated").count(), 1);
-    assert!(events.contains("gate:package-gate-1:finding:0:restore-provability"));
+    assert!(events.contains("gate:package-gate-1-1:finding:0:restore-provability"));
     assert!(events.contains("amendment_proof"));
     assert!(events.contains("reverted"));
 }

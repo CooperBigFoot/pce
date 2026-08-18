@@ -51,6 +51,24 @@ impl Default for EnvironmentFailureLimit {
     }
 }
 
+/// Number of identical gate-failure reports at which judgment is deemed persistently unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GateFailureLimit(u32);
+impl GateFailureLimit {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+impl Default for GateFailureLimit {
+    fn default() -> Self {
+        Self::new(3)
+    }
+}
+
 /// Adjustable driver limits, including the recovery ladder's unchanged spending allowances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +77,8 @@ pub struct RecoveryLimits {
     local_patch_attempts: LocalPatchLimit,
     #[serde(default)]
     environment_failures: EnvironmentFailureLimit,
+    #[serde(default)]
+    gate_failures: GateFailureLimit,
 }
 impl RecoveryLimits {
     /// Construct named limits for the two dispatching rungs and the default environment backstop.
@@ -67,11 +87,17 @@ impl RecoveryLimits {
             retry_attempts,
             local_patch_attempts,
             environment_failures: EnvironmentFailureLimit::new(6),
+            gate_failures: GateFailureLimit::new(3),
         }
     }
     /// Select the identical-environment-failure threshold without changing recovery spending.
     pub const fn with_environment_failure_limit(mut self, limit: EnvironmentFailureLimit) -> Self {
         self.environment_failures = limit;
+        self
+    }
+    /// Select the identical-gate-failure threshold without changing recovery spending.
+    pub const fn with_gate_failure_limit(mut self, limit: GateFailureLimit) -> Self {
+        self.gate_failures = limit;
         self
     }
     pub const fn retry_attempts(self) -> u32 {
@@ -82,6 +108,9 @@ impl RecoveryLimits {
     }
     pub const fn environment_failures(self) -> u32 {
         self.environment_failures.get()
+    }
+    pub const fn gate_failures(self) -> u32 {
+        self.gate_failures.get()
     }
     pub const fn dispatch_budget(self) -> u32 {
         self.retry_attempts()
@@ -172,6 +201,15 @@ mod tests {
         LocalPatchLimit, RecoveryCriterionEvidence, RecoveryLimits, RecoveryRung, RetryLimit,
         compose_local_patch_brief, recovery_budget,
     };
+
+    #[test]
+    fn legacy_limits_default_the_gate_failure_ceiling() {
+        let limits: RecoveryLimits = serde_json::from_str(
+            r#"{"retry_attempts":1,"local_patch_attempts":1,"environment_failures":6}"#,
+        )
+        .expect("legacy limits");
+        assert_eq!(limits.gate_failures(), 3);
+    }
 
     #[test]
     fn identical_failure_count_dispatches_under_budget_and_stops_without_it() {
