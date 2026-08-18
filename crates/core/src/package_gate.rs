@@ -206,6 +206,8 @@ pub fn compose_package_gate_brief(
         }
     }
 
+    output.push_str("\n## 6. Act ownership and long-running commands\n\nRun every act to completion in the foreground and write the outcome before exiting. Ending your turn is exiting. A process you background is orphaned the moment you stop, so never leave one running. Do not use shell backgrounding, `nohup`, `disown`, or a detached wrapper.\n\nFor a long-running command, start one foreground tool invocation with its timeout or yield interval configured to permit the command to finish, then keep the turn open and wait on that same invocation until it returns. If the tool returns a live handle, inspect that same handle until it reaches a terminal state. Do not start a child, report its PID or log path, and end the turn to wait. After the act reaches a terminal state, inspect its evidence and write the required outcome before exiting.\n");
+
     output.push_str("\n## Required outcome\n\n");
     output.push_str("Write exactly one strict JSON outcome document to the path in `PCE_PACKAGE_GATE_OUTCOME` before exiting. Finding nothing is valid and must be written as `{");
     output.push_str("\"findings\":[]}`. Each finding must contain non-empty `description`, `repair`, and `proposed_criterion_command` strings plus a non-empty `repository_refs` list. Every repository entry must contain exactly `repository`, `witness_ref`, and `repair_ref`; name every repository changed by the finding and no repository outside this package. The witness commit must contain the falsifier alone and the repair commit must descend from it. Produce the command and repository-qualified refs but do not execute the command; the driver will require failure at each witness and success at each repair.\n");

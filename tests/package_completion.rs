@@ -39,8 +39,39 @@ fn wrapper_records_zero_and_three_as_results() {
                 .expect("result JSON");
         assert_eq!(value["exit_status"]["kind"], "exited");
         assert_eq!(value["exit_status"]["code"], code);
+        assert_eq!(value["surviving_processes"], "absent");
         assert!(value["stopped_at"].as_str().is_some());
     }
+}
+
+#[test]
+fn wrapper_reports_a_background_child_that_survives_worker_exit() {
+    let directory = tempdir().expect("temporary directory");
+    let pid_path = directory.path().join("background.pid");
+    let command = format!(
+        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{}'",
+        pid_path.display()
+    );
+    let output = pce()
+        .args(["dispatch", "package-worker", "--result"])
+        .arg(result_path(directory.path()))
+        .args(["--required-artifact"])
+        .arg(directory.path().join("artifact"))
+        .args(["--", "/bin/sh", "-c", &command])
+        .output()
+        .expect("wrapper executes");
+    assert!(output.status.success());
+    let value: Value =
+        serde_json::from_slice(&fs::read(result_path(directory.path())).expect("result file"))
+            .expect("result JSON");
+    let pid = fs::read_to_string(pid_path).expect("background pid");
+    let killed = Command::new("/bin/kill")
+        .args(["-KILL", pid.trim()])
+        .status()
+        .expect("kill background child");
+
+    assert!(killed.success());
+    assert_eq!(value["surviving_processes"], "present");
 }
 
 #[test]
@@ -136,6 +167,7 @@ fn collection_rederives_from_disk_and_never_consults_herdr() {
     assert_eq!(first_json["appended"], serde_json::json!([1]));
     assert_eq!(first_json["packages"][0]["state"], "finished");
     assert_eq!(first_json["packages"][0]["exit_status"]["code"], 3);
+    assert_eq!(first_json["packages"][0]["surviving_processes"], "absent");
     let second = collect();
     assert!(second.status.success());
     let second_json: Value = serde_json::from_slice(&second.stdout).expect("second JSON");

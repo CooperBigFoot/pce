@@ -48,8 +48,8 @@ pub use criterion_change::{
 };
 pub use package_completion::{
     AbsolutePackageResultPath, PackageCompletionError, PackageWorkerResult, PackageWorkerStoppedAt,
-    compose_package_worker_argv, derive_package_result_path, parse_package_worker_result,
-    serialize_package_worker_result,
+    SurvivingProcesses, compose_package_worker_argv, derive_package_result_path,
+    parse_package_worker_result, serialize_package_worker_result,
 };
 pub use package_driver::{
     AmendmentProof, AmendmentRepositoryRefs, CommandExitStatus, CompositionInput,

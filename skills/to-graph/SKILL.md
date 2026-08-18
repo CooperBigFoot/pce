@@ -112,8 +112,13 @@ before reporting; the driver records an environment failure and dispatches a fre
 automatically. For any package containing a hard-to-reverse act — minting an immutable artifact,
 registering, publishing — the criteria's `input`/`observation` prose must license the successor to
 resume by verification: finding the act already performed and provably correct is success to
-attest, not an obstacle to fail on. A one-shot act with no stated resume protocol turns the
-driver's ordinary retry into a guaranteed park.
+attest, not an obstacle to fail on. The license must also require a successor to establish that no
+predecessor process is still writing before failed attestation permits removal or repetition. Use
+the act's completion report and status file as the natural evidence: an absent or stale terminal
+status together with a running predecessor means WAIT, not permission to remove or repeat the act.
+Only after the predecessor is known to have stopped may failed attestation authorize the recovery
+action named by the package. A one-shot act with no stated race-safe resume protocol turns the
+driver's ordinary retry into a guaranteed park or makes it race work still in flight.
 
 ## 5. Derive the edges, typed
 

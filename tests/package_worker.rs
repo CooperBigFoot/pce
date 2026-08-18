@@ -122,6 +122,9 @@ Create one known file.
         "repo: {}",
         directory.path().join("repo-worktree").display()
     )));
+    assert!(piped.contains("Ending your turn is exiting"));
+    assert!(piped.contains("keep the turn open and wait on that same invocation"));
+    assert!(piped.contains("never leave one running"));
 }
 
 #[test]

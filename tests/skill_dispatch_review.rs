@@ -6732,3 +6732,14 @@ fn standalone_append_venue_known_match_control() {
         "standalone_append_venue_known_match_control/green: real document must measure zero"
     );
 }
+
+#[test]
+fn to_graph_requires_race_safe_resume_for_irreversible_acts() {
+    let skill =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/to-graph/SKILL.md"))
+            .expect("to-graph skill");
+
+    assert!(skill.contains("predecessor process is still writing"));
+    assert!(skill.contains("WAIT, not permission to remove or repeat the act"));
+    assert!(skill.contains("completion report and status file"));
+}

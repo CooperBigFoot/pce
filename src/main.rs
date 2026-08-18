@@ -61,38 +61,38 @@ use pce_core::{
     RepositoryRelativePath, RepositoryRoot, RepositoryWorktree, RequiredArtifactPresence,
     RetryLimit, RiskOrdering, RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest,
     SignalNumber, SpawnDispatchOutcome, SpawnFailedDispatchCompletionPayload, SquashCommitOid,
-    StdinBinding, StepAuthorityObservation, StepNode, StructuredArtifactObservation, TagName,
-    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason,
-    VersionPolicy, VisionGoal, VisionName, VisionSlug, WorkPackageClassification, WorkPackageGraph,
-    WorkPackageId, WorkPackageMergeObservation, WorkPackageMergeSubject, WorkerArgumentVector,
-    WorkerEnvironment, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
-    append_event, charged_failure_count, classify_claude_result, classify_codex_terminal_usage,
-    classify_dispatch_admission, classify_dispatch_check_in, classify_replay_pair,
-    classify_seatbelt_capability, compose_gate_arguments, compose_herdr_work_package_dispatch,
-    compose_local_patch_brief, compose_package_gate_brief, compose_package_worker_argv,
-    compose_package_worker_brief, compose_planning_role_frame, compute_dispatchability,
-    create_vision, criteria_invariance_violation, derive_dispatch_outcome_state,
-    derive_driver_snapshot, derive_herdr_agent_name, derive_merge_status,
-    derive_milestone_merge_status, derive_package_result_path, derive_run_state,
-    derive_run_state_with_dispatch_artifacts, derive_run_state_with_exceptional_merge_chains,
-    derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
-    dispatch_payload, effective_criteria, evaluate_completion, evaluate_landing_readiness,
-    event_record_matches, fold_dispatch_ledger, fold_paired_execution_proof, fold_replay_runs,
-    gate_failure_outcome, judge_finding_replay, latest_criterion_failure_evidence,
-    measure_contract_snapshot, meter_dispatches, next_gate_attempt, normalize_replay_observation,
-    paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result,
-    parse_dispatch_process_identity, parse_event_line, parse_gate_execution_evidence,
-    parse_gate_stimulus, parse_package_gate_outcome, parse_package_worker_result,
-    parse_paired_falsification_verdict, parse_replay_output_path, parse_replay_schema_path,
-    parse_tracked_repository_contract, parse_work_package_graph, pending_completed_pane_cleanups,
-    pending_gate_challenges, ready_work_packages, rebase_gate_stimulus, recovery_attempt_records,
-    recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
-    render_package_run, seatbelt_capability_probe, serialize_dispatch_check_in,
-    serialize_dispatch_process_identity, serialize_package_worker_result,
-    serialize_tracked_repository_contract, unchanged_package_ids, validate_artifact,
-    validate_package_gate_finding_repositories, validate_package_gate_repositories,
-    validate_verdict_references, validate_workflow_coverage, validated_dispatch_completion_payload,
-    verify_criterion_change, worker_environment_outcome,
+    StdinBinding, StepAuthorityObservation, StepNode, StructuredArtifactObservation,
+    SurvivingProcesses, TagName, TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload,
+    UsageAbsenceReason, VersionPolicy, VisionGoal, VisionName, VisionSlug,
+    WorkPackageClassification, WorkPackageGraph, WorkPackageId, WorkPackageMergeObservation,
+    WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment, WorktreeIdentity,
+    WorktreeState, WriteKind, admit_recurrent_finding, append_event, charged_failure_count,
+    classify_claude_result, classify_codex_terminal_usage, classify_dispatch_admission,
+    classify_dispatch_check_in, classify_replay_pair, classify_seatbelt_capability,
+    compose_gate_arguments, compose_herdr_work_package_dispatch, compose_local_patch_brief,
+    compose_package_gate_brief, compose_package_worker_argv, compose_package_worker_brief,
+    compose_planning_role_frame, compute_dispatchability, create_vision,
+    criteria_invariance_violation, derive_dispatch_outcome_state, derive_driver_snapshot,
+    derive_herdr_agent_name, derive_merge_status, derive_milestone_merge_status,
+    derive_package_result_path, derive_run_state, derive_run_state_with_dispatch_artifacts,
+    derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
+    dispatch_completion_payload, dispatch_invocation, dispatch_payload, effective_criteria,
+    evaluate_completion, evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
+    fold_paired_execution_proof, fold_replay_runs, gate_failure_outcome, judge_finding_replay,
+    latest_criterion_failure_evidence, measure_contract_snapshot, meter_dispatches,
+    next_gate_attempt, normalize_replay_observation, paired_stimulus_identity,
+    parse_acceptance_criteria, parse_claude_result, parse_dispatch_process_identity,
+    parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
+    parse_package_gate_outcome, parse_package_worker_result, parse_paired_falsification_verdict,
+    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
+    parse_work_package_graph, pending_completed_pane_cleanups, pending_gate_challenges,
+    ready_work_packages, rebase_gate_stimulus, recovery_attempt_records, recovery_base_brief,
+    recovery_budget, render_dispatch_projection, render_human_snapshot, render_package_run,
+    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    serialize_package_worker_result, serialize_tracked_repository_contract, unchanged_package_ids,
+    validate_artifact, validate_package_gate_finding_repositories,
+    validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
+    validated_dispatch_completion_payload, verify_criterion_change, worker_environment_outcome,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -5850,6 +5850,24 @@ fn write_package_result_atomic(path: &Path, result: &PackageWorkerResult) -> Res
     Ok(())
 }
 
+#[cfg(unix)]
+fn observe_surviving_package_worker_processes(process_group: u32) -> Result<SurvivingProcesses> {
+    let process_group =
+        i32::try_from(process_group).context("package worker process group exceeds pid_t")?;
+    // SAFETY: the spawned child's positive PID is its isolated process-group ID. Signal zero
+    // performs a presence/permission probe and does not signal or terminate any process.
+    let observation = unsafe { libc::kill(-process_group, 0) };
+    if observation == 0 {
+        return Ok(SurvivingProcesses::Present);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(SurvivingProcesses::Absent),
+        Some(libc::EPERM) => Ok(SurvivingProcesses::Present),
+        _ => Err(error).context("failed to inspect package worker process group"),
+    }
+}
+
 fn run_package_worker(
     result_path: &Path,
     required_artifact_path: &Path,
@@ -5859,10 +5877,15 @@ fn run_package_worker(
         .split_first()
         .context("package worker command is empty")?;
     let started = Instant::now();
-    let status = std::process::Command::new(program)
-        .args(arguments)
-        .status()
+    let mut command = std::process::Command::new(program);
+    command.args(arguments).process_group(0);
+    let mut child = command
+        .spawn()
         .with_context(|| format!("failed to spawn package worker `{program}`"))?;
+    let process_group = child.id();
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for package worker `{program}`"))?;
     let duration_ms = u64::try_from(started.elapsed().as_millis())
         .context("package worker duration exceeds u64")?;
     let result = PackageWorkerResult::new(
@@ -5872,6 +5895,7 @@ fn run_package_worker(
         )?,
         dispatch_exit_status(status)?,
         observe_required_artifact_presence(required_artifact_path)?,
+        observe_surviving_package_worker_processes(process_group)?,
     );
     write_package_result_atomic(result_path, &result)?;
     match result.exit_status() {
@@ -5955,7 +5979,8 @@ fn collect_package_completions(log_path: &Path, vision_dir: &Path) -> Result<Val
                 "package": entry.issuance().node().as_str(),
                 "state": if result.is_some() { "finished" } else { "unaccounted" },
                 "result_path": result_path.display().to_string(),
-                "exit_status": result.map(|result| result.exit_status()),
+                "exit_status": result.as_ref().map(PackageWorkerResult::exit_status),
+                "surviving_processes": result.map(|result| result.surviving_processes()),
             }))
         })
         .collect::<Result<Vec<_>>>()?;
