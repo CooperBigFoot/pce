@@ -6787,3 +6787,125 @@ fn work_graph_limits_supervisor_freeze_authority_to_binary_verified_mechanical_f
         );
     }
 }
+
+#[test]
+fn work_graph_records_feedback_sweep_g_operational_contracts() {
+    let skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/work-graph/SKILL.md"),
+    )
+    .expect("work-graph skill");
+
+    let repartition = skill
+        .split("- **Repartition packaging.**")
+        .nth(1)
+        .and_then(|tail| tail.split("Never modify any repository").next())
+        .expect("repartition section");
+    assert!(repartition.contains("pce graph freeze --vision-dir <vision-dir> \\"));
+    assert!(repartition.contains("--repository <NAME>=<SOURCE_WORKTREE> [...]"));
+
+    for clause in [
+        "AssemblyRepositoryComposed.base_oid` is the composed result",
+        "first parent is the starting base",
+        "does not terminate the Herdr workers",
+        "exact typed attempt identity",
+        "leaf-first",
+        "`TERM`",
+        "`KILL`",
+        "/bin/ps -p <pid> -o command=",
+        "/bin/kill -TERM <pid>",
+        "Never use `pkill`, `killall`, or grep output to select processes to kill",
+        "`/usr/bin/env`",
+        "absolute path to `pce`",
+        "whole descendant tree",
+        "cumulative CPU",
+        "session_path",
+        "environment-failure allowance",
+        "not a package recovery",
+        "`wait_timeout_ms: null` installs no driver timeout",
+        "plan-scoped",
+        "once per journal",
+        "strict-superset",
+        "worker-environment-extended",
+        "names-only launch configuration",
+        "explicit Denies",
+        "The credentials are the fence",
+        "ordinary human freeze checks remote base currency",
+        "Mechanical freeze remains local",
+    ] {
+        assert!(
+            skill.contains(clause),
+            "missing work-graph G clause: {clause}"
+        );
+    }
+}
+
+#[test]
+fn to_graph_records_feedback_sweep_g_authoring_contracts() {
+    let skill =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/to-graph/SKILL.md"))
+            .expect("to-graph skill");
+
+    for clause in [
+        "numeric threshold, tolerance, or bound",
+        "number must appear",
+        "criterion's `command`",
+        "required flag",
+        "script-owned default",
+        "prefix listing and a read beneath that prefix",
+        "Credentials remain the authority fence",
+        "Artifact provenance",
+        "criterion's command",
+        "`input`/`observation` prose",
+        "Act ownership",
+        "Reference resolution",
+        "Consumer addressability",
+        "where will the artifact live?",
+        "What does it reference",
+        "references resolve from",
+        "Who consumes it, and can that consumer name it?",
+        "What does the consumer validate",
+        "location, scheme, or host?",
+        "command paths only",
+        "`--strict`",
+        "refuses on any warning",
+        "Neither mode can prove prose or semantic satisfiability",
+        "--accept-base-currency-risk <HUMAN_RECORD_PATH>",
+        r#""schema_version": 1"#,
+        r#""mode": "historical""#,
+        r#""accepted_by": "<human identity>""#,
+        "This skill never authors the acceptance record",
+    ] {
+        assert!(
+            skill.contains(clause),
+            "missing to-graph G clause: {clause}"
+        );
+    }
+}
+
+#[test]
+fn feedback_sweep_g_does_not_invent_supervision_hook_ceremony() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let work_graph =
+        fs::read_to_string(root.join("skills/work-graph/SKILL.md")).expect("work-graph skill");
+    let to_graph =
+        fs::read_to_string(root.join("skills/to-graph/SKILL.md")).expect("to-graph skill");
+    let hook = fs::read_to_string(root.join("hooks/pce-protect-criteria.sh"))
+        .expect("criteria protection hook");
+
+    let combined = format!("{work_graph}\n{to_graph}").to_ascii_lowercase();
+    for forbidden in [
+        "supervision.md is edit/write-only",
+        "bash may not access supervision.md",
+        "use edit or write for supervision.md",
+    ] {
+        assert!(
+            !combined.contains(forbidden),
+            "invented forbidden ceremony: {forbidden}"
+        );
+    }
+    assert!(!work_graph.contains(r#""credential":"#));
+    assert!(!work_graph.contains(r#""credentials":"#));
+    assert!(!combined.contains("edit/write-only"));
+    assert!(hook.contains(r#"os.path.basename(normalized) != "vision.md""#));
+    assert!(!hook.contains(r#"os.path.basename(normalized) != "supervision.md""#));
+}
