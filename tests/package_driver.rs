@@ -998,6 +998,26 @@ fn revised_plan_refuses_weakened_criterion_before_advancing() {
 fn ratified_criterion_revision_advances_and_forfeits_only_its_package_completion() {
     let temp = TempDir::new().expect("tempdir");
     let repo = repository(temp.path(), "repo", "base");
+    let remote = temp.path().join("origin.git");
+    git(
+        temp.path(),
+        &[
+            "init",
+            "--bare",
+            "-q",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    git(&repo, &["push", "-qu", "origin", "HEAD"]);
     let vision_dir = temp.path().join("driver-test");
     fs::create_dir(&vision_dir).expect("vision directory");
     let source = vision_dir.join("graph.json");

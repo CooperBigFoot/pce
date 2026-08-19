@@ -251,6 +251,27 @@ pub enum DriverRefProduct {
     AssemblyResolution,
 }
 
+/// The class of base-currency failure a human accepted for an immutable graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BaseCurrencyRiskMode {
+    /// The remote default could not be reached or established.
+    Offline,
+    /// The authored ref is historical relative to the reachable remote default.
+    Historical,
+}
+
+/// One attributed acceptance imported from an immutable graph sidecar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BaseCurrencyRiskAcceptance {
+    pub plan_version: u64,
+    pub repositories: Vec<String>,
+    pub mode: BaseCurrencyRiskMode,
+    pub accepted_by: String,
+    pub reason: String,
+    pub sidecar_sha256: String,
+}
+
 /// One append-only fact in the driver journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
@@ -269,6 +290,15 @@ pub enum DriverEvent {
         repair_ref: String,
         lineage_oid: String,
         reason: StaleRepairCreditReason,
+    },
+    /// A graph-specific human base-currency acceptance became visible at its plan boundary.
+    BaseCurrencyRiskAccepted {
+        plan_version: u64,
+        repositories: Vec<String>,
+        mode: BaseCurrencyRiskMode,
+        accepted_by: String,
+        reason: String,
+        sidecar_sha256: String,
     },
     /// A newer immutable plan became active and names the prior completions it carries forward.
     PlanVersionAdvanced {
@@ -695,6 +725,7 @@ pub struct DriverSnapshot {
     amendments: Vec<(String, EffectiveCriterion)>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     criterion_revisions: Vec<RatifiedCriterionRevision>,
+    base_currency_acceptances: Vec<BaseCurrencyRiskAcceptance>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     worker_environment: Vec<String>,
     recovery: Vec<(String, RecoveryBudget)>,
@@ -713,6 +744,10 @@ impl DriverSnapshot {
     }
     pub fn criterion_revisions(&self) -> &[RatifiedCriterionRevision] {
         &self.criterion_revisions
+    }
+    /// Return graph-specific human acceptances imported at plan boundaries.
+    pub fn base_currency_acceptances(&self) -> &[BaseCurrencyRiskAcceptance] {
+        &self.base_currency_acceptances
     }
     /// Return the names-only worker environment contract for this run.
     pub fn worker_environment(&self) -> &[String] {
@@ -743,6 +778,9 @@ pub enum PackageDriverError {
         journal_version: u64,
         graph_version: u64,
     },
+    /// A base-currency acceptance lacks exact plan, repository, attribution, or digest data.
+    #[error("driver base-currency risk acceptance is invalid")]
+    InvalidBaseCurrencyRiskAcceptance,
     /// A plan transition's criterion revisions lack exact human attribution.
     #[error("driver plan transition criterion revisions have invalid human attribution")]
     InvalidCriterionRevisionAttribution,
@@ -839,6 +877,7 @@ pub fn derive_driver_snapshot(
             } => worker_environment_extension_boundary = Some(*to_plan_version),
             DriverEvent::DriverAborted { .. }
             | DriverEvent::DriverResumed
+            | DriverEvent::BaseCurrencyRiskAccepted { .. }
             | DriverEvent::WorkerEnvironmentDeclared { .. }
             | DriverEvent::WorkerEnvironmentExtended { .. }
             | DriverEvent::RecoveryConfigured { .. } => {}
@@ -950,6 +989,59 @@ pub fn derive_driver_snapshot(
                 }
                 _ => return Err(PackageDriverError::InvalidCriterionRevisionAttribution),
             }
+        }
+    }
+    let mut base_currency_acceptances = Vec::new();
+    let mut acceptance_plan_version = 1_u64;
+    let mut acceptance_boundary_open = true;
+    let mut accepted_plan_versions = HashSet::new();
+    for event in events {
+        match event {
+            DriverEvent::PlanVersionAdvanced {
+                to_plan_version, ..
+            } => {
+                acceptance_plan_version = *to_plan_version;
+                acceptance_boundary_open = true;
+            }
+            DriverEvent::BaseCurrencyRiskAccepted {
+                plan_version,
+                repositories,
+                mode,
+                accepted_by,
+                reason,
+                sidecar_sha256,
+            } => {
+                let unique_repositories = repositories.iter().collect::<HashSet<_>>();
+                if *plan_version != acceptance_plan_version
+                    || !acceptance_boundary_open
+                    || !accepted_plan_versions.insert(*plan_version)
+                    || repositories.is_empty()
+                    || unique_repositories.len() != repositories.len()
+                    || repositories
+                        .iter()
+                        .any(|repository| repository.trim().is_empty())
+                    || accepted_by.trim().is_empty()
+                    || reason.trim().is_empty()
+                    || sidecar_sha256.len() != 64
+                    || !sidecar_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(PackageDriverError::InvalidBaseCurrencyRiskAcceptance);
+                }
+                base_currency_acceptances.push(BaseCurrencyRiskAcceptance {
+                    plan_version: *plan_version,
+                    repositories: repositories.clone(),
+                    mode: *mode,
+                    accepted_by: accepted_by.clone(),
+                    reason: reason.clone(),
+                    sidecar_sha256: sidecar_sha256.clone(),
+                });
+            }
+            DriverEvent::DriverAborted { .. }
+            | DriverEvent::DriverResumed
+            | DriverEvent::WorkerEnvironmentDeclared { .. }
+            | DriverEvent::WorkerEnvironmentExtended { .. }
+            | DriverEvent::RecoveryConfigured { .. } => {}
+            _ => acceptance_boundary_open = false,
         }
     }
     let known = graph
@@ -1162,6 +1254,7 @@ pub fn derive_driver_snapshot(
         let package = match event {
             DriverEvent::DriverAborted { .. }
             | DriverEvent::DriverResumed
+            | DriverEvent::BaseCurrencyRiskAccepted { .. }
             | DriverEvent::PlanVersionAdvanced { .. }
             | DriverEvent::WorkerEnvironmentDeclared { .. }
             | DriverEvent::WorkerEnvironmentExtended { .. }
@@ -1226,7 +1319,8 @@ pub fn derive_driver_snapshot(
             DriverEvent::DriverAborted { .. } | DriverEvent::DriverResumed => {
                 unreachable!("driver lifecycle handled above")
             }
-            DriverEvent::PlanVersionAdvanced { .. }
+            DriverEvent::BaseCurrencyRiskAccepted { .. }
+            | DriverEvent::PlanVersionAdvanced { .. }
             | DriverEvent::WorkerEnvironmentDeclared { .. }
             | DriverEvent::WorkerEnvironmentExtended { .. }
             | DriverEvent::RecoveryConfigured { .. }
@@ -1721,6 +1815,7 @@ pub fn derive_driver_snapshot(
         ready,
         amendments,
         criterion_revisions,
+        base_currency_acceptances,
         worker_environment: configured_worker_environment.unwrap_or_default(),
         recovery,
         assembly,
