@@ -239,6 +239,18 @@ pub enum StaleRepairCreditReason {
     CounterfactualUnconstructable,
 }
 
+/// The terminal product certified by one driver-created Git ref.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum DriverRefProduct {
+    /// A package attempt retained as an input to the final assembly.
+    PackageAttempt { package: String, issuance: u64 },
+    /// The final composed assembly for one repository.
+    Assembly,
+    /// A conflict-resolution commit adopted by assembly composition.
+    AssemblyResolution,
+}
+
 /// One append-only fact in the driver journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
@@ -563,6 +575,13 @@ pub enum DriverEvent {
         execution: CriterionExecution,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         amendment_proof: Option<AmendmentProof>,
+    },
+    /// The driver created a non-moving Git ref for a journal-proven terminal product.
+    DriverRefMaterialized {
+        repository: String,
+        reference: String,
+        oid: String,
+        product: DriverRefProduct,
     },
     /// Every effective criterion passed against the composed assembly.
     AssemblyCompleted,
@@ -940,6 +959,7 @@ pub fn derive_driver_snapshot(
                 driver_aborted = false;
                 continue;
             }
+            DriverEvent::DriverRefMaterialized { .. } => continue,
             DriverEvent::PlanVersionAdvanced {
                 from_plan_version,
                 to_plan_version,
@@ -1090,7 +1110,8 @@ pub fn derive_driver_snapshot(
             | DriverEvent::DriverResumed
             | DriverEvent::PlanVersionAdvanced { .. }
             | DriverEvent::WorkerEnvironmentDeclared { .. }
-            | DriverEvent::RecoveryConfigured { .. } => {
+            | DriverEvent::RecoveryConfigured { .. }
+            | DriverEvent::DriverRefMaterialized { .. } => {
                 continue;
             }
             DriverEvent::PackageParkOverruled { package, .. }
@@ -1152,8 +1173,9 @@ pub fn derive_driver_snapshot(
             }
             DriverEvent::PlanVersionAdvanced { .. }
             | DriverEvent::WorkerEnvironmentDeclared { .. }
-            | DriverEvent::RecoveryConfigured { .. } => {
-                unreachable!("configuration handled above")
+            | DriverEvent::RecoveryConfigured { .. }
+            | DriverEvent::DriverRefMaterialized { .. } => {
+                unreachable!("configuration or ref evidence handled above")
             }
             DriverEvent::PackageParkOverruled {
                 plan_version,

@@ -156,10 +156,148 @@ fi
         .find(|event| event["event"] == "assembly-repository-composed")
         .expect("assembly event");
     let assembly_oid = assembly["base_oid"].as_str().expect("assembly oid");
+    let assembly_ref = format!(
+        "refs/heads/pce/{}/assembly-v1",
+        graph["vision"].as_str().expect("vision")
+    );
+    assert_eq!(
+        git(&repository, &["rev-parse", &assembly_ref]),
+        assembly_oid
+    );
+    assert!(events.contains(r#""event":"driver-ref-materialized""#));
     let tree = git(&repository, &["ls-tree", "--name-only", assembly_oid]);
     for file in ["a.txt", "b.txt", "c.txt"] {
         assert!(tree.lines().any(|line| line == file), "missing {file}");
     }
+
+    // Reproduce the cold-resume shape: the proof journal survives, its driver refs do not,
+    // and an out-of-band retention tag is the assembly commit's only explicit name.
+    let mut cold_events = journal_events(&journal)
+        .into_iter()
+        .filter(|event| event["event"] != "driver-ref-materialized")
+        .collect::<Vec<_>>();
+    let composed_index = cold_events
+        .iter()
+        .position(|event| event["event"] == "assembly-repository-composed")
+        .expect("assembly composition");
+    cold_events.insert(
+        composed_index,
+        json!({
+            "event": "assembly-resolution-done",
+            "repository": "repo",
+            "base_oid": assembly_oid,
+        }),
+    );
+    cold_events.push(json!({"event":"driver-aborted","reason":"pre-fix abort"}));
+    cold_events.push(json!({"event":"driver-resumed"}));
+    let cold_journal = cold_events
+        .iter()
+        .map(|event| serde_json::to_string(event).expect("event json"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&journal, cold_journal).expect("cold journal");
+
+    git(&repository, &["update-ref", "-d", &assembly_ref]);
+    let vision = graph["vision"].as_str().expect("vision");
+    for input in assembly["packages"].as_array().expect("assembly inputs") {
+        let package = input["package"].as_str().expect("package");
+        let issuance = cold_events
+            .iter()
+            .rev()
+            .find(|event| event["event"] == "worker-done" && event["package"] == package)
+            .and_then(|event| event["issuance"].as_u64())
+            .expect("completed issuance");
+        git(
+            &repository,
+            &[
+                "update-ref",
+                "-d",
+                &format!("refs/heads/pce/{vision}/{package}/attempt-{issuance}"),
+            ],
+        );
+    }
+    git(
+        &repository,
+        &[
+            "tag",
+            "pce-retained/cold-resume/assembly-v1-resolution",
+            assembly_oid,
+        ],
+    );
+
+    let materialized = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "materialize-refs", "--graph"])
+        .arg(&graph_path)
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository"])
+        .arg(format!("repo={}", repository.display()))
+        .output()
+        .expect("materialize refs");
+    assert!(
+        materialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&materialized.stderr)
+    );
+    assert_eq!(
+        git(&repository, &["rev-parse", &assembly_ref]),
+        assembly_oid
+    );
+    let materialized_events = journal_events(&journal);
+    let resolution_ref = materialized_events
+        .iter()
+        .find(|event| {
+            event["event"] == "driver-ref-materialized"
+                && event["product"]["kind"] == "assembly-resolution"
+        })
+        .and_then(|event| event["reference"].as_str())
+        .expect("resolution materialization")
+        .to_owned();
+    assert_eq!(
+        git(&repository, &["rev-parse", &resolution_ref]),
+        assembly_oid
+    );
+    assert!(materialized_events.iter().any(|event| {
+        event["event"] == "driver-ref-materialized"
+            && event["reference"] == assembly_ref
+            && event["product"]["kind"] == "assembly"
+    }));
+    assert!(materialized_events.iter().any(|event| {
+        event["event"] == "driver-ref-materialized"
+            && event["reference"] == resolution_ref
+            && event["product"]["kind"] == "assembly-resolution"
+    }));
+
+    let idempotent = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "materialize-refs", "--graph"])
+        .arg(&graph_path)
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository"])
+        .arg(format!("repo={}", repository.display()))
+        .output()
+        .expect("idempotent materialization");
+    assert!(idempotent.status.success());
+    let report: Value = serde_json::from_slice(&idempotent.stdout).expect("report");
+    assert_eq!(report["changed"], false);
+
+    git(&repository, &["update-ref", "-d", &assembly_ref]);
+    let wrong_oid = git(&repository, &["rev-parse", "HEAD"]);
+    assert_ne!(wrong_oid, assembly_oid);
+    git(&repository, &["update-ref", &assembly_ref, &wrong_oid]);
+    let refused = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "materialize-refs", "--graph"])
+        .arg(&graph_path)
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository"])
+        .arg(format!("repo={}", repository.display()))
+        .output()
+        .expect("wrong ref refusal");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("refusing to move it"));
+    assert_eq!(git(&repository, &["rev-parse", &assembly_ref]), wrong_oid);
 }
 
 #[test]
