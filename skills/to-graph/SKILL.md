@@ -58,6 +58,12 @@ not yet authored. This is the descent obligation and it is not optional. The rep
 recorded here must match the names in package `repositories` and the keys in `authored_at_refs`
 exactly.
 
+For every artifact reached during this descent, answer these questions from evidence at the recorded
+ref: where will the artifact live? What does it reference, and do those references resolve from
+there? Who consumes it, and can that consumer name it? What does the consumer validate about
+location, scheme, or host? Reading only the implementation named by a criterion does not answer the
+placement and consumer sides of this descent.
+
 ## 3. Partition the acceptance criteria
 
 **Packages come from the criteria, never from the scope list.** The scope list states intent; only
@@ -102,6 +108,16 @@ A criterion with no command that could be written is a defect to report, not a c
 approximate. Do not invent a weaker command that passes. Say which criterion cannot be expressed
 and what would make it expressible — an injectable probe, a controlled environment, a seam that
 does not exist yet — and let step 6 fail on it.
+
+When an observation asserts a numeric threshold, tolerance, or bound, the number must appear
+literally in the criterion's `command`. The called script must take it as a required flag with no
+script-owned default. Criteria invariance protects command bytes, not a constant hidden in a script,
+and `graph check` cannot infer which observations assert numeric standards.
+
+Prefer a criterion that proves a capability over one that names one privileged artifact. For
+example, require prefix listing and a read beneath that prefix rather than reading one named S3
+object. This makes an object-only grant insufficient, but it is authoring craft rather than access
+control. Credentials remain the authority fence even when the criterion is capability-shaped.
 
 **Every command re-executes.** The driver runs a criterion command at package judgement, again for
 each parent when a conflicted join is re-verified, again against the final assembly, and again
@@ -171,7 +187,7 @@ frozen; nothing reads it as authority yet.
 ```bash
 pce graph check --file <vision-dir>/graph.json \
   --repository <NAME>=<ABSOLUTE_PATH> \
-  [--repository <NAME>=<ABSOLUTE_PATH> ...]
+  [--repository <NAME>=<ABSOLUTE_PATH> ...] [--strict]
 ```
 
 Supply exactly one path for every repository named by the graph. The check resolves each
@@ -179,7 +195,24 @@ repository's authored ref in that repository. A missing path, unknown path name,
 ref is one graph error naming the repository and ref. The driver repeats this preflight before it
 can dispatch work or spend an environment-failure attempt.
 
-The graph is not reviewed for taste. It is checked against a predicate that terminates:
+The graph is not reviewed for taste. Before accepting its presentation, answer four evidence
+questions for each newly authored package:
+
+1. **Artifact provenance:** does every artifact named by the criterion's command and its
+   `input`/`observation` prose exist at the package's authored ref, or is it produced by the package
+   itself or by a strictly upstream package?
+2. **Act ownership:** does any frozen package's title or criteria already claim this act?
+3. **Reference resolution:** will every reference made by the artifact resolve from the location
+   where the artifact will live?
+4. **Consumer addressability:** can the consumer name that artifact at all?
+
+The last two are distinct: references can resolve from a sibling artifact even when the consumer's
+address derivation can never name that sibling.
+
+`graph check` adds heuristic authoring warnings by extracting command paths only. Warnings do not
+make the graph structurally invalid. Opt in with `--strict` when every warning must block: `--strict`
+refuses on any warning. Neither mode can prove prose or semantic satisfiability, so the questions
+above remain required even after a clean check. The structural predicate itself terminates:
 
 1. Every criterion has a `command`.
 2. Every package owns at least one criterion.
@@ -307,7 +340,28 @@ pce log --file <vision-dir>/events.jsonl --kind planning-artifact-approved --nod
 
 Freeze repeats repository-ref resolution; it never freezes a map whose repository set and
 authored-ref key set differ. Repository names supplied here and to the driver must be byte-for-byte
-identical to `authored_at_refs` keys.
+identical to `authored_at_refs` keys. An ordinary human freeze fetches each remote default branch and
+refuses when the authored oid is historical or remote currency cannot be established. It names the
+oids and divergence and directs the human to `git pull --ff-only`. Mechanical freeze remains local.
+
+A human may deliberately accept one offline or historical ordinary freeze by independently writing
+this strict record and supplying `--accept-base-currency-risk <HUMAN_RECORD_PATH>` on the freeze
+command. Repository scope must exactly equal the repositories whose currency failures are accepted;
+`mode` is `offline` or `historical`, and unknown fields are refused:
+
+```json
+{
+  "schema_version": 1,
+  "repositories": ["<repository name>"],
+  "mode": "historical",
+  "accepted_by": "<human identity>",
+  "reason": "<human rationale>"
+}
+```
+
+The accepted record is copied immutably beside the frozen graph and later attributed in the driver
+journal. This skill never authors the acceptance record, chooses its rationale, or supplies it on
+the human's behalf. A mechanical freeze cannot carry this record.
 
 A frozen plan version is immutable. A structural change, including a change to any repository's
 authored ref, mints version `n+1` by re-entering step 3 for the affected region; it never edits a

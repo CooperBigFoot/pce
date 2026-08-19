@@ -65,9 +65,21 @@ shape atomically:
 }
 ```
 
-On later invocations, reuse these values without asking. Worker environment names and recovery
-limits are once-per-journal launch configuration. The environment contract stays fixed until a
-higher frozen plan version creates an extension boundary; recovery limits stay fixed. Compare the
+`wait_timeout_ms: null` installs no driver timeout. A wedged worker can therefore hold the driver
+indefinitely; the supervisor is the only timeout and must use the whole-tree evidence rules below.
+
+The driver credential is names-only launch configuration, not graph data and not a `run.json`
+secret field. Record the credential profile or role name, never a token or secret, with the launch
+record in `supervision.md`. Run the driver under a least-privilege credential scoped to exactly what
+the criteria need, with explicit Denies for IAM, cloud, or account mutations that must never occur.
+Workers inherit this authority. The credentials are the fence; criterion prose and worker guidance
+are not an enforcement boundary.
+
+On later invocations, reuse these values without asking. Recovery limits are once per journal, not
+plan-scoped. A plan advance clears disputed parks and consumed overrules and re-scopes package
+state, but does not reset those journal-scoped recovery limits. Worker environment names are also
+once-per-journal launch configuration until a higher frozen plan version creates the ratified
+extension boundary; recovery limits stay fixed. Compare the
 file with the current frozen graph: remove configured repositories and prepare commands whose names
 are absent, write the filtered file atomically, and report every dropped name. If a later graph adds
 a repository, ask only for that repository and extend `run.json`.
@@ -112,12 +124,36 @@ at the next plan-version boundary.
 
 Host only this foreground process in the named tmux session from `run.json`. Create the detached
 session if absent, enable `remain-on-exit`, and relaunch an exited driver with `tmux respawn-pane -k`
-rather than making anonymous sessions. Record the exact shell-escaped argv, launch time, tmux target,
+rather than making anonymous sessions. `respawn-pane` executes an argv without a shell: invoke
+`/usr/bin/env` rather than bare `env`, and supply the absolute path to `pce` rather than bare `pce`.
+Record the exact shell-escaped argv, launch time, tmux target,
 and exit status in `supervision.md` before mentioning the launch in chat.
 
 The driver exits after printing status on `Finished` or `Blocked`; an exited pane is normal. Relaunch
 only after a goal-preserving resolution or a newly frozen graph makes progress possible. Never run
 two drivers against one journal. The driver's own worker panes are not the supervision session.
+Killing or respawning the driver pane does not terminate the Herdr workers it dispatched.
+
+Before any worker kill, preserve the transcript by reading the journaled
+`dispatch-worker-identified.session_path`; do not locate a session by grepping `~/.prime`. Then use
+this discriminator on the whole descendant tree, never only the agent process. An agent at zero CPU
+whose child is doing real work is foreground-waiting on its act and must not be killed. Only a whole
+tree whose cumulative CPU is under one second, whose worktree is clean, and which wrote nothing is
+parked machinery.
+
+Cleanup is exceptional and must be fully guarded. Type the exact attempt identity from the journal
+(for example the complete package-outcome path containing package and issuance) and the recorded
+root PID; never derive either from a text search. Build the descendant tree only by recursively
+calling `/usr/bin/pgrep -P <parent-pid>`. For each PID, process leaves before parents and immediately
+before each signal read its argv with `/bin/ps -p <pid> -o command=`. Refuse unless that argv contains
+the exact typed attempt identity. Use `TERM` then `KILL`: send `/bin/kill -TERM <pid>` leaf-first,
+wait a bounded interval, then re-run the same identity and argv guard before `/bin/kill -KILL <still-live-pid>`, again
+leaf-first. Never use `pkill`, `killall`, or grep output to select processes to kill. This cleanup
+must not reach any concurrent vision.
+
+Killing a confirmed wedged leaf charges the environment-failure allowance, not a package recovery
+rung: `dispatches_remaining`, `retry_remaining`, and `local_patch_remaining` stay unchanged, and
+the driver may redispatch without a human recovery action.
 
 ## 4. Render and interpret the journal
 
@@ -227,9 +263,13 @@ Act without prior approval, then append and report the action, only in these cas
   old package's carried completion. Do **not** freeze it; present the exact human command:
 
   ```bash
-  pce graph freeze --vision-dir <vision-dir>
+  pce graph freeze --vision-dir <vision-dir> \
+    --repository <NAME>=<SOURCE_WORKTREE> [...]
   ```
 
+  This ordinary human freeze checks remote base currency for every repository. A deliberate offline
+  or historical freeze requires the human's attributed risk-acceptance record; the supervisor does
+  not author that record. Mechanical freeze remains local and cannot accept base-currency risk.
   Every other freeze remains a human ruling.
 
 Never modify any repository participating in the run. Never edit a criterion command. Never edit or
@@ -319,6 +359,8 @@ push otherwise. Resolve all of the following once and append them to `supervisio
 - the frozen graph's and journal's SHA-256 digests computed from their bytes with
   `shasum -a 256`;
 - the final `AssemblyRepositoryComposed.base_oid` for the repository in the active plan version;
+  despite its name, `AssemblyRepositoryComposed.base_oid` is the composed result, and that commit's
+  first parent is the starting base from which composition began;
 - every package input named by the final assembly event, its final issuance, local branch
   `pce/<vision>/<package>/attempt-<issuance>`, and the event's exact oid; and
 - assembly branch `pce/<vision>/assembly-v<plan_version>` at the recorded assembly oid.
