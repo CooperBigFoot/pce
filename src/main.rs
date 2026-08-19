@@ -9950,7 +9950,7 @@ fn package_artifact_references(package: &pce_core::WorkPackage) -> Vec<(String, 
     for criterion in package.criteria() {
         for artifact in extract_conservative_artifact_references(criterion.command()) {
             let repository = match artifact.repository_index() {
-                Some(index) => package.repositories().get(index - 1),
+                Some(index) => package.repositories().get(index.position()),
                 None if package.repositories().len() == 1 => package.repositories().first(),
                 None => None,
             };
@@ -10041,6 +10041,9 @@ fn graph_authoring_warnings(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
+            if !strict_upstream_references.is_empty() {
+                continue;
+            }
             warnings.push(GraphAuthoringWarning::ArtifactProvenance {
                 package: package.id().as_str().to_owned(),
                 criterion,

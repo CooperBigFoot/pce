@@ -234,6 +234,6 @@ pub use work_package_graph::{
 };
 
 pub use graph_authoring::{
-    ConservativeArtifactReference, extract_conservative_artifact_references, normalize_act_title,
-    titles_conservatively_overlap,
+    ConservativeArtifactReference, WorktreeRepositoryIndex,
+    extract_conservative_artifact_references, normalize_act_title, titles_conservatively_overlap,
 };

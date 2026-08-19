@@ -92,11 +92,11 @@ fn artifact_lints_warn_by_default_fail_in_strict_and_ignore_ambiguous_tokens() {
 }
 
 #[test]
-fn exact_worktree_paths_use_the_declared_multi_repository_mapping() {
+fn zero_based_worktree_paths_use_the_declared_multi_repository_mapping() {
     let directory = tempdir().expect("temp");
     let (one, oid1) = repository(directory.path(), "one", &[]);
     let (two, oid2) = repository(directory.path(), "two", &["present/data.json"]);
-    let graph = json!({"vision":"multi","plan_version":1,"authored_at_refs":{"one":oid1,"two":oid2},"packages":[package("A","Act", &["one","two"], "cat $PCE_WORKTREE_2/present/data.json $PCE_WORKTREE_1/missing/data.json $PCE_WORKTREE_X/no.json", &[])]});
+    let graph = json!({"vision":"multi","plan_version":1,"authored_at_refs":{"one":oid1,"two":oid2},"packages":[package("A","Act", &["one","two"], "cat $PCE_WORKTREE_1/present/data.json $PCE_WORKTREE_0/missing/data.json $PCE_WORKTREE_2/out-of-range.json $PCE_WORKTREE_X/no.json", &[])]});
     let path = directory.path().join("graph.json");
     fs::write(&path, serde_json::to_vec(&graph).expect("JSON")).expect("graph");
     let output = check(
@@ -128,18 +128,13 @@ fn provenance_distinguishes_strict_upstream_from_downstream_references() {
     fs::write(&path, serde_json::to_vec(&graph).expect("JSON")).expect("graph");
     let output = check(&path, &[format!("repo={}", repo.display())], false);
     let receipt: Value = serde_json::from_slice(&output.stdout).expect("receipt");
-    let b = receipt["warnings"]
-        .as_array()
-        .expect("warnings")
-        .iter()
-        .find(|w| w["package"] == "B")
-        .expect("B warning");
-    assert_eq!(b["strict_upstream_references"], json!(["A"]));
     assert!(
-        b["message"]
-            .as_str()
-            .expect("message")
-            .contains("graph has no output declarations")
+        receipt["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .all(|warning| warning["package"] != "B"),
+        "an exact path referenced by strict upstream A suppresses B's missing-producer warning"
     );
     let a_down = receipt["warnings"]
         .as_array()
@@ -148,6 +143,14 @@ fn provenance_distinguishes_strict_upstream_from_downstream_references() {
         .find(|w| w["package"] == "A" && w["path"] == "shared/downstream.json")
         .expect("A warning");
     assert_eq!(a_down["strict_upstream_references"], json!([]));
+    assert!(
+        receipt["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning["package"] == "C" && warning["path"] == "shared/downstream.json"),
+        "a downstream or unrelated reference must not suppress a missing-producer warning"
+    );
 }
 
 #[test]
