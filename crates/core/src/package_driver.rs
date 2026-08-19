@@ -1800,7 +1800,7 @@ pub fn derive_driver_snapshot(
         .packages()
         .iter()
         .map(|package| {
-            let charged = charged_failure_count(active_events, package.id().as_str());
+            let charged = charged_failure_count(events, package.id().as_str());
             (
                 package.id().as_str().to_owned(),
                 recovery_budget(configured_limits.unwrap_or_default(), charged),
@@ -2077,7 +2077,7 @@ pub fn repeated_identical_worker_blocker<'a>(
 
 /// Count only worker-reported or criterion-judgement failures attributed to package work.
 pub fn charged_failure_count(events: &[DriverEvent], package_id: &str) -> usize {
-    events_for_active_plan(events)
+    events
         .iter()
         .filter(|event| {
             matches!(event,
@@ -3054,5 +3054,47 @@ mod tests {
             failure(3),
         ];
         assert_eq!(repeated_identical_worker_blocker(&parked_breaks, "A"), None);
+    }
+
+    #[test]
+    fn plan_advance_does_not_restore_spent_recovery_rungs() {
+        let limits = RecoveryLimits::new(RetryLimit::new(1), LocalPatchLimit::new(1));
+        let events = vec![
+            DriverEvent::RecoveryConfigured { limits },
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::WorkerFailed {
+                package: "A".to_owned(),
+                issuance: 1,
+                reason: "first failure".to_owned(),
+            },
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 2,
+            },
+            DriverEvent::WorkerFailed {
+                package: "A".to_owned(),
+                issuance: 2,
+                reason: "different second failure".to_owned(),
+            },
+            DriverEvent::PlanVersionAdvanced {
+                from_plan_version: 1,
+                to_plan_version: 2,
+                carried_completions: Vec::new(),
+                carried_amendments: Vec::new(),
+                criterion_revisions_ratified_by: None,
+                criterion_revisions: Vec::new(),
+            },
+        ];
+
+        let snapshot = derive_driver_snapshot(&graph_at_plan_version(2), &events, false)
+            .expect("plan two snapshot");
+        assert_eq!(snapshot.recovery()[0].1.dispatches_remaining, 1);
+        assert_eq!(
+            snapshot.recovery()[0].1.next_rung,
+            crate::RecoveryRung::LocalPatch
+        );
     }
 }
