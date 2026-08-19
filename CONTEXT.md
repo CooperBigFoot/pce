@@ -215,6 +215,8 @@
 | Mechanical freeze and approval attribution | A successful mechanical freeze appends the ordinary three-field `planning-artifact-approved` payload for the frozen graph at node `graph`, because artifact consumers select by that path and digest. The node is bootstrap provenance, not human authorship or ratification; the supervising agent and exact binary acceptance belong in `supervision.md`. |
 | Mechanical freeze and observed interruption | Pure plan bumps interrupted gridded-statics v2, left hfx v2 waiting, and would have interrupted the observed bluesmith recovery even though no definition changed. The opposite boundary is bluesmith W4's proposed `1.25` tolerance: it changed semantic acceptance and correctly stopped at a human freeze. These cases justify removing the empty ruling while retaining the semantic one. |
 
+| Criterion hook path and decision evidence | Bash protection enumerates active `planning/<vision>/vision.md` files and refuses only commands that contain one of those exact absolute or repository-relative paths at path boundaries; `supervision.md` and prose that merely contains its name are unrelated. Edit and Write protection reconstructs the whole proposed document and sends those exact bytes to `pce criteria check` on stdin. A structured refusal reports the first differing criterion position and required/proposed names; verifier transport failures remain fail-closed with the generic diagnostic because no comparison exists to name. |
+
 ## Ambiguities
 
 | Topic | Current interpretation | Resolution condition |

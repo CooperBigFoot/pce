@@ -8,9 +8,9 @@ if [ ! -x "$python" ]; then
 fi
 
 PYTHONDONTWRITEBYTECODE=1 "$python" -c '
-import glob
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -25,8 +25,10 @@ def refuse_construct():
     raise SystemExit(2)
 
 
-def refuse_verifier():
+def refuse_verifier(detail=None):
     sys.stderr.write(VERIFIER_REFUSAL + "\n")
+    if detail is not None:
+        sys.stderr.write(detail + "\n")
     raise SystemExit(2)
 
 
@@ -81,6 +83,36 @@ def proposed_edit(tool_input, path):
     return proposal.encode("utf-8")
 
 
+def criterion_name(criteria, index):
+    if index >= len(criteria):
+        return "<missing>"
+    criterion = criteria[index]
+    if not isinstance(criterion, dict) or not isinstance(criterion.get("name"), str):
+        return "<unnamed>"
+    return json.dumps(criterion["name"])
+
+
+def comparison_failure(output):
+    try:
+        decision = json.loads(output.decode("utf-8"))
+        required = decision["required_criteria"]
+        proposed = decision["proposed_criteria"]
+        if not isinstance(required, list) or not isinstance(proposed, list):
+            return None
+    except Exception:
+        return None
+    for index in range(max(len(required), len(proposed))):
+        required_criterion = required[index] if index < len(required) else None
+        proposed_criterion = proposed[index] if index < len(proposed) else None
+        if required_criterion != proposed_criterion:
+            return "Criterion comparison failed at position {}: required {}; proposed {}.".format(
+                index + 1,
+                criterion_name(required, index),
+                criterion_name(proposed, index),
+            )
+    return None
+
+
 def verify_proposal(document, cwd, log_path, vision_dir):
     executable = os.path.join(os.environ.get("HOME", ""), ".local", "bin", "pce")
     try:
@@ -95,7 +127,39 @@ def verify_proposal(document, cwd, log_path, vision_dir):
     except Exception:
         refuse_verifier()
     if result.returncode != 0:
-        refuse_verifier()
+        refuse_verifier(comparison_failure(result.stdout))
+
+
+def active_vision_paths(root):
+    planning = os.path.join(root, "planning")
+    try:
+        entries = os.scandir(planning)
+    except OSError:
+        return []
+    paths = []
+    with entries:
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            vision = os.path.join(entry.path, "vision.md")
+            log = os.path.join(entry.path, "events.jsonl")
+            if os.path.isfile(vision) and os.path.isfile(log):
+                paths.append(os.path.abspath(vision))
+    return paths
+
+
+def command_references_path(command, path, root):
+    candidates = [path]
+    try:
+        relative = os.path.relpath(path, root)
+        candidates.extend([relative, os.path.join(".", relative)])
+    except ValueError:
+        pass
+    for candidate in candidates:
+        pattern = r"(?<![A-Za-z0-9_./-])" + re.escape(candidate) + r"(?![A-Za-z0-9_./-])"
+        if re.search(pattern, command):
+            return True
+    return False
 
 
 def handle_bash(payload, root):
@@ -105,10 +169,9 @@ def handle_bash(payload, root):
     command = tool_input.get("command")
     if not isinstance(command, str):
         refuse_construct()
-    if "vision.md" not in command or root is None:
+    if root is None:
         return
-    pattern = os.path.join(root, "planning", "*", "events.jsonl")
-    if any(os.path.isfile(candidate) for candidate in glob.glob(pattern)):
+    if any(command_references_path(command, path, root) for path in active_vision_paths(root)):
         sys.stderr.write(BASH_REFUSAL + "\n")
         raise SystemExit(2)
 
