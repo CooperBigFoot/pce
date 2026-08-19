@@ -344,16 +344,19 @@ identical to `authored_at_refs` keys. An ordinary human freeze fetches each remo
 refuses when the authored oid is historical or remote currency cannot be established. It names the
 oids and divergence and directs the human to `git pull --ff-only`. Mechanical freeze remains local.
 
-A human may deliberately accept one offline or historical ordinary freeze by independently writing
-this strict record and supplying `--accept-base-currency-risk <HUMAN_RECORD_PATH>` on the freeze
-command. Repository scope must exactly equal the repositories whose currency failures are accepted;
-`mode` is `offline` or `historical`, and unknown fields are refused:
+A human may deliberately accept currency failures for one ordinary freeze by independently
+writing this strict record and supplying `--accept-base-currency-risk <HUMAN_RECORD_PATH>` on the
+freeze command. The entries must exactly equal the repositories whose currency failures are
+accepted. Each entry assigns that repository its observed `offline` or `historical` mode, so one
+freeze can attribute a mixed failure set. Duplicate repositories and unknown fields are refused:
 
 ```json
 {
   "schema_version": 1,
-  "repositories": ["<repository name>"],
-  "mode": "historical",
+  "entries": [
+    {"repository": "<offline repository name>", "mode": "offline"},
+    {"repository": "<historical repository name>", "mode": "historical"}
+  ],
   "accepted_by": "<human identity>",
   "reason": "<human rationale>"
 }
