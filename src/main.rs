@@ -2630,12 +2630,24 @@ fn run_join_parent_criteria(
             .iter()
             .map(|(repository, path)| Ok((repository.clone(), git_oid(path, "HEAD")?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
+        let materialization_label =
+            format!("join-{package_id}-{}-{issuance}", parent.id().as_str());
         let materialization = materialize_driver_state(
             &command.journal_path,
-            &format!("join-{package_id}-{}-{issuance}", parent.id().as_str()),
+            &materialization_label,
             &sources,
             &refs,
         )?;
+        if !prepare_driver_materialization(
+            &command.journal_path,
+            package_id,
+            &materialization_label,
+            &materialization,
+            &sources,
+            &command.preparations,
+        )? {
+            return Ok(false);
+        }
         let paths = materialization.paths()?;
         let named_paths = materialization
             .named_paths(&sources)

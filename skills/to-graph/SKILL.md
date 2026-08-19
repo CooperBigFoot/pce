@@ -155,7 +155,9 @@ Two of the incidence run's parks were exactly this.
 
 Author criterion commands from commands you have executed successfully against the named input.
 Never write a command because a tool or flag is expected to exist. Recorded evidence must establish
-that the exact command surface exists before it becomes a criterion.
+that the exact command surface exists before it becomes a criterion. A negative-form criterion must
+first assert that its tool exists, for example `test -x ./tool && if ./tool verify; then exit 1; fi`;
+otherwise a missing tool can skip the `then` branch and false-pass the criterion.
 
 A frozen criterion is immutable for every machine role. Only an explicit human-ratified revision at
 a later freeze may edit or remove it, and that ruling forfeits the affected package's carried

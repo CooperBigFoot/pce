@@ -476,8 +476,9 @@ fi
     assert!(events.contains("reverted"));
 }
 
-#[test]
-fn conflicting_dependency_composition_dispatches_owner_and_reproves_parents() {
+fn run_conflicting_dependency_composition(
+    fail_join_preparation: bool,
+) -> (tempfile::TempDir, std::path::PathBuf, std::process::Output) {
     let temp = tempdir().expect("tempdir");
     let repository = temp.path().join("repo");
     fs::create_dir(&repository).expect("repository");
@@ -499,8 +500,8 @@ fn conflicting_dependency_composition_dispatches_owner_and_reproves_parents() {
         "plan_version": 1,
         "authored_at_ref": "HEAD",
         "packages": [
-            {"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"a","input":"repo","observation":"A won its branch","command":"grep -qx A shared.txt"}],"depends_on":[]},
-            {"id":"B","title":"B","repositories":["repo"],"criteria":[{"name":"b","input":"repo","observation":"B won its branch","command":"grep -qx B shared.txt"}],"depends_on":[]},
+            {"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"a","input":"repo","observation":"A won its branch","command":"test -x ./prepared-tool && ./prepared-tool A"}],"depends_on":[]},
+            {"id":"B","title":"B","repositories":["repo"],"criteria":[{"name":"b","input":"repo","observation":"B won its branch","command":"test -x ./prepared-tool && ./prepared-tool B"}],"depends_on":[]},
             {"id":"C","title":"C","repositories":["repo"],"criteria":[{"name":"composed","input":"repo","observation":"dependencies compose","command":"true"}],"depends_on":[
                 {"id":"A","kind":"buildability","reason":"needs A"},
                 {"id":"B","kind":"buildability","reason":"needs B"}
@@ -562,6 +563,10 @@ fi
         .arg(&journal)
         .args(["--repository"])
         .arg(format!("repo={}", repository.display()))
+        .args([
+            "--prepare",
+            "repo=case \"${PCE_FAIL_JOIN_PREPARATION-}:$PWD\" in 1:*join-C-*) exit 42;; esac; printf '#!/bin/sh\ngrep -qx \"$1\" shared.txt\n' > prepared-tool && chmod +x prepared-tool",
+        ])
         .args(["--wait-timeout-ms", "10000"])
         .env("HERDR_ENV", "1")
         .env(
@@ -571,8 +576,18 @@ fi
         .env("PATH", path)
         .env("HOME", temp.path())
         .env("USER", "tester")
+        .env(
+            "PCE_FAIL_JOIN_PREPARATION",
+            if fail_join_preparation { "1" } else { "" },
+        )
         .output()
         .expect("driver");
+    (temp, journal, output)
+}
+
+#[test]
+fn conflicting_dependency_composition_dispatches_owner_and_reproves_parents() {
+    let (temp, journal, output) = run_conflicting_dependency_composition(false);
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -614,11 +629,52 @@ fi
             .iter()
             .any(|event| { event["event"] == "worker-dispatched" && event["package"] == "C" })
     );
+    let join_preparations = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            event["event"] == "environment-preparation-executed"
+                && event["package"] == "C"
+                && event["materialization"]
+                    .as_str()
+                    .is_some_and(|label| label.starts_with("join-C-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(join_preparations.len(), 2);
+    assert_eq!(
+        join_preparations
+            .iter()
+            .map(|(_, event)| event["materialization"].as_str().expect("label"))
+            .collect::<Vec<_>>(),
+        vec!["join-C-A-3", "join-C-B-3"]
+    );
+    assert!(
+        join_preparations
+            .iter()
+            .all(|(_, event)| { event["repository"] == "repo" && event["outcome"] == "succeeded" })
+    );
     let parent_proofs = events
         .iter()
         .filter(|event| event["event"] == "join-criterion-executed")
         .collect::<Vec<_>>();
     assert_eq!(parent_proofs.len(), 2);
+    for proof in &parent_proofs {
+        let parent = proof["parent"].as_str().expect("parent");
+        let preparation_index = join_preparations
+            .iter()
+            .find(|(_, event)| {
+                event["materialization"]
+                    .as_str()
+                    .is_some_and(|label| label.starts_with(&format!("join-C-{parent}-")))
+            })
+            .map(|(index, _)| *index)
+            .expect("parent join preparation");
+        let proof_index = events
+            .iter()
+            .position(|event| std::ptr::eq(event, *proof))
+            .expect("parent proof index");
+        assert!(preparation_index < proof_index);
+    }
     assert!(
         parent_proofs
             .iter()
@@ -634,6 +690,62 @@ fi
         .expect("dependent criterion");
     assert!(last_parent_proof < dependent_criterion);
     assert!(!temp.path().join("unexpected-c-dispatch").exists());
+}
+
+#[test]
+fn failed_join_preparation_is_environmental_and_does_not_charge_the_package() {
+    let (_temp, journal, output) = run_conflicting_dependency_composition(true);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&journal).unwrap_or_default()
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status");
+    assert_eq!(status["outcome"], "blocked");
+
+    let events = journal_events(&journal);
+    let worker_done = events
+        .iter()
+        .position(|event| event["event"] == "worker-done" && event["package"] == "C")
+        .expect("dependent worker done");
+    let failed_preparations = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            event["event"] == "environment-preparation-executed"
+                && event["package"] == "C"
+                && event["outcome"] == "failed"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(failed_preparations.len(), 1);
+    let (failed_preparation_index, failed_preparation) = failed_preparations[0];
+    assert!(worker_done < failed_preparation_index);
+    assert_eq!(failed_preparation["materialization"], "join-C-A-3");
+    assert_eq!(failed_preparation["repository"], "repo");
+    assert_eq!(failed_preparation["execution"]["exit_status"]["code"], 42);
+    assert!(
+        !events.iter().any(|event| {
+            event["event"] == "join-criterion-executed" && event["package"] == "C"
+        })
+    );
+    for forbidden in [
+        "criterion-executed",
+        "gate-dispatched",
+        "gate-finished",
+        "package-completed",
+        "worker-failed",
+        "package-failed",
+        "recovery-rung-attempted",
+        "package-parked",
+    ] {
+        assert!(
+            !events
+                .iter()
+                .any(|event| { event["event"] == forbidden && event["package"] == "C" }),
+            "unexpected {forbidden} for dependent package"
+        );
+    }
 }
 
 #[test]
