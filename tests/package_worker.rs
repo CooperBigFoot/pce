@@ -128,6 +128,57 @@ Create one known file.
 }
 
 #[test]
+fn brief_states_informational_authority_and_cross_package_file_references() {
+    let directory = tempdir().expect("temporary directory");
+    let vision = directory.path().join("vision.md");
+    fs::write(
+        &vision,
+        r#"# Vision: bounded
+
+## Goal / Why
+
+Change one script without crossing authority boundaries.
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{"criteria":[{"name":"Bounded","input":"Inspect scripts","observation":"Only the named act occurs"}]}
+```
+"#,
+    )
+    .expect("vision");
+    let graph = directory.path().join("graph.json");
+    fs::write(
+        &graph,
+        r#"{"vision":"bounded","plan_version":1,"authored_at_ref":"main","packages":[
+{"id":"A","title":"change shared script","repositories":["repo"],"criteria":[{"name":"script works","input":"script","observation":"passes","command":"python scripts/shared_proof.py --self-test"}],"depends_on":[]},
+{"id":"B","title":"consume shared script","repositories":["repo"],"criteria":[{"name":"consumer works","input":"script","observation":"passes","command":"python scripts/shared_proof.py --verify"}],"depends_on":[{"id":"A","kind":"buildability","reason":"uses the shared proof"}]}
+]}"#,
+    )
+    .expect("graph");
+    let output = pce()
+        .args(["package", "brief", "--vision"])
+        .arg(&vision)
+        .args(["--graph"])
+        .arg(&graph)
+        .args(["--package", "A", "--worktree", "repo=/worktrees/repo"])
+        .output()
+        .expect("brief");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let brief = String::from_utf8(output.stdout).expect("brief UTF-8");
+    assert!(
+        brief.contains("Only the repositories under change listed in this brief may be modified")
+    );
+    assert!(brief.contains("even when the credentials you hold permit them"));
+    assert!(brief.contains("only through a criterion that names the act"));
+    assert!(brief.contains("scripts/shared_proof.py: also referenced by B"));
+}
+
+#[test]
 fn two_repository_package_carries_both_worktree_paths() {
     let directory = tempdir().expect("temporary directory");
     let vision = directory.path().join("vision.md");

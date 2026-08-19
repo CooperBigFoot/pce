@@ -4,7 +4,7 @@
 //! A brief gives one worker global intent, graph-wide summary context, and exactly one package's
 //! executable detail. An outcome is the worker's strict, non-self-certifying status report.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -123,6 +123,82 @@ fn render_criterion_summary(output: &mut String, criterion: &crate::WorkPackageC
     let _ = writeln!(output, "    Observation: {}", criterion.observation());
 }
 
+fn criterion_file_references(command: &str) -> BTreeSet<String> {
+    command
+        .split(|character: char| character.is_whitespace() || "|&;()<>[]{}".contains(character))
+        .filter_map(|token| {
+            let value = token
+                .rsplit_once('=')
+                .map_or(token, |(_, value)| value)
+                .trim_matches(|character: char| "'\"`,:".contains(character))
+                .trim_start_matches("./");
+            let basename = value.rsplit('/').next().unwrap_or(value);
+            let has_file_extension = basename
+                .rsplit_once('.')
+                .is_some_and(|(stem, extension)| !stem.is_empty() && !extension.is_empty());
+            (!value.is_empty()
+                && !value.starts_with('-')
+                && !value.contains("://")
+                && (value.contains('/') || has_file_extension))
+                .then(|| value.to_owned())
+        })
+        .collect()
+}
+
+fn render_cross_package_file_references(
+    output: &mut String,
+    graph: &WorkPackageGraph,
+    package: &crate::WorkPackage,
+) {
+    let own_paths = package
+        .criteria()
+        .iter()
+        .flat_map(|criterion| criterion_file_references(criterion.command()))
+        .collect::<BTreeSet<_>>();
+    let mut other_references = BTreeMap::<String, BTreeSet<&str>>::new();
+    for candidate in graph
+        .packages()
+        .iter()
+        .filter(|candidate| candidate.id() != package.id())
+    {
+        for path in candidate
+            .criteria()
+            .iter()
+            .flat_map(|criterion| criterion_file_references(criterion.command()))
+        {
+            if own_paths.contains(&path) {
+                other_references
+                    .entry(path)
+                    .or_default()
+                    .insert(candidate.id().as_str());
+            }
+        }
+    }
+
+    output.push_str("\nCross-package file references derived from criterion commands:\n");
+    if own_paths.is_empty() {
+        output.push_str("- No file paths were found in this package's criterion commands.\n");
+    } else {
+        for path in own_paths {
+            match other_references.get(&path) {
+                Some(packages) => {
+                    let _ = writeln!(
+                        output,
+                        "- {path}: also referenced by {}",
+                        packages.iter().copied().collect::<Vec<_>>().join(", ")
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        output,
+                        "- {path}: no other package criterion references this path"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Compose a deterministic worker brief without executing any criterion command.
 ///
 /// # Errors
@@ -234,6 +310,7 @@ pub fn compose_package_worker_brief(
         let _ = writeln!(output, "  Observation: {}", criterion.observation());
         let _ = writeln!(output, "  Command: {}", criterion.command());
     }
+    render_cross_package_file_references(&mut output, graph, package);
     output.push_str("\nThe commands above are exposed as targets only. Do not execute them as a substitute for independent judgement. Your own assessment is not the judgement: the criteria will be executed independently by the driver, which will use each command's exit status to judge the package.\n");
 
     output.push_str("\n## 4. Scope boundary\n\n");
@@ -262,6 +339,7 @@ pub fn compose_package_worker_brief(
         }
     }
     output.push_str("The graph is context, not permission. Use neighbouring packages to avoid stranding their work, but do not implement, refactor, or opportunistically complete them even when doing so is convenient. If this package cannot serve the vision without changing another package, report a missing dependency or other mis-specification instead of crossing the boundary.\n");
+    output.push_str("Only the repositories under change listed in this brief may be modified. Cloud, IAM, and account-level mutations are out of scope even when the credentials you hold permit them, unless this package has a criterion that names that act. Infrastructure changes may be made only through a criterion that names the act. This boundary is informational; credentials remain the enforcement fence.\n");
 
     output.push_str("\n## 5. Act ownership and long-running commands\n\nRun every act to completion in the foreground and write the outcome before exiting. Ending your turn is exiting. A process you background is orphaned the moment you stop, so never leave one running. Do not use shell backgrounding, `nohup`, `disown`, or a detached wrapper.\n\nFor a long-running command, start one foreground tool invocation with its timeout or yield interval configured to permit the command to finish, then keep the turn open and wait on that same invocation until it returns. If the tool returns a live handle, inspect that same handle until it reaches a terminal state. Do not start a child, report its PID or log path, and end the turn to wait. After the act reaches a terminal state, inspect its evidence and write the required outcome before exiting.\n");
 
