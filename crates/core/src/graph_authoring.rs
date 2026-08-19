@@ -1,17 +1,32 @@
 //! authoring_lints : CriterionCommand → ConservativeArtifactReference*
 //!
 //! This module extracts only literal repository-relative paths whose repository meaning is stable.
+//!
+//! Heuristic limits: extraction is token-based. It does not parse shell grammar or infer that a
+//! command produces its own path. Top-level dotted literals require an alphabetic character, which
+//! retains common manifests while intentionally omitting numeric version-like tokens.
+
+/// A zero-based `$PCE_WORKTREE_N` repository position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WorktreeRepositoryIndex(usize);
+
+impl WorktreeRepositoryIndex {
+    /// Return the zero-based repository position named by the runtime variable.
+    pub const fn position(self) -> usize {
+        self.0
+    }
+}
 
 /// One conservatively extracted artifact reference.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ConservativeArtifactReference {
-    repository_index: Option<usize>,
+    repository_index: Option<WorktreeRepositoryIndex>,
     path: String,
 }
 
 impl ConservativeArtifactReference {
-    /// Return the one-based `$PCE_WORKTREE_N` repository index, if explicitly named.
-    pub const fn repository_index(&self) -> Option<usize> {
+    /// Return the zero-based `$PCE_WORKTREE_N` repository position, if explicitly named.
+    pub const fn repository_index(&self) -> Option<WorktreeRepositoryIndex> {
         self.repository_index
     }
     /// Return the normalized repository-relative path.
@@ -39,9 +54,10 @@ fn normalize_path(raw: &str) -> Option<String> {
         return None;
     }
     if !raw.contains('/')
-        && !raw
+        && (!raw
             .rsplit_once('.')
             .is_some_and(|(stem, suffix)| !stem.is_empty() && !suffix.is_empty())
+            || !raw.chars().any(char::is_alphabetic))
     {
         return None;
     }
@@ -69,12 +85,9 @@ pub fn extract_conservative_artifact_references(
             let Ok(index) = raw_index.parse::<usize>() else {
                 continue;
             };
-            if index == 0 {
-                continue;
-            }
             if let Some(path) = normalize_path(raw_path) {
                 references.push(ConservativeArtifactReference {
-                    repository_index: Some(index),
+                    repository_index: Some(WorktreeRepositoryIndex(index)),
                     path,
                 });
             }
@@ -128,19 +141,36 @@ pub fn titles_conservatively_overlap(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_conservative_artifact_references, normalize_act_title,
+        WorktreeRepositoryIndex, extract_conservative_artifact_references, normalize_act_title,
         titles_conservatively_overlap,
     };
     #[test]
     fn ignores_tokens_with_unstable_shell_or_location_meaning() {
         let refs = extract_conservative_artifact_references(
-            "cat ok/file.json /abs ../up *.json https://x/a $VAR/a '$PCE_WORKTREE_2/good/file.json'",
+            "cat ok/file.json /abs ../up *.json https://x/a $VAR/a '$PCE_WORKTREE_0/good/file.json'",
         );
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].path(), "ok/file.json");
         assert_eq!(refs[0].repository_index(), None);
         assert_eq!(refs[1].path(), "good/file.json");
-        assert_eq!(refs[1].repository_index(), Some(2));
+        assert_eq!(
+            refs[1]
+                .repository_index()
+                .map(WorktreeRepositoryIndex::position),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn keeps_common_top_level_manifests_but_rejects_numeric_dotted_literals() {
+        let refs =
+            extract_conservative_artifact_references("cat Cargo.toml package.json 1.2.3 2026.08");
+        assert_eq!(
+            refs.iter()
+                .map(|reference| reference.path())
+                .collect::<Vec<_>>(),
+            vec!["Cargo.toml", "package.json"]
+        );
     }
     #[test]
     fn title_normalization_is_punctuation_and_case_only() {

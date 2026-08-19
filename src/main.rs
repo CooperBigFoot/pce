@@ -24,8 +24,8 @@ use pce_core::{
     AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
     AbsoluteWorktreeRoot, AcceptanceCriteria, ActReversibility, AmendmentProof,
     AmendmentRepositoryRefs, AppendError, AppendableCategory, AppendableFinding, ArgumentVector,
-    ArtifactOutcome, ArtifactPath, ArtifactProduction, AuthorityFailure, BranchState,
-    BuiltArtifactRef, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage,
+    ArtifactOutcome, ArtifactPath, ArtifactProduction, AuthorityFailure, BaseCurrencyRiskMode,
+    BranchState, BuiltArtifactRef, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage,
     ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage, CommandExitStatus,
     CompletionCriterionStatus, CompletionDecision, CompositionInput, CreationDate,
     CriterionChangeDecision, CriterionExecution, CurrentArtifactObservation, CurrentArtifactState,
@@ -5026,6 +5026,79 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
     }
 }
 
+fn ensure_base_currency_acceptance_imported(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    events: &[DriverEvent],
+) -> Result<bool> {
+    let version = graph.plan_version();
+    let directory = command
+        .graph_path
+        .parent()
+        .context("driver graph has no parent directory")?;
+    let sidecar = directory.join(format!("graph.v{version}.base-currency-acceptance.json"));
+    let bytes = match fs::read(&sidecar) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to read frozen base-currency acceptance {}",
+                    sidecar.display()
+                )
+            });
+        }
+    };
+    let acceptance = parse_base_currency_acceptance(&bytes)
+        .context("failed to parse frozen base-currency acceptance")?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let expected = DriverEvent::BaseCurrencyRiskAccepted {
+        plan_version: version,
+        repositories: acceptance.repositories,
+        mode: acceptance.mode,
+        accepted_by: acceptance.accepted_by,
+        reason: acceptance.reason,
+        sidecar_sha256: digest,
+    };
+    if events.iter().any(|event| event == &expected) {
+        return Ok(false);
+    }
+    if events.iter().any(|event| {
+        matches!(event, DriverEvent::BaseCurrencyRiskAccepted { plan_version, .. } if *plan_version == version)
+    }) {
+        bail!(
+            "driver journal already contains a different base-currency acceptance for plan version {version}"
+        );
+    }
+    let boundary_start = if version == 1 {
+        0
+    } else {
+        events
+            .iter()
+            .rposition(|event| {
+                matches!(event, DriverEvent::PlanVersionAdvanced { to_plan_version, .. } if *to_plan_version == version)
+            })
+            .context("base-currency acceptance cannot be imported before its plan-version boundary")?
+            + 1
+    };
+    if events[boundary_start..].iter().any(|event| {
+        !matches!(
+            event,
+            DriverEvent::DriverAborted { .. }
+                | DriverEvent::DriverResumed
+                | DriverEvent::WorkerEnvironmentDeclared { .. }
+                | DriverEvent::WorkerEnvironmentExtended { .. }
+                | DriverEvent::RecoveryConfigured { .. }
+        )
+    }) {
+        bail!(
+            "base-currency acceptance for plan version {version} cannot be imported after plan work began"
+        );
+    }
+    append_driver_event(&command.journal_path, &expected)?;
+    Ok(true)
+}
+
 fn ensure_driver_plan_version(
     graph: &WorkPackageGraph,
     command: &DriverRunCommand,
@@ -5258,6 +5331,9 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
         verify_graph_repository_refs(&graph, &command.repositories)?;
         let events = read_driver_journal(&command.journal_path)?;
         if ensure_driver_plan_version(&graph, &command, &events)? {
+            continue;
+        }
+        if ensure_base_currency_acceptance_imported(&graph, &command, &events)? {
             continue;
         }
         ensure_worker_environment_contract(&command, &events)?;
@@ -9874,7 +9950,7 @@ fn package_artifact_references(package: &pce_core::WorkPackage) -> Vec<(String, 
     for criterion in package.criteria() {
         for artifact in extract_conservative_artifact_references(criterion.command()) {
             let repository = match artifact.repository_index() {
-                Some(index) => package.repositories().get(index - 1),
+                Some(index) => package.repositories().get(index.position()),
                 None if package.repositories().len() == 1 => package.repositories().first(),
                 None => None,
             };
@@ -9965,6 +10041,9 @@ fn graph_authoring_warnings(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
+            if !strict_upstream_references.is_empty() {
+                continue;
+            }
             warnings.push(GraphAuthoringWarning::ArtifactProvenance {
                 package: package.id().as_str().to_owned(),
                 criterion,
@@ -10165,10 +10244,12 @@ fn highest_frozen_graph_version(vision_dir: &Path) -> Result<Option<u64>> {
     Ok(highest)
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct BaseCurrencyAcceptance {
     schema_version: u64,
+    repositories: Vec<String>,
+    mode: BaseCurrencyRiskMode,
     accepted_by: String,
     reason: String,
 }
@@ -10178,6 +10259,18 @@ fn parse_base_currency_acceptance(bytes: &[u8]) -> Result<BaseCurrencyAcceptance
         serde_json::from_slice(bytes).context("base-currency acceptance must be valid JSON")?;
     if acceptance.schema_version != 1 {
         bail!("base-currency acceptance schema_version must be 1");
+    }
+    if acceptance.repositories.is_empty()
+        || acceptance
+            .repositories
+            .iter()
+            .any(|repository| repository.trim().is_empty())
+    {
+        bail!("base-currency acceptance requires non-empty repository identities");
+    }
+    let unique = acceptance.repositories.iter().collect::<BTreeSet<_>>();
+    if unique.len() != acceptance.repositories.len() {
+        bail!("base-currency acceptance repository identities must be unique");
     }
     if acceptance.accepted_by.trim().is_empty() || acceptance.reason.trim().is_empty() {
         bail!("base-currency acceptance requires non-empty accepted_by and reason");
@@ -10194,19 +10287,32 @@ fn git_output(repository: &Path, arguments: &[&str]) -> Result<Output> {
         .with_context(|| format!("failed to execute git in {}", repository.display()))
 }
 
-fn verify_remote_base_currency(
+#[derive(Debug)]
+struct BaseCurrencyFailure {
+    repository: String,
+    mode: BaseCurrencyRiskMode,
+    diagnostic: String,
+}
+
+fn remote_base_currency_failures(
     graph: &WorkPackageGraph,
     repositories: &[(String, PathBuf)],
-) -> Result<()> {
+) -> Result<Vec<BaseCurrencyFailure>> {
+    let mut failures = Vec::new();
     for (name, repository) in repositories {
         let authored_ref = graph_authored_ref(graph, name)?;
         let authored_oid = git_oid(repository, authored_ref)?;
         let fetched = git_output(repository, &["fetch", "--no-tags", "origin", "HEAD"])?;
         if !fetched.status.success() {
-            bail!(
-                "repository `{name}` remote base currency cannot be established: origin HEAD is missing or unreachable: {}; configure/reach origin or use an explicit attributed --accept-base-currency-risk record for an offline or historical freeze",
-                String::from_utf8_lossy(&fetched.stderr).trim()
-            );
+            failures.push(BaseCurrencyFailure {
+                repository: name.clone(),
+                mode: BaseCurrencyRiskMode::Offline,
+                diagnostic: format!(
+                    "repository `{name}` remote base currency cannot be established: origin HEAD is missing or unreachable: {}; configure/reach origin or use an explicit attributed --accept-base-currency-risk record for an offline or historical freeze",
+                    String::from_utf8_lossy(&fetched.stderr).trim()
+                ),
+            });
+            continue;
         }
         let remote_oid = git_oid(repository, "FETCH_HEAD")?;
         let ancestor = git_output(
@@ -10237,8 +10343,58 @@ fn verify_remote_base_currency(
         let remote_only = fields
             .next()
             .context("git omitted remote-only divergence count")?;
+        failures.push(BaseCurrencyFailure {
+            repository: name.clone(),
+            mode: BaseCurrencyRiskMode::Historical,
+            diagnostic: format!(
+                "repository `{name}` authored oid {authored_oid} is not current with remote default oid {remote_oid} (authored-only {authored_only}, remote-only {remote_only}); update the source worktree with `git pull --ff-only` and re-author the graph"
+            ),
+        });
+    }
+    Ok(failures)
+}
+
+fn verify_remote_base_currency(
+    graph: &WorkPackageGraph,
+    repositories: &[(String, PathBuf)],
+    acceptance: Option<&BaseCurrencyAcceptance>,
+) -> Result<()> {
+    let failures = remote_base_currency_failures(graph, repositories)?;
+    let Some(acceptance) = acceptance else {
+        if let Some(failure) = failures.first() {
+            bail!(failure.diagnostic.clone());
+        }
+        return Ok(());
+    };
+    let accepted = acceptance
+        .repositories
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let failed = failures
+        .iter()
+        .map(|failure| failure.repository.as_str())
+        .collect::<BTreeSet<_>>();
+    if accepted != failed {
         bail!(
-            "repository `{name}` authored oid {authored_oid} is not current with remote default oid {remote_oid} (authored-only {authored_only}, remote-only {remote_only}); update the source worktree with `git pull --ff-only` and re-author the graph"
+            "base-currency acceptance repository scope {:?} does not exactly match repositories with accepted failures {:?}",
+            acceptance.repositories,
+            failures
+                .iter()
+                .map(|failure| failure.repository.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+    if let Some(failure) = failures
+        .iter()
+        .find(|failure| failure.mode != acceptance.mode)
+    {
+        bail!(
+            "repository `{}` has {:?} base-currency failure, not the accepted {:?} mode: {}",
+            failure.repository,
+            failure.mode,
+            acceptance.mode,
+            failure.diagnostic
         );
     }
     Ok(())
@@ -10288,23 +10444,28 @@ fn run_graph_freeze(
     let graph = parse_work_package_graph(&bytes)
         .with_context(|| format!("failed to validate work-package graph {}", source.display()))?;
     verify_graph_repository_refs(&graph, repositories)?;
-    let acceptance_bytes = if authority == FreezeAuthority::Human {
+    let acceptance = if authority == FreezeAuthority::Human {
         match base_currency_acceptance {
             Some(path) => {
                 let bytes = fs::read(path).with_context(|| {
                     format!("failed to read base-currency acceptance {}", path.display())
                 })?;
-                parse_base_currency_acceptance(&bytes)?;
-                Some(bytes)
+                let acceptance = parse_base_currency_acceptance(&bytes)?;
+                Some((bytes, acceptance))
             }
-            None => {
-                verify_remote_base_currency(&graph, repositories)?;
-                None
-            }
+            None => None,
         }
     } else {
         None
     };
+    if authority == FreezeAuthority::Human {
+        verify_remote_base_currency(
+            &graph,
+            repositories,
+            acceptance.as_ref().map(|(_, acceptance)| acceptance),
+        )?;
+    }
+    let acceptance_bytes = acceptance.map(|(bytes, _)| bytes);
     let version = graph.plan_version();
     let expected_vision = vision_dir
         .file_name()
