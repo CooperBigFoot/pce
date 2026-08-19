@@ -142,14 +142,20 @@ tree whose cumulative CPU is under one second, whose worktree is clean, and whic
 parked machinery.
 
 Cleanup is exceptional and must be fully guarded. Type the exact attempt identity from the journal
-(for example the complete package-outcome path containing package and issuance) and the recorded
-root PID; never derive either from a text search. Build the descendant tree only by recursively
-calling `/usr/bin/pgrep -P <parent-pid>`. For each PID, process leaves before parents and immediately
-before each signal read its argv with `/bin/ps -p <pid> -o command=`. Refuse unless that argv contains
-the exact typed attempt identity. Use `TERM` then `KILL`: send `/bin/kill -TERM <pid>` leaf-first,
-wait a bounded interval, then re-run the same identity and argv guard before `/bin/kill -KILL <still-live-pid>`, again
-leaf-first. Never use `pkill`, `killall`, or grep output to select processes to kill. This cleanup
-must not reach any concurrent vision.
+(for example the complete package-outcome path containing package and issuance) and use only the
+journaled root PID; never derive either from a text search. Read and record the exact root argv with
+`/bin/ps -p <root-pid> -o command=`. Refuse unless it contains the exact typed attempt identity.
+Before every signal, re-observe the process at the journaled root PID and require its argv to equal
+the recorded root argv and still contain that attempt identity. Build its descendant tree only by recursively calling `/usr/bin/pgrep -P <parent-pid>`.
+
+Process descendant leaves before parents. Immediately before signaling each descendant leaf,
+re-observe the tree and require that PID to remain in the recursively observed parent chain rooted at
+the still-guarded root. Descendant argv need not contain the attempt identity; the exact argv and
+identity guard belongs to the root. Use `TERM` first: send `/bin/kill -TERM <pid>` leaf-first, wait a
+bounded interval, then guard the root and recursively re-observe the chain again. Use `KILL` only for
+a PID that remains live in that chain: send `/bin/kill -KILL <still-live-pid>`, again leaf-first.
+Never use `pkill`, `killall`, or grep output to select processes to kill. This cleanup must not reach
+any concurrent vision.
 
 Killing a confirmed wedged leaf charges the environment-failure allowance, not a package recovery
 rung: `dispatches_remaining`, `retry_remaining`, and `local_patch_remaining` stay unchanged, and
@@ -359,8 +365,10 @@ push otherwise. Resolve all of the following once and append them to `supervisio
 - the frozen graph's and journal's SHA-256 digests computed from their bytes with
   `shasum -a 256`;
 - the final `AssemblyRepositoryComposed.base_oid` for the repository in the active plan version;
-  despite its name, `AssemblyRepositoryComposed.base_oid` is the composed result, and that commit's
-  first parent is the starting base from which composition began;
+  despite its name, `AssemblyRepositoryComposed.base_oid` is the final composed tip. Following its
+  first-parent chain reaches the starting authored base. Its immediate first parent equals that base
+  only for a single clean merge input. Do not require resolved paths or multi-input composition to
+  share that immediate-parent shape;
 - every package input named by the final assembly event, its final issuance, local branch
   `pce/<vision>/<package>/attempt-<issuance>`, and the event's exact oid; and
 - assembly branch `pce/<vision>/assembly-v<plan_version>` at the recorded assembly oid.
