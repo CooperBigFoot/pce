@@ -53,8 +53,8 @@ pub use package_completion::{
     parse_package_worker_result, serialize_package_worker_result,
 };
 pub use package_driver::{
-    AmendmentProof, AmendmentRepositoryRefs, BaseCurrencyRiskAcceptance, BaseCurrencyRiskMode,
-    CommandExitStatus, CompositionInput, CriterionExecution, CriterionOrigin,
+    AmendmentProof, AmendmentRepositoryRefs, BaseCurrencyRiskAcceptance, BaseCurrencyRiskEntry,
+    BaseCurrencyRiskMode, CommandExitStatus, CompositionInput, CriterionExecution, CriterionOrigin,
     DispatchEnvironmentObservation, DispatchWorkerProcessObservation, DriverAssemblyState,
     DriverEvent, DriverLoopOutcome, DriverPackageState, DriverRefProduct, DriverSnapshot,
     EffectiveCriterion, EnvironmentPreparationOutcome, FindingRejectionReason,

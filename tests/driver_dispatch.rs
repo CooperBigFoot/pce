@@ -14,11 +14,11 @@ fn executable(path: &Path, contents: &str) {
 #[test]
 fn default_driver_composes_dispatch_and_waits_for_durable_result() {
     let temp = tempdir().expect("tempdir");
-    let worktree_root = temp
-        .path()
-        .canonicalize()
-        .expect("canonical tempdir")
-        .join("worktrees");
+    let physical_worktree_root = temp.path().join("physical-worktrees");
+    fs::create_dir(&physical_worktree_root).expect("physical worktree root");
+    let worktree_root = temp.path().join("worktrees-link");
+    std::os::unix::fs::symlink(&physical_worktree_root, &worktree_root)
+        .expect("worktree root symlink");
     let repository = temp.path().join("repo");
     fs::create_dir(&repository).expect("repository");
     for args in [
@@ -91,7 +91,7 @@ set -eu
 cat >/dev/null
 mkdir -p "$HOME/.prime/agent/daemon-workers/test-daemon"
 session_path="$HOME/known-prime-session.jsonl"
-printf '{"createCommand":{"config":{"cwd":"%s"},"sessionPath":"%s"}}\n' "$(pwd)" "$session_path" > "$HOME/.prime/agent/daemon-workers/test-daemon/worker-$$.json"
+printf '{"createCommand":{"config":{"cwd":"%s"},"sessionPath":"%s"}}\n' "$(pwd -P)" "$session_path" > "$HOME/.prime/agent/daemon-workers/test-daemon/worker-$$.json"
 sleep 0.35
 if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
   printf 'known\n' > known.txt
@@ -160,8 +160,8 @@ fi
             .success()
     );
     assert_eq!(
-        fs::read_dir(temp.path().join("worktrees"))
-            .expect("worktree root")
+        fs::read_dir(&physical_worktree_root)
+            .expect("physical worktree root")
             .count(),
         0,
         "completed implementation and gate attempt roots remain"
