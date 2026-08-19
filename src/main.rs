@@ -3804,6 +3804,10 @@ fn record_driver_dispatch_identity(
             .context("package dispatch identity omitted process observation")?,
     )
     .context("package dispatch process observation is invalid")?;
+    let session_path = identity
+        .get("session_path")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     append_driver_event(
         journal,
         &DriverEvent::DispatchWorkerIdentified {
@@ -3813,6 +3817,7 @@ fn record_driver_dispatch_identity(
             agent_name: agent_name.to_owned(),
             pane_id: pane_id.to_owned(),
             workspace_id: workspace_id.to_owned(),
+            session_path,
             process,
         },
     )
@@ -7262,6 +7267,68 @@ fn observe_spawned_herdr_process(pane_id: &str) -> DispatchWorkerProcessObservat
     DispatchWorkerProcessObservation::Inconclusive { detail }
 }
 
+fn is_prime_agent_dispatch(arguments: &[String]) -> bool {
+    let executable = arguments
+        .iter()
+        .rposition(|argument| argument == "--")
+        .and_then(|separator| arguments.get(separator + 1))
+        .or_else(|| arguments.first());
+    executable.is_some_and(|argument| {
+        Path::new(argument)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some("prime-agent")
+    })
+}
+
+fn matching_prime_sessions(worktree_path: &str) -> Vec<Option<String>> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let descriptor_root = PathBuf::from(home).join(".prime/agent/daemon-workers");
+    let Ok(daemon_entries) = fs::read_dir(descriptor_root) else {
+        return Vec::new();
+    };
+    daemon_entries
+        .filter_map(|entry| entry.ok())
+        .flat_map(|daemon| {
+            fs::read_dir(daemon.path())
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.ok())
+        })
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|descriptor| {
+            descriptor
+                .pointer("/createCommand/config/cwd")
+                .and_then(Value::as_str)
+                == Some(worktree_path)
+        })
+        .map(|descriptor| {
+            descriptor
+                .pointer("/createCommand/sessionPath")
+                .and_then(Value::as_str)
+                .filter(|session_path| Path::new(session_path).is_absolute())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn observe_prime_session_path(worktree_path: &str) -> Option<String> {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(500) {
+        let matches = matching_prime_sessions(worktree_path);
+        match matches.as_slice() {
+            [Some(session_path)] => return Some(session_path.clone()),
+            [None] | [_, _, ..] => return None,
+            [] => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    None
+}
+
 fn record_dispatch_spawn_failure(
     log_path: &Path,
     node: &NodeId,
@@ -7619,6 +7686,15 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     }
     let pane_ownership_error =
         (!pane_ownership_errors.is_empty()).then(|| pane_ownership_errors.join("; "));
+    let session_path = if is_prime_agent_dispatch(&command.worker_arguments) {
+        created
+            .first()
+            .and_then(|worktree| worktree.get("path"))
+            .and_then(Value::as_str)
+            .and_then(observe_prime_session_path)
+    } else {
+        None
+    };
     Ok(json!({
         "agent_name": plan.agent_name().as_str(),
         "issuance_sequence": issuance.sequence().get(),
@@ -7627,6 +7703,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             "agent_name": plan.agent_name().as_str(),
             "pane_id": worker_pane_id,
             "workspace_id": worker_workspace_id,
+            "session_path": session_path,
             "process": worker_process,
         },
         "pane_cleanup_targets": pane_cleanup_targets,
