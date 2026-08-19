@@ -78,8 +78,9 @@ use pce_core::{
     derive_package_result_path, derive_run_state, derive_run_state_with_dispatch_artifacts,
     derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
     dispatch_completion_payload, dispatch_invocation, dispatch_payload, effective_criteria,
-    evaluate_completion, evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
-    fold_paired_execution_proof, fold_replay_runs, gate_failure_outcome, judge_finding_replay,
+    evaluate_completion, evaluate_landing_readiness, event_record_matches,
+    extract_conservative_artifact_references, fold_dispatch_ledger, fold_paired_execution_proof,
+    fold_replay_runs, gate_failure_outcome, judge_finding_replay,
     latest_criterion_failure_evidence, measure_contract_snapshot, meter_dispatches,
     next_gate_attempt, normalize_replay_observation, paired_stimulus_identity,
     parse_acceptance_criteria, parse_claude_result, parse_criterion_revision_manifest,
@@ -91,8 +92,9 @@ use pce_core::{
     recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
     render_package_run, repeated_identical_worker_blocker, seatbelt_capability_probe,
     serialize_dispatch_check_in, serialize_dispatch_process_identity,
-    serialize_package_worker_result, serialize_tracked_repository_contract, unchanged_package_ids,
-    validate_artifact, validate_criterion_revisions, validate_package_gate_finding_repositories,
+    serialize_package_worker_result, serialize_tracked_repository_contract,
+    titles_conservatively_overlap, unchanged_package_ids, validate_artifact,
+    validate_criterion_revisions, validate_package_gate_finding_repositories,
     validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
     validated_dispatch_completion_payload, verify_criterion_change, verify_mechanical_freeze,
     worker_environment_outcome,
@@ -109,7 +111,7 @@ const USAGE: &str = concat!(
     "       pce log meter\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] [--override-risk-ordering]\n",
-    "       pce graph check --file <GRAPH_PATH> [--repository <NAME=SOURCE_WORKTREE>]...\n",
+    "       pce graph check --file <GRAPH_PATH> [--strict] [--repository <NAME=SOURCE_WORKTREE>]...\n",
     "       pce graph freeze --vision-dir <VISION_DIR> [--mechanical] [--criterion-revisions <HUMAN_RECORD_PATH>] [--accept-base-currency-risk <HUMAN_RECORD_PATH>] --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
     "       pce package brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> [--brief <ABSOLUTE_BRIEF_PATH>] -- <WORKER_ARG>...\n",
@@ -400,6 +402,7 @@ enum Command {
     GraphCheck {
         path: PathBuf,
         repositories: Vec<(String, PathBuf)>,
+        strict: bool,
     },
     GraphFreeze {
         vision_dir: PathBuf,
@@ -824,7 +827,11 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         } => run_dispatch_reconcile(&log_path, issuance_sequence, node),
         Command::VisionNew { name } => run_vision_new(&name),
         Command::VisionCheck => run_vision_check(input),
-        Command::GraphCheck { path, repositories } => run_graph_check(&path, &repositories),
+        Command::GraphCheck {
+            path,
+            repositories,
+            strict,
+        } => run_graph_check(&path, &repositories, strict),
         Command::GraphFreeze {
             vision_dir,
             repositories,
@@ -9641,10 +9648,19 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
         bail!(USAGE);
     };
     match action {
-        "check" if flag == "--file" && is_value(raw_value) => Ok(Command::GraphCheck {
-            path: PathBuf::from(raw_value),
-            repositories: parse_graph_repositories(trailing)?,
-        }),
+        "check" if flag == "--file" && is_value(raw_value) => {
+            let strict = trailing.iter().any(|argument| argument == "--strict");
+            let repository_arguments = trailing
+                .iter()
+                .filter(|argument| argument.as_str() != "--strict")
+                .cloned()
+                .collect::<Vec<_>>();
+            Ok(Command::GraphCheck {
+                path: PathBuf::from(raw_value),
+                repositories: parse_graph_repositories(&repository_arguments)?,
+                strict,
+            })
+        }
         "freeze" if flag == "--vision-dir" && is_value(raw_value) => {
             let mut repositories = Vec::new();
             let mut authority = FreezeAuthority::Human;
@@ -9808,18 +9824,202 @@ fn run_vision_check(input: &mut dyn Read) -> Result<()> {
     .context("failed to check vision acceptance criteria")
 }
 
-fn run_graph_check(path: &Path, repositories: &[(String, PathBuf)]) -> Result<()> {
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum GraphAuthoringWarning {
+    ArtifactProvenance {
+        package: String,
+        criterion: String,
+        repository: String,
+        path: String,
+        strict_upstream_references: Vec<String>,
+        message: String,
+    },
+    ActOwnershipArtifact {
+        package: String,
+        predecessor_package: String,
+        repository: String,
+        path: String,
+        message: String,
+    },
+    ActOwnershipTitle {
+        package: String,
+        predecessor_package: String,
+        title: String,
+        message: String,
+    },
+    PredecessorUnavailable {
+        path: String,
+        message: String,
+    },
+}
+
+fn package_artifact_references(package: &pce_core::WorkPackage) -> Vec<(String, String, String)> {
+    let mut references = Vec::new();
+    for criterion in package.criteria() {
+        for artifact in extract_conservative_artifact_references(criterion.command()) {
+            let repository = match artifact.repository_index() {
+                Some(index) => package.repositories().get(index - 1),
+                None if package.repositories().len() == 1 => package.repositories().first(),
+                None => None,
+            };
+            if let Some(repository) = repository {
+                references.push((
+                    criterion.name().to_owned(),
+                    repository.clone(),
+                    artifact.path().to_owned(),
+                ));
+            }
+        }
+    }
+    references.sort();
+    references.dedup();
+    references
+}
+
+fn strict_upstream_ids(graph: &WorkPackageGraph, package_id: &str) -> BTreeSet<String> {
+    let by_id = graph
+        .packages()
+        .iter()
+        .map(|package| (package.id().as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = vec![package_id];
+    let mut upstream = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        let Some(package) = by_id.get(id) else {
+            continue;
+        };
+        for dependency in package.depends_on() {
+            if upstream.insert(dependency.id().as_str().to_owned()) {
+                pending.push(dependency.id().as_str());
+            }
+        }
+    }
+    upstream
+}
+
+fn artifact_exists_at_authored_ref(
+    graph: &WorkPackageGraph,
+    repositories: &[(String, PathBuf)],
+    repository_name: &str,
+    path: &str,
+) -> Result<Option<bool>> {
+    let Some((_, repository)) = repositories
+        .iter()
+        .find(|(name, _)| name == repository_name)
+    else {
+        return Ok(None);
+    };
+    let authored_ref = graph_authored_ref(graph, repository_name)?;
+    let oid = git_oid(repository, authored_ref)?;
+    let object = format!("{oid}:{path}");
+    let output = git_output(repository, &["cat-file", "-e", &object])?;
+    Ok(Some(output.status.success()))
+}
+
+fn graph_authoring_warnings(
+    path: &Path,
+    graph: &WorkPackageGraph,
+    repositories: &[(String, PathBuf)],
+) -> Result<Vec<GraphAuthoringWarning>> {
+    let references = graph
+        .packages()
+        .iter()
+        .map(|package| (package.id().as_str(), package_artifact_references(package)))
+        .collect::<BTreeMap<_, _>>();
+    let mut warnings = Vec::new();
+    for package in graph.packages() {
+        let upstream = strict_upstream_ids(graph, package.id().as_str());
+        for (criterion, repository, artifact_path) in package_artifact_references(package) {
+            if artifact_exists_at_authored_ref(graph, repositories, &repository, &artifact_path)?
+                != Some(false)
+            {
+                continue;
+            }
+            let strict_upstream_references = upstream
+                .iter()
+                .filter(|upstream_id| {
+                    references.get(upstream_id.as_str()).is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|(_, candidate_repository, candidate_path)| {
+                                candidate_repository == &repository
+                                    && candidate_path == &artifact_path
+                            })
+                    })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            warnings.push(GraphAuthoringWarning::ArtifactProvenance {
+                package: package.id().as_str().to_owned(),
+                criterion,
+                repository,
+                path: artifact_path,
+                strict_upstream_references,
+                message: "artifact does not exist at the authored ref; a producer cannot be proven because the graph has no output declarations".to_owned(),
+            });
+        }
+    }
+    if graph.plan_version() > 1 {
+        let predecessor_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("graph.v{}.json", graph.plan_version() - 1));
+        match fs::read(&predecessor_path) {
+            Ok(bytes) => {
+                let predecessor = parse_work_package_graph(&bytes).with_context(|| format!("failed to validate predecessor graph {}", predecessor_path.display()))?;
+                let predecessor_ids = predecessor.packages().iter().map(|package| package.id().as_str()).collect::<BTreeSet<_>>();
+                let predecessor_references = predecessor.packages().iter().map(|package| (package, package_artifact_references(package))).collect::<Vec<_>>();
+                for package in graph.packages().iter().filter(|package| !predecessor_ids.contains(package.id().as_str())) {
+                    let current_references = package_artifact_references(package);
+                    for (predecessor_package, frozen_references) in &predecessor_references {
+                        for (_, repository, artifact_path) in &current_references {
+                            if frozen_references.iter().any(|(_, frozen_repository, frozen_path)| frozen_repository == repository && frozen_path == artifact_path) {
+                                warnings.push(GraphAuthoringWarning::ActOwnershipArtifact {
+                                    package: package.id().as_str().to_owned(), predecessor_package: predecessor_package.id().as_str().to_owned(), repository: repository.clone(), path: artifact_path.clone(),
+                                    message: "new package references the exact canonical artifact already referenced by a predecessor package".to_owned(),
+                                });
+                            }
+                        }
+                        if titles_conservatively_overlap(package.title(), predecessor_package.title()) {
+                            warnings.push(GraphAuthoringWarning::ActOwnershipTitle {
+                                package: package.id().as_str().to_owned(), predecessor_package: predecessor_package.id().as_str().to_owned(), title: package.title().to_owned(),
+                                message: "new package title has conservative normalized overlap with a predecessor package title".to_owned(),
+                            });
+                        }
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => warnings.push(GraphAuthoringWarning::PredecessorUnavailable {
+                path: predecessor_path.display().to_string(), message: "act ownership cannot be checked because the immediate predecessor graph is missing".to_owned(),
+            }),
+            Err(error) => return Err(error).with_context(|| format!("failed to read predecessor graph {}", predecessor_path.display())),
+        }
+    }
+    Ok(warnings)
+}
+
+fn run_graph_check(path: &Path, repositories: &[(String, PathBuf)], strict: bool) -> Result<()> {
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read work-package graph {}", path.display()))?;
     let graph = parse_work_package_graph(&bytes)
         .with_context(|| format!("failed to validate work-package graph {}", path.display()))?;
     verify_graph_repository_refs(&graph, repositories)?;
+    let warnings = graph_authoring_warnings(path, &graph, repositories)?;
+    if strict && !warnings.is_empty() {
+        bail!(
+            "graph check strict mode refused {} authoring warning(s): {}",
+            warnings.len(),
+            serde_json::to_string(&warnings).context("failed to serialize authoring warnings")?
+        );
+    }
     write_json_stdout(&json!({
         "valid": true,
         "refs_verified": !repositories.is_empty(),
         "vision": graph.vision(),
         "plan_version": graph.plan_version(),
         "packages": graph.packages().len(),
+        "warnings": warnings,
     }))
 }
 
