@@ -4,7 +4,7 @@
 //! A brief gives one worker global intent, graph-wide summary context, and exactly one package's
 //! executable detail. An outcome is the worker's strict, non-self-certifying status report.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -123,6 +123,82 @@ fn render_criterion_summary(output: &mut String, criterion: &crate::WorkPackageC
     let _ = writeln!(output, "    Observation: {}", criterion.observation());
 }
 
+fn criterion_file_references(command: &str) -> BTreeSet<String> {
+    command
+        .split(|character: char| character.is_whitespace() || "|&;()<>[]{}".contains(character))
+        .filter_map(|token| {
+            let value = token
+                .rsplit_once('=')
+                .map_or(token, |(_, value)| value)
+                .trim_matches(|character: char| "'\"`,:".contains(character))
+                .trim_start_matches("./");
+            let basename = value.rsplit('/').next().unwrap_or(value);
+            let has_file_extension = basename
+                .rsplit_once('.')
+                .is_some_and(|(stem, extension)| !stem.is_empty() && !extension.is_empty());
+            (!value.is_empty()
+                && !value.starts_with('-')
+                && !value.contains("://")
+                && (value.contains('/') || has_file_extension))
+                .then(|| value.to_owned())
+        })
+        .collect()
+}
+
+fn render_cross_package_file_references(
+    output: &mut String,
+    graph: &WorkPackageGraph,
+    package: &crate::WorkPackage,
+) {
+    let own_paths = package
+        .criteria()
+        .iter()
+        .flat_map(|criterion| criterion_file_references(criterion.command()))
+        .collect::<BTreeSet<_>>();
+    let mut other_references = BTreeMap::<String, BTreeSet<&str>>::new();
+    for candidate in graph
+        .packages()
+        .iter()
+        .filter(|candidate| candidate.id() != package.id())
+    {
+        for path in candidate
+            .criteria()
+            .iter()
+            .flat_map(|criterion| criterion_file_references(criterion.command()))
+        {
+            if own_paths.contains(&path) {
+                other_references
+                    .entry(path)
+                    .or_default()
+                    .insert(candidate.id().as_str());
+            }
+        }
+    }
+
+    output.push_str("\nCross-package file references derived from criterion commands:\n");
+    if own_paths.is_empty() {
+        output.push_str("- No file paths were found in this package's criterion commands.\n");
+    } else {
+        for path in own_paths {
+            match other_references.get(&path) {
+                Some(packages) => {
+                    let _ = writeln!(
+                        output,
+                        "- {path}: also referenced by {}",
+                        packages.iter().copied().collect::<Vec<_>>().join(", ")
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        output,
+                        "- {path}: no other package criterion references this path"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Compose a deterministic worker brief without executing any criterion command.
 ///
 /// # Errors
@@ -234,6 +310,7 @@ pub fn compose_package_worker_brief(
         let _ = writeln!(output, "  Observation: {}", criterion.observation());
         let _ = writeln!(output, "  Command: {}", criterion.command());
     }
+    render_cross_package_file_references(&mut output, graph, package);
     output.push_str("\nThe commands above are exposed as targets only. Do not execute them as a substitute for independent judgement. Your own assessment is not the judgement: the criteria will be executed independently by the driver, which will use each command's exit status to judge the package.\n");
 
     output.push_str("\n## 4. Scope boundary\n\n");
@@ -262,10 +339,11 @@ pub fn compose_package_worker_brief(
         }
     }
     output.push_str("The graph is context, not permission. Use neighbouring packages to avoid stranding their work, but do not implement, refactor, or opportunistically complete them even when doing so is convenient. If this package cannot serve the vision without changing another package, report a missing dependency or other mis-specification instead of crossing the boundary.\n");
+    output.push_str("Only the repositories under change listed in this brief may be modified. Cloud, IAM, and account-level mutations are out of scope even when the credentials you hold permit them, unless this package has a criterion that names that act. Infrastructure changes may be made only through a criterion that names the act. This boundary is informational; credentials remain the enforcement fence.\n");
 
     output.push_str("\n## 5. Act ownership and long-running commands\n\nRun every act to completion in the foreground and write the outcome before exiting. Ending your turn is exiting. A process you background is orphaned the moment you stop, so never leave one running. Do not use shell backgrounding, `nohup`, `disown`, or a detached wrapper.\n\nFor a long-running command, start one foreground tool invocation with its timeout or yield interval configured to permit the command to finish, then keep the turn open and wait on that same invocation until it returns. If the tool returns a live handle, inspect that same handle until it reaches a terminal state. Do not start a child, report its PID or log path, and end the turn to wait. After the act reaches a terminal state, inspect its evidence and write the required outcome before exiting.\n");
 
-    output.push_str("\n## Required outcome\n\nWrite exactly one strict JSON outcome document to the path in `PCE_PACKAGE_OUTCOME` before exiting:\n- done: `{\"outcome\":\"done\"}`\n- failed: `{\"outcome\":\"failed\",\"blocked_by\":\"specific blocker\"}`\n- mis-specified criterion: `{\"outcome\":\"mis-specified\",\"fault\":{\"kind\":\"criterion\",\"name\":\"criterion name\"}}`\n- mis-specified missing dependency: `{\"outcome\":\"mis-specified\",\"fault\":{\"kind\":\"missing-dependency\",\"id\":\"dependency identity\"}}`\nDo not self-certify criterion results in this file. `done` means only that you believe the implementation work is complete. Commit all completed work before reporting done. Criteria run against the resulting commit, not the working tree, so uncommitted work will not be judged.\n");
+    output.push_str("\n## Required outcome\n\nWrite exactly one strict JSON outcome document to the path in `PCE_PACKAGE_OUTCOME` before exiting:\n- done: `{\"outcome\":\"done\"}`\n- failed: `{\"outcome\":\"failed\",\"blocked_by\":\"specific blocker\"}`\n- mis-specified criterion: `{\"outcome\":\"mis-specified\",\"fault\":{\"kind\":\"criterion\",\"name\":\"criterion name\"}}`\n- mis-specified missing dependency: `{\"outcome\":\"mis-specified\",\"fault\":{\"kind\":\"missing-dependency\",\"id\":{\"missing\":\"capability or artifact\",\"checked\":[\"path or symbol\"],\"command\":\"command used to check\"}}}`\nA missing-dependency fault must be falsifiable: name what is missing, identify at least one path or symbol you checked, and give the exact non-empty command used to check. A package identifier alone is invalid. If you cannot identify and test a missing prerequisite, investigate further or report the specific blocker as `failed`; do not invent a mis-specification.\nDo not self-certify criterion results in this file. `done` means only that you believe the implementation work is complete. Commit all completed work before reporting done. Criteria run against the resulting commit, not the working tree, so uncommitted work will not be judged.\n");
     Ok(output)
 }
 
@@ -304,14 +382,54 @@ impl TryFrom<String> for NonEmptyString {
     }
 }
 
+/// Falsifiable evidence for a prerequisite believed to be absent from the graph.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MissingDependencyEvidence {
+    missing: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_non_empty_checked")]
+    checked: Vec<NonEmptyString>,
+    command: NonEmptyString,
+}
+
+impl MissingDependencyEvidence {
+    /// Return the capability or artifact believed to be missing.
+    pub fn as_str(&self) -> &str {
+        self.missing.as_str()
+    }
+
+    /// Return the paths or symbols examined for the missing prerequisite.
+    pub fn checked(&self) -> &[NonEmptyString] {
+        &self.checked
+    }
+
+    /// Return the command used to test for the prerequisite.
+    pub fn command(&self) -> &str {
+        self.command.as_str()
+    }
+}
+
+fn deserialize_non_empty_checked<'de, D>(deserializer: D) -> Result<Vec<NonEmptyString>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let checked = Vec::<NonEmptyString>::deserialize(deserializer)?;
+    if checked.is_empty() {
+        return Err(serde::de::Error::custom(
+            "checked paths or symbols must be non-empty",
+        ));
+    }
+    Ok(checked)
+}
+
 /// The actionable identity of a package mis-specification.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum MisSpecificationFault {
     /// One named package criterion does not serve the vision goal.
     Criterion { name: NonEmptyString },
-    /// One named prerequisite is absent from the graph.
-    MissingDependency { id: NonEmptyString },
+    /// One prerequisite is absent, with evidence that lets a supervisor test that claim.
+    MissingDependency { id: MissingDependencyEvidence },
 }
 
 /// Parse exactly one strict worker outcome JSON document.
@@ -355,6 +473,23 @@ mod tests {
     use super::{PackageOutcome, parse_package_outcome};
 
     #[test]
+    fn missing_dependency_fault_requires_falsifiable_evidence() {
+        assert!(matches!(
+            parse_package_outcome(
+                br#"{"outcome":"mis-specified","fault":{"kind":"missing-dependency","id":{"missing":"released-reader HTTPS transport","checked":["src/reader.py::ReleasedReader","tests/test_reader.py"],"command":"rg ReleasedReader src/reader.py tests/test_reader.py"}}}"#
+            ),
+            Ok(PackageOutcome::MisSpecified { .. })
+        ));
+        for unfalsifiable in [
+            br#"{"outcome":"mis-specified","fault":{"kind":"missing-dependency","id":"GD2"}}"#.as_slice(),
+            br#"{"outcome":"mis-specified","fault":{"kind":"missing-dependency","id":{"missing":"released-reader HTTPS transport","checked":[],"command":"rg ReleasedReader src/reader.py"}}}"#.as_slice(),
+            br#"{"outcome":"mis-specified","fault":{"kind":"missing-dependency","id":{"missing":"released-reader HTTPS transport","checked":["src/reader.py"],"command":" "}}}"#.as_slice(),
+        ] {
+            assert!(parse_package_outcome(unfalsifiable).is_err());
+        }
+    }
+
+    #[test]
     fn parses_exactly_three_strict_actionable_outcomes() {
         assert!(matches!(
             parse_package_outcome(br#"{"outcome":"done"}"#),
@@ -367,7 +502,7 @@ mod tests {
         assert!(matches!(parse_package_outcome(br#"{"outcome":"mis-specified","fault":{"kind":"criterion","name":"wrong oracle"}}"#), Ok(PackageOutcome::MisSpecified { .. })));
         assert!(matches!(
             parse_package_outcome(
-                br#"{"outcome":"mis-specified","fault":{"kind":"missing-dependency","id":"WP0"}}"#
+                br#"{"outcome":"mis-specified","fault":{"kind":"missing-dependency","id":{"missing":"compiler capability","checked":["tools/compiler.rs::compile"],"command":"rg compile tools/compiler.rs"}}}"#
             ),
             Ok(PackageOutcome::MisSpecified { .. })
         ));
