@@ -14,6 +14,11 @@ fn executable(path: &Path, contents: &str) {
 #[test]
 fn default_driver_composes_dispatch_and_waits_for_durable_result() {
     let temp = tempdir().expect("tempdir");
+    let worktree_root = temp
+        .path()
+        .canonicalize()
+        .expect("canonical tempdir")
+        .join("worktrees");
     let repository = temp.path().join("repo");
     fs::create_dir(&repository).expect("repository");
     for args in [
@@ -84,6 +89,9 @@ fi"#,
 set -eu
 [ "${TEST_WORKER_ENV-}" = "credential-secret-value" ]
 cat >/dev/null
+mkdir -p "$HOME/.prime/agent/daemon-workers/test-daemon"
+session_path="$HOME/known-prime-session.jsonl"
+printf '{"createCommand":{"config":{"cwd":"%s"},"sessionPath":"%s"}}\n' "$(pwd)" "$session_path" > "$HOME/.prime/agent/daemon-workers/test-daemon/worker-$$.json"
 sleep 0.35
 if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
   printf 'known\n' > known.txt
@@ -106,10 +114,7 @@ fi
         .args(["--prepare", r#"repo=test -n "$TEST_WORKER_ENV""#])
         .env("TEST_WORKER_ENV", "credential-secret-value")
         .env("HERDR_ENV", "1")
-        .env(
-            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
-            temp.path().join("worktrees"),
-        )
+        .env("PCE_WORK_PACKAGE_WORKTREE_ROOT", &worktree_root)
         .env("PATH", path)
         .env("HOME", temp.path())
         .env("USER", "tester")
@@ -170,6 +175,18 @@ fi
     assert!(!closed.contains("unrelated-workspace"));
     assert!(journal.contains("owned-pane-1"));
     assert!(journal.contains("owned-pane-2"));
+    let dispatch_identity = journal
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("journal event JSON"))
+        .find(|event| event["event"] == "dispatch-worker-identified" && event["package"] == "A")
+        .expect("implementation dispatch identity");
+    assert_eq!(
+        dispatch_identity["session_path"],
+        temp.path()
+            .join("known-prime-session.jsonl")
+            .display()
+            .to_string()
+    );
     assert!(journal.contains("dispatch-pane-cleanup"));
     assert!(journal.contains("simulated close refusal"));
     assert!(journal.contains("\"outcome\":\"failed\""));
@@ -182,10 +199,7 @@ fi
         .args(["--repository"])
         .arg(format!("repo={}", repository.display()))
         .env("HERDR_ENV", "1")
-        .env(
-            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
-            temp.path().join("worktrees"),
-        )
+        .env("PCE_WORK_PACKAGE_WORKTREE_ROOT", &worktree_root)
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),

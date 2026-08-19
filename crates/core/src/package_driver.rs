@@ -430,6 +430,8 @@ pub enum DriverEvent {
         agent_name: String,
         pane_id: String,
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_path: Option<String>,
         process: DispatchWorkerProcessObservation,
     },
     /// The driver recorded the evidence used to close one environment-lost dispatch.
@@ -2292,6 +2294,32 @@ mod tests {
                 ]
             })
             .collect()
+    }
+
+    #[test]
+    fn old_dispatch_worker_identity_without_session_path_deserializes() {
+        let event: DriverEvent = serde_json::from_value(serde_json::json!({
+            "event": "dispatch-worker-identified",
+            "package": "A",
+            "issuance": 1,
+            "dispatch_sequence": 2,
+            "agent_name": "worker-a",
+            "pane_id": "pane-1",
+            "workspace_id": "workspace-1",
+            "process": {
+                "state": "inconclusive",
+                "detail": "not observed"
+            }
+        }))
+        .expect("old journal event");
+
+        assert!(matches!(
+            event,
+            DriverEvent::DispatchWorkerIdentified {
+                session_path: None,
+                ..
+            }
+        ));
     }
 
     #[test]
