@@ -398,6 +398,38 @@ No findings yet about the driver itself; it has produced six journal events and 
   (two modify/delete pairs), so recomposition alone cannot produce a promotable tree. Suggested as a
   separate vision or issue.
 
+## Post-fix outcome (appended 2026-08-19, after the fix landed)
+
+The attribution fix and the resolution-worker scoping landed and were confirmed installed by digest
+(`sha256 64a45a98…`, size 10783408, resolved through the `~/.local/bin/pce` symlink to
+`pce/target/release/pce`). Relaunching against the unchanged `graph.v2.json` produced
+`outcome: finished`, `assembly: {"state":"complete"}`, pane exit status 0, journal ending in
+`assembly-completed`.
+
+The attribution finding is **resolved and verified in practice**: the former fatal abort now appears
+as a typed `repair-credit-stale` record (`package REC3`, `gate package-gate-3-1`, `finding 0`,
+`repair_ref 7a34e785…`, `lineage_oid 7056e1e4…`, `reason "counterfactual-unconstructable"`), the
+run continued past it, and `driver-status` reports REC3's amendment with `repository_refs: []` —
+byte-exact credit dropped, criterion retained and proven by execution. Cold resume worked: the
+driver resumed at REC4, the exact abort point, without re-running the nine already-green criteria.
+All 12 assembly criteria across the plan-version-2 pass are exit 0.
+
+Two notes for the fix's authors:
+
+1. **The absent-assembly-branch finding below is now confirmed blocking, not moot.** It was
+   originally recorded as masked by the ancestry failure. With the base corrected and attribution
+   fixed, it is the sole remaining obstacle: `git rev-parse --verify
+   pce/2026-08-19-a-fixture-is-a-recording/assembly-v2^{commit}` → `fatal: Needed a single
+   revision`, on a run that reached `Finished`. A fully proven assembly cannot be promoted.
+2. **Resolution-commit anchoring did not cover this commit.** The install report described
+   resolution commits as now anchored under `refs/pce-assembly-resolutions/*`. For assembly oid
+   `7056e1e4…`, `git for-each-ref` matching that namespace returns nothing, and
+   `git for-each-ref --points-at 7056e1e4…` returns only the supervisor's manually created retention
+   tag. Theory, not established: anchoring applies to resolutions the fixed binary creates, and this
+   one was produced pre-fix and resumed over rather than re-created. If so, a resumed run leaves its
+   resolution commit unanchored, which is worth handling since resume is exactly the path a
+   post-fix upgrade takes.
+
 ## Disposition
 
 Ruled by the human on 2026-08-19: fix repair attribution (the first recommendation under the
