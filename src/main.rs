@@ -2377,8 +2377,25 @@ fn run_composed_driver_gate(
             gate: gate_name.clone(),
         },
     )?;
+    let reproof_challenges = outcome
+        .findings()
+        .iter()
+        .map(PackageGateChallenge::from_finding)
+        .collect();
+    if matches!(
+        finalize_gate_repairs(
+            graph,
+            command,
+            package_id,
+            issuance,
+            &gate_name,
+            reproof_challenges,
+        )?,
+        GateReproofOutcome::Rejected
+    ) {
+        return Ok(());
+    }
     if !rejected_challenges.is_empty() {
-        harden_package_lineage_for_issuance(graph, command, package_id, issuance)?;
         append_gate_failure_outcome(
             command,
             package_id,
@@ -2778,6 +2795,193 @@ fn harden_package_lineage_for_issuance(
         }
     }
     Ok(())
+}
+
+const GATE_REPROOF_FAILED_REASON: &str = "gate repair re-proof failed";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateReproofOutcome {
+    Proven,
+    Rejected,
+}
+
+fn rollback_gate_repairs(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    package_id: &str,
+    issuance: u64,
+    merges: &[DriverEvent],
+) -> Result<()> {
+    let branch = package_branch(graph, package_id, issuance);
+    let mut rolled_back = Vec::new();
+    for event in merges.iter().rev() {
+        let DriverEvent::PackageRepairMerged {
+            package,
+            repository,
+            gate,
+            finding,
+            repair_ref,
+            previous_oid,
+            hardened_oid,
+        } = event
+        else {
+            continue;
+        };
+        let source = command
+            .repositories
+            .iter()
+            .find(|(name, _)| name == repository)
+            .map(|(_, path)| path)
+            .with_context(|| format!("missing repository mapping for rollback `{repository}`"))?;
+        let update = std::process::Command::new("git")
+            .arg("-C")
+            .arg(source)
+            .args([
+                "update-ref",
+                &format!("refs/heads/{branch}"),
+                previous_oid,
+                hardened_oid,
+            ])
+            .output()?;
+        if !update.status.success() {
+            bail!(
+                "failed to roll back rejected gate repair {} for package {}: {}",
+                repair_ref,
+                package_id,
+                String::from_utf8_lossy(&update.stderr).trim()
+            );
+        }
+        rolled_back.push(DriverEvent::PackageRepairRolledBack {
+            package: package.clone(),
+            repository: repository.clone(),
+            gate: gate.clone(),
+            finding: *finding,
+            repair_ref: repair_ref.clone(),
+            hardened_oid: hardened_oid.clone(),
+            restored_oid: previous_oid.clone(),
+        });
+    }
+    for event in rolled_back {
+        append_driver_event(&command.journal_path, &event)?;
+    }
+    Ok(())
+}
+
+fn finalize_gate_repairs(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    package_id: &str,
+    issuance: u64,
+    gate: &str,
+    mut challenges: Vec<PackageGateChallenge>,
+) -> Result<GateReproofOutcome> {
+    let before = read_driver_journal(&command.journal_path)?;
+    let before_len = before.len();
+    harden_package_lineage_for_issuance(graph, command, package_id, issuance)?;
+    let events = read_driver_journal(&command.journal_path)?;
+    let criteria = effective_criteria(graph, package_id, &events)?;
+    if !criteria.iter().any(|criterion| {
+        matches!(
+            criterion.origin,
+            pce_core::CriterionOrigin::Amendment { .. }
+        )
+    }) {
+        return Ok(GateReproofOutcome::Proven);
+    }
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == package_id)
+        .with_context(|| format!("package {package_id} is absent from graph"))?;
+    let sources = package_repository_sources(package, &command.repositories)?;
+    let branch = package_branch(graph, package_id, issuance);
+    let references = sources
+        .iter()
+        .map(|(name, source)| Ok((name.clone(), git_oid(source, &branch)?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let materialization = materialize_driver_state(
+        &command.journal_path,
+        &format!("gate-reproof-{package_id}-{issuance}"),
+        &sources,
+        &references,
+    )?;
+    let paths = materialization.paths()?;
+    for (repository, checkout) in materialization.named_paths(&sources) {
+        let Some(preparation) = command.preparations.get(&repository) else {
+            continue;
+        };
+        let execution = shell_execution_at(preparation, &checkout, &paths)?;
+        if !execution.exit_status().is_success() {
+            append_driver_event(
+                &command.journal_path,
+                &DriverEvent::GateReproofEnvironmentFailed {
+                    package: package_id.to_owned(),
+                    issuance,
+                    gate: gate.to_owned(),
+                    repository,
+                    command: preparation.clone(),
+                    execution,
+                },
+            )?;
+            bail!("gate re-proof environment preparation failed without charging a failure budget");
+        }
+    }
+    let named_paths = materialization
+        .named_paths(&sources)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let mut failed = Vec::new();
+    for criterion in criteria {
+        let (execution, amendment_proof, passed) =
+            execute_effective_criterion(&criterion, &paths, &named_paths)?;
+        if !passed {
+            challenges.push(PackageGateChallenge::from_reproof_failure(
+                &criterion.name,
+                &criterion.command,
+            ));
+            failed.push(format!(
+                "{} ({:?})",
+                criterion.name,
+                execution.exit_status()
+            ));
+        }
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::GateReproofExecuted {
+                package: package_id.to_owned(),
+                gate: gate.to_owned(),
+                name: criterion.name,
+                origin: criterion.origin,
+                execution,
+                amendment_proof,
+            },
+        )?;
+    }
+    if failed.is_empty() {
+        return Ok(GateReproofOutcome::Proven);
+    }
+    let merges = events[before_len..]
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                DriverEvent::PackageRepairMerged { package, gate: merged_gate, .. }
+                    if package == package_id && merged_gate == gate
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    rollback_gate_repairs(graph, command, package_id, issuance, &merges)?;
+    append_gate_failure_outcome(
+        command,
+        package_id,
+        issuance,
+        gate.to_owned(),
+        GATE_REPROOF_FAILED_REASON,
+        format!("hardened lineage failed criteria: {}", failed.join(", ")),
+        challenges,
+    )?;
+    Ok(GateReproofOutcome::Rejected)
 }
 
 fn driver_package_base_refs(
@@ -19996,6 +20200,176 @@ None.
         assert!(reverted.exit_status().is_success());
         assert!(reverted.stdout().contains("0 tests"));
         assert!(!passed);
+    }
+
+    #[test]
+    fn gate_reproof_rejects_a_repair_that_breaks_an_authored_criterion_without_charging_package() {
+        let directory = tempdir().expect("temporary directory");
+        let repository = directory.path().join("repo");
+        fs::create_dir(&repository).expect("repository directory");
+        initialize_git_repository(&repository);
+        fs::write(repository.join("value"), "sealed-order").expect("baseline value");
+        git(&repository, &["add", "value"]);
+        git(&repository, &["commit", "-m", "worker result"]);
+        let oid = |reference: &str| {
+            let output = ProcessCommand::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", reference])
+                .output()
+                .expect("git rev-parse should spawn");
+            assert!(output.status.success());
+            String::from_utf8(output.stdout)
+                .expect("oid UTF-8")
+                .trim()
+                .to_owned()
+        };
+        let worker_oid = oid("HEAD");
+        let branch = "pce/gate-reproof/A/attempt-1";
+        git(&repository, &["branch", branch, &worker_oid]);
+        fs::write(repository.join("value"), "canonical-order").expect("repair value");
+        fs::write(repository.join("guard"), "present").expect("repair guard");
+        git(&repository, &["add", "value", "guard"]);
+        git(&repository, &["commit", "-m", "gate repair"]);
+        let repair_oid = oid("HEAD");
+
+        let graph_path = directory.path().join("graph.json");
+        fs::write(
+            &graph_path,
+            serde_json::to_vec(&json!({
+                "vision":"gate-reproof", "plan_version":1,
+                "authored_at_refs":{"repo":worker_oid},
+                "packages":[{
+                    "id":"A", "title":"A", "repositories":["repo"],
+                    "criteria":[{
+                        "name":"sealed baseline remains verifiable",
+                        "input":"worker lineage", "observation":"original ordering verifies",
+                        "command":r#"test "$(cat value)" = sealed-order"#
+                    }],
+                    "depends_on":[]
+                }]
+            }))
+            .expect("graph JSON"),
+        )
+        .expect("graph write");
+        let journal_path = directory.path().join("events.jsonl");
+        let limits = pce_core::RecoveryLimits::new(
+            pce_core::RetryLimit::new(1),
+            pce_core::LocalPatchLimit::new(1),
+        )
+        .with_gate_failure_limit(pce_core::GateFailureLimit::new(3));
+        for event in [
+            pce_core::DriverEvent::RecoveryConfigured { limits },
+            pce_core::DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            pce_core::DriverEvent::WorkerDone {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            pce_core::DriverEvent::FindingReplayed {
+                package: "A".to_owned(),
+                gate: "gate-1".to_owned(),
+                finding: 0,
+                command: "test -f guard".to_owned(),
+                repository_refs: vec![pce_core::AmendmentRepositoryRefs {
+                    repository: "repo".to_owned(),
+                    witness_ref: worker_oid.clone(),
+                    repair_ref: repair_oid.clone(),
+                }],
+                witness: pce_core::CriterionExecution::new(
+                    "test -f guard".to_owned(),
+                    "repo".to_owned(),
+                    pce_core::CommandExitStatus::Exited { code: 1 },
+                    String::new(),
+                    String::new(),
+                ),
+                repair: pce_core::CriterionExecution::new(
+                    "test -f guard".to_owned(),
+                    "repo".to_owned(),
+                    pce_core::CommandExitStatus::Exited { code: 0 },
+                    String::new(),
+                    String::new(),
+                ),
+                decision: pce_core::FindingReplayDecision::Accepted,
+            },
+            pce_core::DriverEvent::GateFinished {
+                package: "A".to_owned(),
+                gate: "gate-1".to_owned(),
+            },
+        ] {
+            crate::append_driver_event(&journal_path, &event).expect("journal event");
+        }
+        let command = crate::DriverRunCommand {
+            graph_path: graph_path.clone(),
+            journal_path: journal_path.clone(),
+            repositories: vec![("repo".to_owned(), repository.clone())],
+            preparations: std::collections::BTreeMap::new(),
+            override_risk_ordering: false,
+            recovery_limits: limits,
+            worker_override: None,
+            wait_timeout: None,
+        };
+        let graph = crate::read_driver_graph(&graph_path).expect("graph");
+
+        let proved = crate::finalize_gate_repairs(&graph, &command, "A", 1, "gate-1", Vec::new())
+            .expect("reproof flow");
+
+        assert_eq!(proved, crate::GateReproofOutcome::Rejected);
+        assert_eq!(oid(branch), worker_oid);
+        let events = crate::read_driver_journal(&journal_path).expect("journal");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, pce_core::DriverEvent::GateReproofExecuted { .. }))
+                .count(),
+            2
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            pce_core::DriverEvent::GateReproofExecuted { name, execution, .. }
+                if name == "sealed baseline remains verifiable" && !execution.exit_status().is_success()
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            pce_core::DriverEvent::GateReproofExecuted {
+                name,
+                amendment_proof: Some(proof),
+                ..
+            } if name == "gate:gate-1:finding:0" && proof.proves_guard()
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            pce_core::DriverEvent::PackageRepairRolledBack { restored_oid, .. }
+                if restored_oid == &worker_oid
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            pce_core::DriverEvent::GateFailed { reason, challenges, .. }
+                if reason == crate::GATE_REPROOF_FAILED_REASON
+                    && challenges.iter().any(|challenge| {
+                        challenge.proposed_criterion_command()
+                            == r#"test "$(cat value)" = sealed-order"#
+                    })
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, pce_core::DriverEvent::PackageCompleted { .. }))
+        );
+        let snapshot = pce_core::derive_driver_snapshot(&graph, &events, false).expect("snapshot");
+        assert!(matches!(
+            snapshot.packages()[0].1,
+            pce_core::DriverPackageState::Judging { issuance: 1 }
+        ));
+        assert_eq!(pce_core::charged_failure_count(&events, "A"), 0);
+        assert!(
+            pce_core::effective_criteria(&graph, "A", &events)
+                .expect("effective criteria")
+                .iter()
+                .all(|criterion| matches!(criterion.origin, pce_core::CriterionOrigin::Authored))
+        );
     }
 
     #[test]

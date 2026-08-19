@@ -306,6 +306,19 @@ impl PackageGateChallenge {
             proposed_criterion_command: finding.proposed_criterion_command.clone(),
         }
     }
+
+    /// Carry one gate-caused criterion regression into the next judgment attempt.
+    pub fn from_reproof_failure(name: &str, command: &str) -> Self {
+        Self {
+            description: NonEmptyString(format!(
+                "the accepted gate repair broke package criterion `{name}`"
+            )),
+            repair: NonEmptyString(
+                "preserve the finding while restoring the package criterion".to_owned(),
+            ),
+            proposed_criterion_command: NonEmptyString(command.to_owned()),
+        }
+    }
     pub fn description(&self) -> &str {
         &self.description.0
     }
