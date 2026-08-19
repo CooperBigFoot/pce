@@ -57,8 +57,8 @@ pub use package_driver::{
     DispatchWorkerProcessObservation, DriverAssemblyState, DriverEvent, DriverLoopOutcome,
     DriverPackageState, DriverSnapshot, EffectiveCriterion, EnvironmentPreparationOutcome,
     FindingRejectionReason, FindingReplayDecision, PackageDriverError, PaneCleanupOutcome,
-    PendingPaneCleanup, RecoveryAttemptRecord, charged_failure_count, derive_driver_snapshot,
-    effective_criteria, gate_failure_outcome, judge_finding_replay,
+    PendingPaneCleanup, RatifiedCriterionRevision, RecoveryAttemptRecord, charged_failure_count,
+    derive_driver_snapshot, effective_criteria, gate_failure_outcome, judge_finding_replay,
     latest_criterion_failure_evidence, next_gate_attempt, pending_completed_pane_cleanups,
     pending_gate_challenges, recovery_attempt_records, recovery_base_brief,
     worker_environment_outcome,
@@ -222,9 +222,11 @@ pub use workflow_coverage::{
 };
 
 pub use work_package_graph::{
-    ClassifiedWorkPackage, CriteriaInvarianceViolation, DependencyKind, ReadyWorkPackages,
-    RiskOrdering, WorkPackage, WorkPackageClassification, WorkPackageCriterion,
-    WorkPackageDependency, WorkPackageGraph, WorkPackageGraphError, WorkPackageId,
-    WorkPackageMergeObservation, criteria_invariance_violation, parse_work_package_graph,
-    ready_work_packages, unchanged_package_ids,
+    ClassifiedWorkPackage, CriteriaInvarianceViolation, CriterionRevision, CriterionRevisionError,
+    CriterionRevisionManifest, DependencyKind, ReadyWorkPackages, RiskOrdering, WorkPackage,
+    WorkPackageClassification, WorkPackageCriterion, WorkPackageDependency, WorkPackageGraph,
+    WorkPackageGraphError, WorkPackageId, WorkPackageMergeObservation,
+    criteria_invariance_violation, criteria_invariance_violations,
+    parse_criterion_revision_manifest, parse_work_package_graph, ready_work_packages,
+    unchanged_package_ids, validate_criterion_revisions,
 };

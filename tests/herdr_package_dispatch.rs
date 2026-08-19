@@ -108,7 +108,13 @@ fn live_herdr_package_dispatch_records_sleep_then_exit_three() {
             "USER={}",
             std::env::var("USER").unwrap_or_else(|_| "worker".to_owned())
         ))
-        .args(["--", "/bin/sh", "-c", "sleep 2; exit 3"])
+        .args(["--env", "CAMPAIGN_PATH=direct-secret-value"])
+        .args([
+            "--",
+            "/bin/sh",
+            "-c",
+            r#"test -n "$CAMPAIGN_PATH"; sleep 2; exit 3"#,
+        ])
         .output()
         .expect("pce package dispatch");
     assert!(

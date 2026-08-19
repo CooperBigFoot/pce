@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{CString, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -72,7 +72,7 @@ use pce_core::{
     compose_gate_arguments, compose_herdr_work_package_dispatch, compose_local_patch_brief,
     compose_package_gate_brief, compose_package_worker_argv, compose_package_worker_brief,
     compose_planning_role_frame, compute_dispatchability, create_vision,
-    criteria_invariance_violation, derive_dispatch_outcome_state, derive_driver_snapshot,
+    criteria_invariance_violations, derive_dispatch_outcome_state, derive_driver_snapshot,
     derive_herdr_agent_name, derive_merge_status, derive_milestone_merge_status,
     derive_package_result_path, derive_run_state, derive_run_state_with_dispatch_artifacts,
     derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
@@ -81,16 +81,17 @@ use pce_core::{
     fold_paired_execution_proof, fold_replay_runs, gate_failure_outcome, judge_finding_replay,
     latest_criterion_failure_evidence, measure_contract_snapshot, meter_dispatches,
     next_gate_attempt, normalize_replay_observation, paired_stimulus_identity,
-    parse_acceptance_criteria, parse_claude_result, parse_dispatch_process_identity,
-    parse_event_line, parse_gate_execution_evidence, parse_gate_stimulus,
-    parse_package_gate_outcome, parse_package_worker_result, parse_paired_falsification_verdict,
-    parse_replay_output_path, parse_replay_schema_path, parse_tracked_repository_contract,
-    parse_work_package_graph, pending_completed_pane_cleanups, pending_gate_challenges,
-    ready_work_packages, rebase_gate_stimulus, recovery_attempt_records, recovery_base_brief,
-    recovery_budget, render_dispatch_projection, render_human_snapshot, render_package_run,
-    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
-    serialize_package_worker_result, serialize_tracked_repository_contract, unchanged_package_ids,
-    validate_artifact, validate_package_gate_finding_repositories,
+    parse_acceptance_criteria, parse_claude_result, parse_criterion_revision_manifest,
+    parse_dispatch_process_identity, parse_event_line, parse_gate_execution_evidence,
+    parse_gate_stimulus, parse_package_gate_outcome, parse_package_worker_result,
+    parse_paired_falsification_verdict, parse_replay_output_path, parse_replay_schema_path,
+    parse_tracked_repository_contract, parse_work_package_graph, pending_completed_pane_cleanups,
+    pending_gate_challenges, ready_work_packages, rebase_gate_stimulus, recovery_attempt_records,
+    recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
+    render_package_run, seatbelt_capability_probe, serialize_dispatch_check_in,
+    serialize_dispatch_process_identity, serialize_package_worker_result,
+    serialize_tracked_repository_contract, unchanged_package_ids, validate_artifact,
+    validate_criterion_revisions, validate_package_gate_finding_repositories,
     validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
     validated_dispatch_completion_payload, verify_criterion_change, worker_environment_outcome,
 };
@@ -107,7 +108,7 @@ const USAGE: &str = concat!(
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] [--override-risk-ordering]\n",
     "       pce graph check --file <GRAPH_PATH> [--repository <NAME=SOURCE_WORKTREE>]...\n",
-    "       pce graph freeze --vision-dir <VISION_DIR> --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
+    "       pce graph freeze --vision-dir <VISION_DIR> [--criterion-revisions <HUMAN_RECORD_PATH>] --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
     "       pce package brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> [--brief <ABSOLUTE_BRIEF_PATH>] -- <WORKER_ARG>...\n",
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
@@ -115,7 +116,7 @@ const USAGE: &str = concat!(
     "       pce package render --graph <GRAPH_PATH> [--journal <DRIVER_JOURNAL>] --output <HTML_PATH>\n",
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
     "       pce package driver-overrule --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --rationale <TEXT>\n",
-    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--gate-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
+    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--worker-env <NAME>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--gate-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
@@ -133,7 +134,8 @@ const USAGE: &str = concat!(
     "       pce gate exec\n",
     "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>\n",
     "       pce gate execution-subject-probe --output <REPOSITORY_RELATIVE_OUTPUT_PATH>\n",
-    "       pce gate paired-execution-proof --repo-root <ABSOLUTE_REPOSITORY_ROOT> --artifacts <ABSOLUTE_EMPTY_DIRECTORY> --env <NAME=VALUE> --env <NAME=VALUE> --env <NAME=VALUE>"
+    "       pce gate paired-execution-proof --repo-root <ABSOLUTE_REPOSITORY_ROOT> --artifacts <ABSOLUTE_EMPTY_DIRECTORY> --env <NAME=VALUE> --env <NAME=VALUE> --env <NAME=VALUE>\n",
+    "       --worker-env forwards that named driver variable only to package and gate worker workspaces; criteria and --prepare commands continue to inherit the driver's full launch environment."
 );
 static GRAPH_FREEZE_NONCE: AtomicU64 = AtomicU64::new(0);
 const GATE_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
@@ -325,6 +327,7 @@ struct DriverRunCommand {
     journal_path: PathBuf,
     repositories: Vec<(String, PathBuf)>,
     preparations: BTreeMap<String, String>,
+    worker_environment: BTreeMap<String, String>,
     override_risk_ordering: bool,
     recovery_limits: RecoveryLimits,
     worker_override: Option<Vec<String>>,
@@ -384,6 +387,7 @@ enum Command {
     GraphFreeze {
         vision_dir: PathBuf,
         repositories: Vec<(String, PathBuf)>,
+        criterion_revisions: Option<PathBuf>,
     },
     LogWrite {
         path: PathBuf,
@@ -804,7 +808,8 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::GraphFreeze {
             vision_dir,
             repositories,
-        } => run_graph_freeze(&vision_dir, &repositories),
+            criterion_revisions,
+        } => run_graph_freeze(&vision_dir, &repositories, criterion_revisions.as_deref()),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
             let stdout = std::io::stdout();
@@ -2013,6 +2018,7 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
     let mut environment_failure_limit = 6_u32;
     let mut gate_failure_limit = 3_u32;
     let mut wait_timeout = None;
+    let mut worker_environment = BTreeMap::new();
     let mut mapping_args = Vec::new();
     let mut index = 4;
     while index < options.len() {
@@ -2039,6 +2045,18 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
                 gate_failure_limit = value;
             }
             index += 2;
+        } else if options[index] == "--worker-env" {
+            let name = options
+                .get(index + 1)
+                .context("--worker-env requires an environment name")?;
+            validate_worker_environment_name(name)?;
+            let value = std::env::var(name).with_context(|| {
+                format!("declared worker environment variable `{name}` is unset or not Unicode")
+            })?;
+            if worker_environment.insert(name.clone(), value).is_some() {
+                bail!("worker environment name `{name}` is repeated");
+            }
+            index += 2;
         } else if options[index] == "--wait-timeout-ms" {
             let value = options
                 .get(index + 1)
@@ -2061,6 +2079,7 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
         journal_path: PathBuf::from(&options[3]),
         repositories,
         preparations,
+        worker_environment,
         override_risk_ordering,
         recovery_limits: RecoveryLimits::new(
             RetryLimit::new(retry_limit),
@@ -2079,6 +2098,37 @@ fn driver_outcome_path(journal: &Path, package: &str, issuance: u64) -> Result<P
         .join("package-outcomes")
         .join(package)
         .join(format!("{issuance}.json")))
+}
+
+fn ensure_worker_environment_contract(
+    command: &DriverRunCommand,
+    events: &[DriverEvent],
+) -> Result<()> {
+    let names = command
+        .worker_environment
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let configured = events.iter().find_map(|event| match event {
+        DriverEvent::WorkerEnvironmentDeclared { names } => {
+            Some(names.iter().cloned().collect::<BTreeSet<_>>())
+        }
+        _ => None,
+    });
+    match configured {
+        Some(configured) if configured != names => bail!(
+            "driver worker environment is already declared as {:?}, not {:?}",
+            configured,
+            names
+        ),
+        Some(_) => Ok(()),
+        None => append_driver_event(
+            &command.journal_path,
+            &DriverEvent::WorkerEnvironmentDeclared {
+                names: names.into_iter().collect(),
+            },
+        ),
+    }
 }
 
 fn ensure_recovery_configuration(command: &DriverRunCommand, events: &[DriverEvent]) -> Result<()> {
@@ -2313,7 +2363,7 @@ fn run_composed_driver_gate(
             .collect(),
         base_refs: gate_base_refs,
         conflicted_joins: BTreeMap::new(),
-        environment: route_environment()?,
+        environment: route_environment(command)?,
         worker_arguments,
     })?;
     record_driver_dispatch_panes(&command.journal_path, package_id, issuance, &response)?;
@@ -2631,15 +2681,30 @@ fn driver_dispatch_log(command: &DriverRunCommand) -> Result<PathBuf> {
     Ok(driver_vision_directory(command)?.join(".pce/package-dispatch.jsonl"))
 }
 
-fn route_environment() -> Result<BTreeMap<String, String>> {
-    ["PATH", "HOME", "USER"]
-        .into_iter()
-        .map(|name| {
-            std::env::var(name)
-                .with_context(|| format!("driver route environment omitted {name}"))
-                .map(|value| (name.to_owned(), value))
-        })
-        .collect()
+fn validate_worker_environment_name(name: &str) -> Result<()> {
+    let mut bytes = name.bytes();
+    let valid_start = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+    if !valid_start || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+        bail!("worker environment name `{name}` must match [A-Za-z_][A-Za-z0-9_]*");
+    }
+    if matches!(name, "TMPDIR" | "PCE_DISPATCH_TMPDIR" | "PCE_WORKTREES")
+        || name.starts_with("PCE_WORKTREE_")
+    {
+        bail!("worker environment name `{name}` is binary-owned");
+    }
+    Ok(())
+}
+
+fn route_environment(command: &DriverRunCommand) -> Result<BTreeMap<String, String>> {
+    let mut environment = command.worker_environment.clone();
+    for name in ["PATH", "HOME", "USER"] {
+        let value = std::env::var(name)
+            .with_context(|| format!("driver route environment omitted {name}"))?;
+        environment.insert(name.to_owned(), value);
+    }
+    Ok(environment)
 }
 
 fn active_driver_events(events: &[DriverEvent]) -> &[DriverEvent] {
@@ -3158,7 +3223,7 @@ fn driver_package_worktrees(
             package.id(),
             DispatchAttempt::parse(issuance)?,
         ))?,
-        WorkerEnvironment::parse(route_environment()?)?,
+        WorkerEnvironment::parse(route_environment(command)?)?,
         WorkerArgumentVector::parse(vec!["prime-agent".to_owned(), "-p".to_owned()])?,
     )?;
     plan.worktrees()
@@ -3451,7 +3516,7 @@ fn issue_driver_package_dispatch(
                 _ => None,
             })
             .collect(),
-        environment: route_environment()?,
+        environment: route_environment(command)?,
         worker_arguments,
     })?;
     record_driver_dispatch_identity(&command.journal_path, package_id, issuance, &response)?;
@@ -4457,13 +4522,49 @@ fn ensure_driver_plan_version(
     if next.plan_version() != to_plan_version || next.vision() != graph.vision() {
         bail!("next frozen graph does not form a sequential plan version");
     }
-    if let Some(violation) = criteria_invariance_violation(&previous, &next) {
-        bail!(
-            "criterion {:?} from predecessor package {} was changed or removed; freezing the revised version is the human's ruling",
-            violation.criterion().name(),
-            violation.previous_package().as_str()
-        );
-    }
+    let violations = criteria_invariance_violations(&previous, &next);
+    let revision_path =
+        directory.join(format!("graph.v{to_plan_version}.criterion-revisions.json"));
+    let (criterion_revisions_ratified_by, criterion_revisions) = if violations.is_empty() {
+        if revision_path.try_exists().with_context(|| {
+            format!(
+                "failed to inspect frozen criterion revision record {}",
+                revision_path.display()
+            )
+        })? {
+            bail!(
+                "frozen criterion revision record {} exists, but no predecessor criterion changed or was removed",
+                revision_path.display()
+            );
+        }
+        (None, Vec::new())
+    } else {
+        let revision_bytes = fs::read(&revision_path).with_context(|| {
+            let affected = violations
+                .iter()
+                .map(|violation| {
+                    format!(
+                        "{}::{:?}",
+                        violation.previous_package().as_str(),
+                        violation.criterion().name()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "criteria changed or were removed ({affected}); the real exits are additive world-conformance or a human-ratified revision recorded at freeze in {}",
+                revision_path.display()
+            )
+        })?;
+        let manifest = parse_criterion_revision_manifest(&revision_bytes)
+            .context("failed to parse frozen human criterion revision record")?;
+        validate_criterion_revisions(&previous, &next, manifest.revisions())
+            .context("frozen human criterion revision record does not match the plan transition")?;
+        (
+            Some(manifest.ratified_by().to_owned()),
+            manifest.revisions().to_vec(),
+        )
+    };
     let previous_snapshot =
         derive_driver_snapshot(&previous, events, command.override_risk_ordering)
             .context("failed to derive predecessor plan before advancing")?;
@@ -4507,12 +4608,29 @@ fn ensure_driver_plan_version(
         })
         .map(|(package, _)| package.clone())
         .collect();
-    let carried_amendments = previous_snapshot
-        .amendments()
+    let next_packages = next
+        .packages()
         .iter()
-        .filter(|(package, _)| carried_completions.contains(package))
-        .cloned()
-        .collect();
+        .map(|package| (package.id().as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+    let mut carried_amendments = Vec::new();
+    for (package, amendment) in previous_snapshot.amendments() {
+        let successor_package = next_packages.get(package.as_str()).with_context(|| {
+            format!(
+                "cannot remove package {package} while its gate-earned amendments remain durable; an explicit amendment portability ruling is required"
+            )
+        })?;
+        if amendment.repository_refs.iter().any(|reference| {
+            !successor_package
+                .repositories()
+                .contains(&reference.repository)
+        }) {
+            bail!(
+                "cannot narrow repository scope for package {package} while its gate-earned amendment references a removed repository"
+            );
+        }
+        carried_amendments.push((package.clone(), amendment.clone()));
+    }
     append_driver_event(
         &command.journal_path,
         &DriverEvent::PlanVersionAdvanced {
@@ -4520,6 +4638,8 @@ fn ensure_driver_plan_version(
             to_plan_version,
             carried_completions,
             carried_amendments,
+            criterion_revisions_ratified_by,
+            criterion_revisions,
         },
     )?;
     Ok(true)
@@ -4528,6 +4648,8 @@ fn ensure_driver_plan_version(
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
     let initial_graph = read_driver_graph(&command.graph_path)?;
     verify_graph_repository_refs(&initial_graph, &command.repositories)?;
+    let initial_events = read_driver_journal(&command.journal_path)?;
+    ensure_worker_environment_contract(&command, &initial_events)?;
     let initial_events = read_driver_journal(&command.journal_path)?;
     ensure_recovery_configuration(&command, &initial_events)?;
     let mut issued_this_launch = HashSet::new();
@@ -6083,6 +6205,63 @@ enum HerdrAgentStartOutcome {
     SpawnObservedButUnusable(Error),
 }
 
+fn environment_assignment_name(argument: &str) -> Option<&str> {
+    let (name, _) = argument.split_once('=')?;
+    let mut bytes = name.bytes();
+    let valid_start = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+    (valid_start && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')).then_some(name)
+}
+
+fn redact_environment_assignments(arguments: &[String]) -> Vec<String> {
+    arguments
+        .iter()
+        .map(|argument| {
+            environment_assignment_name(argument)
+                .map_or_else(|| argument.clone(), |name| format!("{name}=<redacted>"))
+        })
+        .collect()
+}
+
+fn redact_herdr_stderr(arguments: &[String], stderr: &[u8]) -> String {
+    let mut redacted = String::from_utf8_lossy(stderr).into_owned();
+    for argument in arguments {
+        let Some(name) = environment_assignment_name(argument) else {
+            continue;
+        };
+        let Some((_, value)) = argument.split_once('=') else {
+            continue;
+        };
+        if !value.is_empty() {
+            redacted = redacted.replace(value, "<redacted>");
+        }
+        redacted = redacted.replace(argument, &format!("{name}=<redacted>"));
+    }
+    redacted
+}
+
+#[cfg(test)]
+#[test]
+fn herdr_environment_values_are_redacted_from_observations_and_errors() {
+    let arguments = vec![
+        "/usr/bin/env".to_owned(),
+        "-i".to_owned(),
+        "CAMPAIGN_TOKEN=super-secret".to_owned(),
+        "worker".to_owned(),
+    ];
+    assert_eq!(
+        redact_environment_assignments(&arguments),
+        ["/usr/bin/env", "-i", "CAMPAIGN_TOKEN=<redacted>", "worker"]
+    );
+    let stderr = redact_herdr_stderr(
+        &arguments,
+        b"refused CAMPAIGN_TOKEN=super-secret because super-secret is invalid",
+    );
+    assert!(!stderr.contains("super-secret"));
+    assert!(stderr.contains("CAMPAIGN_TOKEN=<redacted>"));
+}
+
 fn execute_herdr_agent_start(invocation: &HerdrInvocation) -> HerdrAgentStartOutcome {
     let output = match std::process::Command::new(invocation.executable())
         .args(invocation.argv())
@@ -6100,8 +6279,8 @@ fn execute_herdr_agent_start(invocation: &HerdrInvocation) -> HerdrAgentStartOut
         return HerdrAgentStartOutcome::Refused(anyhow!(
             "herdr command failed with {} for {:?}: {}",
             output.status,
-            invocation.argv(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            redact_environment_assignments(invocation.argv()),
+            redact_herdr_stderr(invocation.argv(), &output.stderr).trim()
         ));
     }
     match serde_json::from_slice(&output.stdout) {
@@ -6137,8 +6316,11 @@ fn parse_herdr_foreground_process(response: &Value) -> Option<DispatchWorkerProc
             process
                 .get("cmdline")
                 .and_then(Value::as_str)
-                .map_or_else(Vec::new, |line| vec![line.to_owned()])
+                .map_or_else(Vec::new, |line| {
+                    line.split_whitespace().map(str::to_owned).collect()
+                })
         });
+    let argv = redact_environment_assignments(&argv);
     Some(DispatchWorkerProcessObservation::Observed {
         process_id,
         name,
@@ -8657,16 +8839,45 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
     let [flag, raw_value, trailing @ ..] = args else {
         bail!(USAGE);
     };
-    let repositories = parse_graph_repositories(trailing)?;
     match action {
         "check" if flag == "--file" && is_value(raw_value) => Ok(Command::GraphCheck {
             path: PathBuf::from(raw_value),
-            repositories,
+            repositories: parse_graph_repositories(trailing)?,
         }),
-        "freeze" if flag == "--vision-dir" && is_value(raw_value) => Ok(Command::GraphFreeze {
-            vision_dir: PathBuf::from(raw_value),
-            repositories,
-        }),
+        "freeze" if flag == "--vision-dir" && is_value(raw_value) => {
+            let mut repositories = Vec::new();
+            let mut criterion_revisions = None;
+            let mut index = 0;
+            while index < trailing.len() {
+                if index + 1 >= trailing.len() || !is_value(&trailing[index + 1]) {
+                    bail!(USAGE);
+                }
+                match trailing[index].as_str() {
+                    "--repository" => {
+                        let Some((name, path)) = trailing[index + 1].split_once('=') else {
+                            bail!("repository mapping must be NAME=SOURCE_WORKTREE");
+                        };
+                        if name.trim().is_empty() || path.trim().is_empty() {
+                            bail!("repository mapping must contain a non-empty name and path");
+                        }
+                        if repositories.iter().any(|(existing, _)| existing == name) {
+                            bail!("repository mapping `{name}` was supplied more than once");
+                        }
+                        repositories.push((name.to_owned(), PathBuf::from(path)));
+                    }
+                    "--criterion-revisions" if criterion_revisions.is_none() => {
+                        criterion_revisions = Some(PathBuf::from(&trailing[index + 1]));
+                    }
+                    _ => bail!(USAGE),
+                }
+                index += 2;
+            }
+            Ok(Command::GraphFreeze {
+                vision_dir: PathBuf::from(raw_value),
+                repositories,
+                criterion_revisions,
+            })
+        }
         _ => bail!(USAGE),
     }
 }
@@ -8889,12 +9100,36 @@ fn publish_frozen_graph(path: &Path, bytes: &[u8]) -> Result<bool> {
     Ok(linked)
 }
 
-fn run_graph_freeze(vision_dir: &Path, repositories: &[(String, PathBuf)]) -> Result<()> {
+fn run_graph_freeze(
+    vision_dir: &Path,
+    repositories: &[(String, PathBuf)],
+    criterion_revisions: Option<&Path>,
+) -> Result<()> {
     if repositories.is_empty() {
         bail!(
             "graph freeze requires one --repository NAME=SOURCE_WORKTREE mapping per graph repository"
         );
     }
+    let freeze_lock_path = vision_dir.join(".pce-graph-freeze.lock");
+    let freeze_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&freeze_lock_path)
+        .with_context(|| {
+            format!(
+                "failed to open graph freeze lock {}",
+                freeze_lock_path.display()
+            )
+        })?;
+    freeze_lock.lock().with_context(|| {
+        format!(
+            "failed to lock graph freeze at {}",
+            freeze_lock_path.display()
+        )
+    })?;
     let source = vision_dir.join("graph.json");
     let bytes = fs::read(&source)
         .with_context(|| format!("failed to read work-package graph {}", source.display()))?;
@@ -8913,6 +9148,21 @@ fn run_graph_freeze(vision_dir: &Path, repositories: &[(String, PathBuf)]) -> Re
             expected_vision
         );
     }
+    let frozen = vision_dir.join(format!("graph.v{version}.json"));
+    if frozen
+        .try_exists()
+        .with_context(|| format!("failed to inspect frozen graph {}", frozen.display()))?
+    {
+        let existing = fs::read(&frozen)
+            .with_context(|| format!("failed to read frozen graph {}", frozen.display()))?;
+        if existing != bytes {
+            bail!(
+                "frozen plan artifact {} already contains different bytes",
+                frozen.display()
+            );
+        }
+    }
+    let mut frozen_revision_digest = None;
     if version > 1 {
         let previous = vision_dir.join(format!("graph.v{}.json", version - 1));
         let previous_bytes = fs::read(&previous).with_context(|| {
@@ -8933,14 +9183,82 @@ fn run_graph_freeze(vision_dir: &Path, repositories: &[(String, PathBuf)]) -> Re
                 graph.vision()
             );
         }
+        let violations = criteria_invariance_violations(&previous_graph, &graph);
+        if violations.is_empty() {
+            if criterion_revisions.is_some() {
+                bail!(
+                    "criterion revision record supplied, but no predecessor criterion changed or was removed"
+                );
+            }
+            let frozen_record =
+                vision_dir.join(format!("graph.v{version}.criterion-revisions.json"));
+            if frozen_record.try_exists().with_context(|| {
+                format!(
+                    "failed to inspect frozen criterion revision record {}",
+                    frozen_record.display()
+                )
+            })? {
+                bail!(
+                    "frozen criterion revision record {} exists, but no predecessor criterion changed or was removed",
+                    frozen_record.display()
+                );
+            }
+        } else {
+            let record_path = criterion_revisions.with_context(|| {
+                let affected = violations
+                    .iter()
+                    .map(|violation| {
+                        format!(
+                            "{}::{:?}",
+                            violation.previous_package().as_str(),
+                            violation.criterion().name()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "criteria changed or were removed ({affected}); additive world-conformance requires no graph edit, otherwise the human must ratify the exact revision with --criterion-revisions <HUMAN_RECORD_PATH>"
+                )
+            })?;
+            let revision_bytes = fs::read(record_path).with_context(|| {
+                format!(
+                    "failed to read human criterion revision record {}",
+                    record_path.display()
+                )
+            })?;
+            let manifest = parse_criterion_revision_manifest(&revision_bytes)
+                .context("failed to parse human criterion revision record")?;
+            validate_criterion_revisions(&previous_graph, &graph, manifest.revisions())
+                .context("human criterion revision record does not match the graph transition")?;
+            let frozen_record =
+                vision_dir.join(format!("graph.v{version}.criterion-revisions.json"));
+            publish_frozen_graph(&frozen_record, &revision_bytes).with_context(|| {
+                format!("frozen criterion revision record for plan version {version} is immutable")
+            })?;
+            frozen_revision_digest = Some(format!("{:x}", Sha256::digest(&revision_bytes)));
+        }
+    } else if criterion_revisions.is_some() {
+        bail!("plan version 1 has no predecessor criteria to revise");
     }
-    let frozen = vision_dir.join(format!("graph.v{version}.json"));
     let wrote = publish_frozen_graph(&frozen, &bytes)
         .with_context(|| format!("frozen plan version {version} is immutable"))?;
     let digest = format!("{:x}", Sha256::digest(&bytes));
-    write_json_stdout(
-        &json!({ "path": frozen, "plan_version": version, "sha256": digest, "created": wrote }),
-    )
+    let mut output = json!({
+        "path": frozen,
+        "plan_version": version,
+        "sha256": digest,
+        "created": wrote
+    });
+    if let Some(revision_digest) = frozen_revision_digest {
+        output["criterion_revisions"] = Value::from(
+            vision_dir
+                .join(format!("graph.v{version}.criterion-revisions.json"))
+                .display()
+                .to_string(),
+        );
+        output["criterion_revisions_sha256"] = Value::from(revision_digest);
+    }
+    write_json_stdout(&output)
 }
 
 fn run_log(path: &Path, kind: WriteKind, node: NodeId, input: &mut dyn Read) -> Result<()> {
@@ -19002,7 +19320,8 @@ None.
             "       pce gate exec\n",
             "       pce gate replay --repo-root <ABSOLUTE_REPOSITORY_ROOT> --evidence <ABSOLUTE_EVIDENCE_PATH> --execution-ref <EXECUTION_REF> --broken-ref <REF> --repaired-ref <REF> --schema <REPOSITORY_RELATIVE_SCHEMA_PATH> --output <REPOSITORY_RELATIVE_OUTPUT_PATH> --expected <conforming-verdict|nonconforming-verdict>\n",
             "       pce gate execution-subject-probe --output <REPOSITORY_RELATIVE_OUTPUT_PATH>\n",
-            "       pce gate paired-execution-proof --repo-root <ABSOLUTE_REPOSITORY_ROOT> --artifacts <ABSOLUTE_EMPTY_DIRECTORY> --env <NAME=VALUE> --env <NAME=VALUE> --env <NAME=VALUE>"
+            "       pce gate paired-execution-proof --repo-root <ABSOLUTE_REPOSITORY_ROOT> --artifacts <ABSOLUTE_EMPTY_DIRECTORY> --env <NAME=VALUE> --env <NAME=VALUE> --env <NAME=VALUE>\n",
+            "       --worker-env forwards that named driver variable only to package and gate worker workspaces; criteria and --prepare commands continue to inherit the driver's full launch environment."
         )));
     }
 

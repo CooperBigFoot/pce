@@ -44,13 +44,16 @@ Derive the required repository **names** from the union of `packages[].repositor
 
 `<vision-dir>/run.json` is the durable launch authority. On first launch, ask for source worktree
 paths and optional prepare commands only for those exact names, plus any non-default driver limits
-the human wants. Require absolute worktree paths and verify each repository with `git -C <path>
-status`. Write this shape atomically:
+the human wants. Also ask for the names of environment variables already exported in the driver's
+launch shell that every package and gate worker workspace requires. Store names only, never values.
+Require absolute worktree paths and verify each repository with `git -C <path> status`. Write this
+shape atomically:
 
 ```json
 {
   "repositories": {"NAME": "/absolute/source/worktree"},
   "prepare": {"NAME": "COMMAND"},
+  "environment": ["NAME"],
   "override_risk_ordering": false,
   "retry_limit": null,
   "local_patch_limit": null,
@@ -64,8 +67,10 @@ On later invocations, reuse these values without asking. Compare the file with t
 graph: remove configured repositories and prepare commands whose names are absent, write the
 filtered file atomically, and report every dropped name. If a later graph adds a repository, ask
 only for that repository and extend `run.json`. Reject duplicate names, relative paths, prepare
-commands without a matching repository, malformed types, and unknown fields. Never fill a missing
-value by guesswork.
+commands without a matching repository, malformed types, and unknown fields. Reject duplicate or unset environment names before launch, and report each unset name. Environment names must match
+`[A-Za-z_][A-Za-z0-9_]*` and must not claim binary-owned `TMPDIR`, `PCE_DISPATCH_TMPDIR`,
+`PCE_WORKTREES`, or `PCE_WORKTREE_*`. Never fill a missing value by guesswork. Never write an
+environment value to `run.json`, `supervision.md`, or the driver journal.
 
 Use `<vision-dir>/driver-journal.jsonl` as the one journal. If another plausible journal already
 exists, report the ambiguity and stop rather than starting a second history or editing either file.
@@ -79,9 +84,16 @@ following command with the stored optional flags included only when non-null or 
 pce package driver-run --graph <frozen-graph> \
   --journal <vision-dir>/driver-journal.jsonl \
   --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... \
-  [--override-risk-ordering] [--retry-limit N] [--local-patch-limit N] \
+  [--worker-env NAME]... [--override-risk-ordering] [--retry-limit N] [--local-patch-limit N] \
   [--environment-failure-limit N] [--wait-timeout-ms N]
 ```
+
+`--worker-env` is names-only pass-through from the driver's launch environment. It applies to the
+package worker and every gate worker spawned in that workspace, including later attempts after a
+driver restart. Criteria commands continue to inherit the driver's full launch environment, as do
+`--prepare` commands in driver-owned materializations; they are not restricted to the declared
+worker set. Every relaunch must reuse the stored environment names so the journaled contract remains
+unchanged.
 
 Host only this foreground process in the named tmux session from `run.json`. Create the detached
 session if absent, enable `remain-on-exit`, and relaunch an exited driver with `tmux respawn-pane -k`
@@ -188,13 +200,35 @@ same false repository assumption are not recovery.
 A driver refusal because a criterion changed, disappeared, or was split into renamed halves is a
 human ruling, not an invitation to evade the floor. Draft and mechanically check the proposed graph,
 show the old and proposed criterion text and the park reasons side by side, append the complete
-briefing, push-notify, and stop with:
+briefing, push-notify, and stop. The freeze will refuse the changed draft unless the human writes an
+exact revision record containing their identity, the predecessor criterion, the successor criterion
+(or removal), and their rationale, then explicitly supplies it:
 
 ```bash
-pce graph freeze --vision-dir <vision-dir>
+pce graph freeze --vision-dir <vision-dir> \
+  --criterion-revisions <human-authored-record-path> \
+  --repository <NAME>=<SOURCE_WORKTREE> [...]
 ```
 
-The skill never runs that command.
+The human-authored JSON record has this exact typed shape; `successor: null` means removal:
+
+```json
+{
+  "schema_version": 1,
+  "ratified_by": "<human identity>",
+  "revisions": [{
+    "previous_package": "<package id>",
+    "predecessor": {"name":"...","input":"...","observation":"...","command":"..."},
+    "successor": {"name":"...","input":"...","observation":"...","command":"..."},
+    "rationale": "<human-authored rationale>"
+  }]
+}
+```
+
+The skill never writes the revision record, supplies `--criterion-revisions`, or runs the freeze.
+Only the human ratifies a frozen criterion revision. Ratification forfeits the affected package's
+carried completion. Mechanical freezes remain definition-preserving and can never carry a revision
+record.
 
 ## 7. Notify or promote at the terminal boundary
 
@@ -267,8 +301,13 @@ journal records. The body is generated evidence, not a diff summary or review re
    the rationale;
 5. every `plan-version-advanced` event, its carried completions and amendments, plus a structural
    diff of the adjacent frozen graphs stating which package definitions and dependency edges were
-   revised; and
-6. every final `assembly-criterion-executed` command and exit status against the composed whole,
+   revised;
+6. every human-ratified criterion revision, quoting the predecessor criterion bytes, successor
+   criterion bytes (or removal), ratifier, and human rationale verbatim. Put each value in a fence
+   longer than every fence contained in that value. Refuse before pushing if a journal revision
+   cannot be correlated exactly with its versioned frozen revision record and adjacent frozen
+   graphs; and
+7. every final `assembly-criterion-executed` command and exit status against the composed whole,
    including paired amendment proof, followed by the terminal `assembly-completed` event.
 
 Quote journal text without paraphrasing. Successful stdout/stderr and transient absolute working
@@ -319,8 +358,9 @@ the run's final line. No prose follows that URL.
 
 This skill may draft only a goal-preserving graph repartition under section 6 and may promote only
 through sections 7 through 10. It does not write `vision.md`, invoke `/to-graph`, weaken or rename
-criteria, freeze a graph, edit the journal, invoke `/land-ticket`, or land any non-assembly branch.
-Freeze and park-overrule remain human rulings; promotion after proof is mechanical.
+criteria, author or supply a criterion revision record, freeze a graph, edit the journal, invoke
+`/land-ticket`, or land any non-assembly branch. Criterion revision, freeze, and park-overrule remain
+human rulings; promotion after proof is mechanical.
 
 The append-only driver journal is the admissible run proof. `supervision.md` is explanation and
 captured evidence, never a substitute for or repair of that proof. No important fact may exist only

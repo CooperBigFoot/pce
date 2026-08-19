@@ -168,12 +168,18 @@ impl WorkerEnvironment {
     /// Rejects empty names and binary-owned `TMPDIR` or `PCE_WORKTREE_*` entries.
     pub fn parse(entries: BTreeMap<String, String>) -> Result<Self, HerdrDispatchPlanError> {
         for name in entries.keys() {
-            if name.is_empty() {
-                return Err(HerdrDispatchPlanError::EmptyValue {
-                    field: "environment name",
-                });
+            let mut bytes = name.bytes();
+            let valid_start = bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+            if !valid_start || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+                return Err(HerdrDispatchPlanError::InvalidEnvironmentName { name: name.clone() });
             }
-            if !matches!(name.as_str(), "PATH" | "HOME" | "USER") {
+            if matches!(
+                name.as_str(),
+                "TMPDIR" | "PCE_DISPATCH_TMPDIR" | "PCE_WORKTREES"
+            ) || name.starts_with("PCE_WORKTREE_")
+            {
                 return Err(HerdrDispatchPlanError::ReservedEnvironment { name: name.clone() });
             }
         }
@@ -425,6 +431,9 @@ pub enum HerdrDispatchPlanError {
     /// A domain path was not absolute.
     #[error("{field} must be absolute: {path}")]
     PathNotAbsolute { field: &'static str, path: PathBuf },
+    /// An environment name cannot be represented as one portable process assignment.
+    #[error("environment name `{name}` must match [A-Za-z_][A-Za-z0-9_]*")]
+    InvalidEnvironmentName { name: String },
     /// The caller attempted to replace a binary-owned environment binding.
     #[error("environment name `{name}` is binary-owned")]
     ReservedEnvironment { name: String },
@@ -798,19 +807,28 @@ mod tests {
     }
 
     #[test]
-    fn only_explicit_operator_environment_names_are_accepted() {
-        let error = WorkerEnvironment::parse(BTreeMap::from([(
-            "SHELL".to_owned(),
-            "/bin/zsh".to_owned(),
+    fn explicit_operator_environment_accepts_custom_names_and_reserves_binary_names() {
+        let environment = WorkerEnvironment::parse(BTreeMap::from([(
+            "CAMPAIGN_TOKEN".to_owned(),
+            "secret".to_owned(),
         )]))
-        .expect_err("operator environment must not leak");
-        assert_eq!(
-            error.to_string(),
-            "environment name `SHELL` is binary-owned"
-        );
-        let empty =
-            WorkerEnvironment::parse(BTreeMap::new()).unwrap_or_else(|error| panic!("{error}"));
-        assert!(empty.0.is_empty());
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(environment.0["CAMPAIGN_TOKEN"], "secret");
+
+        for name in [
+            "TMPDIR",
+            "PCE_DISPATCH_TMPDIR",
+            "PCE_WORKTREES",
+            "PCE_WORKTREE_0",
+        ] {
+            let error =
+                WorkerEnvironment::parse(BTreeMap::from([(name.to_owned(), "value".to_owned())]))
+                    .expect_err("binary-owned environment must be refused");
+            assert_eq!(
+                error.to_string(),
+                format!("environment name `{name}` is binary-owned")
+            );
+        }
     }
     #[test]
     fn pane_close_targets_only_the_exact_returned_opaque_identity() {

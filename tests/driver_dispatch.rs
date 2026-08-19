@@ -82,6 +82,7 @@ fi"#,
         &bin.join("prime-agent"),
         r#"#!/bin/sh
 set -eu
+[ "${TEST_WORKER_ENV-}" = "credential-secret-value" ]
 cat >/dev/null
 sleep 0.35
 if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
@@ -101,6 +102,9 @@ fi
         .arg(temp.path().join("driver.jsonl"))
         .args(["--repository"])
         .arg(format!("repo={}", repository.display()))
+        .args(["--worker-env", "TEST_WORKER_ENV"])
+        .args(["--prepare", r#"repo=test -n "$TEST_WORKER_ENV""#])
+        .env("TEST_WORKER_ENV", "credential-secret-value")
         .env("HERDR_ENV", "1")
         .env(
             "PCE_WORK_PACKAGE_WORKTREE_ROOT",
@@ -120,8 +124,13 @@ fi
     );
     let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
     assert_eq!(stdout["outcome"], "finished");
+    assert_eq!(stdout["worker_environment"][0], "TEST_WORKER_ENV");
     let journal = fs::read_to_string(temp.path().join("driver.jsonl")).expect("journal");
     assert_eq!(journal.matches("worker-dispatched").count(), 1);
+    assert!(
+        journal.contains(r#""event":"worker-environment-declared","names":["TEST_WORKER_ENV"]"#)
+    );
+    assert!(!journal.contains("credential-secret-value"));
     assert!(!journal.contains("driver-no-findings"));
     assert!(temp.path().join(".pce/package-results/A/1.json").is_file());
     assert!(temp.path().join(".pce/package-results/A/3.json").is_file());
@@ -164,6 +173,57 @@ fi
     assert!(journal.contains("dispatch-pane-cleanup"));
     assert!(journal.contains("simulated close refusal"));
     assert!(journal.contains("\"outcome\":\"failed\""));
+
+    let mismatched_restart = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "driver-run", "--graph"])
+        .arg(&graph)
+        .args(["--journal"])
+        .arg(temp.path().join("driver.jsonl"))
+        .args(["--repository"])
+        .arg(format!("repo={}", repository.display()))
+        .env("HERDR_ENV", "1")
+        .env(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+            temp.path().join("worktrees"),
+        )
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
+        )
+        .env("HOME", temp.path())
+        .env("USER", "tester")
+        .output()
+        .expect("mismatched restart");
+    assert!(!mismatched_restart.status.success());
+    let mismatch_error = String::from_utf8_lossy(&mismatched_restart.stderr);
+    assert!(
+        mismatch_error.contains("driver worker environment is already declared"),
+        "{mismatch_error}"
+    );
+}
+
+#[test]
+fn driver_refuses_an_unset_worker_environment_before_journaling() {
+    let temp = tempdir().expect("tempdir");
+    let journal = temp.path().join("driver.jsonl");
+    let name = format!("PCE_TEST_UNSET_WORKER_ENV_{}", std::process::id());
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "driver-run", "--graph"])
+        .arg(temp.path().join("missing-graph.json"))
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository", "repo=/tmp", "--worker-env"])
+        .arg(&name)
+        .env_remove(&name)
+        .output()
+        .expect("driver");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains(&name));
+    assert!(
+        !journal.exists(),
+        "unset declaration wrote a driver journal"
+    );
 }
 
 #[test]

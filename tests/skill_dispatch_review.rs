@@ -6743,3 +6743,24 @@ fn to_graph_requires_race_safe_resume_for_irreversible_acts() {
     assert!(skill.contains("WAIT, not permission to remove or repeat the act"));
     assert!(skill.contains("completion report and status file"));
 }
+
+#[test]
+fn work_graph_declares_names_only_worker_environment() {
+    let skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/work-graph/SKILL.md"),
+    )
+    .expect("work-graph skill");
+
+    for clause in [
+        r#""environment": ["NAME"]"#,
+        "Reject duplicate or unset environment names",
+        "[--worker-env NAME]...",
+        "Criteria commands continue to inherit the driver's full launch environment",
+    ] {
+        assert!(
+            skill.contains(clause),
+            "missing worker environment clause: {clause}"
+        );
+    }
+    assert!(!skill.contains(r#""environment": {"#));
+}
