@@ -34,6 +34,29 @@ fn git(root: &std::path::Path, args: &[&str]) -> String {
         .to_owned()
 }
 
+fn attach_current_origin(repository: &std::path::Path, remote: &std::path::Path) {
+    let parent = remote.parent().expect("remote parent");
+    git(
+        parent,
+        &[
+            "init",
+            "--bare",
+            "-q",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    git(
+        repository,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    git(repository, &["push", "-qu", "origin", "HEAD"]);
+}
+
 #[test]
 fn committed_fixture_conforms_to_committed_schema() {
     let schema: Value = serde_json::from_str(SCHEMA).expect("schema JSON");
@@ -54,6 +77,7 @@ fn freezing_version_two_preserves_readable_version_one_bytes() {
     git(&repository, &["add", "."]);
     git(&repository, &["commit", "-qm", "seed"]);
     let authored_ref = git(&repository, &["rev-parse", "HEAD"]);
+    attach_current_origin(&repository, &directory.path().join("origin.git"));
     let mapping = format!("RivRetrieve={}", repository.display());
 
     let vision_dir = directory
@@ -192,6 +216,7 @@ fn mechanical_freeze_accepts_only_definition_preserving_successors() {
     git(&repository, &["add", "."]);
     git(&repository, &["commit", "-qm", "seed"]);
     let first_ref = git(&repository, &["rev-parse", "HEAD"]);
+    attach_current_origin(&repository, &directory.path().join("origin.git"));
     fs::write(repository.join("second"), "second").expect("second");
     git(&repository, &["add", "."]);
     git(&repository, &["commit", "-qm", "second"]);
@@ -227,6 +252,7 @@ fn mechanical_freeze_accepts_only_definition_preserving_successors() {
         "{}",
         String::from_utf8_lossy(&initial.stderr)
     );
+    fs::remove_dir_all(directory.path().join("origin.git")).expect("make origin unreachable");
 
     graph["plan_version"] = Value::from(2);
     graph
@@ -300,6 +326,11 @@ fn mechanical_freeze_normalizes_multi_repository_scalar_refs() {
         fs::write(repository.join("seed"), "seed").expect("seed");
         git(repository, &["add", "."]);
         git(repository, &["commit", "-qm", "seed"]);
+        let remote_name = format!(
+            "{}.git",
+            repository.file_name().expect("name").to_string_lossy()
+        );
+        attach_current_origin(repository, &directory.path().join(remote_name));
     }
     let vision_dir = directory.path().join("multi-repository-mechanical");
     fs::create_dir(&vision_dir).expect("vision directory");
@@ -368,6 +399,7 @@ fn mechanical_freeze_refuses_a_draft_behind_the_highest_frozen_version() {
     fs::write(repository.join("seed"), "seed").expect("seed");
     git(&repository, &["add", "."]);
     git(&repository, &["commit", "-qm", "seed"]);
+    attach_current_origin(&repository, &directory.path().join("origin.git"));
     let mapping = format!("RivRetrieve={}", repository.display());
     let vision_dir = directory
         .path()
@@ -418,6 +450,7 @@ fn criterion_edit_requires_explicit_human_revision_record_at_freeze() {
     git(&repository, &["add", "."]);
     git(&repository, &["commit", "-qm", "seed"]);
     let authored_ref = git(&repository, &["rev-parse", "HEAD"]);
+    attach_current_origin(&repository, &directory.path().join("origin.git"));
     let mapping = format!("RivRetrieve={}", repository.display());
     let vision_dir = directory
         .path()
@@ -711,4 +744,179 @@ fn revision_matching_preserves_duplicates_and_allows_ratified_package_removal() 
     .expect("manifest");
     validate_criterion_revisions(&previous, &removed, removal_manifest.revisions())
         .expect("removing the package ratifies every removed occurrence");
+}
+
+fn init_remote_pair(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, String) {
+    let remote = root.join("origin.git");
+    git(
+        root,
+        &[
+            "init",
+            "--bare",
+            "-q",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    let repository = root.join("checkout");
+    git(
+        root,
+        &[
+            "clone",
+            "-q",
+            remote.to_str().expect("remote path"),
+            repository.to_str().expect("checkout path"),
+        ],
+    );
+    git(&repository, &["config", "user.email", "test@example.com"]);
+    git(&repository, &["config", "user.name", "Test"]);
+    fs::write(repository.join("artifact.txt"), "current").expect("artifact");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "current"]);
+    git(&repository, &["push", "-qu", "origin", "HEAD"]);
+    let oid = git(&repository, &["rev-parse", "HEAD"]);
+    (repository, remote, oid)
+}
+
+fn one_package_graph(vision: &str, authored: &str) -> Value {
+    serde_json::json!({
+        "vision": vision,
+        "plan_version": 1,
+        "authored_at_refs": {"repo": authored},
+        "packages": [{
+            "id": "A", "title": "Create artifact", "repositories": ["repo"],
+            "criteria": [{"name":"artifact", "input":"run", "observation":"passes", "command":"test -f artifact.txt"}],
+            "depends_on": []
+        }]
+    })
+}
+
+#[test]
+fn human_freeze_requires_remote_base_currency_and_reports_divergence() {
+    let directory = tempdir().expect("temporary directory");
+    let (repository, _remote, authored) = init_remote_pair(directory.path());
+    fs::write(repository.join("remote.txt"), "remote").expect("remote change");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "remote advance"]);
+    git(&repository, &["push", "-q", "origin", "HEAD"]);
+    let remote_oid = git(&repository, &["rev-parse", "HEAD"]);
+    git(&repository, &["reset", "--hard", &authored]);
+    let vision = directory.path().join("remote-currency");
+    fs::create_dir(&vision).expect("vision");
+    fs::write(
+        vision.join("graph.json"),
+        serde_json::to_vec(&one_package_graph("remote-currency", &authored)).expect("graph"),
+    )
+    .expect("graph");
+    let mapping = format!("repo={}", repository.display());
+    let behind = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision)
+        .args(["--repository", &mapping])
+        .output()
+        .expect("behind freeze");
+    assert!(!behind.status.success());
+    let behind_stderr = String::from_utf8_lossy(&behind.stderr);
+    assert!(
+        behind_stderr.contains("authored-only 0") && behind_stderr.contains("remote-only 1"),
+        "{behind_stderr}"
+    );
+
+    fs::write(repository.join("local.txt"), "local").expect("local change");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "local divergence"]);
+    let authored_oid = git(&repository, &["rev-parse", "HEAD"]);
+    fs::write(
+        vision.join("graph.json"),
+        serde_json::to_vec(&one_package_graph("remote-currency", &authored_oid)).expect("graph"),
+    )
+    .expect("graph");
+    let result = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision)
+        .args(["--repository", &mapping])
+        .output()
+        .expect("freeze");
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("repo"), "{stderr}");
+    assert!(stderr.contains(&authored_oid), "{stderr}");
+    assert!(stderr.contains(&remote_oid), "{stderr}");
+    assert!(
+        stderr.contains("authored-only 1") && stderr.contains("remote-only 1"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("git pull --ff-only"), "{stderr}");
+}
+
+#[test]
+fn base_currency_escape_is_attributed_durable_and_rejected_for_mechanical() {
+    let directory = tempdir().expect("temporary directory");
+    let repository = directory.path().join("repository");
+    fs::create_dir(&repository).expect("repository");
+    git(&repository, &["init", "-q"]);
+    git(&repository, &["config", "user.email", "test@example.com"]);
+    git(&repository, &["config", "user.name", "Test"]);
+    fs::write(repository.join("artifact.txt"), "current").expect("artifact");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "current"]);
+    let authored = git(&repository, &["rev-parse", "HEAD"]);
+    let vision = directory.path().join("offline-freeze");
+    fs::create_dir(&vision).expect("vision");
+    fs::write(
+        vision.join("graph.json"),
+        serde_json::to_vec(&one_package_graph("offline-freeze", &authored)).expect("graph"),
+    )
+    .expect("graph");
+    let acceptance = vision.join("acceptance.json");
+    fs::write(&acceptance, serde_json::to_vec(&serde_json::json!({"schema_version":1,"accepted_by":"Nicolas","reason":"Historical offline reconstruction"})).expect("acceptance")).expect("acceptance");
+    let mapping = format!("repo={}", repository.display());
+    let refused = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision)
+        .args(["--repository", &mapping])
+        .output()
+        .expect("missing-origin freeze");
+    assert!(!refused.status.success());
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        refusal.contains("repo") && refusal.contains("missing or unreachable"),
+        "{refusal}"
+    );
+    let result = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision)
+        .args([
+            "--accept-base-currency-risk",
+            acceptance.to_str().expect("path"),
+            "--repository",
+            &mapping,
+        ])
+        .output()
+        .expect("freeze");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let sidecar = vision.join("graph.v1.base-currency-acceptance.json");
+    let durable: Value =
+        serde_json::from_slice(&fs::read(sidecar).expect("sidecar")).expect("JSON");
+    assert_eq!(durable["accepted_by"], "Nicolas");
+    let mechanical = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision)
+        .args([
+            "--mechanical",
+            "--accept-base-currency-risk",
+            acceptance.to_str().expect("path"),
+            "--repository",
+            &mapping,
+        ])
+        .output()
+        .expect("mechanical");
+    assert!(!mechanical.status.success());
+    assert!(
+        String::from_utf8_lossy(&mechanical.stderr)
+            .contains("mechanical freeze cannot accept base-currency risk")
+    );
 }

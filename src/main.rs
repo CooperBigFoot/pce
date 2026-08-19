@@ -110,7 +110,7 @@ const USAGE: &str = concat!(
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] [--override-risk-ordering]\n",
     "       pce graph check --file <GRAPH_PATH> [--repository <NAME=SOURCE_WORKTREE>]...\n",
-    "       pce graph freeze --vision-dir <VISION_DIR> [--mechanical] [--criterion-revisions <HUMAN_RECORD_PATH>] --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
+    "       pce graph freeze --vision-dir <VISION_DIR> [--mechanical] [--criterion-revisions <HUMAN_RECORD_PATH>] [--accept-base-currency-risk <HUMAN_RECORD_PATH>] --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
     "       pce package brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> [--brief <ABSOLUTE_BRIEF_PATH>] -- <WORKER_ARG>...\n",
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
@@ -406,6 +406,7 @@ enum Command {
         repositories: Vec<(String, PathBuf)>,
         authority: FreezeAuthority,
         criterion_revisions: Option<PathBuf>,
+        base_currency_acceptance: Option<PathBuf>,
     },
     LogWrite {
         path: PathBuf,
@@ -829,11 +830,13 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
             repositories,
             authority,
             criterion_revisions,
+            base_currency_acceptance,
         } => run_graph_freeze(
             &vision_dir,
             &repositories,
             authority,
             criterion_revisions.as_deref(),
+            base_currency_acceptance.as_deref(),
         ),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
@@ -9646,6 +9649,7 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
             let mut repositories = Vec::new();
             let mut authority = FreezeAuthority::Human;
             let mut criterion_revisions = None;
+            let mut base_currency_acceptance = None;
             let mut index = 0;
             while index < trailing.len() {
                 match trailing[index].as_str() {
@@ -9676,6 +9680,14 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
                         criterion_revisions = Some(PathBuf::from(&trailing[index + 1]));
                         index += 2;
                     }
+                    "--accept-base-currency-risk"
+                        if base_currency_acceptance.is_none()
+                            && index + 1 < trailing.len()
+                            && is_value(&trailing[index + 1]) =>
+                    {
+                        base_currency_acceptance = Some(PathBuf::from(&trailing[index + 1]));
+                        index += 2;
+                    }
                     _ => bail!(USAGE),
                 }
             }
@@ -9684,6 +9696,7 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
                 repositories,
                 authority,
                 criterion_revisions,
+                base_currency_acceptance,
             })
         }
         _ => bail!(USAGE),
@@ -9937,14 +9950,97 @@ fn highest_frozen_graph_version(vision_dir: &Path) -> Result<Option<u64>> {
     Ok(highest)
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BaseCurrencyAcceptance {
+    schema_version: u64,
+    accepted_by: String,
+    reason: String,
+}
+
+fn parse_base_currency_acceptance(bytes: &[u8]) -> Result<BaseCurrencyAcceptance> {
+    let acceptance: BaseCurrencyAcceptance =
+        serde_json::from_slice(bytes).context("base-currency acceptance must be valid JSON")?;
+    if acceptance.schema_version != 1 {
+        bail!("base-currency acceptance schema_version must be 1");
+    }
+    if acceptance.accepted_by.trim().is_empty() || acceptance.reason.trim().is_empty() {
+        bail!("base-currency acceptance requires non-empty accepted_by and reason");
+    }
+    Ok(acceptance)
+}
+
+fn git_output(repository: &Path, arguments: &[&str]) -> Result<Output> {
+    std::process::Command::new("git")
+        .args(["-C"])
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .with_context(|| format!("failed to execute git in {}", repository.display()))
+}
+
+fn verify_remote_base_currency(
+    graph: &WorkPackageGraph,
+    repositories: &[(String, PathBuf)],
+) -> Result<()> {
+    for (name, repository) in repositories {
+        let authored_ref = graph_authored_ref(graph, name)?;
+        let authored_oid = git_oid(repository, authored_ref)?;
+        let fetched = git_output(repository, &["fetch", "--no-tags", "origin", "HEAD"])?;
+        if !fetched.status.success() {
+            bail!(
+                "repository `{name}` remote base currency cannot be established: origin HEAD is missing or unreachable: {}; configure/reach origin or use an explicit attributed --accept-base-currency-risk record for an offline or historical freeze",
+                String::from_utf8_lossy(&fetched.stderr).trim()
+            );
+        }
+        let remote_oid = git_oid(repository, "FETCH_HEAD")?;
+        let ancestor = git_output(
+            repository,
+            &["merge-base", "--is-ancestor", &remote_oid, &authored_oid],
+        )?;
+        if ancestor.status.success() {
+            continue;
+        }
+        let divergence = git_output(
+            repository,
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{authored_oid}...{remote_oid}"),
+            ],
+        )?;
+        if !divergence.status.success() {
+            bail!("repository `{name}` failed to measure authored/remote divergence");
+        }
+        let counts = String::from_utf8(divergence.stdout)
+            .context("git returned non-UTF-8 divergence counts")?;
+        let mut fields = counts.split_whitespace();
+        let authored_only = fields
+            .next()
+            .context("git omitted authored-only divergence count")?;
+        let remote_only = fields
+            .next()
+            .context("git omitted remote-only divergence count")?;
+        bail!(
+            "repository `{name}` authored oid {authored_oid} is not current with remote default oid {remote_oid} (authored-only {authored_only}, remote-only {remote_only}); update the source worktree with `git pull --ff-only` and re-author the graph"
+        );
+    }
+    Ok(())
+}
+
 fn run_graph_freeze(
     vision_dir: &Path,
     repositories: &[(String, PathBuf)],
     authority: FreezeAuthority,
     criterion_revisions: Option<&Path>,
+    base_currency_acceptance: Option<&Path>,
 ) -> Result<()> {
     if authority == FreezeAuthority::Mechanical && criterion_revisions.is_some() {
         bail!("mechanical freeze cannot carry a human criterion revision record");
+    }
+    if authority == FreezeAuthority::Mechanical && base_currency_acceptance.is_some() {
+        bail!("mechanical freeze cannot accept base-currency risk");
     }
     if repositories.is_empty() {
         bail!(
@@ -9977,6 +10073,23 @@ fn run_graph_freeze(
     let graph = parse_work_package_graph(&bytes)
         .with_context(|| format!("failed to validate work-package graph {}", source.display()))?;
     verify_graph_repository_refs(&graph, repositories)?;
+    let acceptance_bytes = if authority == FreezeAuthority::Human {
+        match base_currency_acceptance {
+            Some(path) => {
+                let bytes = fs::read(path).with_context(|| {
+                    format!("failed to read base-currency acceptance {}", path.display())
+                })?;
+                parse_base_currency_acceptance(&bytes)?;
+                Some(bytes)
+            }
+            None => {
+                verify_remote_base_currency(&graph, repositories)?;
+                None
+            }
+        }
+    } else {
+        None
+    };
     let version = graph.plan_version();
     let expected_vision = vision_dir
         .file_name()
@@ -10101,6 +10214,15 @@ fn run_graph_freeze(
     } else if criterion_revisions.is_some() {
         bail!("plan version 1 has no predecessor criteria to revise");
     }
+    let frozen_base_currency_acceptance = if let Some(acceptance_bytes) = acceptance_bytes {
+        let path = vision_dir.join(format!("graph.v{version}.base-currency-acceptance.json"));
+        publish_frozen_graph(&path, &acceptance_bytes).with_context(|| {
+            format!("frozen base-currency acceptance for plan version {version} is immutable")
+        })?;
+        Some((path, format!("{:x}", Sha256::digest(&acceptance_bytes))))
+    } else {
+        None
+    };
     let wrote = publish_frozen_graph(&frozen, &bytes)
         .with_context(|| format!("frozen plan version {version} is immutable"))?;
     let digest = format!("{:x}", Sha256::digest(&bytes));
@@ -10112,6 +10234,10 @@ fn run_graph_freeze(
     });
     if authority == FreezeAuthority::Mechanical {
         output["mechanical"] = Value::from(true);
+    }
+    if let Some((acceptance_path, acceptance_digest)) = frozen_base_currency_acceptance {
+        output["base_currency_acceptance"] = Value::from(acceptance_path.display().to_string());
+        output["base_currency_acceptance_sha256"] = Value::from(acceptance_digest);
     }
     if let Some(revision_digest) = frozen_revision_digest {
         output["criterion_revisions"] = Value::from(
