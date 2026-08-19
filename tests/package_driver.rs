@@ -1598,3 +1598,56 @@ fn changed_per_repository_refs_carry_lineage_and_recompose_each_assembly_base() 
     assert!(second_tree.lines().any(|path| path == "second-package"));
     assert!(second_tree.lines().any(|path| path == "second-new-ground"));
 }
+
+#[test]
+fn missing_dependency_fault_retains_falsifiable_evidence_in_journal_and_status() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "base");
+    let graph_path = temp.path().join("graph.json");
+    let journal = temp.path().join("driver.jsonl");
+    graph(
+        &graph_path,
+        &["repo"],
+        json!([
+            {"name":"green","input":"repo","observation":"zero","command":"true"}
+        ]),
+    );
+    let worker = temp.path().join("worker.sh");
+    fs::write(&worker, r#"#!/bin/sh
+printf '%s' '{"outcome":"mis-specified","fault":{"kind":"missing-dependency","id":{"missing":"protoc >= 27","checked":["/opt/protoc/bin/protoc","PATH:protoc"],"command":"command -v protoc && protoc --version"}}}' > "$PCE_PACKAGE_OUTCOME"
+"#).expect("worker");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-run".into(),
+            "--graph".into(),
+            graph_path.display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--repository".into(),
+            format!("repo={}", repo.display()),
+            "--worker-override".into(),
+            "--".into(),
+            "/bin/sh".into(),
+            worker.display().to_string(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = "replan: missing dependency: protoc >= 27; checked: [\"/opt/protoc/bin/protoc\",\"PATH:protoc\"]; command: command -v protoc && protoc --version";
+    let events = fs::read_to_string(&journal).expect("journal");
+    let parked = events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("event"))
+        .find(|event| event["event"] == "package-parked")
+        .expect("package park");
+    assert_eq!(parked["reason"], expected);
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status");
+    assert_eq!(status["packages"][0][1]["state"], "parked");
+    assert_eq!(status["packages"][0][1]["reason"], expected);
+}

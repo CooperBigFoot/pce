@@ -327,7 +327,8 @@ pub fn render_package_run(
             String::new()
         } else {
             match state {
-                DriverPackageState::Failed { reason } | DriverPackageState::Parked { reason } => {
+                DriverPackageState::Failed { reason }
+                | DriverPackageState::Parked { reason, .. } => {
                     format!("<p class=\"reason\">{}</p>", escaped(reason))
                 }
                 _ => String::new(),
