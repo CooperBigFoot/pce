@@ -20629,6 +20629,7 @@ None.
             recovery_limits: limits,
             worker_override: None,
             wait_timeout: None,
+            worker_environment: std::collections::BTreeMap::new(),
         };
         let graph = crate::read_driver_graph(&graph_path).expect("graph");
 
