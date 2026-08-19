@@ -2277,7 +2277,11 @@ fn append_worker_environment_outcome(
     append_driver_event(&command.journal_path, &event)
 }
 
-fn park_if_recovery_exhausted(command: &DriverRunCommand, package_id: &str) -> Result<()> {
+fn park_if_recovery_exhausted(
+    command: &DriverRunCommand,
+    package_id: &str,
+    blocked_by: Option<&str>,
+) -> Result<()> {
     let events = read_driver_journal(&command.journal_path)?;
     let charged = charged_failure_count(&events, package_id);
     let budget = recovery_budget(command.recovery_limits, charged);
@@ -2293,7 +2297,7 @@ fn park_if_recovery_exhausted(command: &DriverRunCommand, package_id: &str) -> R
             reason: format!(
                 "recovery spending exhausted after {charged} attributable failures; re-author as plan version n+1"
             ),
-            blocked_by: None,
+            blocked_by: blocked_by.map(str::to_owned),
             attempts,
         },
     )
@@ -2757,7 +2761,7 @@ fn observe_driver_worker_outcome(
                 }
             }
             if !run_join_parent_criteria(graph, command, &package_id, issuance)? {
-                park_if_recovery_exhausted(command, &package_id)?;
+                park_if_recovery_exhausted(command, &package_id, None)?;
                 return Ok(true);
             }
             let _ = execute_driver_criteria(DriverCriteriaCommand {
@@ -2767,7 +2771,7 @@ fn observe_driver_worker_outcome(
                 repositories,
                 preparations: command.preparations.clone(),
             })?;
-            park_if_recovery_exhausted(command, &package_id)?;
+            park_if_recovery_exhausted(command, &package_id, None)?;
             let refreshed = read_driver_journal(&command.journal_path)?;
             let state = derive_driver_snapshot(graph, &refreshed, command.override_risk_ordering)?;
             if state.packages().iter().any(|(name, package_state)| {
@@ -2803,7 +2807,7 @@ fn observe_driver_worker_outcome(
                 },
             )?;
             if !park_if_worker_blocker_repeated(command, &package_id)? {
-                park_if_recovery_exhausted(command, &package_id)?;
+                park_if_recovery_exhausted(command, &package_id, Some(blocked_by.as_str()))?;
             }
         }
         pce_core::PackageOutcome::MisSpecified { fault } => {
@@ -5276,7 +5280,7 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
             .collect::<Vec<_>>();
         if !exhausted.is_empty() {
             for package in exhausted {
-                park_if_recovery_exhausted(&command, &package)?;
+                park_if_recovery_exhausted(&command, &package, None)?;
             }
             continue;
         }
@@ -5568,7 +5572,7 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
                     RecoveryRung::Retry => base_brief,
                     RecoveryRung::LocalPatch => compose_local_patch_brief(&base_brief, &evidence),
                     RecoveryRung::Replan => {
-                        park_if_recovery_exhausted(&command, package_id)?;
+                        park_if_recovery_exhausted(&command, package_id, None)?;
                         continue;
                     }
                 };

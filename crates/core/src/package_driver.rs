@@ -631,6 +631,9 @@ pub enum DriverPackageState {
     },
     Parked {
         reason: String,
+        /// The worker-reported blocker, distinct from the generic recovery park reason.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        blocked_by: Option<String>,
     },
 }
 
@@ -1338,7 +1341,9 @@ pub fn derive_driver_snapshot(
                     });
                 }
             },
-            DriverEvent::RecoveryParked { reason, .. } => {
+            DriverEvent::RecoveryParked {
+                reason, blocked_by, ..
+            } => {
                 if matches!(
                     state,
                     DriverPackageState::Complete | DriverPackageState::Parked { .. }
@@ -1349,6 +1354,7 @@ pub fn derive_driver_snapshot(
                 }
                 *state = DriverPackageState::Parked {
                     reason: reason.clone(),
+                    blocked_by: blocked_by.clone(),
                 };
             }
             DriverEvent::WorkerSpawnFailed { issuance, .. } => match state {
@@ -1449,6 +1455,7 @@ pub fn derive_driver_snapshot(
                 DriverPackageState::Running { issuance: running } if running == issuance => {
                     *state = DriverPackageState::Parked {
                         reason: reason.clone(),
+                        blocked_by: None,
                     };
                     disputed_parks.insert(package.clone());
                 }
@@ -1956,7 +1963,12 @@ pub fn repeated_identical_worker_blocker<'a>(
                 DriverEvent::WorkerFailed {
                     package, reason, ..
                 } if package == package_id => Some(Some(reason.as_str())),
-                DriverEvent::WorkerDone { package, .. } if package == package_id => Some(None),
+                DriverEvent::WorkerDone { package, .. }
+                | DriverEvent::PackageParked { package, .. }
+                    if package == package_id =>
+                {
+                    Some(None)
+                }
                 _ => None,
             });
     let latest = failures.next()??;
@@ -2825,6 +2837,51 @@ mod tests {
         assert_eq!(repeated_identical_worker_blocker(&events, "A"), None);
 
         events.push(failure("A", 6, "external blocker "));
+        assert_eq!(repeated_identical_worker_blocker(&events, "A"), None);
+    }
+
+    #[test]
+    fn mis_specified_terminal_outcome_breaks_worker_blocker_streak() {
+        let events = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::WorkerFailed {
+                package: "A".to_owned(),
+                issuance: 1,
+                reason: "compiler image unavailable".to_owned(),
+            },
+            DriverEvent::WorkerFailed {
+                package: "B".to_owned(),
+                issuance: 1,
+                reason: "compiler image unavailable".to_owned(),
+            },
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 2,
+            },
+            DriverEvent::PackageParked {
+                package: "A".to_owned(),
+                issuance: 2,
+                reason: "replan: criterion: wrong boundary".to_owned(),
+            },
+            DriverEvent::PackageParkOverruled {
+                package: "A".to_owned(),
+                plan_version: 1,
+                rationale: "criterion stands".to_owned(),
+            },
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 3,
+            },
+            DriverEvent::WorkerFailed {
+                package: "A".to_owned(),
+                issuance: 3,
+                reason: "compiler image unavailable".to_owned(),
+            },
+        ];
+
         assert_eq!(repeated_identical_worker_blocker(&events, "A"), None);
     }
 }

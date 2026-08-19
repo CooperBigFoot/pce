@@ -427,6 +427,11 @@ fn second_identical_worker_blocker_parks_without_exhausting_recovery_budget() {
     assert_eq!(fs::read_to_string(&attempts).expect("attempts").len(), 2);
     let status: Value = serde_json::from_slice(&output.stdout).expect("status");
     assert_eq!(status["packages"][0][1]["state"], "parked");
+    assert_eq!(status["packages"][0][1]["blocked_by"], blocked_by);
+    assert_eq!(
+        status["packages"][0][1]["reason"],
+        "repeated identical worker blocker; package work cannot resolve it"
+    );
     assert_eq!(status["recovery"][0][1]["dispatches_remaining"], 1);
     assert_eq!(status["recovery"][0][1]["next_rung"], "local-patch");
 
@@ -441,4 +446,82 @@ fn second_identical_worker_blocker_parks_without_exhausting_recovery_budget() {
         parked["reason"],
         "repeated identical worker blocker; package work cannot resolve it"
     );
+}
+
+#[test]
+fn budget_exhaustion_parks_with_final_worker_blocker_in_status_and_journal() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    fs::write(repo.join("value"), "base").expect("value");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "base"]);
+
+    let graph_path = temp.path().join("graph.json");
+    fs::write(
+        &graph_path,
+        serde_json::to_vec(&json!({
+            "vision":"budget-blocker", "plan_version":1, "authored_at_ref":"HEAD",
+            "packages":[{"id":"A","title":"A","repositories":["repo"],
+                "criteria":[{"name":"green","input":"repo","observation":"zero","command":"true"}],
+                "depends_on":[]}]
+        }))
+        .expect("graph"),
+    )
+    .expect("graph write");
+    let count = temp.path().join("count");
+    let worker = temp.path().join("worker.sh");
+    fs::write(&worker, format!(r#"#!/bin/sh
+if test -f '{}'; then blocker='final SDK probe: /opt/acme/sdk missing'; else blocker='initial registry timeout'; touch '{}'; fi
+printf '{{"outcome":"failed","blocked_by":"%s"}}' "$blocker" > "$PCE_PACKAGE_OUTCOME"
+"#, count.display(), count.display())).expect("worker");
+    let journal = temp.path().join("journal.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "package",
+            "driver-run",
+            "--graph",
+            graph_path.to_str().expect("graph"),
+            "--journal",
+            journal.to_str().expect("journal"),
+            "--repository",
+            &format!("repo={}", repo.display()),
+            "--retry-limit",
+            "1",
+            "--local-patch-limit",
+            "0",
+            "--worker-override",
+            "--",
+            "/bin/sh",
+            worker.to_str().expect("worker"),
+        ])
+        .current_dir(temp.path())
+        .output()
+        .expect("pce");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status");
+    let blocker = "final SDK probe: /opt/acme/sdk missing";
+    assert_eq!(status["packages"][0][1]["state"], "parked");
+    assert_eq!(status["packages"][0][1]["blocked_by"], blocker);
+    assert!(
+        status["packages"][0][1]["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("spending exhausted")
+    );
+    let parked = fs::read_to_string(&journal)
+        .expect("journal")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("event"))
+        .find(|event| event["event"] == "recovery-parked")
+        .expect("recovery park");
+    assert_eq!(parked["blocked_by"], blocker);
 }
