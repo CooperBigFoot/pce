@@ -258,6 +258,17 @@ Only a journal whose active plan version ends in `assembly-completed`, and whose
 `Finished`, enters sections 8 through 10. This is a mechanical consequence of completed proof, not
 another human ruling.
 
+Before section 8, the supervisor may ask the driver to restore names proved by that terminal journal:
+
+```bash
+pce package materialize-refs --graph <frozen-graph> --journal <driver-journal> \
+  --repository <name=source-worktree> [--repository <name=source-worktree>]...
+```
+
+This command may create only missing refs at journal-proven oids. It never executes package work,
+recomposes an assembly, or moves an existing ref. A mismatch is terminal. After this command,
+section 8 remains strict: the supervisor never creates or repairs a ref itself.
+
 ## 8. Establish the exact promotion inputs
 
 Promotion currently supports exactly one repository. Require the union of graph repository names to

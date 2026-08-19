@@ -35,15 +35,16 @@ use pce_core::{
     DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
     DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass, DispatchRootCause,
     DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchWorkerProcessObservation,
-    DispatchabilityResult, DriverAssemblyState, DriverEvent, EnvironmentFailureLimit,
-    EnvironmentPreparationOutcome, EventBodyRef, EventKindName, EventLogTail, EventLogTailLine,
-    EventRecord, EventRecordFilter, EventTimestamp, Evidence, ExactPullRequestIdentity,
-    ExactPullRequestState, ExceptionalMergeChain, ExceptionalMergeChainObservation, Executable,
-    ExitCode, ExpectedVerdictOutcome, FileObservation, FindingAdmission, FindingRejectionReason,
-    FindingReplayDecision, FinishedResult, GateExecutionEvidence, GateExecutionRecord,
-    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
-    GateFailureLimit, GateObservedResult, GateProcessObservation, GateProcessStimulus,
-    GateStimulus, GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
+    DispatchabilityResult, DriverAssemblyState, DriverEvent, DriverRefProduct,
+    EnvironmentFailureLimit, EnvironmentPreparationOutcome, EventBodyRef, EventKindName,
+    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
+    ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
+    ExceptionalMergeChainObservation, Executable, ExitCode, ExpectedVerdictOutcome,
+    FileObservation, FindingAdmission, FindingRejectionReason, FindingReplayDecision,
+    FinishedResult, GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig,
+    GateExecutionRef, GateExecutionRejection, GateExecutionResponse, GateFailureLimit,
+    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
+    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
     HerdrPaneId, HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, KnownPayload,
     LandingReadinessDecision, LegacyRepositoryContractPayload, LocalPatchLimit,
@@ -115,6 +116,7 @@ const USAGE: &str = concat!(
     "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> [--issuance <N>] [--attempt <N>] [--challenges <ABSOLUTE_PATH>] [--defer-finding-validation] -- <WORKER_ARG>...\n",
     "       pce package render --graph <GRAPH_PATH> [--journal <DRIVER_JOURNAL>] --output <HTML_PATH>\n",
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
+    "       pce package materialize-refs --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>...\n",
     "       pce package driver-overrule --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --rationale <TEXT>\n",
     "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--worker-env <NAME>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--gate-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
@@ -293,6 +295,13 @@ struct DriverStatusCommand {
 }
 
 #[derive(Debug)]
+struct MaterializeRefsCommand {
+    graph_path: PathBuf,
+    journal_path: PathBuf,
+    repositories: Vec<(String, PathBuf)>,
+}
+
+#[derive(Debug)]
 struct DriverCriteriaCommand {
     graph_path: PathBuf,
     journal_path: PathBuf,
@@ -351,6 +360,7 @@ enum Command {
     PackageDispatch(PackageDispatchCommand),
     PackageRender(PackageRenderCommand),
     DriverStatus(DriverStatusCommand),
+    MaterializeRefs(MaterializeRefsCommand),
     DriverCriteria(DriverCriteriaCommand),
     DriverReplay(DriverReplayCommand),
     DriverOverrule(DriverOverruleCommand),
@@ -759,6 +769,7 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::PackageDispatch(command) => run_package_dispatch(command),
         Command::PackageRender(command) => run_package_render(command),
         Command::DriverStatus(command) => run_driver_status(command),
+        Command::MaterializeRefs(command) => run_materialize_refs(command),
         Command::DriverCriteria(command) => run_driver_criteria(command),
         Command::DriverReplay(command) => run_driver_replay(command),
         Command::DriverOverrule(command) => run_driver_overrule(command),
@@ -922,6 +933,9 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         }
         [verb, action, rest @ ..] if verb == "package" && action == "driver-status" => {
             parse_driver_status(rest)
+        }
+        [verb, action, rest @ ..] if verb == "package" && action == "materialize-refs" => {
+            parse_materialize_refs(rest)
         }
         [verb, action, rest @ ..] if verb == "package" && action == "criteria-run" => {
             parse_driver_criteria(rest)
@@ -1846,6 +1860,24 @@ fn parse_driver_status(rest: &[String]) -> Result<Command> {
         graph_path: PathBuf::from(graph),
         journal_path: PathBuf::from(journal),
         override_risk_ordering,
+    }))
+}
+
+fn parse_materialize_refs(rest: &[String]) -> Result<Command> {
+    let [graph_flag, graph, journal_flag, journal, trailing @ ..] = rest else {
+        bail!(USAGE);
+    };
+    if graph_flag != "--graph" || journal_flag != "--journal" {
+        bail!(USAGE);
+    }
+    let (repositories, preparations) = parse_driver_repository_options(trailing)?;
+    if !preparations.is_empty() {
+        bail!("ref materialization accepts repository mappings only");
+    }
+    Ok(Command::MaterializeRefs(MaterializeRefsCommand {
+        graph_path: PathBuf::from(graph),
+        journal_path: PathBuf::from(journal),
+        repositories,
     }))
 }
 
@@ -4178,25 +4210,40 @@ fn ensure_assembly_checkout(source: &Path, path: &Path, oid: &str) -> Result<()>
     Ok(())
 }
 
-fn anchor_assembly_resolution(source: &Path, repository: &str, oid: &str) -> Result<String> {
+fn anchor_assembly_resolution(
+    source: &Path,
+    repository: &str,
+    oid: &str,
+) -> Result<(String, bool)> {
     let resolution_ref = format!(
         "refs/pce-assembly-resolutions/{}/{}",
         composition_component(repository),
         oid
     );
+    if let Some(current) = git_oid_if_available(source, &resolution_ref)? {
+        if current != oid {
+            bail!(
+                "assembly resolution ref {} is at {}, expected {}; refusing to move it",
+                resolution_ref,
+                current,
+                oid
+            );
+        }
+        return Ok((resolution_ref, false));
+    }
     let anchored = std::process::Command::new("git")
         .arg("-C")
         .arg(source)
-        .args(["update-ref", &resolution_ref, oid])
+        .args(["update-ref", &resolution_ref, oid, ""])
         .output()?;
     if !anchored.status.success() {
         bail!(
-            "failed to anchor assembly resolution {}: {}",
+            "failed to anchor assembly resolution {} without movement: {}",
             oid,
             String::from_utf8_lossy(&anchored.stderr).trim()
         );
     }
-    Ok(resolution_ref)
+    Ok((resolution_ref, true))
 }
 
 fn assembly_resolution_prompt(
@@ -4313,7 +4360,7 @@ fn resolve_assembly_conflict(
         }
     }
     let base_oid = git_oid(checkout, "HEAD")?;
-    anchor_assembly_resolution(source, repository, &base_oid)?;
+    let (resolution_ref, created) = anchor_assembly_resolution(source, repository, &base_oid)?;
     append_driver_event(
         &command.journal_path,
         &DriverEvent::AssemblyResolutionDone {
@@ -4321,6 +4368,17 @@ fn resolve_assembly_conflict(
             base_oid: base_oid.clone(),
         },
     )?;
+    if created {
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::DriverRefMaterialized {
+                repository: repository.to_owned(),
+                reference: resolution_ref,
+                oid: base_oid.clone(),
+                product: DriverRefProduct::AssemblyResolution,
+            },
+        )?;
+    }
     Ok(base_oid)
 }
 
@@ -5113,7 +5171,16 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
             continue;
         }
         match snapshot.outcome() {
-            pce_core::DriverLoopOutcome::Finished | pce_core::DriverLoopOutcome::Blocked => {
+            pce_core::DriverLoopOutcome::Finished => {
+                materialize_driver_refs(&graph, &command.journal_path, &command.repositories)
+                    .context("failed to materialize journal-proven terminal refs")?;
+                return run_driver_status(DriverStatusCommand {
+                    graph_path: command.graph_path,
+                    journal_path: command.journal_path,
+                    override_risk_ordering: command.override_risk_ordering,
+                });
+            }
+            pce_core::DriverLoopOutcome::Blocked => {
                 return run_driver_status(DriverStatusCommand {
                     graph_path: command.graph_path,
                     journal_path: command.journal_path,
@@ -5666,6 +5733,189 @@ fn run_package_render(command: PackageRenderCommand) -> Result<()> {
             command.output_path.display()
         )
     })
+}
+
+#[derive(Debug, Clone)]
+struct DriverRefIntent {
+    repository: String,
+    reference: String,
+    oid: String,
+    product: DriverRefProduct,
+}
+
+fn derive_driver_ref_intents(
+    graph: &WorkPackageGraph,
+    events: &[DriverEvent],
+) -> Result<Vec<DriverRefIntent>> {
+    let snapshot = derive_driver_snapshot(graph, events, false)
+        .context("cannot materialize refs from an invalid driver journal")?;
+    if !matches!(snapshot.outcome(), pce_core::DriverLoopOutcome::Finished)
+        || !matches!(snapshot.assembly(), DriverAssemblyState::Complete)
+    {
+        bail!("driver refs require a Finished journal with a complete assembly");
+    }
+
+    let active = active_assembly_events(events);
+    let mut composed = BTreeMap::<String, (String, Vec<CompositionInput>)>::new();
+    let mut resolutions = Vec::<(String, String)>::new();
+    for event in active {
+        match event {
+            DriverEvent::AssemblyRepositoryComposed {
+                repository,
+                base_oid,
+                packages,
+            } => {
+                composed.insert(repository.clone(), (base_oid.clone(), packages.clone()));
+            }
+            DriverEvent::AssemblyResolutionDone {
+                repository,
+                base_oid,
+            } => resolutions.push((repository.clone(), base_oid.clone())),
+            _ => {}
+        }
+    }
+    if composed.is_empty() {
+        bail!("finished driver journal has no final assembly repository");
+    }
+
+    let mut intents = Vec::new();
+    for (repository, (_, packages)) in &composed {
+        for package in packages {
+            let issuance = completed_package_issuance(events, &package.package)?;
+            intents.push(DriverRefIntent {
+                repository: repository.clone(),
+                reference: format!(
+                    "refs/heads/{}",
+                    package_branch(graph, &package.package, issuance)
+                ),
+                oid: package.oid.clone(),
+                product: DriverRefProduct::PackageAttempt {
+                    package: package.package.clone(),
+                    issuance,
+                },
+            });
+        }
+    }
+    for (repository, oid) in resolutions {
+        if !composed.contains_key(&repository) {
+            bail!("resolution journal names uncomposed repository `{repository}`");
+        }
+        intents.push(DriverRefIntent {
+            reference: format!(
+                "refs/pce-assembly-resolutions/{}/{}",
+                composition_component(&repository),
+                oid
+            ),
+            repository,
+            oid,
+            product: DriverRefProduct::AssemblyResolution,
+        });
+    }
+    for (repository, (oid, _)) in composed {
+        intents.push(DriverRefIntent {
+            repository,
+            reference: format!(
+                "refs/heads/pce/{}/assembly-v{}",
+                graph.vision(),
+                graph.plan_version()
+            ),
+            oid,
+            product: DriverRefProduct::Assembly,
+        });
+    }
+    Ok(intents)
+}
+
+fn materialize_driver_refs(
+    graph: &WorkPackageGraph,
+    journal: &Path,
+    repositories: &[(String, PathBuf)],
+) -> Result<(usize, usize)> {
+    let events = read_driver_journal(journal)?;
+    let intents = derive_driver_ref_intents(graph, &events)?;
+    let sources = repositories
+        .iter()
+        .map(|(name, path)| (name.as_str(), path.as_path()))
+        .collect::<BTreeMap<_, _>>();
+    if sources.len() != repositories.len() {
+        bail!("ref materialization repository mappings must be unique");
+    }
+
+    let mut observed = Vec::with_capacity(intents.len());
+    for intent in &intents {
+        let source = sources
+            .get(intent.repository.as_str())
+            .with_context(|| format!("missing repository mapping for `{}`", intent.repository))?;
+        let target = git_oid(source, &intent.oid).with_context(|| {
+            format!(
+                "journal-proven oid {} is unavailable in repository `{}`",
+                intent.oid, intent.repository
+            )
+        })?;
+        if target != intent.oid {
+            bail!("journal oid {} did not resolve exactly", intent.oid);
+        }
+        let current = git_oid_if_available(source, &intent.reference)?;
+        if let Some(current) = &current
+            && current != &intent.oid
+        {
+            bail!(
+                "ref {} in repository `{}` is at {}, expected {}; refusing to move it",
+                intent.reference,
+                intent.repository,
+                current,
+                intent.oid
+            );
+        }
+        observed.push(current);
+    }
+
+    let mut created = 0_usize;
+    let mut already_correct = 0_usize;
+    for (intent, current) in intents.iter().zip(observed) {
+        if current.is_some() {
+            already_correct += 1;
+            continue;
+        }
+        let source = sources
+            .get(intent.repository.as_str())
+            .with_context(|| format!("missing repository mapping for `{}`", intent.repository))?;
+        let update = std::process::Command::new("git")
+            .arg("-C")
+            .arg(source)
+            .args(["update-ref", &intent.reference, &intent.oid, ""])
+            .output()?;
+        if !update.status.success() {
+            bail!(
+                "failed to create ref {} at {} without movement: {}",
+                intent.reference,
+                intent.oid,
+                String::from_utf8_lossy(&update.stderr).trim()
+            );
+        }
+        append_driver_event(
+            journal,
+            &DriverEvent::DriverRefMaterialized {
+                repository: intent.repository.clone(),
+                reference: intent.reference.clone(),
+                oid: intent.oid.clone(),
+                product: intent.product.clone(),
+            },
+        )?;
+        created += 1;
+    }
+    Ok((created, already_correct))
+}
+
+fn run_materialize_refs(command: MaterializeRefsCommand) -> Result<()> {
+    let graph = read_driver_graph(&command.graph_path)?;
+    let (created, already_correct) =
+        materialize_driver_refs(&graph, &command.journal_path, &command.repositories)?;
+    write_json_stdout(&json!({
+        "created": created,
+        "already_correct": already_correct,
+        "changed": created > 0,
+    }))
 }
 
 fn run_driver_status(command: DriverStatusCommand) -> Result<()> {
