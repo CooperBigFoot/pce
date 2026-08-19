@@ -123,24 +123,62 @@ fn render_criterion_summary(output: &mut String, criterion: &crate::WorkPackageC
     let _ = writeln!(output, "    Observation: {}", criterion.observation());
 }
 
-fn criterion_file_references(command: &str) -> BTreeSet<String> {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CriterionFileReference {
+    repository: String,
+    path: String,
+}
+
+fn criterion_file_references(
+    command: &str,
+    repositories: &[String],
+) -> BTreeSet<CriterionFileReference> {
     command
         .split(|character: char| character.is_whitespace() || "|&;()<>[]{}".contains(character))
         .filter_map(|token| {
-            let value = token
-                .rsplit_once('=')
-                .map_or(token, |(_, value)| value)
-                .trim_matches(|character: char| "'\"`,:".contains(character))
-                .trim_start_matches("./");
-            let basename = value.rsplit('/').next().unwrap_or(value);
-            let has_file_extension = basename
-                .rsplit_once('.')
-                .is_some_and(|(stem, extension)| !stem.is_empty() && !extension.is_empty());
-            (!value.is_empty()
-                && !value.starts_with('-')
-                && !value.contains("://")
-                && (value.contains('/') || has_file_extension))
-                .then(|| value.to_owned())
+            let value = token.trim_matches(|character: char| "'\"`,:".contains(character));
+            if value.is_empty()
+                || value.starts_with('-')
+                || value.starts_with('/')
+                || value.contains("://")
+                || value.contains('=')
+                || value.contains(['\\', '*', '?', '~'])
+            {
+                return None;
+            }
+
+            let (repository, relative_path, explicitly_rooted) =
+                if let Some(indexed) = value.strip_prefix("$PCE_WORKTREE_") {
+                    let (index, path) = indexed.split_once('/')?;
+                    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return None;
+                    }
+                    let repository = repositories.get(index.parse::<usize>().ok()?)?;
+                    (repository.as_str(), path, true)
+                } else {
+                    if value.contains('$') {
+                        return None;
+                    }
+                    (
+                        repositories.first()?.as_str(),
+                        value.trim_start_matches("./"),
+                        false,
+                    )
+                };
+
+            if relative_path.is_empty()
+                || (!explicitly_rooted && !relative_path.contains('/'))
+                || relative_path
+                    .split('/')
+                    .any(|component| component.is_empty() || component == "." || component == "..")
+            {
+                return None;
+            }
+
+            Some(CriterionFileReference {
+                repository: repository.to_owned(),
+                path: relative_path.to_owned(),
+            })
         })
         .collect()
 }
@@ -153,45 +191,48 @@ fn render_cross_package_file_references(
     let own_paths = package
         .criteria()
         .iter()
-        .flat_map(|criterion| criterion_file_references(criterion.command()))
+        .flat_map(|criterion| {
+            criterion_file_references(criterion.command(), package.repositories())
+        })
         .collect::<BTreeSet<_>>();
-    let mut other_references = BTreeMap::<String, BTreeSet<&str>>::new();
+    let mut other_references = BTreeMap::<CriterionFileReference, BTreeSet<&str>>::new();
     for candidate in graph
         .packages()
         .iter()
         .filter(|candidate| candidate.id() != package.id())
     {
-        for path in candidate
-            .criteria()
-            .iter()
-            .flat_map(|criterion| criterion_file_references(criterion.command()))
-        {
-            if own_paths.contains(&path) {
+        for reference in candidate.criteria().iter().flat_map(|criterion| {
+            criterion_file_references(criterion.command(), candidate.repositories())
+        }) {
+            if own_paths.contains(&reference) {
                 other_references
-                    .entry(path)
+                    .entry(reference)
                     .or_default()
                     .insert(candidate.id().as_str());
             }
         }
     }
 
-    output.push_str("\nCross-package file references derived from criterion commands:\n");
+    output.push_str("\nHeuristic cross-package file references (syntactically derived from criterion commands):\n");
     if own_paths.is_empty() {
-        output.push_str("- No file paths were found in this package's criterion commands.\n");
+        output.push_str(
+            "- No conservative path candidates were syntactically derived for this package.\n",
+        );
     } else {
-        for path in own_paths {
-            match other_references.get(&path) {
+        for reference in own_paths {
+            let CriterionFileReference { repository, path } = &reference;
+            match other_references.get(&reference) {
                 Some(packages) => {
                     let _ = writeln!(
                         output,
-                        "- {path}: also referenced by {}",
+                        "- {repository}:{path}: syntactically derived match with {} (heuristic only)",
                         packages.iter().copied().collect::<Vec<_>>().join(", ")
                     );
                 }
                 None => {
                     let _ = writeln!(
                         output,
-                        "- {path}: no other package criterion references this path"
+                        "- {repository}:{path}: no syntactically derived cross-package match (heuristic only)"
                     );
                 }
             }

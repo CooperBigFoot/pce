@@ -175,7 +175,7 @@ Change one script without crossing authority boundaries.
     );
     assert!(brief.contains("even when the credentials you hold permit them"));
     assert!(brief.contains("only through a criterion that names the act"));
-    assert!(brief.contains("scripts/shared_proof.py: also referenced by B"));
+    assert!(brief.contains("repo:scripts/shared_proof.py: syntactically derived match with B"));
 }
 
 #[test]
@@ -221,4 +221,110 @@ Change two repositories coherently.
     let brief = String::from_utf8(output.stdout).expect("brief UTF-8");
     assert!(brief.contains(&format!("alpha: {}", first.display())));
     assert!(brief.contains(&format!("beta: {}", second.display())));
+}
+
+fn brief_for_reference_graph(packages: &str, worktrees: &[&str]) -> String {
+    let directory = tempdir().expect("temporary directory");
+    let vision = directory.path().join("vision.md");
+    fs::write(
+        &vision,
+        r#"# Vision: references
+
+## Goal / Why
+
+Keep criterion references scoped to their repositories.
+
+## Acceptance criteria (vision-level "done")
+
+```json
+{"criteria":[{"name":"Scoped","input":"Inspect references","observation":"References stay scoped"}]}
+```
+"#,
+    )
+    .expect("vision");
+    let graph = directory.path().join("graph.json");
+    fs::write(
+        &graph,
+        format!(
+            r#"{{"vision":"references","plan_version":1,"authored_at_ref":"main","packages":[{packages}]}}"#
+        ),
+    )
+    .expect("graph");
+    let mut command = pce();
+    command
+        .args(["package", "brief", "--vision"])
+        .arg(&vision)
+        .args(["--graph"])
+        .arg(&graph)
+        .args(["--package", "A"]);
+    for worktree in worktrees {
+        command.args(["--worktree", worktree]);
+    }
+    let output = command.output().expect("brief");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("brief UTF-8")
+}
+
+#[test]
+fn criterion_reference_same_path_in_same_repository_is_a_heuristic_match() {
+    let brief = brief_for_reference_graph(
+        r#"{"id":"A","title":"producer","repositories":["repo"],"criteria":[{"name":"a","input":"tree","observation":"passes","command":"python scripts/shared.py"}],"depends_on":[]},
+{"id":"B","title":"consumer","repositories":["repo"],"criteria":[{"name":"b","input":"tree","observation":"passes","command":"python ./scripts/shared.py"}],"depends_on":[]}"#,
+        &["repo=/worktrees/repo"],
+    );
+
+    assert!(brief.contains("Heuristic cross-package file references"));
+    assert!(brief.contains("repo:scripts/shared.py: syntactically derived match with B"));
+}
+
+#[test]
+fn criterion_reference_same_path_in_different_repositories_does_not_match() {
+    let brief = brief_for_reference_graph(
+        r#"{"id":"A","title":"producer","repositories":["alpha"],"criteria":[{"name":"a","input":"tree","observation":"passes","command":"python scripts/shared.py"}],"depends_on":[]},
+{"id":"B","title":"consumer","repositories":["beta"],"criteria":[{"name":"b","input":"tree","observation":"passes","command":"python scripts/shared.py"}],"depends_on":[]}"#,
+        &["alpha=/worktrees/alpha"],
+    );
+
+    assert!(brief.contains("alpha:scripts/shared.py"));
+    assert!(!brief.contains("syntactically derived match with B"));
+}
+
+#[test]
+fn absolute_criterion_path_does_not_collide_with_relative_path() {
+    let brief = brief_for_reference_graph(
+        r#"{"id":"A","title":"producer","repositories":["repo"],"criteria":[{"name":"a","input":"tree","observation":"passes","command":"python scripts/shared.py"}],"depends_on":[]},
+{"id":"B","title":"consumer","repositories":["repo"],"criteria":[{"name":"b","input":"tree","observation":"passes","command":"python /srv/repo/scripts/shared.py"}],"depends_on":[]}"#,
+        &["repo=/worktrees/repo"],
+    );
+
+    assert!(!brief.contains("syntactically derived match with B"));
+    assert!(!brief.contains("/srv/repo/scripts/shared.py:"));
+}
+
+#[test]
+fn dotted_executable_is_not_reported_as_a_file_reference() {
+    let brief = brief_for_reference_graph(
+        r#"{"id":"A","title":"producer","repositories":["repo"],"criteria":[{"name":"a","input":"tree","observation":"passes","command":"python3.12 scripts/proof.py"}],"depends_on":[]},
+{"id":"B","title":"consumer","repositories":["repo"],"criteria":[{"name":"b","input":"tree","observation":"passes","command":"python3.12 --version"}],"depends_on":[]}"#,
+        &["repo=/worktrees/repo"],
+    );
+
+    assert!(brief.contains("repo:scripts/proof.py"));
+    assert!(!brief.contains("repo:python3.12"));
+}
+
+#[test]
+fn indexed_worktree_reference_maps_by_each_packages_repository_order() {
+    let brief = brief_for_reference_graph(
+        r#"{"id":"A","title":"producer","repositories":["alpha","beta"],"criteria":[{"name":"a","input":"tree","observation":"passes","command":"python $PCE_WORKTREE_1/scripts/shared.py"}],"depends_on":[]},
+{"id":"B","title":"consumer","repositories":["beta"],"criteria":[{"name":"b","input":"tree","observation":"passes","command":"python scripts/shared.py"}],"depends_on":[]}"#,
+        &["alpha=/worktrees/alpha", "beta=/worktrees/beta"],
+    );
+
+    assert!(brief.contains("beta:scripts/shared.py: syntactically derived match with B"));
+    assert!(!brief.contains("alpha:scripts/shared.py"));
 }
