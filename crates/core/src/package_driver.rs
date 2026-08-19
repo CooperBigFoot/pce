@@ -2052,22 +2052,17 @@ pub fn repeated_identical_worker_blocker<'a>(
     events: &'a [DriverEvent],
     package_id: &str,
 ) -> Option<&'a str> {
-    let mut failures =
-        events_for_active_plan(events)
-            .iter()
-            .rev()
-            .filter_map(|event| match event {
-                DriverEvent::WorkerFailed {
-                    package, reason, ..
-                } if package == package_id => Some(Some(reason.as_str())),
-                DriverEvent::WorkerDone { package, .. }
-                | DriverEvent::PackageParked { package, .. }
-                    if package == package_id =>
-                {
-                    Some(None)
-                }
-                _ => None,
-            });
+    let mut failures = events.iter().rev().filter_map(|event| match event {
+        DriverEvent::WorkerFailed {
+            package, reason, ..
+        } if package == package_id => Some(Some(reason.as_str())),
+        DriverEvent::WorkerDone { package, .. } | DriverEvent::PackageParked { package, .. }
+            if package == package_id =>
+        {
+            Some(None)
+        }
+        _ => None,
+    });
     let latest = failures.next()??;
     let previous = failures.next()??;
     (latest.as_bytes() == previous.as_bytes()).then_some(latest)
@@ -3006,5 +3001,51 @@ mod tests {
         ];
 
         assert_eq!(repeated_identical_worker_blocker(&events, "A"), None);
+    }
+
+    #[test]
+    fn plan_advance_preserves_last_terminal_worker_outcome_for_blocker_recurrence() {
+        let failure = |issuance: u64| DriverEvent::WorkerFailed {
+            package: "A".to_owned(),
+            issuance,
+            reason: "compiler image unavailable".to_owned(),
+        };
+        let advance = || DriverEvent::PlanVersionAdvanced {
+            from_plan_version: 1,
+            to_plan_version: 2,
+            carried_completions: Vec::new(),
+            carried_amendments: Vec::new(),
+            criterion_revisions_ratified_by: None,
+            criterion_revisions: Vec::new(),
+        };
+
+        let repeated = vec![failure(1), advance(), failure(2)];
+        assert_eq!(
+            repeated_identical_worker_blocker(&repeated, "A"),
+            Some("compiler image unavailable")
+        );
+
+        let done_breaks = vec![
+            failure(1),
+            DriverEvent::WorkerDone {
+                package: "A".to_owned(),
+                issuance: 2,
+            },
+            advance(),
+            failure(3),
+        ];
+        assert_eq!(repeated_identical_worker_blocker(&done_breaks, "A"), None);
+
+        let parked_breaks = vec![
+            failure(1),
+            DriverEvent::PackageParked {
+                package: "A".to_owned(),
+                issuance: 2,
+                reason: "replan: criterion: wrong boundary".to_owned(),
+            },
+            advance(),
+            failure(3),
+        ];
+        assert_eq!(repeated_identical_worker_blocker(&parked_breaks, "A"), None);
     }
 }
