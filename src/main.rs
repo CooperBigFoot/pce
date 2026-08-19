@@ -89,10 +89,10 @@ use pce_core::{
     parse_tracked_repository_contract, parse_work_package_graph, pending_completed_pane_cleanups,
     pending_gate_challenges, ready_work_packages, rebase_gate_stimulus, recovery_attempt_records,
     recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
-    render_package_run, seatbelt_capability_probe, serialize_dispatch_check_in,
-    serialize_dispatch_process_identity, serialize_package_worker_result,
-    serialize_tracked_repository_contract, unchanged_package_ids, validate_artifact,
-    validate_criterion_revisions, validate_package_gate_finding_repositories,
+    render_package_run, repeated_identical_worker_blocker, seatbelt_capability_probe,
+    serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    serialize_package_worker_result, serialize_tracked_repository_contract, unchanged_package_ids,
+    validate_artifact, validate_criterion_revisions, validate_package_gate_finding_repositories,
     validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
     validated_dispatch_completion_payload, verify_criterion_change, verify_mechanical_freeze,
     worker_environment_outcome,
@@ -2283,9 +2283,31 @@ fn park_if_recovery_exhausted(command: &DriverRunCommand, package_id: &str) -> R
             reason: format!(
                 "recovery spending exhausted after {charged} attributable failures; re-author as plan version n+1"
             ),
+            blocked_by: None,
             attempts,
         },
     )
+}
+
+fn park_if_worker_blocker_repeated(command: &DriverRunCommand, package_id: &str) -> Result<bool> {
+    let events = read_driver_journal(&command.journal_path)?;
+    let Some(blocked_by) =
+        repeated_identical_worker_blocker(&events, package_id).map(str::to_owned)
+    else {
+        return Ok(false);
+    };
+    let evidence = latest_criterion_failure_evidence(&events, package_id);
+    let attempts = recovery_attempt_records(&events, package_id, evidence);
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::RecoveryParked {
+            package: package_id.to_owned(),
+            reason: "repeated identical worker blocker; package work cannot resolve it".to_owned(),
+            blocked_by: Some(blocked_by),
+            attempts,
+        },
+    )?;
+    Ok(true)
 }
 
 const GATE_STOPPED_REASON: &str = "gate dispatch stopped without an outcome";
@@ -2770,7 +2792,9 @@ fn observe_driver_worker_outcome(
                     reason: blocked_by.as_str().to_owned(),
                 },
             )?;
-            park_if_recovery_exhausted(command, &package_id)?;
+            if !park_if_worker_blocker_repeated(command, &package_id)? {
+                park_if_recovery_exhausted(command, &package_id)?;
+            }
         }
         pce_core::PackageOutcome::MisSpecified { fault } => {
             let reason = match fault {
