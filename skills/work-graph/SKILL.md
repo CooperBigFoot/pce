@@ -63,14 +63,24 @@ shape atomically:
 }
 ```
 
-On later invocations, reuse these values without asking. Compare the file with the current frozen
-graph: remove configured repositories and prepare commands whose names are absent, write the
-filtered file atomically, and report every dropped name. If a later graph adds a repository, ask
-only for that repository and extend `run.json`. Reject duplicate names, relative paths, prepare
-commands without a matching repository, malformed types, and unknown fields. Reject duplicate or unset environment names before launch, and report each unset name. Environment names must match
-`[A-Za-z_][A-Za-z0-9_]*` and must not claim binary-owned `TMPDIR`, `PCE_DISPATCH_TMPDIR`,
-`PCE_WORKTREES`, or `PCE_WORKTREE_*`. Never fill a missing value by guesswork. Never write an
-environment value to `run.json`, `supervision.md`, or the driver journal.
+On later invocations, reuse these values without asking. Worker environment names and recovery
+limits are once-per-journal launch configuration. The environment contract stays fixed until a
+higher frozen plan version creates an extension boundary; recovery limits stay fixed. Compare the
+file with the current frozen graph: remove configured repositories and prepare commands whose names
+are absent, write the filtered file atomically, and report every dropped name. If a later graph adds
+a repository, ask only for that repository and extend `run.json`.
+
+Before the first launch, read the package harness, its documented commands, and scripts used by its
+criteria for named environment variables. Record every required worker variable in `run.json` before
+dispatch. This is the cheapest correction because a worker environment need that is visible in the
+harness should not consume a plan-version extension.
+
+Reject duplicate names, relative paths, prepare commands without a matching repository, malformed
+types, and unknown fields. Reject duplicate or unset environment names before launch, and report
+each unset name. Environment names must match `[A-Za-z_][A-Za-z0-9_]*` and must not claim
+binary-owned `TMPDIR`, `PCE_DISPATCH_TMPDIR`, `PCE_WORKTREES`, or `PCE_WORKTREE_*`. Never fill a
+missing value by guesswork. Never write an environment value to `run.json`, `supervision.md`, or the
+driver journal.
 
 Use `<vision-dir>/driver-journal.jsonl` as the one journal. If another plausible journal already
 exists, report the ambiguity and stop rather than starting a second history or editing either file.
@@ -92,8 +102,11 @@ pce package driver-run --graph <frozen-graph> \
 package worker and every gate worker spawned in that workspace, including later attempts after a
 driver restart. Criteria commands continue to inherit the driver's full launch environment, as do
 `--prepare` commands in driver-owned materializations; they are not restricted to the declared
-worker set. Every relaunch must reuse the stored environment names so the journaled contract remains
-unchanged.
+worker set. Every relaunch must reuse the stored environment names unless a higher frozen plan
+version motivates a strict-superset extension. At that boundary, add names to `run.json` and launch
+with the complete set. The driver records `worker-environment-extended` with exactly the added names.
+It refuses removals and refuses additions after work has started in that plan; the exit is to extend
+at the next plan-version boundary.
 
 Host only this foreground process in the named tmux session from `run.json`. Create the detached
 session if absent, enable `remain-on-exit`, and relaunch an exited driver with `tmux respawn-pane -k`
@@ -123,8 +136,8 @@ Interpret typed events rather than scraping pane prose. Maintain cross-attempt p
 `recovery-configured`, `worker-dispatched`, `dispatch-pane-opened`, `dispatch-pane-cleanup`,
 `environment-preparation-executed`, `criterion-executed`, `worker-done`, `gate-finished`,
 `finding-replayed`, `package-base-composed`, `package-completed`, `package-parked`,
-`package-park-overruled`, `package-join-conflicted`, `worker-environment-failed`, and
-`plan-version-advanced`.
+`package-park-overruled`, `package-join-conflicted`, `worker-environment-failed`,
+`worker-environment-extended`, and `plan-version-advanced`.
 
 Narration may state a theory, but must name the events and refs supporting it and label it as a
 theory. Compare repeated reasons across attempts and plan versions; do not emit a mechanically

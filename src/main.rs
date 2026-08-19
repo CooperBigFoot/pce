@@ -2141,26 +2141,77 @@ fn ensure_worker_environment_contract(
         .keys()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let configured = events.iter().find_map(|event| match event {
-        DriverEvent::WorkerEnvironmentDeclared { names } => {
-            Some(names.iter().cloned().collect::<BTreeSet<_>>())
+    let mut configured = None::<BTreeSet<String>>;
+    for event in events {
+        match event {
+            DriverEvent::WorkerEnvironmentDeclared { names } => {
+                configured = Some(names.iter().cloned().collect());
+            }
+            DriverEvent::WorkerEnvironmentExtended { added_names, .. } => {
+                configured
+                    .get_or_insert_with(BTreeSet::new)
+                    .extend(added_names.iter().cloned());
+            }
+            _ => {}
         }
-        _ => None,
-    });
-    match configured {
-        Some(configured) if configured != names => bail!(
-            "driver worker environment is already declared as {:?}, not {:?}",
-            configured,
-            names
-        ),
-        Some(_) => Ok(()),
-        None => append_driver_event(
+    }
+    let Some(configured) = configured else {
+        return append_driver_event(
             &command.journal_path,
             &DriverEvent::WorkerEnvironmentDeclared {
                 names: names.into_iter().collect(),
             },
-        ),
+        );
+    };
+    if configured == names {
+        return Ok(());
     }
+    if !configured.is_subset(&names) {
+        bail!(
+            "driver worker environment is already declared as {:?}, not {:?}; cannot remove declared names because the contract is additions-only",
+            configured,
+            names
+        );
+    }
+    let boundary_plan_version = events
+        .iter()
+        .rposition(|event| matches!(event, DriverEvent::PlanVersionAdvanced { .. }))
+        .and_then(|index| {
+            let plan_version = match &events[index] {
+                DriverEvent::PlanVersionAdvanced {
+                    to_plan_version, ..
+                } => *to_plan_version,
+                _ => return None,
+            };
+            events[index + 1..]
+                .iter()
+                .all(|event| {
+                    matches!(
+                        event,
+                        DriverEvent::DriverAborted { .. }
+                            | DriverEvent::DriverResumed
+                            | DriverEvent::WorkerEnvironmentDeclared { .. }
+                            | DriverEvent::WorkerEnvironmentExtended { .. }
+                            | DriverEvent::RecoveryConfigured { .. }
+                    )
+                })
+                .then_some(plan_version)
+        });
+    let Some(plan_version) = boundary_plan_version else {
+        bail!(
+            "driver worker environment additions are refused mid-plan; extend at the next plan-version boundary (current {:?}, supplied {:?})",
+            configured,
+            names
+        );
+    };
+    let added_names = names.difference(&configured).cloned().collect();
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::WorkerEnvironmentExtended {
+            plan_version,
+            added_names,
+        },
+    )
 }
 
 fn ensure_recovery_configuration(command: &DriverRunCommand, events: &[DriverEvent]) -> Result<()> {
@@ -5125,9 +5176,6 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
     }
     let initial_graph = read_driver_graph(&command.graph_path)?;
     verify_graph_repository_refs(&initial_graph, &command.repositories)?;
-    let initial_events = read_driver_journal(&command.journal_path)?;
-    ensure_worker_environment_contract(&command, &initial_events)?;
-    let initial_events = read_driver_journal(&command.journal_path)?;
     ensure_recovery_configuration(&command, &initial_events)?;
     let mut issued_this_launch = HashSet::new();
     loop {
@@ -5137,6 +5185,8 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
         if ensure_driver_plan_version(&graph, &command, &events)? {
             continue;
         }
+        ensure_worker_environment_contract(&command, &events)?;
+        let events = read_driver_journal(&command.journal_path)?;
         if repair_driver_environment_closures(&command, &events)? > 0 {
             continue;
         }
@@ -20952,6 +21002,140 @@ None.
                 & 0o777,
             0o700
         );
+    }
+
+    fn worker_environment_command(
+        journal_path: PathBuf,
+        names: &[(&str, &str)],
+    ) -> crate::DriverRunCommand {
+        crate::DriverRunCommand {
+            graph_path: journal_path.with_file_name("graph.json"),
+            journal_path,
+            repositories: Vec::new(),
+            preparations: std::collections::BTreeMap::new(),
+            worker_environment: names
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            override_risk_ordering: false,
+            recovery_limits: pce_core::RecoveryLimits::default(),
+            worker_override: None,
+            wait_timeout: None,
+        }
+    }
+
+    fn plan_advanced_event() -> pce_core::DriverEvent {
+        pce_core::DriverEvent::PlanVersionAdvanced {
+            from_plan_version: 6,
+            to_plan_version: 7,
+            carried_completions: Vec::new(),
+            carried_amendments: Vec::new(),
+            criterion_revisions_ratified_by: None,
+            criterion_revisions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn worker_environment_strict_superset_is_recorded_at_plan_boundary() {
+        let directory = tempdir().expect("temporary directory");
+        let journal_path = directory.path().join("events.jsonl");
+        let events = vec![
+            pce_core::DriverEvent::WorkerEnvironmentDeclared { names: Vec::new() },
+            plan_advanced_event(),
+        ];
+        let command = worker_environment_command(
+            journal_path.clone(),
+            &[
+                ("POURPOINT_LIVE_READ_AUTHORIZATION", "authorized"),
+                ("POURPOINT_RELEASE_WHEEL", "/tmp/pourpoint.whl"),
+            ],
+        );
+
+        crate::ensure_worker_environment_contract(&command, &events)
+            .expect("a strict superset must extend at the plan boundary");
+
+        let line = fs::read_to_string(&journal_path).expect("extension event");
+        let event: serde_json::Value = serde_json::from_str(line.trim()).expect("event JSON");
+        assert_eq!(event["event"], "worker-environment-extended");
+        assert_eq!(event["plan_version"], 7);
+        assert_eq!(
+            event["added_names"],
+            json!([
+                "POURPOINT_LIVE_READ_AUTHORIZATION",
+                "POURPOINT_RELEASE_WHEEL"
+            ])
+        );
+        let routed = crate::route_environment(&command).expect("routed environment");
+        assert_eq!(
+            routed
+                .get("POURPOINT_LIVE_READ_AUTHORIZATION")
+                .map(String::as_str),
+            Some("authorized")
+        );
+        assert_eq!(
+            routed.get("POURPOINT_RELEASE_WHEEL").map(String::as_str),
+            Some("/tmp/pourpoint.whl")
+        );
+    }
+
+    #[test]
+    fn worker_environment_extension_refuses_removal_and_mid_plan_addition() {
+        let directory = tempdir().expect("temporary directory");
+        let declared = pce_core::DriverEvent::WorkerEnvironmentDeclared {
+            names: vec!["EXISTING".to_owned()],
+        };
+        let removal = worker_environment_command(directory.path().join("removal.jsonl"), &[]);
+        let error =
+            crate::ensure_worker_environment_contract(&removal, std::slice::from_ref(&declared))
+                .expect_err("removal must stay refused");
+        assert!(format!("{error:#}").contains("cannot remove declared names"));
+        let replacement = worker_environment_command(
+            directory.path().join("replacement.jsonl"),
+            &[("REPLACEMENT", "new")],
+        );
+        let error = crate::ensure_worker_environment_contract(
+            &replacement,
+            std::slice::from_ref(&declared),
+        )
+        .expect_err("an incomparable set must stay refused");
+        assert!(format!("{error:#}").contains("cannot remove declared names"));
+
+        let addition = worker_environment_command(
+            directory.path().join("addition.jsonl"),
+            &[("EXISTING", "old"), ("ADDED", "new")],
+        );
+        let error = crate::ensure_worker_environment_contract(
+            &addition,
+            &[
+                declared,
+                pce_core::DriverEvent::WorkerDispatched {
+                    package: "GD2".to_owned(),
+                    issuance: 1,
+                },
+            ],
+        )
+        .expect_err("mid-plan addition must stay refused");
+        assert!(format!("{error:#}").contains("extend at the next plan-version boundary"));
+    }
+
+    #[test]
+    fn worker_environment_absence_keeps_deriving_the_initial_declaration() {
+        let directory = tempdir().expect("temporary directory");
+        let journal_path = directory.path().join("events.jsonl");
+        let command =
+            worker_environment_command(journal_path.clone(), &[("FIRST_DECLARATION", "value")]);
+
+        let historical_events = [pce_core::DriverEvent::WorkerDispatched {
+            package: "LEGACY".to_owned(),
+            issuance: 1,
+        }];
+        crate::ensure_worker_environment_contract(&command, &historical_events)
+            .expect("old journal without a declaration must derive one");
+
+        let line = fs::read_to_string(journal_path).expect("declaration event");
+        let event: serde_json::Value = serde_json::from_str(line.trim()).expect("event JSON");
+        assert_eq!(event["event"], "worker-environment-declared");
+        assert_eq!(event["names"], json!(["FIRST_DECLARATION"]));
     }
 
     #[test]

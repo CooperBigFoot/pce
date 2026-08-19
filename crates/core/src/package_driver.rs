@@ -287,8 +287,13 @@ pub enum DriverEvent {
         plan_version: u64,
         rationale: String,
     },
-    /// The names-only environment contract selected once for worker workspaces in this run.
+    /// The initial names-only environment contract selected for worker workspaces in this run.
     WorkerEnvironmentDeclared { names: Vec<String> },
+    /// Names added to the worker environment contract at one plan-version boundary.
+    WorkerEnvironmentExtended {
+        plan_version: u64,
+        added_names: Vec<String>,
+    },
     /// The named spending limits selected once for this graph run.
     RecoveryConfigured { limits: RecoveryLimits },
     /// A recovery dispatch and the exact augmented brief supplied to it.
@@ -787,6 +792,11 @@ pub enum PackageDriverError {
     /// More than one distinct names-only worker environment contract appears in one run journal.
     #[error("driver journal contains conflicting worker environment declarations")]
     ConflictingWorkerEnvironment,
+    /// A worker environment extension is not attached to the named open plan-version boundary.
+    #[error(
+        "worker environment extension for plan version {plan_version} does not occur at an open plan-version boundary"
+    )]
+    WorkerEnvironmentExtensionOutsidePlanBoundary { plan_version: u64 },
     /// More than one distinct limit configuration appears in one graph-run journal.
     #[error("driver journal contains conflicting recovery limit configurations")]
     ConflictingRecoveryLimits,
@@ -814,8 +824,20 @@ pub fn derive_driver_snapshot(
 ) -> Result<DriverSnapshot, PackageDriverError> {
     let mut configured_limits = None;
     let mut configured_worker_environment = None;
+    let mut worker_environment_extension_boundary = None;
     let mut prior_issuance = 0_u64;
     for event in events {
+        match event {
+            DriverEvent::PlanVersionAdvanced {
+                to_plan_version, ..
+            } => worker_environment_extension_boundary = Some(*to_plan_version),
+            DriverEvent::DriverAborted { .. }
+            | DriverEvent::DriverResumed
+            | DriverEvent::WorkerEnvironmentDeclared { .. }
+            | DriverEvent::WorkerEnvironmentExtended { .. }
+            | DriverEvent::RecoveryConfigured { .. } => {}
+            _ => worker_environment_extension_boundary = None,
+        }
         if let DriverEvent::WorkerDispatched { package, issuance } = event {
             if *issuance == 0 {
                 return Err(PackageDriverError::ZeroIssuance {
@@ -831,14 +853,40 @@ pub fn derive_driver_snapshot(
             prior_issuance = *issuance;
         }
 
-        if let DriverEvent::WorkerEnvironmentDeclared { names } = event {
-            if configured_worker_environment
-                .as_ref()
-                .is_some_and(|configured| configured != names)
-            {
-                return Err(PackageDriverError::ConflictingWorkerEnvironment);
+        match event {
+            DriverEvent::WorkerEnvironmentDeclared { names } => {
+                if configured_worker_environment
+                    .as_ref()
+                    .is_some_and(|configured| configured != names)
+                {
+                    return Err(PackageDriverError::ConflictingWorkerEnvironment);
+                }
+                configured_worker_environment = Some(names.clone());
             }
-            configured_worker_environment = Some(names.clone());
+            DriverEvent::WorkerEnvironmentExtended {
+                plan_version,
+                added_names,
+            } => {
+                if worker_environment_extension_boundary != Some(*plan_version) {
+                    return Err(
+                        PackageDriverError::WorkerEnvironmentExtensionOutsidePlanBoundary {
+                            plan_version: *plan_version,
+                        },
+                    );
+                }
+                let configured = configured_worker_environment
+                    .as_mut()
+                    .ok_or(PackageDriverError::ConflictingWorkerEnvironment)?;
+                if added_names.is_empty()
+                    || added_names.iter().any(|name| configured.contains(name))
+                    || added_names.iter().collect::<HashSet<_>>().len() != added_names.len()
+                {
+                    return Err(PackageDriverError::ConflictingWorkerEnvironment);
+                }
+                configured.extend(added_names.iter().cloned());
+                configured.sort();
+            }
+            _ => {}
         }
         if let DriverEvent::RecoveryConfigured { limits } = event {
             if configured_limits.is_some_and(|configured| configured != *limits) {
@@ -1110,6 +1158,7 @@ pub fn derive_driver_snapshot(
             | DriverEvent::DriverResumed
             | DriverEvent::PlanVersionAdvanced { .. }
             | DriverEvent::WorkerEnvironmentDeclared { .. }
+            | DriverEvent::WorkerEnvironmentExtended { .. }
             | DriverEvent::RecoveryConfigured { .. }
             | DriverEvent::DriverRefMaterialized { .. } => {
                 continue;
@@ -1173,6 +1222,7 @@ pub fn derive_driver_snapshot(
             }
             DriverEvent::PlanVersionAdvanced { .. }
             | DriverEvent::WorkerEnvironmentDeclared { .. }
+            | DriverEvent::WorkerEnvironmentExtended { .. }
             | DriverEvent::RecoveryConfigured { .. }
             | DriverEvent::DriverRefMaterialized { .. } => {
                 unreachable!("configuration or ref evidence handled above")
@@ -2073,15 +2123,23 @@ mod tests {
     use super::{
         CommandExitStatus, CompositionInput, CriterionExecution, CriterionOrigin,
         DriverAssemblyState, DriverEvent, DriverLoopOutcome, DriverPackageState,
-        charged_failure_count, derive_driver_snapshot, worker_environment_outcome,
+        PackageDriverError, charged_failure_count, derive_driver_snapshot,
+        worker_environment_outcome,
     };
     use crate::{
         EnvironmentFailureLimit, LocalPatchLimit, RecoveryLimits, RetryLimit,
         parse_work_package_graph,
     };
 
+    fn graph_at_plan_version(plan_version: u64) -> crate::WorkPackageGraph {
+        let graph = format!(
+            r#"{{"vision":"v","plan_version":{plan_version},"authored_at_ref":"HEAD","packages":[{{"id":"A","title":"A","repositories":["r"],"criteria":[{{"name":"a","input":"i","observation":"o","command":"true"}}],"depends_on":[]}},{{"id":"B","title":"B","repositories":["r"],"criteria":[{{"name":"b","input":"i","observation":"o","command":"true"}}],"depends_on":[{{"id":"A","kind":"buildability","reason":"A"}}]}}]}}"#
+        );
+        parse_work_package_graph(graph.as_bytes()).expect("valid graph")
+    }
+
     fn graph() -> crate::WorkPackageGraph {
-        parse_work_package_graph(br#"{"vision":"v","plan_version":1,"authored_at_ref":"HEAD","packages":[{"id":"A","title":"A","repositories":["r"],"criteria":[{"name":"a","input":"i","observation":"o","command":"true"}],"depends_on":[]},{"id":"B","title":"B","repositories":["r"],"criteria":[{"name":"b","input":"i","observation":"o","command":"true"}],"depends_on":[{"id":"A","kind":"buildability","reason":"A"}]}]}"#).expect("valid graph")
+        graph_at_plan_version(1)
     }
 
     fn completed_packages() -> Vec<DriverEvent> {
@@ -2179,6 +2237,117 @@ mod tests {
             snapshot.packages()[1].1,
             DriverPackageState::Pending
         ));
+    }
+
+    #[test]
+    fn worker_environment_extensions_fold_as_exact_additions() {
+        let graph = graph_at_plan_version(2);
+        let events = vec![
+            DriverEvent::WorkerEnvironmentDeclared { names: Vec::new() },
+            DriverEvent::PlanVersionAdvanced {
+                from_plan_version: 1,
+                to_plan_version: 2,
+                carried_completions: Vec::new(),
+                carried_amendments: Vec::new(),
+                criterion_revisions_ratified_by: None,
+                criterion_revisions: Vec::new(),
+            },
+            DriverEvent::WorkerEnvironmentExtended {
+                plan_version: 2,
+                added_names: vec!["AUTHORIZATION".to_owned(), "WHEEL".to_owned()],
+            },
+        ];
+
+        let snapshot = derive_driver_snapshot(&graph, &events, false)
+            .expect("additions-only environment must derive");
+        assert_eq!(
+            snapshot.worker_environment(),
+            &["AUTHORIZATION".to_owned(), "WHEEL".to_owned()]
+        );
+        let encoded = serde_json::to_value(&events[2]).expect("extension event JSON");
+        assert_eq!(encoded["event"], "worker-environment-extended");
+        assert_eq!(
+            encoded["added_names"],
+            serde_json::json!(["AUTHORIZATION", "WHEEL"])
+        );
+    }
+
+    #[test]
+    fn worker_environment_extension_rejects_non_exact_additions() {
+        let graph = graph();
+        for added_names in [
+            Vec::new(),
+            vec!["EXISTING".to_owned()],
+            vec!["NEW".to_owned(), "NEW".to_owned()],
+        ] {
+            let events = vec![
+                DriverEvent::WorkerEnvironmentDeclared {
+                    names: vec!["EXISTING".to_owned()],
+                },
+                DriverEvent::PlanVersionAdvanced {
+                    from_plan_version: 1,
+                    to_plan_version: 2,
+                    carried_completions: Vec::new(),
+                    carried_amendments: Vec::new(),
+                    criterion_revisions_ratified_by: None,
+                    criterion_revisions: Vec::new(),
+                },
+                DriverEvent::WorkerEnvironmentExtended {
+                    plan_version: 2,
+                    added_names,
+                },
+            ];
+            assert!(matches!(
+                derive_driver_snapshot(&graph, &events, false),
+                Err(PackageDriverError::ConflictingWorkerEnvironment)
+            ));
+        }
+    }
+
+    #[test]
+    fn worker_environment_extension_requires_the_named_open_boundary() {
+        let graph = graph();
+        for events in [
+            vec![
+                DriverEvent::WorkerEnvironmentDeclared { names: Vec::new() },
+                DriverEvent::PlanVersionAdvanced {
+                    from_plan_version: 1,
+                    to_plan_version: 2,
+                    carried_completions: Vec::new(),
+                    carried_amendments: Vec::new(),
+                    criterion_revisions_ratified_by: None,
+                    criterion_revisions: Vec::new(),
+                },
+                DriverEvent::WorkerEnvironmentExtended {
+                    plan_version: 3,
+                    added_names: vec!["NEW".to_owned()],
+                },
+            ],
+            vec![
+                DriverEvent::WorkerEnvironmentDeclared { names: Vec::new() },
+                DriverEvent::PlanVersionAdvanced {
+                    from_plan_version: 1,
+                    to_plan_version: 2,
+                    carried_completions: Vec::new(),
+                    carried_amendments: Vec::new(),
+                    criterion_revisions_ratified_by: None,
+                    criterion_revisions: Vec::new(),
+                },
+                DriverEvent::WorkerDispatched {
+                    package: "A".to_owned(),
+                    issuance: 1,
+                },
+                DriverEvent::WorkerEnvironmentExtended {
+                    plan_version: 2,
+                    added_names: vec!["NEW".to_owned()],
+                },
+            ],
+        ] {
+            assert!(matches!(
+                derive_driver_snapshot(&graph, &events, false),
+                Err(PackageDriverError::WorkerEnvironmentExtensionOutsidePlanBoundary { .. })
+            ));
+        }
     }
 
     #[test]

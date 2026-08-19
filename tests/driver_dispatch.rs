@@ -203,6 +203,213 @@ fi
 }
 
 #[test]
+fn plan_boundary_extends_empty_worker_environment_for_pourpoint_shape() {
+    let temp = tempdir().expect("tempdir");
+    let repository = temp.path().join("repo");
+    fs::create_dir(&repository).expect("repository");
+    for args in [
+        ["init"].as_slice(),
+        ["config", "user.email", "test@example.com"].as_slice(),
+        ["config", "user.name", "Test"].as_slice(),
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(&repository)
+                .args(args)
+                .status()
+                .expect("git")
+                .success()
+        );
+    }
+    fs::write(repository.join("seed"), "seed\n").expect("seed");
+    assert!(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["add", "."])
+            .status()
+            .expect("add")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["commit", "-m", "seed"])
+            .status()
+            .expect("commit")
+            .success()
+    );
+    let base = String::from_utf8(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("oid")
+    .trim()
+    .to_owned();
+    let vision = format!("pourpoint-env-extension-{}", std::process::id());
+    fs::write(
+        temp.path().join("vision.md"),
+        "# Vision: pourpoint environment extension\n\n## Goal / Why\n\nProve live reader access.\n\n## Acceptance criteria (vision-level \"done\")\n\n```json\n{\"criteria\":[{\"name\":\"proof\",\"input\":\"package\",\"observation\":\"passes\"}]}\n```\n",
+    )
+    .expect("vision");
+    let package = |id: &str, title: &str| {
+        serde_json::json!({
+            "id": id,
+            "title": title,
+            "repositories": ["repo"],
+            "criteria": [{"name": "proof", "input": "package", "observation": "passes", "command": "true"}],
+            "depends_on": []
+        })
+    };
+    let graph_json = |version, packages: Vec<serde_json::Value>| {
+        serde_json::json!({
+            "vision": vision,
+            "plan_version": version,
+            "authored_at_refs": {"repo": base},
+            "packages": packages
+        })
+    };
+    let graph_v1 = temp.path().join("graph.v1.json");
+    let graph_v2 = temp.path().join("graph.v2.json");
+    fs::write(
+        &graph_v1,
+        serde_json::to_vec(&graph_json(1, vec![package("GD1", "prior proof")]))
+            .expect("graph v1 JSON"),
+    )
+    .expect("graph v1");
+    fs::write(
+        &graph_v2,
+        serde_json::to_vec(&graph_json(
+            2,
+            vec![
+                package("GD1", "prior proof"),
+                package("GD2", "live released reader"),
+            ],
+        ))
+        .expect("graph v2 JSON"),
+    )
+    .expect("graph v2");
+    assert!(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["branch", &format!("pce/{vision}/GD1/attempt-1"), &base])
+            .status()
+            .expect("branch")
+            .success()
+    );
+
+    let journal_path = temp.path().join("driver.jsonl");
+    let prior_events = [
+        serde_json::json!({"event":"worker-environment-declared","names":[]}),
+        serde_json::json!({"event":"recovery-configured","limits":{"retry_attempts":1,"local_patch_attempts":1,"environment_failures":6,"gate_failures":3}}),
+        serde_json::json!({"event":"worker-dispatched","package":"GD1","issuance":1}),
+        serde_json::json!({"event":"worker-done","package":"GD1","issuance":1}),
+        serde_json::json!({"event":"gate-finished","package":"GD1","gate":"package-gate-1-1"}),
+        serde_json::json!({"event":"package-completed","package":"GD1"}),
+    ];
+    let journal = prior_events
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&journal_path, journal).expect("journal");
+
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).expect("bin");
+    executable(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+set -eu
+if [ "$1 $2" = "worktree create" ]; then
+  shift 2; cwd= path= branch= base=
+  while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
+  git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
+  count=1; [ ! -f "$HOME/herdr-worktree-count" ] || count=$(( $(cat "$HOME/herdr-worktree-count") + 1 ))
+  printf '%s' "$count" > "$HOME/herdr-worktree-count"
+  printf '{"result":{"workspace":{"workspace_id":"workspace-%s"},"tab":{"tab_id":"workspace-%s:t1"},"root_pane":{"pane_id":"pane-%s","workspace_id":"workspace-%s"}}}\n' "$count" "$count" "$count" "$count"
+elif [ "$1 $2" = "workspace close" ]; then
+  printf '%s\n' '{"result":{"closed":true}}'
+else
+  shift 2; agent_cwd=
+  while [ "$1" != "--" ]; do if [ "$1" = "--cwd" ]; then agent_cwd=$2; shift 2; else shift; fi; done; shift
+  (cd "$agent_cwd" && "$@") &
+  printf '%s\n' '{}'
+fi"#,
+    );
+    executable(
+        &bin.join("prime-agent"),
+        r#"#!/bin/sh
+set -eu
+[ "${POURPOINT_LIVE_READ_AUTHORIZATION-}" = "authorized" ]
+[ "${POURPOINT_RELEASE_WHEEL-}" = "/tmp/pourpoint.whl" ]
+cat >/dev/null
+if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
+  printf '%s\n' forwarded > "$HOME/pourpoint-env-observed"
+  printf '%s' '{"outcome":"done"}' > "$PCE_PACKAGE_OUTCOME"
+else
+  printf '%s' '{"findings":[]}' > "$PCE_PACKAGE_GATE_OUTCOME"
+fi
+"#,
+    );
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "driver-run", "--graph"])
+        .arg(&graph_v2)
+        .args(["--journal"])
+        .arg(&journal_path)
+        .args(["--repository"])
+        .arg(format!("repo={}", repository.display()))
+        .args(["--worker-env", "POURPOINT_LIVE_READ_AUTHORIZATION"])
+        .args(["--worker-env", "POURPOINT_RELEASE_WHEEL"])
+        .env("POURPOINT_LIVE_READ_AUTHORIZATION", "authorized")
+        .env("POURPOINT_RELEASE_WHEEL", "/tmp/pourpoint.whl")
+        .env("HERDR_ENV", "1")
+        .env(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+            temp.path().join("worktrees"),
+        )
+        .env("PATH", path)
+        .env("HOME", temp.path())
+        .env("USER", "tester")
+        .output()
+        .expect("boundary relaunch");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("pourpoint-env-observed")).expect("worker observation"),
+        "forwarded\n"
+    );
+
+    let events = fs::read_to_string(&journal_path)
+        .expect("journal")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("event JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(events[6]["event"], "plan-version-advanced");
+    assert_eq!(events[7]["event"], "worker-environment-extended");
+    assert_eq!(events[7]["plan_version"], 2);
+    assert_eq!(
+        events[7]["added_names"],
+        serde_json::json!([
+            "POURPOINT_LIVE_READ_AUTHORIZATION",
+            "POURPOINT_RELEASE_WHEEL"
+        ])
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["event"] == "worker-dispatched" && event["package"] == "GD2" })
+    );
+}
+
+#[test]
 fn driver_refuses_an_unset_worker_environment_before_journaling() {
     let temp = tempdir().expect("tempdir");
     let journal = temp.path().join("driver.jsonl");
