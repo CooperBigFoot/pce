@@ -2816,7 +2816,18 @@ fn observe_driver_worker_outcome(
                     format!("replan: criterion: {}", name.as_str())
                 }
                 pce_core::MisSpecificationFault::MissingDependency { id } => {
-                    format!("replan: missing dependency: {}", id.as_str())
+                    let checked = id
+                        .checked()
+                        .iter()
+                        .map(|item| item.as_str())
+                        .collect::<Vec<_>>();
+                    let checked = serde_json::to_string(&checked)
+                        .context("failed to serialize missing-dependency checks")?;
+                    format!(
+                        "replan: missing dependency: {}; checked: {checked}; command: {}",
+                        id.as_str(),
+                        id.command()
+                    )
                 }
             };
             append_driver_event(
