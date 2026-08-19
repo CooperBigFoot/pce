@@ -868,7 +868,7 @@ fn base_currency_escape_is_attributed_durable_and_rejected_for_mechanical() {
     )
     .expect("graph");
     let acceptance = vision.join("acceptance.json");
-    fs::write(&acceptance, serde_json::to_vec(&serde_json::json!({"schema_version":1,"repositories":["repo"],"mode":"offline","accepted_by":"Nicolas","reason":"Historical offline reconstruction"})).expect("acceptance")).expect("acceptance");
+    fs::write(&acceptance, serde_json::to_vec(&serde_json::json!({"schema_version":1,"entries":[{"repository":"repo","mode":"offline"}],"accepted_by":"Nicolas","reason":"Historical offline reconstruction"})).expect("acceptance")).expect("acceptance");
     let mapping = format!("repo={}", repository.display());
     let refused = pce()
         .args(["graph", "freeze", "--vision-dir"])
@@ -887,8 +887,7 @@ fn base_currency_escape_is_attributed_durable_and_rejected_for_mechanical() {
         &wrong_scope,
         serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,
-            "repositories": ["other"],
-            "mode": "offline",
+            "entries": [{"repository": "other", "mode": "offline"}],
             "accepted_by": "Nicolas",
             "reason": "Unrelated repository"
         }))
@@ -933,8 +932,8 @@ fn base_currency_escape_is_attributed_durable_and_rejected_for_mechanical() {
     let durable: Value =
         serde_json::from_slice(&fs::read(sidecar).expect("sidecar")).expect("JSON");
     assert_eq!(durable["accepted_by"], "Nicolas");
-    assert_eq!(durable["repositories"], serde_json::json!(["repo"]));
-    assert_eq!(durable["mode"], "offline");
+    assert_eq!(durable["entries"][0]["repository"], "repo");
+    assert_eq!(durable["entries"][0]["mode"], "offline");
 
     let worker = vision.join("worker.sh");
     fs::write(
@@ -986,8 +985,8 @@ printf '%s' '{"outcome":"done"}' > "$PCE_PACKAGE_OUTCOME"
         "Nicolas"
     );
     assert_eq!(
-        snapshot["base_currency_acceptances"][0]["repositories"],
-        serde_json::json!(["repo"])
+        snapshot["base_currency_acceptances"][0]["entries"],
+        serde_json::json!([{"repository": "repo", "mode": "offline"}])
     );
 
     let old_dir = directory.path().join("old-replay");
@@ -1026,5 +1025,178 @@ printf '%s' '{"outcome":"done"}' > "$PCE_PACKAGE_OUTCOME"
     assert!(
         String::from_utf8_lossy(&mechanical.stderr)
             .contains("mechanical freeze cannot accept base-currency risk")
+    );
+}
+
+#[test]
+fn base_currency_acceptance_matches_mixed_repository_failures_and_modes_exactly() {
+    let directory = tempdir().expect("temporary directory");
+
+    let offline = directory.path().join("offline");
+    fs::create_dir(&offline).expect("offline repository");
+    git(&offline, &["init", "-q"]);
+    git(&offline, &["config", "user.email", "test@example.com"]);
+    git(&offline, &["config", "user.name", "Test"]);
+    fs::write(offline.join("artifact.txt"), "offline").expect("offline artifact");
+    git(&offline, &["add", "."]);
+    git(&offline, &["commit", "-qm", "offline"]);
+    let offline_oid = git(&offline, &["rev-parse", "HEAD"]);
+
+    let historical_root = directory.path().join("historical-root");
+    fs::create_dir(&historical_root).expect("historical root");
+    let (historical, _remote, historical_oid) = init_remote_pair(&historical_root);
+    fs::write(historical.join("remote.txt"), "advance").expect("remote advance");
+    git(&historical, &["add", "."]);
+    git(&historical, &["commit", "-qm", "remote advance"]);
+    git(&historical, &["push", "-q", "origin", "HEAD"]);
+    git(&historical, &["reset", "--hard", &historical_oid]);
+
+    let vision = directory.path().join("mixed-currency");
+    fs::create_dir(&vision).expect("vision");
+    fs::write(
+        vision.join("graph.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "vision": "mixed-currency",
+            "plan_version": 1,
+            "authored_at_refs": {
+                "offline": offline_oid,
+                "historical": historical_oid
+            },
+            "packages": [{
+                "id": "A",
+                "title": "Create artifacts",
+                "repositories": ["offline", "historical"],
+                "criteria": [{
+                    "name": "artifact",
+                    "input": "run",
+                    "observation": "passes",
+                    "command": "true"
+                }],
+                "depends_on": []
+            }]
+        }))
+        .expect("graph"),
+    )
+    .expect("graph");
+    let offline_mapping = format!("offline={}", offline.display());
+    let historical_mapping = format!("historical={}", historical.display());
+    let acceptance = vision.join("acceptance.json");
+    fs::write(
+        &acceptance,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "entries": [
+                {"repository": "offline", "mode": "offline"},
+                {"repository": "historical", "mode": "historical"}
+            ],
+            "accepted_by": "Nicolas",
+            "reason": "Explicit mixed-risk reconstruction"
+        }))
+        .expect("acceptance"),
+    )
+    .expect("acceptance");
+
+    let accepted = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision)
+        .args(["--accept-base-currency-risk"])
+        .arg(&acceptance)
+        .args(["--repository", &offline_mapping])
+        .args(["--repository", &historical_mapping])
+        .output()
+        .expect("mixed freeze");
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let durable: Value = serde_json::from_slice(
+        &fs::read(vision.join("graph.v1.base-currency-acceptance.json"))
+            .expect("durable acceptance"),
+    )
+    .expect("durable JSON");
+    assert_eq!(durable["entries"][0]["repository"], "offline");
+    assert_eq!(durable["entries"][0]["mode"], "offline");
+    assert_eq!(durable["entries"][1]["repository"], "historical");
+    assert_eq!(durable["entries"][1]["mode"], "historical");
+
+    let worker = vision.join("worker.sh");
+    fs::write(
+        &worker,
+        r#"#!/bin/sh
+printf '%s' '{"outcome":"done"}' > "$PCE_PACKAGE_OUTCOME"
+"#,
+    )
+    .expect("worker");
+    let journal = vision.join("driver.jsonl");
+    let activated = pce()
+        .args(["package", "driver-run", "--graph"])
+        .arg(vision.join("graph.v1.json"))
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository", &offline_mapping])
+        .args(["--repository", &historical_mapping])
+        .args(["--worker-override", "--", "/bin/sh"])
+        .arg(&worker)
+        .output()
+        .expect("activate driver");
+    assert!(
+        activated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+    let events = fs::read_to_string(&journal).expect("journal");
+    let acceptance_event: Value = events
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event JSON"))
+        .find(|event: &Value| event["event"] == "base-currency-risk-accepted")
+        .expect("acceptance event");
+    assert_eq!(acceptance_event["entries"], durable["entries"]);
+    let status = pce()
+        .args(["package", "driver-status", "--graph"])
+        .arg(vision.join("graph.v1.json"))
+        .args(["--journal"])
+        .arg(&journal)
+        .output()
+        .expect("status");
+    assert!(status.status.success());
+    let snapshot: Value = serde_json::from_slice(&status.stdout).expect("status JSON");
+    assert_eq!(
+        snapshot["base_currency_acceptances"][0]["entries"],
+        durable["entries"]
+    );
+
+    fs::remove_file(vision.join("graph.v1.json")).expect("remove frozen graph");
+    fs::remove_file(vision.join("graph.v1.base-currency-acceptance.json"))
+        .expect("remove frozen acceptance");
+    let mismatch = vision.join("mismatch.json");
+    fs::write(
+        &mismatch,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "entries": [
+                {"repository": "offline", "mode": "historical"},
+                {"repository": "historical", "mode": "offline"}
+            ],
+            "accepted_by": "Nicolas",
+            "reason": "Wrong per-repository modes"
+        }))
+        .expect("mismatch"),
+    )
+    .expect("mismatch");
+    let refused = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision)
+        .args(["--accept-base-currency-risk"])
+        .arg(&mismatch)
+        .args(["--repository", &offline_mapping])
+        .args(["--repository", &historical_mapping])
+        .output()
+        .expect("mismatched freeze");
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("offline") && stderr.contains("historical"),
+        "{stderr}"
     );
 }

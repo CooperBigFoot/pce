@@ -24,21 +24,21 @@ use pce_core::{
     AbsoluteRequiredArtifactPath, AbsoluteSchemaPath, AbsoluteWorkingDirectory,
     AbsoluteWorktreeRoot, AcceptanceCriteria, ActReversibility, AmendmentProof,
     AmendmentRepositoryRefs, AppendError, AppendableCategory, AppendableFinding, ArgumentVector,
-    ArtifactOutcome, ArtifactPath, ArtifactProduction, AuthorityFailure, BaseCurrencyRiskMode,
-    BranchState, BuiltArtifactRef, CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage,
-    ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage, CommandExitStatus,
-    CompletionCriterionStatus, CompletionDecision, CompositionInput, CreationDate,
-    CriterionChangeDecision, CriterionExecution, CurrentArtifactObservation, CurrentArtifactState,
-    DispatchAdmission, DispatchAttempt, DispatchCandidate, DispatchCompletionPayload,
-    DispatchDuration, DispatchEnvelope, DispatchEnvironmentObservation, DispatchExitStatus,
-    DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion, DispatchLogging,
-    DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
-    DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass, DispatchRootCause,
-    DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchWorkerProcessObservation,
-    DispatchabilityResult, DriverAssemblyState, DriverEvent, DriverRefProduct,
-    EnvironmentFailureLimit, EnvironmentPreparationOutcome, EventBodyRef, EventKindName,
-    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
-    ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
+    ArtifactOutcome, ArtifactPath, ArtifactProduction, AuthorityFailure, BaseCurrencyRiskEntry,
+    BaseCurrencyRiskMode, BranchState, BuiltArtifactRef, CanonicalNode as DispatchNode,
+    CheckoutFailure, CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage,
+    CommandExitStatus, CompletionCriterionStatus, CompletionDecision, CompositionInput,
+    CreationDate, CriterionChangeDecision, CriterionExecution, CurrentArtifactObservation,
+    CurrentArtifactState, DispatchAdmission, DispatchAttempt, DispatchCandidate,
+    DispatchCompletionPayload, DispatchDuration, DispatchEnvelope, DispatchEnvironmentObservation,
+    DispatchExitStatus, DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion,
+    DispatchLogging, DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput,
+    DispatchRef, DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass,
+    DispatchRootCause, DispatchTarget, DispatchTokenUsage, DispatchVisionSource,
+    DispatchWorkerProcessObservation, DispatchabilityResult, DriverAssemblyState, DriverEvent,
+    DriverRefProduct, EnvironmentFailureLimit, EnvironmentPreparationOutcome, EventBodyRef,
+    EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
+    Evidence, ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
     ExceptionalMergeChainObservation, Executable, ExitCode, ExpectedVerdictOutcome,
     FileObservation, FindingAdmission, FindingRejectionReason, FindingReplayDecision,
     FinishedResult, GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig,
@@ -5059,8 +5059,7 @@ fn ensure_base_currency_acceptance_imported(
     let digest = format!("{:x}", Sha256::digest(&bytes));
     let expected = DriverEvent::BaseCurrencyRiskAccepted {
         plan_version: version,
-        repositories: acceptance.repositories,
-        mode: acceptance.mode,
+        entries: acceptance.entries,
         accepted_by: acceptance.accepted_by,
         reason: acceptance.reason,
         sidecar_sha256: digest,
@@ -10325,8 +10324,7 @@ fn highest_frozen_graph_version(vision_dir: &Path) -> Result<Option<u64>> {
 #[serde(deny_unknown_fields)]
 struct BaseCurrencyAcceptance {
     schema_version: u64,
-    repositories: Vec<String>,
-    mode: BaseCurrencyRiskMode,
+    entries: Vec<BaseCurrencyRiskEntry>,
     accepted_by: String,
     reason: String,
 }
@@ -10337,17 +10335,21 @@ fn parse_base_currency_acceptance(bytes: &[u8]) -> Result<BaseCurrencyAcceptance
     if acceptance.schema_version != 1 {
         bail!("base-currency acceptance schema_version must be 1");
     }
-    if acceptance.repositories.is_empty()
+    if acceptance.entries.is_empty()
         || acceptance
-            .repositories
+            .entries
             .iter()
-            .any(|repository| repository.trim().is_empty())
+            .any(|entry| entry.repository.trim().is_empty())
     {
-        bail!("base-currency acceptance requires non-empty repository identities");
+        bail!("base-currency acceptance requires non-empty repository entries");
     }
-    let unique = acceptance.repositories.iter().collect::<BTreeSet<_>>();
-    if unique.len() != acceptance.repositories.len() {
-        bail!("base-currency acceptance repository identities must be unique");
+    let unique = acceptance
+        .entries
+        .iter()
+        .map(|entry| entry.repository.as_str())
+        .collect::<BTreeSet<_>>();
+    if unique.len() != acceptance.entries.len() {
+        bail!("base-currency acceptance repository entries must be unique");
     }
     if acceptance.accepted_by.trim().is_empty() || acceptance.reason.trim().is_empty() {
         bail!("base-currency acceptance requires non-empty accepted_by and reason");
@@ -10444,9 +10446,9 @@ fn verify_remote_base_currency(
         return Ok(());
     };
     let accepted = acceptance
-        .repositories
+        .entries
         .iter()
-        .map(String::as_str)
+        .map(|entry| entry.repository.as_str())
         .collect::<BTreeSet<_>>();
     let failed = failures
         .iter()
@@ -10455,22 +10457,29 @@ fn verify_remote_base_currency(
     if accepted != failed {
         bail!(
             "base-currency acceptance repository scope {:?} does not exactly match repositories with accepted failures {:?}",
-            acceptance.repositories,
+            acceptance
+                .entries
+                .iter()
+                .map(|entry| entry.repository.as_str())
+                .collect::<Vec<_>>(),
             failures
                 .iter()
                 .map(|failure| failure.repository.as_str())
                 .collect::<Vec<_>>()
         );
     }
-    if let Some(failure) = failures
-        .iter()
-        .find(|failure| failure.mode != acceptance.mode)
-    {
+    if let Some((failure, entry)) = failures.iter().find_map(|failure| {
+        acceptance
+            .entries
+            .iter()
+            .find(|entry| entry.repository == failure.repository && entry.mode != failure.mode)
+            .map(|entry| (failure, entry))
+    }) {
         bail!(
             "repository `{}` has {:?} base-currency failure, not the accepted {:?} mode: {}",
             failure.repository,
             failure.mode,
-            acceptance.mode,
+            entry.mode,
             failure.diagnostic
         );
     }

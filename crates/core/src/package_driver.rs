@@ -261,12 +261,19 @@ pub enum BaseCurrencyRiskMode {
     Historical,
 }
 
+/// One repository and the exact class of base-currency failure accepted for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BaseCurrencyRiskEntry {
+    pub repository: String,
+    pub mode: BaseCurrencyRiskMode,
+}
+
 /// One attributed acceptance imported from an immutable graph sidecar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BaseCurrencyRiskAcceptance {
     pub plan_version: u64,
-    pub repositories: Vec<String>,
-    pub mode: BaseCurrencyRiskMode,
+    pub entries: Vec<BaseCurrencyRiskEntry>,
     pub accepted_by: String,
     pub reason: String,
     pub sidecar_sha256: String,
@@ -294,8 +301,7 @@ pub enum DriverEvent {
     /// A graph-specific human base-currency acceptance became visible at its plan boundary.
     BaseCurrencyRiskAccepted {
         plan_version: u64,
-        repositories: Vec<String>,
-        mode: BaseCurrencyRiskMode,
+        entries: Vec<BaseCurrencyRiskEntry>,
         accepted_by: String,
         reason: String,
         sidecar_sha256: String,
@@ -1007,21 +1013,23 @@ pub fn derive_driver_snapshot(
             }
             DriverEvent::BaseCurrencyRiskAccepted {
                 plan_version,
-                repositories,
-                mode,
+                entries,
                 accepted_by,
                 reason,
                 sidecar_sha256,
             } => {
-                let unique_repositories = repositories.iter().collect::<HashSet<_>>();
+                let unique_repositories = entries
+                    .iter()
+                    .map(|entry| entry.repository.as_str())
+                    .collect::<HashSet<_>>();
                 if *plan_version != acceptance_plan_version
                     || !acceptance_boundary_open
                     || !accepted_plan_versions.insert(*plan_version)
-                    || repositories.is_empty()
-                    || unique_repositories.len() != repositories.len()
-                    || repositories
+                    || entries.is_empty()
+                    || unique_repositories.len() != entries.len()
+                    || entries
                         .iter()
-                        .any(|repository| repository.trim().is_empty())
+                        .any(|entry| entry.repository.trim().is_empty())
                     || accepted_by.trim().is_empty()
                     || reason.trim().is_empty()
                     || sidecar_sha256.len() != 64
@@ -1031,8 +1039,7 @@ pub fn derive_driver_snapshot(
                 }
                 base_currency_acceptances.push(BaseCurrencyRiskAcceptance {
                     plan_version: *plan_version,
-                    repositories: repositories.clone(),
-                    mode: *mode,
+                    entries: entries.clone(),
                     accepted_by: accepted_by.clone(),
                     reason: reason.clone(),
                     sidecar_sha256: sidecar_sha256.clone(),
