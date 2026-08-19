@@ -181,6 +181,232 @@ fn freezing_version_two_preserves_readable_version_one_bytes() {
 }
 
 #[test]
+fn mechanical_freeze_accepts_only_definition_preserving_successors() {
+    let directory = tempdir().expect("temporary directory");
+    let repository = directory.path().join("repository");
+    fs::create_dir(&repository).expect("repository directory");
+    git(&repository, &["init", "-q"]);
+    git(&repository, &["config", "user.email", "test@example.com"]);
+    git(&repository, &["config", "user.name", "Test"]);
+    fs::write(repository.join("seed"), "seed").expect("seed");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "seed"]);
+    let first_ref = git(&repository, &["rev-parse", "HEAD"]);
+    fs::write(repository.join("second"), "second").expect("second");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "second"]);
+    let second_ref = git(&repository, &["rev-parse", "HEAD"]);
+    let mapping = format!("RivRetrieve={}", repository.display());
+
+    let vision_dir = directory
+        .path()
+        .join("2026-08-11-the-store-is-the-only-copy");
+    fs::create_dir(&vision_dir).expect("vision directory");
+    let source = vision_dir.join("graph.json");
+    let mut graph: Value = serde_json::from_slice(FIXTURE).expect("fixture JSON");
+    graph["authored_at_ref"] = Value::from(first_ref);
+    fs::write(&source, serde_json::to_vec_pretty(&graph).expect("v1 JSON")).expect("v1");
+    let mechanical_v1 = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .arg("--mechanical")
+        .args(["--repository", &mapping])
+        .output()
+        .expect("mechanical v1 freeze");
+    assert!(!mechanical_v1.status.success());
+    assert!(!vision_dir.join("graph.v1.json").exists());
+
+    let initial = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .args(["--repository", &mapping])
+        .output()
+        .expect("initial freeze");
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+
+    graph["plan_version"] = Value::from(2);
+    graph
+        .as_object_mut()
+        .expect("graph object")
+        .remove("authored_at_ref");
+    graph["authored_at_refs"] = serde_json::json!({"RivRetrieve": second_ref});
+    fs::write(&source, serde_json::to_vec_pretty(&graph).expect("v2 JSON")).expect("v2");
+    let mechanical = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .arg("--mechanical")
+        .args(["--repository", &mapping])
+        .output()
+        .expect("mechanical freeze");
+    assert!(
+        mechanical.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mechanical.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&mechanical.stdout).expect("freeze receipt");
+    assert_eq!(receipt["mechanical"], true);
+    assert!(vision_dir.join("graph.v2.json").exists());
+
+    graph["plan_version"] = Value::from(3);
+    graph["packages"][1]["depends_on"][0]["reason"] = Value::from("typo fixed");
+    fs::write(&source, serde_json::to_vec_pretty(&graph).expect("v3 JSON")).expect("v3");
+    let reason_edit = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .arg("--mechanical")
+        .args(["--repository", &mapping])
+        .output()
+        .expect("reason-edit freeze");
+    assert!(!reason_edit.status.success());
+    let stderr = String::from_utf8_lossy(&reason_edit.stderr);
+    assert!(stderr.contains("package definitions differ"), "{stderr}");
+    assert!(!vision_dir.join("graph.v3.json").exists());
+
+    let combined = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .arg("--mechanical")
+        .args(["--criterion-revisions", "unused-human-record.json"])
+        .args(["--repository", &mapping])
+        .output()
+        .expect("combined mechanical and revision freeze");
+    assert!(!combined.status.success());
+    assert!(
+        String::from_utf8_lossy(&combined.stderr)
+            .contains("mechanical freeze cannot carry a human criterion revision record")
+    );
+    assert!(!vision_dir.join("graph.v3.json").exists());
+    assert!(
+        !vision_dir
+            .join("graph.v3.criterion-revisions.json")
+            .exists()
+    );
+}
+
+#[test]
+fn mechanical_freeze_normalizes_multi_repository_scalar_refs() {
+    let directory = tempdir().expect("temporary directory");
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    for repository in [&first, &second] {
+        fs::create_dir(repository).expect("repository directory");
+        git(repository, &["init", "-q"]);
+        git(repository, &["config", "user.email", "test@example.com"]);
+        git(repository, &["config", "user.name", "Test"]);
+        fs::write(repository.join("seed"), "seed").expect("seed");
+        git(repository, &["add", "."]);
+        git(repository, &["commit", "-qm", "seed"]);
+    }
+    let vision_dir = directory.path().join("multi-repository-mechanical");
+    fs::create_dir(&vision_dir).expect("vision directory");
+    let source = vision_dir.join("graph.json");
+    let mut graph = serde_json::json!({
+        "vision": "multi-repository-mechanical",
+        "plan_version": 1,
+        "authored_at_ref": "HEAD",
+        "packages": [{
+            "id": "A",
+            "title": "A",
+            "repositories": ["first", "second"],
+            "criteria": [{"name": "a", "input": "run", "observation": "passes", "command": "true"}],
+            "depends_on": []
+        }]
+    });
+    fs::write(&source, serde_json::to_vec(&graph).expect("v1 JSON")).expect("v1");
+    let first_mapping = format!("first={}", first.display());
+    let second_mapping = format!("second={}", second.display());
+    let frozen_v1 = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .args(["--repository", &first_mapping])
+        .args(["--repository", &second_mapping])
+        .output()
+        .expect("v1 freeze");
+    assert!(
+        frozen_v1.status.success(),
+        "{}",
+        String::from_utf8_lossy(&frozen_v1.stderr)
+    );
+
+    graph["plan_version"] = Value::from(2);
+    graph
+        .as_object_mut()
+        .expect("graph object")
+        .remove("authored_at_ref");
+    graph["authored_at_refs"] = serde_json::json!({
+        "first": "HEAD",
+        "second": "refs/heads/main"
+    });
+    fs::write(&source, serde_json::to_vec(&graph).expect("v2 JSON")).expect("v2");
+    let frozen_v2 = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .arg("--mechanical")
+        .args(["--repository", &first_mapping])
+        .args(["--repository", &second_mapping])
+        .output()
+        .expect("v2 mechanical freeze");
+    assert!(
+        frozen_v2.status.success(),
+        "{}",
+        String::from_utf8_lossy(&frozen_v2.stderr)
+    );
+}
+
+#[test]
+fn mechanical_freeze_refuses_a_draft_behind_the_highest_frozen_version() {
+    let directory = tempdir().expect("temporary directory");
+    let repository = directory.path().join("repository");
+    fs::create_dir(&repository).expect("repository directory");
+    git(&repository, &["init", "-q"]);
+    git(&repository, &["config", "user.email", "test@example.com"]);
+    git(&repository, &["config", "user.name", "Test"]);
+    fs::write(repository.join("seed"), "seed").expect("seed");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "seed"]);
+    let mapping = format!("RivRetrieve={}", repository.display());
+    let vision_dir = directory
+        .path()
+        .join("2026-08-11-the-store-is-the-only-copy");
+    fs::create_dir(&vision_dir).expect("vision directory");
+    let source = vision_dir.join("graph.json");
+    let mut graph: Value = serde_json::from_slice(FIXTURE).expect("fixture JSON");
+    graph["authored_at_ref"] = Value::from("HEAD");
+    fs::write(&source, serde_json::to_vec(&graph).expect("v1 JSON")).expect("v1");
+    let frozen_v1 = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .args(["--repository", &mapping])
+        .output()
+        .expect("v1 freeze");
+    assert!(frozen_v1.status.success());
+
+    let mut future = graph.clone();
+    future["plan_version"] = Value::from(3);
+    fs::write(
+        vision_dir.join("graph.v3.json"),
+        serde_json::to_vec(&future).expect("v3 JSON"),
+    )
+    .expect("future frozen graph");
+    graph["plan_version"] = Value::from(2);
+    fs::write(&source, serde_json::to_vec(&graph).expect("v2 JSON")).expect("v2");
+    let refused = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .arg("--mechanical")
+        .args(["--repository", &mapping])
+        .output()
+        .expect("stale mechanical freeze");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("highest frozen version"));
+    assert!(!vision_dir.join("graph.v2.json").exists());
+}
+
+#[test]
 fn criterion_edit_requires_explicit_human_revision_record_at_freeze() {
     let directory = tempdir().expect("temporary directory");
     let repository = directory.path().join("repository");

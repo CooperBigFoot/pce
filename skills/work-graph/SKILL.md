@@ -11,8 +11,10 @@ preserve the vision's goal.
 
 `$1` is an existing vision directory. Run commands from the repository that owns it. Reconstruct
 state from disk on every invocation; a previous conversation is never authority. Criteria invariance
-must be a refusal in the installed `pce` binary before this skill may exercise graph-revision
-authority; a prose promise or harness hook is not a substitute.
+and definition-preserving mechanical freeze must be refusals in the installed `pce` binary before
+this skill may exercise the corresponding graph-revision authority; a prose promise or harness hook
+is not a substitute. The authority is specifically the `pce graph freeze --mechanical` path: it
+refuses when package definitions differ or graph metadata changes.
 
 ## 1. Resolve the only admissible graph
 
@@ -198,6 +200,27 @@ Act without prior approval, then append and report the action, only in these cas
   driver anchors the resolution commit under `refs/pce-assembly-resolutions/*` before journaling it.
 - **Install a missing tool.** Record the exact install and undo commands in `supervision.md` before
   reporting them.
+- **Freeze an exactly definition-preserving successor.** Only when every package in `graph.json`
+  is deep-equal to the highest frozen predecessor, and the only changes are `plan_version` advancing
+  by one plus `authored_at_ref` or `authored_at_refs`, run the binary refusal path itself. A legacy
+  scalar-to-map conversion is allowed. A title, repository, criterion, dependency, ordering, or edge
+  `reason` edit is not mechanical. Supply every repository mapping from `run.json` so every new ref
+  resolves:
+
+  ```bash
+  pce graph freeze --vision-dir <vision-dir> --mechanical \
+    --repository <NAME>=<SOURCE_WORKTREE> [...]
+  ```
+
+  Before reporting, append the draft, exact command, and binary acceptance to `supervision.md`, and
+  identify the author as the work-graph supervisor. Then append the frozen path, receipt digest, and
+  exact digest command as the ordinary three-field `planning-artifact-approved` payload in
+  `<vision-dir>/events.jsonl` at node `graph`. That node is bootstrap attribution to the graph
+  artifact, not a claim of human authorship or ratification; do not add an actor field. Avoid a
+  duplicate exact path-and-digest approval on resume. No notification or prior approval gate applies.
+  Ref-only changes for already-complete packages are left to the driver's existing plan-advance
+  carry-forward or recomposition decision. Never combine `--mechanical` with
+  `--criterion-revisions`.
 - **Repartition packaging.** Draft the next `graph.json` by splitting, merging, re-edging, renaming,
   or adding packages while preserving every existing criterion's `name`, `input`, `observation`,
   and `command` byte-for-byte. Run `pce graph check` on the draft. State that a split forfeits the
@@ -206,6 +229,8 @@ Act without prior approval, then append and report the action, only in these cas
   ```bash
   pce graph freeze --vision-dir <vision-dir>
   ```
+
+  Every other freeze remains a human ruling.
 
 Never modify any repository participating in the run. Never edit a criterion command. Never edit or
 truncate the journal. Never use a flag to relax criteria invariance; none exists.
@@ -242,8 +267,8 @@ The human-authored JSON record has this exact typed shape; `successor: null` mea
 }
 ```
 
-The skill never writes the revision record, supplies `--criterion-revisions`, or runs the freeze.
-Only the human ratifies a frozen criterion revision. Ratification forfeits the affected package's
+The skill never writes the revision record, supplies `--criterion-revisions`, or runs a
+non-mechanical freeze. Only the human ratifies a frozen criterion revision. Ratification forfeits the affected package's
 carried completion. When the package starts its fresh attempt, gate-earned amendments carry as
 criteria, but repair commits from the forfeited attempt do not carry into the rebuilt lineage. The
 fresh attempt must pass each carried amendment on its own merits. Mechanical freezes remain
@@ -386,11 +411,13 @@ the run's final line. No prose follows that URL.
 
 ## 11. Preserve the boundary
 
-This skill may draft only a goal-preserving graph repartition under section 6 and may promote only
-through sections 7 through 10. It does not write `vision.md`, invoke `/to-graph`, weaken or rename
-criteria, author or supply a criterion revision record, freeze a graph, edit the journal, invoke
-`/land-ticket`, or land any non-assembly branch. Criterion revision, freeze, and park-overrule remain
-human rulings; promotion after proof is mechanical.
+This skill may draft only a goal-preserving graph repartition under section 6, may freeze only an
+exact definition-preserving successor accepted by `pce graph freeze --mechanical`, and may promote
+only through sections 7 through 10. It does not write `vision.md`, invoke `/to-graph`, weaken or
+rename criteria, author or supply a criterion revision record, run any other freeze, edit the journal,
+invoke `/land-ticket`, or land any non-assembly branch. Criterion revision, every semantic freeze,
+and park-overrule remain human rulings; verified definition preservation and promotion after proof
+are mechanical.
 
 The append-only driver journal is the admissible run proof. `supervision.md` is explanation and
 captured evidence, never a substitute for or repair of that proof. No important fact may exist only

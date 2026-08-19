@@ -224,10 +224,10 @@ pub use workflow_coverage::{
 
 pub use work_package_graph::{
     ClassifiedWorkPackage, CriteriaInvarianceViolation, CriterionRevision, CriterionRevisionError,
-    CriterionRevisionManifest, DependencyKind, ReadyWorkPackages, RiskOrdering, WorkPackage,
-    WorkPackageClassification, WorkPackageCriterion, WorkPackageDependency, WorkPackageGraph,
-    WorkPackageGraphError, WorkPackageId, WorkPackageMergeObservation,
-    criteria_invariance_violation, criteria_invariance_violations,
+    CriterionRevisionManifest, DependencyKind, MechanicalFreezeError, ReadyWorkPackages,
+    RiskOrdering, WorkPackage, WorkPackageClassification, WorkPackageCriterion,
+    WorkPackageDependency, WorkPackageGraph, WorkPackageGraphError, WorkPackageId,
+    WorkPackageMergeObservation, criteria_invariance_violation, criteria_invariance_violations,
     parse_criterion_revision_manifest, parse_work_package_graph, ready_work_packages,
-    unchanged_package_ids, validate_criterion_revisions,
+    unchanged_package_ids, validate_criterion_revisions, verify_mechanical_freeze,
 };

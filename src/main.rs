@@ -94,7 +94,8 @@ use pce_core::{
     serialize_tracked_repository_contract, unchanged_package_ids, validate_artifact,
     validate_criterion_revisions, validate_package_gate_finding_repositories,
     validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
-    validated_dispatch_completion_payload, verify_criterion_change, worker_environment_outcome,
+    validated_dispatch_completion_payload, verify_criterion_change, verify_mechanical_freeze,
+    worker_environment_outcome,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -109,7 +110,7 @@ const USAGE: &str = concat!(
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] [--override-risk-ordering]\n",
     "       pce graph check --file <GRAPH_PATH> [--repository <NAME=SOURCE_WORKTREE>]...\n",
-    "       pce graph freeze --vision-dir <VISION_DIR> [--criterion-revisions <HUMAN_RECORD_PATH>] --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
+    "       pce graph freeze --vision-dir <VISION_DIR> [--mechanical] [--criterion-revisions <HUMAN_RECORD_PATH>] --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
     "       pce package brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> [--brief <ABSOLUTE_BRIEF_PATH>] -- <WORKER_ARG>...\n",
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
@@ -343,6 +344,12 @@ struct DriverRunCommand {
     wait_timeout: Option<Duration>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FreezeAuthority {
+    Human,
+    Mechanical,
+}
+
 #[derive(Debug)]
 enum Command {
     DispatchContinuation,
@@ -397,6 +404,7 @@ enum Command {
     GraphFreeze {
         vision_dir: PathBuf,
         repositories: Vec<(String, PathBuf)>,
+        authority: FreezeAuthority,
         criterion_revisions: Option<PathBuf>,
     },
     LogWrite {
@@ -819,8 +827,14 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::GraphFreeze {
             vision_dir,
             repositories,
+            authority,
             criterion_revisions,
-        } => run_graph_freeze(&vision_dir, &repositories, criterion_revisions.as_deref()),
+        } => run_graph_freeze(
+            &vision_dir,
+            &repositories,
+            authority,
+            criterion_revisions.as_deref(),
+        ),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
             let stdout = std::io::stdout();
@@ -9594,14 +9608,18 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
         }),
         "freeze" if flag == "--vision-dir" && is_value(raw_value) => {
             let mut repositories = Vec::new();
+            let mut authority = FreezeAuthority::Human;
             let mut criterion_revisions = None;
             let mut index = 0;
             while index < trailing.len() {
-                if index + 1 >= trailing.len() || !is_value(&trailing[index + 1]) {
-                    bail!(USAGE);
-                }
                 match trailing[index].as_str() {
-                    "--repository" => {
+                    "--mechanical" if authority == FreezeAuthority::Human => {
+                        authority = FreezeAuthority::Mechanical;
+                        index += 1;
+                    }
+                    "--repository"
+                        if index + 1 < trailing.len() && is_value(&trailing[index + 1]) =>
+                    {
                         let Some((name, path)) = trailing[index + 1].split_once('=') else {
                             bail!("repository mapping must be NAME=SOURCE_WORKTREE");
                         };
@@ -9612,17 +9630,23 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
                             bail!("repository mapping `{name}` was supplied more than once");
                         }
                         repositories.push((name.to_owned(), PathBuf::from(path)));
+                        index += 2;
                     }
-                    "--criterion-revisions" if criterion_revisions.is_none() => {
+                    "--criterion-revisions"
+                        if criterion_revisions.is_none()
+                            && index + 1 < trailing.len()
+                            && is_value(&trailing[index + 1]) =>
+                    {
                         criterion_revisions = Some(PathBuf::from(&trailing[index + 1]));
+                        index += 2;
                     }
                     _ => bail!(USAGE),
                 }
-                index += 2;
             }
             Ok(Command::GraphFreeze {
                 vision_dir: PathBuf::from(raw_value),
                 repositories,
+                authority,
                 criterion_revisions,
             })
         }
@@ -9848,11 +9872,44 @@ fn publish_frozen_graph(path: &Path, bytes: &[u8]) -> Result<bool> {
     Ok(linked)
 }
 
+fn highest_frozen_graph_version(vision_dir: &Path) -> Result<Option<u64>> {
+    let mut highest = None;
+    for entry in fs::read_dir(vision_dir)
+        .with_context(|| format!("failed to list vision directory {}", vision_dir.display()))?
+    {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read an entry in vision directory {}",
+                vision_dir.display()
+            )
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(raw_version) = name
+            .strip_prefix("graph.v")
+            .and_then(|value| value.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let Ok(version) = raw_version.parse::<u64>() else {
+            continue;
+        };
+        highest = Some(highest.map_or(version, |current: u64| current.max(version)));
+    }
+    Ok(highest)
+}
+
 fn run_graph_freeze(
     vision_dir: &Path,
     repositories: &[(String, PathBuf)],
+    authority: FreezeAuthority,
     criterion_revisions: Option<&Path>,
 ) -> Result<()> {
+    if authority == FreezeAuthority::Mechanical && criterion_revisions.is_some() {
+        bail!("mechanical freeze cannot carry a human criterion revision record");
+    }
     if repositories.is_empty() {
         bail!(
             "graph freeze requires one --repository NAME=SOURCE_WORKTREE mapping per graph repository"
@@ -9897,16 +9954,31 @@ fn run_graph_freeze(
         );
     }
     let frozen = vision_dir.join(format!("graph.v{version}.json"));
-    if frozen
+    let frozen_exists = frozen
         .try_exists()
-        .with_context(|| format!("failed to inspect frozen graph {}", frozen.display()))?
-    {
+        .with_context(|| format!("failed to inspect frozen graph {}", frozen.display()))?;
+    if frozen_exists {
         let existing = fs::read(&frozen)
             .with_context(|| format!("failed to read frozen graph {}", frozen.display()))?;
         if existing != bytes {
             bail!(
                 "frozen plan artifact {} already contains different bytes",
                 frozen.display()
+            );
+        }
+    }
+    if authority == FreezeAuthority::Mechanical {
+        let highest = highest_frozen_graph_version(vision_dir)?;
+        let expected_highest = if frozen_exists {
+            version
+        } else {
+            version
+                .checked_sub(1)
+                .context("mechanical freeze requires a frozen predecessor")?
+        };
+        if highest != Some(expected_highest) {
+            bail!(
+                "mechanical freeze requires the highest frozen version to be {expected_highest}, found {highest:?}"
             );
         }
     }
@@ -9930,6 +10002,9 @@ fn run_graph_freeze(
                 version - 1,
                 graph.vision()
             );
+        }
+        if authority == FreezeAuthority::Mechanical {
+            verify_mechanical_freeze(&previous_graph, &graph)?;
         }
         let violations = criteria_invariance_violations(&previous_graph, &graph);
         if violations.is_empty() {
@@ -9985,6 +10060,8 @@ fn run_graph_freeze(
             })?;
             frozen_revision_digest = Some(format!("{:x}", Sha256::digest(&revision_bytes)));
         }
+    } else if authority == FreezeAuthority::Mechanical {
+        bail!("mechanical freeze requires a frozen predecessor");
     } else if criterion_revisions.is_some() {
         bail!("plan version 1 has no predecessor criteria to revise");
     }
@@ -9997,6 +10074,9 @@ fn run_graph_freeze(
         "sha256": digest,
         "created": wrote
     });
+    if authority == FreezeAuthority::Mechanical {
+        output["mechanical"] = Value::from(true);
+    }
     if let Some(revision_digest) = frozen_revision_digest {
         output["criterion_revisions"] = Value::from(
             vision_dir

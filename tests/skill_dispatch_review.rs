@@ -6764,3 +6764,26 @@ fn work_graph_declares_names_only_worker_environment() {
     }
     assert!(!skill.contains(r#""environment": {"#));
 }
+
+#[test]
+fn work_graph_limits_supervisor_freeze_authority_to_binary_verified_mechanical_freezes() {
+    let skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/work-graph/SKILL.md"),
+    )
+    .expect("work-graph skill");
+
+    for clause in [
+        "pce graph freeze --mechanical",
+        "package definitions differ",
+        "append the draft, exact command, and binary acceptance to `supervision.md`",
+        "planning-artifact-approved",
+        "bootstrap attribution to the graph",
+        "Never combine `--mechanical` with",
+        "Every other freeze remains a human ruling",
+    ] {
+        assert!(
+            skill.contains(clause),
+            "missing mechanical freeze authority clause: {clause}"
+        );
+    }
+}

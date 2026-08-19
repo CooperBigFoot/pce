@@ -1,6 +1,7 @@
 //! readiness : WorkPackageGraph × RepositoryMergeObservations × RiskOrdering → ReadyReport
 //! criterion_floor : WorkPackageGraph × WorkPackageGraph → CriteriaInvarianceViolation*
 //! ratification : WorkPackageGraph × WorkPackageGraph × CriterionRevision* → Result
+//! mechanical_freeze : WorkPackageGraph × WorkPackageGraph → Result
 //!
 //! A validated graph is a finite DAG whose hard ancestry remains connected when advisory edges
 //! are overridden. A criterion floor changes only through an exact, attributed human revision.
@@ -45,6 +46,56 @@ impl WorkPackageGraph {
     pub fn packages(&self) -> &[WorkPackage] {
         &self.packages
     }
+}
+
+/// A proposed successor is not an exact definition-preserving plan bump.
+#[derive(Debug, Error)]
+pub enum MechanicalFreezeError {
+    /// The successor plan version is not exactly one greater than its predecessor.
+    #[error("mechanical freeze requires plan version {expected}, found {actual}")]
+    NonSequentialVersion { expected: u64, actual: u64 },
+    /// The predecessor plan version cannot be advanced without overflowing its carrier.
+    #[error("mechanical freeze predecessor plan version overflow at {version}")]
+    VersionOverflow { version: u64 },
+    /// A field other than the plan version or normalized authored repository refs changed.
+    #[error(
+        "mechanical freeze refused because package definitions differ or graph metadata changed; use a human freeze for any definition-of-done change"
+    )]
+    DefinitionChanged,
+}
+
+/// Prove that a successor changes only its sequential version and authored repository refs.
+///
+/// Legacy scalar authored refs have already been normalized by graph parsing, so scalar-to-map
+/// migration compares equal here.
+///
+/// # Errors
+///
+/// Returns an error when the version is not sequential or any definition-bearing field differs.
+pub fn verify_mechanical_freeze(
+    previous: &WorkPackageGraph,
+    next: &WorkPackageGraph,
+) -> Result<(), MechanicalFreezeError> {
+    let expected =
+        previous
+            .plan_version
+            .checked_add(1)
+            .ok_or(MechanicalFreezeError::VersionOverflow {
+                version: previous.plan_version,
+            })?;
+    if next.plan_version != expected {
+        return Err(MechanicalFreezeError::NonSequentialVersion {
+            expected,
+            actual: next.plan_version,
+        });
+    }
+    if previous.schema != next.schema
+        || previous.vision != next.vision
+        || previous.packages != next.packages
+    {
+        return Err(MechanicalFreezeError::DefinitionChanged);
+    }
+    Ok(())
 }
 
 /// A non-empty package identifier.
