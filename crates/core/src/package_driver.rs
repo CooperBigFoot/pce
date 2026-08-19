@@ -450,6 +450,35 @@ pub enum DriverEvent {
         previous_oid: String,
         hardened_oid: String,
     },
+    /// One authored or amended criterion was re-executed against gate-hardened lineage.
+    GateReproofExecuted {
+        package: String,
+        gate: String,
+        name: String,
+        origin: CriterionOrigin,
+        execution: CriterionExecution,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amendment_proof: Option<AmendmentProof>,
+    },
+    /// An environment preparation failed before gate re-proof and consumed no failure budget.
+    GateReproofEnvironmentFailed {
+        package: String,
+        issuance: u64,
+        gate: String,
+        repository: String,
+        command: String,
+        execution: CriterionExecution,
+    },
+    /// A repair rejected by gate re-proof was removed from the package lineage.
+    PackageRepairRolledBack {
+        package: String,
+        repository: String,
+        gate: String,
+        finding: u64,
+        repair_ref: String,
+        hardened_oid: String,
+        restored_oid: String,
+    },
     /// Assembly could not reconstruct a credited finding after this package rewrote its source.
     PackageHardeningInvalidated {
         package: String,
@@ -962,6 +991,9 @@ pub fn derive_driver_snapshot(
             | DriverEvent::FindingReplayed { package, .. }
             | DriverEvent::GateFinished { package, .. }
             | DriverEvent::PackageRepairMerged { package, .. }
+            | DriverEvent::GateReproofExecuted { package, .. }
+            | DriverEvent::GateReproofEnvironmentFailed { package, .. }
+            | DriverEvent::PackageRepairRolledBack { package, .. }
             | DriverEvent::PackageHardeningInvalidated { package, .. }
             | DriverEvent::PackageCompleted { package }
             | DriverEvent::PackageFailed { package, .. } => package,
@@ -1245,13 +1277,23 @@ pub fn derive_driver_snapshot(
             }
             DriverEvent::JoinCriterionExecuted { .. }
             | DriverEvent::CriterionExecuted { .. }
-            | DriverEvent::GateFinished { .. } => {
+            | DriverEvent::GateFinished { .. }
+            | DriverEvent::GateReproofExecuted { .. } => {
                 if !matches!(state, DriverPackageState::Judging { .. }) {
                     return Err(PackageDriverError::EventAfterTerminal {
                         package: package.clone(),
                     });
                 }
             }
+            DriverEvent::GateReproofEnvironmentFailed { issuance, .. } => match state {
+                DriverPackageState::Judging { issuance: judging } if judging == issuance => {}
+                _ => {
+                    return Err(PackageDriverError::UnmatchedOutcome {
+                        package: package.clone(),
+                        issuance: *issuance,
+                    });
+                }
+            },
             DriverEvent::FindingRejected { reason, .. } => {
                 if !matches!(state, DriverPackageState::Judging { .. }) {
                     return Err(PackageDriverError::EventAfterTerminal {
@@ -1311,6 +1353,23 @@ pub fn derive_driver_snapshot(
                         package: package.clone(),
                     });
                 }
+            }
+            DriverEvent::PackageRepairRolledBack { gate, finding, .. } => {
+                if !matches!(state, DriverPackageState::Judging { .. }) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+                amendments.retain(|(amended_package, criterion)| {
+                    amended_package != package
+                        || !matches!(
+                            &criterion.origin,
+                            CriterionOrigin::Amendment {
+                                gate: amended_gate,
+                                finding: amended_finding,
+                            } if amended_gate == gate && amended_finding == finding
+                        )
+                });
             }
             DriverEvent::PackageHardeningInvalidated { .. } => {
                 if !matches!(state, DriverPackageState::Complete) {

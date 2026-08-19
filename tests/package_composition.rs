@@ -289,6 +289,46 @@ fi
     );
     let events = fs::read_to_string(&journal).expect("journal");
     assert_eq!(events.matches("package-repair-merged").count(), 1);
+    assert_eq!(events.matches("gate-reproof-executed").count(), 4);
+    let parsed = events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("driver event"))
+        .collect::<Vec<_>>();
+    let event_index = |predicate: &dyn Fn(&Value) -> bool| {
+        parsed
+            .iter()
+            .position(predicate)
+            .expect("expected driver event")
+    };
+    let merged = event_index(&|event| event["event"] == "package-repair-merged");
+    let authored_reproof = event_index(&|event| {
+        event["event"] == "gate-reproof-executed"
+            && event["gate"] == "package-gate-1-1"
+            && event["name"] == "a"
+    });
+    let amendment_reproof = event_index(&|event| {
+        event["event"] == "gate-reproof-executed"
+            && event["gate"] == "package-gate-1-1"
+            && event["name"] == "gate:package-gate-1-1:finding:0"
+    });
+    let incomplete = event_index(&|event| {
+        event["event"] == "gate-failed" && event["gate"] == "package-gate-1-1"
+    });
+    let second_gate = event_index(&|event| {
+        event["event"] == "gate-dispatched" && event["gate"] == "package-gate-1-2"
+    });
+    assert!(merged < authored_reproof);
+    assert!(authored_reproof < amendment_reproof);
+    assert!(amendment_reproof < incomplete);
+    assert!(incomplete < second_gate);
+    assert_eq!(
+        parsed[amendment_reproof]["amendment_proof"]["outcome"],
+        "reverted"
+    );
+    assert_ne!(
+        parsed[amendment_reproof]["amendment_proof"]["execution"]["exit_status"]["code"],
+        0
+    );
     assert_eq!(events.matches("gate-dispatched").count(), 4);
     assert_eq!(events.matches("gate-failed").count(), 1);
     assert!(events.contains("package-gate-1-2"));
