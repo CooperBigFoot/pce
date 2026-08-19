@@ -6803,38 +6803,113 @@ fn work_graph_records_feedback_sweep_g_operational_contracts() {
     assert!(repartition.contains("pce graph freeze --vision-dir <vision-dir> \\"));
     assert!(repartition.contains("--repository <NAME>=<SOURCE_WORKTREE> [...]"));
 
+    let cleanup = skill
+        .split("Before any worker kill")
+        .nth(1)
+        .and_then(|tail| tail.split("Killing a confirmed wedged leaf").next())
+        .expect("worker cleanup section");
     for clause in [
-        "AssemblyRepositoryComposed.base_oid` is the composed result",
-        "first parent is the starting base",
-        "does not terminate the Herdr workers",
+        "session_path",
+        "whole descendant tree",
+        "cumulative CPU",
+        "journaled root PID",
+        "exact root argv",
         "exact typed attempt identity",
+        "still-guarded root",
+        "recursively observed parent chain",
+        "Descendant argv need not contain the attempt identity",
         "leaf-first",
         "`TERM`",
         "`KILL`",
-        "/bin/ps -p <pid> -o command=",
         "/bin/kill -TERM <pid>",
         "Never use `pkill`, `killall`, or grep output to select processes to kill",
+    ] {
+        assert!(cleanup.contains(clause), "missing cleanup clause: {clause}");
+    }
+    assert!(!cleanup.contains("For each PID"));
+    assert!(!cleanup.contains("unless that argv contains"));
+
+    let promotion_inputs = skill
+        .split("## 8. Establish the exact promotion inputs")
+        .nth(1)
+        .and_then(|tail| tail.split("## 9. Render the pull request").next())
+        .expect("promotion inputs section");
+    for clause in [
+        "AssemblyRepositoryComposed.base_oid` is the final composed tip",
+        "first-parent chain reaches the starting authored base",
+        "single clean merge input",
+        "resolved paths",
+    ] {
+        assert!(
+            promotion_inputs.contains(clause),
+            "missing assembly base clause: {clause}"
+        );
+    }
+    assert!(!promotion_inputs.contains("that commit's first parent is the starting base"));
+
+    let launch = skill
+        .split("Host only this foreground process")
+        .nth(1)
+        .and_then(|tail| tail.split("Before any worker kill").next())
+        .expect("driver launch section");
+    for clause in [
+        "does not terminate the Herdr workers",
         "`/usr/bin/env`",
         "absolute path to `pce`",
-        "whole descendant tree",
-        "cumulative CPU",
-        "session_path",
-        "environment-failure allowance",
-        "not a package recovery",
+    ] {
+        assert!(launch.contains(clause), "missing launch clause: {clause}");
+    }
+
+    let worker_environment = skill
+        .split("`--worker-env` is names-only")
+        .nth(1)
+        .and_then(|tail| tail.split("Host only this foreground process").next())
+        .expect("worker environment section");
+    for clause in ["strict-superset", "worker-environment-extended"] {
+        assert!(
+            worker_environment.contains(clause),
+            "missing worker environment clause: {clause}"
+        );
+    }
+
+    let run_authority = skill
+        .split("<vision-dir>/run.json` is the durable launch authority")
+        .nth(1)
+        .and_then(|tail| tail.split("## 3. Launch and relaunch").next())
+        .expect("run authority section");
+    for clause in [
         "`wait_timeout_ms: null` installs no driver timeout",
         "plan-scoped",
         "once per journal",
-        "strict-superset",
-        "worker-environment-extended",
         "names-only launch configuration",
         "explicit Denies",
         "The credentials are the fence",
+    ] {
+        assert!(
+            run_authority.contains(clause),
+            "missing run authority clause: {clause}"
+        );
+    }
+
+    let kill_accounting = skill
+        .split("Killing a confirmed wedged leaf")
+        .nth(1)
+        .and_then(|tail| tail.split("## 4. Render and interpret").next())
+        .expect("kill accounting section");
+    for clause in ["environment-failure allowance", "not a package recovery"] {
+        assert!(
+            kill_accounting.contains(clause),
+            "missing kill accounting clause: {clause}"
+        );
+    }
+
+    for clause in [
         "ordinary human freeze checks remote base currency",
         "Mechanical freeze remains local",
     ] {
         assert!(
-            skill.contains(clause),
-            "missing work-graph G clause: {clause}"
+            repartition.contains(clause),
+            "missing freeze clause: {clause}"
         );
     }
 }
