@@ -78,8 +78,9 @@ use pce_core::{
     derive_package_result_path, derive_run_state, derive_run_state_with_dispatch_artifacts,
     derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
     dispatch_completion_payload, dispatch_invocation, dispatch_payload, effective_criteria,
-    evaluate_completion, evaluate_landing_readiness, event_record_matches, fold_dispatch_ledger,
-    fold_paired_execution_proof, fold_replay_runs, gate_failure_outcome, judge_finding_replay,
+    evaluate_completion, evaluate_landing_readiness, event_record_matches,
+    extract_conservative_artifact_references, fold_dispatch_ledger, fold_paired_execution_proof,
+    fold_replay_runs, gate_failure_outcome, judge_finding_replay,
     latest_criterion_failure_evidence, measure_contract_snapshot, meter_dispatches,
     next_gate_attempt, normalize_replay_observation, paired_stimulus_identity,
     parse_acceptance_criteria, parse_claude_result, parse_criterion_revision_manifest,
@@ -91,8 +92,9 @@ use pce_core::{
     recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
     render_package_run, repeated_identical_worker_blocker, seatbelt_capability_probe,
     serialize_dispatch_check_in, serialize_dispatch_process_identity,
-    serialize_package_worker_result, serialize_tracked_repository_contract, unchanged_package_ids,
-    validate_artifact, validate_criterion_revisions, validate_package_gate_finding_repositories,
+    serialize_package_worker_result, serialize_tracked_repository_contract,
+    titles_conservatively_overlap, unchanged_package_ids, validate_artifact,
+    validate_criterion_revisions, validate_package_gate_finding_repositories,
     validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
     validated_dispatch_completion_payload, verify_criterion_change, verify_mechanical_freeze,
     worker_environment_outcome,
@@ -109,8 +111,8 @@ const USAGE: &str = concat!(
     "       pce log meter\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] [--override-risk-ordering]\n",
-    "       pce graph check --file <GRAPH_PATH> [--repository <NAME=SOURCE_WORKTREE>]...\n",
-    "       pce graph freeze --vision-dir <VISION_DIR> [--mechanical] [--criterion-revisions <HUMAN_RECORD_PATH>] --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
+    "       pce graph check --file <GRAPH_PATH> [--strict] [--repository <NAME=SOURCE_WORKTREE>]...\n",
+    "       pce graph freeze --vision-dir <VISION_DIR> [--mechanical] [--criterion-revisions <HUMAN_RECORD_PATH>] [--accept-base-currency-risk <HUMAN_RECORD_PATH>] --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
     "       pce package brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> [--brief <ABSOLUTE_BRIEF_PATH>] -- <WORKER_ARG>...\n",
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
@@ -400,12 +402,14 @@ enum Command {
     GraphCheck {
         path: PathBuf,
         repositories: Vec<(String, PathBuf)>,
+        strict: bool,
     },
     GraphFreeze {
         vision_dir: PathBuf,
         repositories: Vec<(String, PathBuf)>,
         authority: FreezeAuthority,
         criterion_revisions: Option<PathBuf>,
+        base_currency_acceptance: Option<PathBuf>,
     },
     LogWrite {
         path: PathBuf,
@@ -823,17 +827,23 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         } => run_dispatch_reconcile(&log_path, issuance_sequence, node),
         Command::VisionNew { name } => run_vision_new(&name),
         Command::VisionCheck => run_vision_check(input),
-        Command::GraphCheck { path, repositories } => run_graph_check(&path, &repositories),
+        Command::GraphCheck {
+            path,
+            repositories,
+            strict,
+        } => run_graph_check(&path, &repositories, strict),
         Command::GraphFreeze {
             vision_dir,
             repositories,
             authority,
             criterion_revisions,
+            base_currency_acceptance,
         } => run_graph_freeze(
             &vision_dir,
             &repositories,
             authority,
             criterion_revisions.as_deref(),
+            base_currency_acceptance.as_deref(),
         ),
         Command::LogWrite { path, kind, node } => run_log(&path, kind, node, input),
         Command::LogRead { path, filter } => {
@@ -9638,14 +9648,24 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
         bail!(USAGE);
     };
     match action {
-        "check" if flag == "--file" && is_value(raw_value) => Ok(Command::GraphCheck {
-            path: PathBuf::from(raw_value),
-            repositories: parse_graph_repositories(trailing)?,
-        }),
+        "check" if flag == "--file" && is_value(raw_value) => {
+            let strict = trailing.iter().any(|argument| argument == "--strict");
+            let repository_arguments = trailing
+                .iter()
+                .filter(|argument| argument.as_str() != "--strict")
+                .cloned()
+                .collect::<Vec<_>>();
+            Ok(Command::GraphCheck {
+                path: PathBuf::from(raw_value),
+                repositories: parse_graph_repositories(&repository_arguments)?,
+                strict,
+            })
+        }
         "freeze" if flag == "--vision-dir" && is_value(raw_value) => {
             let mut repositories = Vec::new();
             let mut authority = FreezeAuthority::Human;
             let mut criterion_revisions = None;
+            let mut base_currency_acceptance = None;
             let mut index = 0;
             while index < trailing.len() {
                 match trailing[index].as_str() {
@@ -9676,6 +9696,14 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
                         criterion_revisions = Some(PathBuf::from(&trailing[index + 1]));
                         index += 2;
                     }
+                    "--accept-base-currency-risk"
+                        if base_currency_acceptance.is_none()
+                            && index + 1 < trailing.len()
+                            && is_value(&trailing[index + 1]) =>
+                    {
+                        base_currency_acceptance = Some(PathBuf::from(&trailing[index + 1]));
+                        index += 2;
+                    }
                     _ => bail!(USAGE),
                 }
             }
@@ -9684,6 +9712,7 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
                 repositories,
                 authority,
                 criterion_revisions,
+                base_currency_acceptance,
             })
         }
         _ => bail!(USAGE),
@@ -9795,18 +9824,202 @@ fn run_vision_check(input: &mut dyn Read) -> Result<()> {
     .context("failed to check vision acceptance criteria")
 }
 
-fn run_graph_check(path: &Path, repositories: &[(String, PathBuf)]) -> Result<()> {
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum GraphAuthoringWarning {
+    ArtifactProvenance {
+        package: String,
+        criterion: String,
+        repository: String,
+        path: String,
+        strict_upstream_references: Vec<String>,
+        message: String,
+    },
+    ActOwnershipArtifact {
+        package: String,
+        predecessor_package: String,
+        repository: String,
+        path: String,
+        message: String,
+    },
+    ActOwnershipTitle {
+        package: String,
+        predecessor_package: String,
+        title: String,
+        message: String,
+    },
+    PredecessorUnavailable {
+        path: String,
+        message: String,
+    },
+}
+
+fn package_artifact_references(package: &pce_core::WorkPackage) -> Vec<(String, String, String)> {
+    let mut references = Vec::new();
+    for criterion in package.criteria() {
+        for artifact in extract_conservative_artifact_references(criterion.command()) {
+            let repository = match artifact.repository_index() {
+                Some(index) => package.repositories().get(index - 1),
+                None if package.repositories().len() == 1 => package.repositories().first(),
+                None => None,
+            };
+            if let Some(repository) = repository {
+                references.push((
+                    criterion.name().to_owned(),
+                    repository.clone(),
+                    artifact.path().to_owned(),
+                ));
+            }
+        }
+    }
+    references.sort();
+    references.dedup();
+    references
+}
+
+fn strict_upstream_ids(graph: &WorkPackageGraph, package_id: &str) -> BTreeSet<String> {
+    let by_id = graph
+        .packages()
+        .iter()
+        .map(|package| (package.id().as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = vec![package_id];
+    let mut upstream = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        let Some(package) = by_id.get(id) else {
+            continue;
+        };
+        for dependency in package.depends_on() {
+            if upstream.insert(dependency.id().as_str().to_owned()) {
+                pending.push(dependency.id().as_str());
+            }
+        }
+    }
+    upstream
+}
+
+fn artifact_exists_at_authored_ref(
+    graph: &WorkPackageGraph,
+    repositories: &[(String, PathBuf)],
+    repository_name: &str,
+    path: &str,
+) -> Result<Option<bool>> {
+    let Some((_, repository)) = repositories
+        .iter()
+        .find(|(name, _)| name == repository_name)
+    else {
+        return Ok(None);
+    };
+    let authored_ref = graph_authored_ref(graph, repository_name)?;
+    let oid = git_oid(repository, authored_ref)?;
+    let object = format!("{oid}:{path}");
+    let output = git_output(repository, &["cat-file", "-e", &object])?;
+    Ok(Some(output.status.success()))
+}
+
+fn graph_authoring_warnings(
+    path: &Path,
+    graph: &WorkPackageGraph,
+    repositories: &[(String, PathBuf)],
+) -> Result<Vec<GraphAuthoringWarning>> {
+    let references = graph
+        .packages()
+        .iter()
+        .map(|package| (package.id().as_str(), package_artifact_references(package)))
+        .collect::<BTreeMap<_, _>>();
+    let mut warnings = Vec::new();
+    for package in graph.packages() {
+        let upstream = strict_upstream_ids(graph, package.id().as_str());
+        for (criterion, repository, artifact_path) in package_artifact_references(package) {
+            if artifact_exists_at_authored_ref(graph, repositories, &repository, &artifact_path)?
+                != Some(false)
+            {
+                continue;
+            }
+            let strict_upstream_references = upstream
+                .iter()
+                .filter(|upstream_id| {
+                    references.get(upstream_id.as_str()).is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|(_, candidate_repository, candidate_path)| {
+                                candidate_repository == &repository
+                                    && candidate_path == &artifact_path
+                            })
+                    })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            warnings.push(GraphAuthoringWarning::ArtifactProvenance {
+                package: package.id().as_str().to_owned(),
+                criterion,
+                repository,
+                path: artifact_path,
+                strict_upstream_references,
+                message: "artifact does not exist at the authored ref; a producer cannot be proven because the graph has no output declarations".to_owned(),
+            });
+        }
+    }
+    if graph.plan_version() > 1 {
+        let predecessor_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("graph.v{}.json", graph.plan_version() - 1));
+        match fs::read(&predecessor_path) {
+            Ok(bytes) => {
+                let predecessor = parse_work_package_graph(&bytes).with_context(|| format!("failed to validate predecessor graph {}", predecessor_path.display()))?;
+                let predecessor_ids = predecessor.packages().iter().map(|package| package.id().as_str()).collect::<BTreeSet<_>>();
+                let predecessor_references = predecessor.packages().iter().map(|package| (package, package_artifact_references(package))).collect::<Vec<_>>();
+                for package in graph.packages().iter().filter(|package| !predecessor_ids.contains(package.id().as_str())) {
+                    let current_references = package_artifact_references(package);
+                    for (predecessor_package, frozen_references) in &predecessor_references {
+                        for (_, repository, artifact_path) in &current_references {
+                            if frozen_references.iter().any(|(_, frozen_repository, frozen_path)| frozen_repository == repository && frozen_path == artifact_path) {
+                                warnings.push(GraphAuthoringWarning::ActOwnershipArtifact {
+                                    package: package.id().as_str().to_owned(), predecessor_package: predecessor_package.id().as_str().to_owned(), repository: repository.clone(), path: artifact_path.clone(),
+                                    message: "new package references the exact canonical artifact already referenced by a predecessor package".to_owned(),
+                                });
+                            }
+                        }
+                        if titles_conservatively_overlap(package.title(), predecessor_package.title()) {
+                            warnings.push(GraphAuthoringWarning::ActOwnershipTitle {
+                                package: package.id().as_str().to_owned(), predecessor_package: predecessor_package.id().as_str().to_owned(), title: package.title().to_owned(),
+                                message: "new package title has conservative normalized overlap with a predecessor package title".to_owned(),
+                            });
+                        }
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => warnings.push(GraphAuthoringWarning::PredecessorUnavailable {
+                path: predecessor_path.display().to_string(), message: "act ownership cannot be checked because the immediate predecessor graph is missing".to_owned(),
+            }),
+            Err(error) => return Err(error).with_context(|| format!("failed to read predecessor graph {}", predecessor_path.display())),
+        }
+    }
+    Ok(warnings)
+}
+
+fn run_graph_check(path: &Path, repositories: &[(String, PathBuf)], strict: bool) -> Result<()> {
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read work-package graph {}", path.display()))?;
     let graph = parse_work_package_graph(&bytes)
         .with_context(|| format!("failed to validate work-package graph {}", path.display()))?;
     verify_graph_repository_refs(&graph, repositories)?;
+    let warnings = graph_authoring_warnings(path, &graph, repositories)?;
+    if strict && !warnings.is_empty() {
+        bail!(
+            "graph check strict mode refused {} authoring warning(s): {}",
+            warnings.len(),
+            serde_json::to_string(&warnings).context("failed to serialize authoring warnings")?
+        );
+    }
     write_json_stdout(&json!({
         "valid": true,
         "refs_verified": !repositories.is_empty(),
         "vision": graph.vision(),
         "plan_version": graph.plan_version(),
         "packages": graph.packages().len(),
+        "warnings": warnings,
     }))
 }
 
@@ -9937,14 +10150,97 @@ fn highest_frozen_graph_version(vision_dir: &Path) -> Result<Option<u64>> {
     Ok(highest)
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BaseCurrencyAcceptance {
+    schema_version: u64,
+    accepted_by: String,
+    reason: String,
+}
+
+fn parse_base_currency_acceptance(bytes: &[u8]) -> Result<BaseCurrencyAcceptance> {
+    let acceptance: BaseCurrencyAcceptance =
+        serde_json::from_slice(bytes).context("base-currency acceptance must be valid JSON")?;
+    if acceptance.schema_version != 1 {
+        bail!("base-currency acceptance schema_version must be 1");
+    }
+    if acceptance.accepted_by.trim().is_empty() || acceptance.reason.trim().is_empty() {
+        bail!("base-currency acceptance requires non-empty accepted_by and reason");
+    }
+    Ok(acceptance)
+}
+
+fn git_output(repository: &Path, arguments: &[&str]) -> Result<Output> {
+    std::process::Command::new("git")
+        .args(["-C"])
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .with_context(|| format!("failed to execute git in {}", repository.display()))
+}
+
+fn verify_remote_base_currency(
+    graph: &WorkPackageGraph,
+    repositories: &[(String, PathBuf)],
+) -> Result<()> {
+    for (name, repository) in repositories {
+        let authored_ref = graph_authored_ref(graph, name)?;
+        let authored_oid = git_oid(repository, authored_ref)?;
+        let fetched = git_output(repository, &["fetch", "--no-tags", "origin", "HEAD"])?;
+        if !fetched.status.success() {
+            bail!(
+                "repository `{name}` remote base currency cannot be established: origin HEAD is missing or unreachable: {}; configure/reach origin or use an explicit attributed --accept-base-currency-risk record for an offline or historical freeze",
+                String::from_utf8_lossy(&fetched.stderr).trim()
+            );
+        }
+        let remote_oid = git_oid(repository, "FETCH_HEAD")?;
+        let ancestor = git_output(
+            repository,
+            &["merge-base", "--is-ancestor", &remote_oid, &authored_oid],
+        )?;
+        if ancestor.status.success() {
+            continue;
+        }
+        let divergence = git_output(
+            repository,
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{authored_oid}...{remote_oid}"),
+            ],
+        )?;
+        if !divergence.status.success() {
+            bail!("repository `{name}` failed to measure authored/remote divergence");
+        }
+        let counts = String::from_utf8(divergence.stdout)
+            .context("git returned non-UTF-8 divergence counts")?;
+        let mut fields = counts.split_whitespace();
+        let authored_only = fields
+            .next()
+            .context("git omitted authored-only divergence count")?;
+        let remote_only = fields
+            .next()
+            .context("git omitted remote-only divergence count")?;
+        bail!(
+            "repository `{name}` authored oid {authored_oid} is not current with remote default oid {remote_oid} (authored-only {authored_only}, remote-only {remote_only}); update the source worktree with `git pull --ff-only` and re-author the graph"
+        );
+    }
+    Ok(())
+}
+
 fn run_graph_freeze(
     vision_dir: &Path,
     repositories: &[(String, PathBuf)],
     authority: FreezeAuthority,
     criterion_revisions: Option<&Path>,
+    base_currency_acceptance: Option<&Path>,
 ) -> Result<()> {
     if authority == FreezeAuthority::Mechanical && criterion_revisions.is_some() {
         bail!("mechanical freeze cannot carry a human criterion revision record");
+    }
+    if authority == FreezeAuthority::Mechanical && base_currency_acceptance.is_some() {
+        bail!("mechanical freeze cannot accept base-currency risk");
     }
     if repositories.is_empty() {
         bail!(
@@ -9977,6 +10273,23 @@ fn run_graph_freeze(
     let graph = parse_work_package_graph(&bytes)
         .with_context(|| format!("failed to validate work-package graph {}", source.display()))?;
     verify_graph_repository_refs(&graph, repositories)?;
+    let acceptance_bytes = if authority == FreezeAuthority::Human {
+        match base_currency_acceptance {
+            Some(path) => {
+                let bytes = fs::read(path).with_context(|| {
+                    format!("failed to read base-currency acceptance {}", path.display())
+                })?;
+                parse_base_currency_acceptance(&bytes)?;
+                Some(bytes)
+            }
+            None => {
+                verify_remote_base_currency(&graph, repositories)?;
+                None
+            }
+        }
+    } else {
+        None
+    };
     let version = graph.plan_version();
     let expected_vision = vision_dir
         .file_name()
@@ -10101,6 +10414,15 @@ fn run_graph_freeze(
     } else if criterion_revisions.is_some() {
         bail!("plan version 1 has no predecessor criteria to revise");
     }
+    let frozen_base_currency_acceptance = if let Some(acceptance_bytes) = acceptance_bytes {
+        let path = vision_dir.join(format!("graph.v{version}.base-currency-acceptance.json"));
+        publish_frozen_graph(&path, &acceptance_bytes).with_context(|| {
+            format!("frozen base-currency acceptance for plan version {version} is immutable")
+        })?;
+        Some((path, format!("{:x}", Sha256::digest(&acceptance_bytes))))
+    } else {
+        None
+    };
     let wrote = publish_frozen_graph(&frozen, &bytes)
         .with_context(|| format!("frozen plan version {version} is immutable"))?;
     let digest = format!("{:x}", Sha256::digest(&bytes));
@@ -10112,6 +10434,10 @@ fn run_graph_freeze(
     });
     if authority == FreezeAuthority::Mechanical {
         output["mechanical"] = Value::from(true);
+    }
+    if let Some((acceptance_path, acceptance_digest)) = frozen_base_currency_acceptance {
+        output["base_currency_acceptance"] = Value::from(acceptance_path.display().to_string());
+        output["base_currency_acceptance_sha256"] = Value::from(acceptance_digest);
     }
     if let Some(revision_digest) = frozen_revision_digest {
         output["criterion_revisions"] = Value::from(

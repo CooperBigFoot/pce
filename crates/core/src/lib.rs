@@ -13,6 +13,7 @@ pub mod dispatch_process_identity;
 pub mod event_log;
 pub mod gate_execution;
 pub mod gate_replay;
+pub mod graph_authoring;
 pub mod herdr_dispatch;
 pub mod landing_readiness;
 pub mod package_completion;
@@ -230,4 +231,9 @@ pub use work_package_graph::{
     WorkPackageMergeObservation, criteria_invariance_violation, criteria_invariance_violations,
     parse_criterion_revision_manifest, parse_work_package_graph, ready_work_packages,
     unchanged_package_ids, validate_criterion_revisions, verify_mechanical_freeze,
+};
+
+pub use graph_authoring::{
+    ConservativeArtifactReference, extract_conservative_artifact_references, normalize_act_title,
+    titles_conservatively_overlap,
 };
