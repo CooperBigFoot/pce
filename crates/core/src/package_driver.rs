@@ -347,6 +347,9 @@ pub enum DriverEvent {
     RecoveryParked {
         package: String,
         reason: String,
+        /// The worker-reported blocker that caused this park, if one was available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocked_by: Option<String>,
         attempts: Vec<RecoveryAttemptRecord>,
     },
     /// The spawning code observed that no child was produced.
@@ -1940,6 +1943,27 @@ fn events_for_active_plan(events: &[DriverEvent]) -> &[DriverEvent] {
         .map_or(events, |index| &events[index..])
 }
 
+/// Return the byte-identical blocker from the last two failed worker outcomes.
+pub fn repeated_identical_worker_blocker<'a>(
+    events: &'a [DriverEvent],
+    package_id: &str,
+) -> Option<&'a str> {
+    let mut failures =
+        events_for_active_plan(events)
+            .iter()
+            .rev()
+            .filter_map(|event| match event {
+                DriverEvent::WorkerFailed {
+                    package, reason, ..
+                } if package == package_id => Some(Some(reason.as_str())),
+                DriverEvent::WorkerDone { package, .. } if package == package_id => Some(None),
+                _ => None,
+            });
+    let latest = failures.next()??;
+    let previous = failures.next()??;
+    (latest.as_bytes() == previous.as_bytes()).then_some(latest)
+}
+
 /// Count only worker-reported or criterion-judgement failures attributed to package work.
 pub fn charged_failure_count(events: &[DriverEvent], package_id: &str) -> usize {
     events_for_active_plan(events)
@@ -2124,7 +2148,7 @@ mod tests {
         CommandExitStatus, CompositionInput, CriterionExecution, CriterionOrigin,
         DriverAssemblyState, DriverEvent, DriverLoopOutcome, DriverPackageState,
         PackageDriverError, charged_failure_count, derive_driver_snapshot,
-        worker_environment_outcome,
+        repeated_identical_worker_blocker, worker_environment_outcome,
     };
     use crate::{
         EnvironmentFailureLimit, LocalPatchLimit, RecoveryLimits, RetryLimit,
@@ -2774,5 +2798,33 @@ mod tests {
             }
         );
         assert_eq!(gating.outcome(), DriverLoopOutcome::Blocked);
+    }
+
+    #[test]
+    fn repeated_worker_blocker_requires_two_consecutive_byte_identical_failures() {
+        let failure = |package: &str, issuance: u64, reason: &str| DriverEvent::WorkerFailed {
+            package: package.to_owned(),
+            issuance,
+            reason: reason.to_owned(),
+        };
+        let mut events = vec![
+            failure("A", 1, "external blocker"),
+            failure("B", 2, "other package blocker"),
+            failure("A", 3, "external blocker"),
+        ];
+        assert_eq!(
+            repeated_identical_worker_blocker(&events, "A"),
+            Some("external blocker")
+        );
+
+        events.push(DriverEvent::WorkerDone {
+            package: "A".to_owned(),
+            issuance: 4,
+        });
+        events.push(failure("A", 5, "external blocker"));
+        assert_eq!(repeated_identical_worker_blocker(&events, "A"), None);
+
+        events.push(failure("A", 6, "external blocker "));
+        assert_eq!(repeated_identical_worker_blocker(&events, "A"), None);
     }
 }

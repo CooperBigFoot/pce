@@ -62,7 +62,7 @@ pub use package_driver::{
     effective_criteria, gate_failure_outcome, judge_finding_replay,
     latest_criterion_failure_evidence, next_gate_attempt, pending_completed_pane_cleanups,
     pending_gate_challenges, recovery_attempt_records, recovery_base_brief,
-    worker_environment_outcome,
+    repeated_identical_worker_blocker, worker_environment_outcome,
 };
 pub use package_gate::{
     BuiltArtifactRef, PackageGateChallenge, PackageGateError, PackageGateFinding,

@@ -357,3 +357,88 @@ exit 1
         base
     );
 }
+
+#[test]
+fn second_identical_worker_blocker_parks_without_exhausting_recovery_budget() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    fs::write(repo.join("value"), "base").expect("value");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "base"]);
+
+    let graph_path = temp.path().join("graph.json");
+    fs::write(
+        &graph_path,
+        serde_json::to_vec(&json!({
+            "vision":"repeated-blocker",
+            "plan_version":1,
+            "authored_at_ref":"HEAD",
+            "packages":[{
+                "id":"A",
+                "title":"A",
+                "repositories":["repo"],
+                "criteria":[{"name":"green","input":"repo","observation":"zero","command":"true"}],
+                "depends_on":[]
+            }]
+        }))
+        .expect("graph"),
+    )
+    .expect("graph write");
+    let attempts = temp.path().join("attempts");
+    let worker = temp.path().join("worker.sh");
+    let blocked_by = "HFX_CAMPAIGN_EVIDENCE and HFX_S3_ENV_FILE are unset";
+    fs::write(
+        &worker,
+        format!(
+            "#!/bin/sh\nprintf x >> '{}'\nprintf '%s' '{{\"outcome\":\"failed\",\"blocked_by\":\"{blocked_by}\"}}' > \"$PCE_PACKAGE_OUTCOME\"\n",
+            attempts.display()
+        ),
+    )
+    .expect("worker");
+    let journal = temp.path().join("journal.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "package",
+            "driver-run",
+            "--graph",
+            graph_path.to_str().expect("graph"),
+            "--journal",
+            journal.to_str().expect("journal"),
+            "--repository",
+            &format!("repo={}", repo.display()),
+            "--worker-override",
+            "--",
+            "/bin/sh",
+            worker.to_str().expect("worker"),
+        ])
+        .current_dir(temp.path())
+        .output()
+        .expect("pce");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(fs::read_to_string(&attempts).expect("attempts").len(), 2);
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status");
+    assert_eq!(status["packages"][0][1]["state"], "parked");
+    assert_eq!(status["recovery"][0][1]["dispatches_remaining"], 1);
+    assert_eq!(status["recovery"][0][1]["next_rung"], "local-patch");
+
+    let events = fs::read_to_string(&journal).expect("journal");
+    let parked = events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("event"))
+        .find(|event| event["event"] == "recovery-parked")
+        .expect("recovery park");
+    assert_eq!(parked["blocked_by"], blocked_by);
+    assert_eq!(
+        parked["reason"],
+        "repeated identical worker blocker; package work cannot resolve it"
+    );
+}
