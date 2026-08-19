@@ -7281,6 +7281,9 @@ fn is_prime_agent_dispatch(arguments: &[String]) -> bool {
 }
 
 fn matching_prime_sessions(worktree_path: &str) -> Vec<Option<String>> {
+    let Ok(canonical_worktree_path) = Path::new(worktree_path).canonicalize() else {
+        return Vec::new();
+    };
     let Some(home) = std::env::var_os("HOME") else {
         return Vec::new();
     };
@@ -7303,7 +7306,8 @@ fn matching_prime_sessions(worktree_path: &str) -> Vec<Option<String>> {
             descriptor
                 .pointer("/createCommand/config/cwd")
                 .and_then(Value::as_str)
-                == Some(worktree_path)
+                .and_then(|cwd| Path::new(cwd).canonicalize().ok())
+                .is_some_and(|cwd| cwd == canonical_worktree_path)
         })
         .map(|descriptor| {
             descriptor
