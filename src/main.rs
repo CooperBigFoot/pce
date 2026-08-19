@@ -21497,15 +21497,20 @@ None.
         git(&repository, &["commit", "-m", "resolved assembly"]);
         let oid = crate::git_oid(&repository, "HEAD").expect("resolution oid");
 
-        let reference =
+        let (reference, created) =
             crate::anchor_assembly_resolution(&repository, "repo", &oid).expect("resolution ref");
 
+        assert!(created);
         assert!(reference.starts_with("refs/pce-assembly-resolutions/"));
         assert!(reference.ends_with(&oid));
         assert_eq!(
             crate::git_oid(&repository, &reference).expect("anchored oid"),
             oid
         );
+        let (same_reference, created_again) =
+            crate::anchor_assembly_resolution(&repository, "repo", &oid).expect("existing ref");
+        assert_eq!(same_reference, reference);
+        assert!(!created_again);
     }
 
     #[test]
