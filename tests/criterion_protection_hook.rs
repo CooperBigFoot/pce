@@ -14,6 +14,9 @@ use support::CliHarness;
 const VISION_DIR_NAME: &str = "2026-08-03-criterion-protection-fixture";
 const REFUSE_CONSTRUCT: &[u8] = b"REFUSED: criterion protection could not construct the complete proposed vision for verification.\n";
 const REFUSE_VERIFIER: &[u8] = b"REFUSED: criterion protection could not obtain an accepting decision from pce criteria check. Ratified criteria may not be removed, reordered, or changed; record additive criteria first with pce log --kind criterion-added.\n";
+const REFUSE_CHANGED_RATIFIED: &[u8] = b"REFUSED: criterion protection could not obtain an accepting decision from pce criteria check. Ratified criteria may not be removed, reordered, or changed; record additive criteria first with pce log --kind criterion-added.\nCriterion comparison failed at position 1: required \"Ratified criterion\"; proposed \"Ratified criterion\".\n";
+const REFUSE_UNLOGGED_ADDITION: &[u8] = b"REFUSED: criterion protection could not obtain an accepting decision from pce criteria check. Ratified criteria may not be removed, reordered, or changed; record additive criteria first with pce log --kind criterion-added.\nCriterion comparison failed at position 2: required <missing>; proposed \"Added criterion\".\n";
+const REFUSE_REORDERED_FIRST: &[u8] = b"REFUSED: criterion protection could not obtain an accepting decision from pce criteria check. Ratified criteria may not be removed, reordered, or changed; record additive criteria first with pce log --kind criterion-added.\nCriterion comparison failed at position 1: required \"Ratified criterion\"; proposed \"Second ratified criterion\".\n";
 const REFUSE_BASH: &[u8] = b"REFUSED: Bash may not access vision.md during an active run; use Read for inspection, Edit or Write for a proposed change, and pce log --kind criterion-added for additive criteria.\n";
 const RATIFIED: &str = "# Vision: criterion protection fixture\n\n## Acceptance criteria (vision-level \"done\")\n\n```json\n{\"criteria\":[{\"name\":\"Ratified criterion\",\"input\":\"Run the ratified probe.\",\"observation\":\"The probe exits 0.\"}]}\n```\n";
 const RATIFIED_ADDED: &str = "# Vision: criterion protection fixture\n\n## Acceptance criteria (vision-level \"done\")\n\n```json\n{\"criteria\":[{\"name\":\"Ratified criterion\",\"input\":\"Run the ratified probe.\",\"observation\":\"The probe exits 0.\"},{\"name\":\"Added criterion\",\"input\":\"Run the added probe.\",\"observation\":\"The added probe exits 0.\"}]}\n```\n";
@@ -55,7 +58,10 @@ fn edit_reconstructs_candidate_and_refusal_is_fail_closed() {
     );
 
     install_real_pce(&fixture.home);
-    assert_refusal(run_hook(&fixture, &payload, Vec::new()), REFUSE_VERIFIER);
+    assert_refusal(
+        run_hook(&fixture, &payload, Vec::new()),
+        REFUSE_CHANGED_RATIFIED,
+    );
 
     fs::write(&fixture.vision, TWO_RATIFIED).expect("write two-criterion vision");
     let removal = edit_payload(
@@ -64,7 +70,10 @@ fn edit_reconstructs_candidate_and_refusal_is_fail_closed() {
         "",
         Some(json!(false)),
     );
-    assert_refusal(run_hook(&fixture, &removal, Vec::new()), REFUSE_VERIFIER);
+    assert_refusal(
+        run_hook(&fixture, &removal, Vec::new()),
+        REFUSE_REORDERED_FIRST,
+    );
 }
 
 #[test]
@@ -73,7 +82,10 @@ fn logged_addition_is_the_only_additive_path() {
     let fixture = Fixture::new(&harness, RATIFIED);
     install_real_pce(&fixture.home);
     let payload = write_payload(&fixture, RATIFIED_ADDED);
-    assert_refusal(run_hook(&fixture, &payload, Vec::new()), REFUSE_VERIFIER);
+    assert_refusal(
+        run_hook(&fixture, &payload, Vec::new()),
+        REFUSE_UNLOGGED_ADDITION,
+    );
 
     let addition = br#"{"criterion":{"name":"Added criterion","input":"Run the added probe.","observation":"The added probe exits 0."},"change_of_course":"Reality exposed an uncovered failure."}"#;
     let output = harness
@@ -243,15 +255,32 @@ fn irrelevant_events_tools_and_paths_are_silent_noops() {
 fn bash_vision_access_is_denied_only_with_an_active_run() {
     let harness = CliHarness::new().expect("create harness");
     let fixture = Fixture::new(&harness, RATIFIED);
-    let dangerous = "python3 -c 'open(\"planning/2026-08-03-criterion-protection-fixture/vision.md\",\"w\").write(\"weakened\")'";
-    assert_refusal(
-        run_hook(
+    for harmless in [
+        "cat planning/2026-08-03-criterion-protection-fixture/supervision.md",
+        "printf '%s\n' 'the supervisor appends to supervision.md'",
+    ] {
+        assert_silent_success(&run_hook(
             &fixture,
-            &bash_payload(&fixture.root, dangerous),
+            &bash_payload(&fixture.root, harmless),
             Vec::new(),
-        ),
-        REFUSE_BASH,
-    );
+        ));
+    }
+    let relative = "planning/2026-08-03-criterion-protection-fixture/vision.md";
+    for dangerous in [
+        format!("cat {relative}"),
+        format!("cat ./{relative}"),
+        format!("cat {}", fixture.vision.display()),
+        format!("python3 -c 'open(\"{relative}\",\"w\").write(\"weakened\")'"),
+    ] {
+        assert_refusal(
+            run_hook(
+                &fixture,
+                &bash_payload(&fixture.root, &dangerous),
+                Vec::new(),
+            ),
+            REFUSE_BASH,
+        );
+    }
     assert_silent_success(&run_hook(
         &fixture,
         &bash_payload(&fixture.root, "cargo test --workspace"),
@@ -261,13 +290,46 @@ fn bash_vision_access_is_denied_only_with_an_active_run() {
     fs::create_dir(&no_run).expect("create no-run root");
     assert_silent_success(&run_hook(
         &fixture,
-        &bash_payload(&no_run, dangerous),
+        &bash_payload(&no_run, &format!("cat {relative}")),
         Vec::new(),
     ));
     assert_eq!(
         fs::read(&fixture.vision).expect("read protected vision"),
         RATIFIED.as_bytes()
     );
+}
+
+#[test]
+fn criterion_refusal_names_the_first_failed_comparison() {
+    let harness = CliHarness::new().expect("create harness");
+    let fixture = Fixture::new(&harness, TWO_RATIFIED);
+    install_real_pce(&fixture.home);
+    let payload = write_payload(
+        &fixture,
+        &TWO_RATIFIED.replace(
+            r#"{"name":"Ratified criterion","input":"Run the ratified probe.","observation":"The probe exits 0."},{"name":"Second ratified criterion","input":"Run the second probe.","observation":"The second probe exits 0."}"#,
+            r#"{"name":"Second ratified criterion","input":"Run the second probe.","observation":"The second probe exits 0."},{"name":"Ratified criterion","input":"Run the ratified probe.","observation":"The probe exits 0."}"#,
+        ),
+    );
+    assert_refusal(
+        run_hook(&fixture, &payload, Vec::new()),
+        REFUSE_REORDERED_FIRST,
+    );
+}
+
+#[test]
+fn prose_only_edit_with_byte_identical_criteria_is_accepted() {
+    let harness = CliHarness::new().expect("create harness");
+    let document = format!("{RATIFIED}\n## Scope-In\n\nOriginal scope.\n");
+    let fixture = Fixture::new(&harness, &document);
+    install_real_pce(&fixture.home);
+    let payload = edit_payload(
+        &fixture,
+        "Original scope.",
+        "Revised scope mentioning supervision.md.",
+        Some(json!(false)),
+    );
+    assert_silent_success(&run_hook(&fixture, &payload, Vec::new()));
 }
 
 #[test]
