@@ -179,6 +179,10 @@ Act without prior approval, then append and report the action, only in these cas
   graph revision; do not spend another retry trying to recreate the cheap door.
 - **Rebuild disposable state.** Re-run a configured prepare command, remove a corrupt disposable
   worktree, or clear a cache. Record what was removed and how it can be reconstructed.
+- **Resolve an assembly conflict only within its assigned paths.** The resolution worker may edit
+  only the exact conflicted paths named by the driver. It must not run repository-wide formatters or
+  change any other path; if another path is required, it refuses instead of widening scope. The
+  driver anchors the resolution commit under `refs/pce-assembly-resolutions/*` before journaling it.
 - **Install a missing tool.** Record the exact install and undo commands in `supervision.md` before
   reporting them.
 - **Repartition packaging.** Draft the next `graph.json` by splitting, merging, re-edging, renaming,
@@ -227,8 +231,10 @@ The human-authored JSON record has this exact typed shape; `successor: null` mea
 
 The skill never writes the revision record, supplies `--criterion-revisions`, or runs the freeze.
 Only the human ratifies a frozen criterion revision. Ratification forfeits the affected package's
-carried completion. Mechanical freezes remain definition-preserving and can never carry a revision
-record.
+carried completion. When the package starts its fresh attempt, gate-earned amendments carry as
+criteria, but repair commits from the forfeited attempt do not carry into the rebuilt lineage. The
+fresh attempt must pass each carried amendment on its own merits. Mechanical freezes remain
+definition-preserving and can never carry a revision record.
 
 ## 7. Notify or promote at the terminal boundary
 

@@ -159,7 +159,9 @@ that the exact command surface exists before it becomes a criterion.
 
 A frozen criterion is immutable for every machine role. Only an explicit human-ratified revision at
 a later freeze may edit or remove it, and that ruling forfeits the affected package's carried
-completion. This skill never authors or supplies a criterion revision record.
+completion. Gate-earned amendments still carry as criteria into the fresh attempt; repair commits
+from the forfeited attempt do not carry into its rebuilt lineage. This skill never authors or
+supplies a criterion revision record.
 
 Write the draft to `<vision-dir>/graph.json` in the shape given in step 8. It is a draft until it is
 frozen; nothing reads it as authority yet.

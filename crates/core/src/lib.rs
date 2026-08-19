@@ -57,11 +57,11 @@ pub use package_driver::{
     DispatchWorkerProcessObservation, DriverAssemblyState, DriverEvent, DriverLoopOutcome,
     DriverPackageState, DriverSnapshot, EffectiveCriterion, EnvironmentPreparationOutcome,
     FindingRejectionReason, FindingReplayDecision, PackageDriverError, PaneCleanupOutcome,
-    PendingPaneCleanup, RatifiedCriterionRevision, RecoveryAttemptRecord, charged_failure_count,
-    derive_driver_snapshot, effective_criteria, gate_failure_outcome, judge_finding_replay,
-    latest_criterion_failure_evidence, next_gate_attempt, pending_completed_pane_cleanups,
-    pending_gate_challenges, recovery_attempt_records, recovery_base_brief,
-    worker_environment_outcome,
+    PendingPaneCleanup, RatifiedCriterionRevision, RecoveryAttemptRecord, StaleRepairCreditReason,
+    charged_failure_count, derive_driver_snapshot, effective_criteria, gate_failure_outcome,
+    judge_finding_replay, latest_criterion_failure_evidence, next_gate_attempt,
+    pending_completed_pane_cleanups, pending_gate_challenges, recovery_attempt_records,
+    recovery_base_brief, worker_environment_outcome,
 };
 pub use package_gate::{
     BuiltArtifactRef, PackageGateChallenge, PackageGateError, PackageGateFinding,

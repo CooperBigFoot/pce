@@ -227,10 +227,37 @@ pub enum DispatchEnvironmentObservation {
     Inconclusive,
 }
 
+/// Why a remembered repair can no longer harden a rebuilt package lineage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StaleRepairCreditReason {
+    /// The old repair commit is not available in its repository anymore.
+    RepairUnavailable,
+    /// The repair and current package lineage are both available but divergent.
+    DivergentLineage,
+    /// The repair hunk cannot be reverted from the composed tree although its criterion passes.
+    CounterfactualUnconstructable,
+}
+
 /// One append-only fact in the driver journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DriverEvent {
+    /// The driver returned an error after recording the diagnostic for from-disk explanation.
+    DriverAborted { reason: String },
+    /// A prior abort was acknowledged by a new driver process before it resumed the fold.
+    DriverResumed,
+    /// A remembered repair does not belong to this package attempt's rebuilt lineage.
+    RepairCreditStale {
+        package: String,
+        issuance: u64,
+        repository: String,
+        gate: String,
+        finding: u64,
+        repair_ref: String,
+        lineage_oid: String,
+        reason: StaleRepairCreditReason,
+    },
     /// A newer immutable plan became active and names the prior completions it carries forward.
     PlanVersionAdvanced {
         from_plan_version: u64,
@@ -886,6 +913,7 @@ pub fn derive_driver_snapshot(
     let mut assembly = DriverAssemblyState::Pending;
     let mut disputed_parks = HashSet::new();
     let mut consumed_overrules = HashSet::new();
+    let mut driver_aborted = false;
     let terminal = |state: &DriverPackageState| {
         matches!(
             state,
@@ -904,6 +932,14 @@ pub fn derive_driver_snapshot(
                 .all(|state| matches!(state, DriverPackageState::Complete))
         };
         match event {
+            DriverEvent::DriverAborted { .. } => {
+                driver_aborted = true;
+                continue;
+            }
+            DriverEvent::DriverResumed => {
+                driver_aborted = false;
+                continue;
+            }
             DriverEvent::PlanVersionAdvanced {
                 from_plan_version,
                 to_plan_version,
@@ -1050,7 +1086,9 @@ pub fn derive_driver_snapshot(
             _ => {}
         }
         let package = match event {
-            DriverEvent::PlanVersionAdvanced { .. }
+            DriverEvent::DriverAborted { .. }
+            | DriverEvent::DriverResumed
+            | DriverEvent::PlanVersionAdvanced { .. }
             | DriverEvent::WorkerEnvironmentDeclared { .. }
             | DriverEvent::RecoveryConfigured { .. } => {
                 continue;
@@ -1087,6 +1125,7 @@ pub fn derive_driver_snapshot(
             | DriverEvent::GateReproofExecuted { package, .. }
             | DriverEvent::GateReproofEnvironmentFailed { package, .. }
             | DriverEvent::PackageRepairRolledBack { package, .. }
+            | DriverEvent::RepairCreditStale { package, .. }
             | DriverEvent::PackageHardeningInvalidated { package, .. }
             | DriverEvent::PackageCompleted { package }
             | DriverEvent::PackageFailed { package, .. } => package,
@@ -1108,6 +1147,9 @@ pub fn derive_driver_snapshot(
             .get_mut(package)
             .unwrap_or_else(|| unreachable!("known package initialized"));
         match event {
+            DriverEvent::DriverAborted { .. } | DriverEvent::DriverResumed => {
+                unreachable!("driver lifecycle handled above")
+            }
             DriverEvent::PlanVersionAdvanced { .. }
             | DriverEvent::WorkerEnvironmentDeclared { .. }
             | DriverEvent::RecoveryConfigured { .. } => {
@@ -1449,6 +1491,29 @@ pub fn derive_driver_snapshot(
                     });
                 }
             }
+            DriverEvent::RepairCreditStale { gate, finding, .. } => {
+                if !matches!(
+                    state,
+                    DriverPackageState::Complete | DriverPackageState::Judging { .. }
+                ) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+                for (amended_package, criterion) in &mut amendments {
+                    if amended_package == package
+                        && matches!(
+                            &criterion.origin,
+                            CriterionOrigin::Amendment {
+                                gate: amended_gate,
+                                finding: amended_finding,
+                            } if amended_gate == gate && amended_finding == finding
+                        )
+                    {
+                        criterion.repository_refs.clear();
+                    }
+                }
+            }
             DriverEvent::PackageRepairRolledBack { gate, finding, .. } => {
                 if !matches!(state, DriverPackageState::Judging { .. }) {
                     return Err(PackageDriverError::EventAfterTerminal {
@@ -1531,7 +1596,9 @@ pub fn derive_driver_snapshot(
     let all_complete = states
         .values()
         .all(|state| matches!(state, DriverPackageState::Complete));
-    let outcome = if all_complete {
+    let outcome = if driver_aborted {
+        DriverLoopOutcome::Blocked
+    } else if all_complete {
         match assembly {
             DriverAssemblyState::Complete => DriverLoopOutcome::Finished,
             DriverAssemblyState::Failed { .. } => DriverLoopOutcome::Blocked,
@@ -2014,6 +2081,25 @@ mod tests {
                 ]
             })
             .collect()
+    }
+
+    #[test]
+    fn journal_ending_in_driver_abort_is_blocked_until_a_resume_event() {
+        let graph = graph();
+        let mut events = vec![DriverEvent::WorkerDispatched {
+            package: "A".to_owned(),
+            issuance: 1,
+        }];
+        events.push(DriverEvent::DriverAborted {
+            reason: "credited repair is stale".to_owned(),
+        });
+
+        let aborted = derive_driver_snapshot(&graph, &events, false).expect("aborted snapshot");
+        assert_eq!(aborted.outcome(), DriverLoopOutcome::Blocked);
+
+        events.push(DriverEvent::DriverResumed);
+        let resumed = derive_driver_snapshot(&graph, &events, false).expect("resumed snapshot");
+        assert_eq!(resumed.outcome(), DriverLoopOutcome::Running);
     }
 
     #[test]
