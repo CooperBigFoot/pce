@@ -237,6 +237,10 @@ pub enum DriverEvent {
         to_plan_version: u64,
         carried_completions: Vec<String>,
         carried_amendments: Vec<(String, EffectiveCriterion)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        criterion_revisions_ratified_by: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        criterion_revisions: Vec<crate::CriterionRevision>,
     },
     /// A human ruled that one disputed package definition stands for one fresh attempt.
     PackageParkOverruled {
@@ -244,6 +248,8 @@ pub enum DriverEvent {
         plan_version: u64,
         rationale: String,
     },
+    /// The names-only environment contract selected once for worker workspaces in this run.
+    WorkerEnvironmentDeclared { names: Vec<String> },
     /// The named spending limits selected once for this graph run.
     RecoveryConfigured { limits: RecoveryLimits },
     /// A recovery dispatch and the exact augmented brief supplied to it.
@@ -593,12 +599,47 @@ pub enum DriverLoopOutcome {
     Blocked,
 }
 
+/// One human-ratified criterion revision reconstructed from a typed plan transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RatifiedCriterionRevision {
+    from_plan_version: u64,
+    to_plan_version: u64,
+    ratified_by: String,
+    revision: crate::CriterionRevision,
+}
+
+impl RatifiedCriterionRevision {
+    /// Return the predecessor plan version.
+    pub const fn from_plan_version(&self) -> u64 {
+        self.from_plan_version
+    }
+
+    /// Return the successor plan version.
+    pub const fn to_plan_version(&self) -> u64 {
+        self.to_plan_version
+    }
+
+    /// Return the human identity attributed with the ruling.
+    pub fn ratified_by(&self) -> &str {
+        &self.ratified_by
+    }
+
+    /// Return the exact revision record.
+    pub const fn revision(&self) -> &crate::CriterionRevision {
+        &self.revision
+    }
+}
+
 /// Complete view reconstructed from graph and journal only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DriverSnapshot {
     packages: Vec<(String, DriverPackageState)>,
     ready: Vec<String>,
     amendments: Vec<(String, EffectiveCriterion)>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    criterion_revisions: Vec<RatifiedCriterionRevision>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    worker_environment: Vec<String>,
     recovery: Vec<(String, RecoveryBudget)>,
     assembly: DriverAssemblyState,
     outcome: DriverLoopOutcome,
@@ -612,6 +653,13 @@ impl DriverSnapshot {
     }
     pub fn amendments(&self) -> &[(String, EffectiveCriterion)] {
         &self.amendments
+    }
+    pub fn criterion_revisions(&self) -> &[RatifiedCriterionRevision] {
+        &self.criterion_revisions
+    }
+    /// Return the names-only worker environment contract for this run.
+    pub fn worker_environment(&self) -> &[String] {
+        &self.worker_environment
     }
     pub fn recovery(&self) -> &[(String, RecoveryBudget)] {
         &self.recovery
@@ -638,6 +686,9 @@ pub enum PackageDriverError {
         journal_version: u64,
         graph_version: u64,
     },
+    /// A plan transition's criterion revisions lack exact human attribution.
+    #[error("driver plan transition criterion revisions have invalid human attribution")]
+    InvalidCriterionRevisionAttribution,
     /// A plan transition did not advance by exactly one immutable version.
     #[error(
         "driver plan transition must advance from version {from_plan_version} to {to_plan_version}"
@@ -687,6 +738,9 @@ pub enum PackageDriverError {
     /// A pre-replay rejection used a reason reserved for execution evidence.
     #[error("structural finding rejection for package `{package}` has a non-structural reason")]
     InvalidStructuralFindingReason { package: String },
+    /// More than one distinct names-only worker environment contract appears in one run journal.
+    #[error("driver journal contains conflicting worker environment declarations")]
+    ConflictingWorkerEnvironment,
     /// More than one distinct limit configuration appears in one graph-run journal.
     #[error("driver journal contains conflicting recovery limit configurations")]
     ConflictingRecoveryLimits,
@@ -713,6 +767,7 @@ pub fn derive_driver_snapshot(
     override_risk_ordering: bool,
 ) -> Result<DriverSnapshot, PackageDriverError> {
     let mut configured_limits = None;
+    let mut configured_worker_environment = None;
     let mut prior_issuance = 0_u64;
     for event in events {
         if let DriverEvent::WorkerDispatched { package, issuance } = event {
@@ -730,6 +785,15 @@ pub fn derive_driver_snapshot(
             prior_issuance = *issuance;
         }
 
+        if let DriverEvent::WorkerEnvironmentDeclared { names } = event {
+            if configured_worker_environment
+                .as_ref()
+                .is_some_and(|configured| configured != names)
+            {
+                return Err(PackageDriverError::ConflictingWorkerEnvironment);
+            }
+            configured_worker_environment = Some(names.clone());
+        }
         if let DriverEvent::RecoveryConfigured { limits } = event {
             if configured_limits.is_some_and(|configured| configured != *limits) {
                 return Err(PackageDriverError::ConflictingRecoveryLimits);
@@ -760,6 +824,32 @@ pub fn derive_driver_snapshot(
                 proven_completions.insert(package.clone());
             }
             _ => {}
+        }
+    }
+    let mut criterion_revisions = Vec::new();
+    for event in events {
+        if let DriverEvent::PlanVersionAdvanced {
+            from_plan_version,
+            to_plan_version,
+            criterion_revisions_ratified_by,
+            criterion_revisions: revisions,
+            ..
+        } = event
+        {
+            match (criterion_revisions_ratified_by, revisions.is_empty()) {
+                (None, true) => {}
+                (Some(ratified_by), false) if !ratified_by.trim().is_empty() => {
+                    criterion_revisions.extend(revisions.iter().cloned().map(|revision| {
+                        RatifiedCriterionRevision {
+                            from_plan_version: *from_plan_version,
+                            to_plan_version: *to_plan_version,
+                            ratified_by: ratified_by.clone(),
+                            revision,
+                        }
+                    }));
+                }
+                _ => return Err(PackageDriverError::InvalidCriterionRevisionAttribution),
+            }
         }
     }
     let known = graph
@@ -819,6 +909,7 @@ pub fn derive_driver_snapshot(
                 to_plan_version,
                 carried_completions,
                 carried_amendments,
+                ..
             } => {
                 if from_plan_version.checked_add(1) != Some(*to_plan_version)
                     || *to_plan_version != graph.plan_version()
@@ -843,8 +934,8 @@ pub fn derive_driver_snapshot(
                     states.insert(package.clone(), DriverPackageState::Complete);
                 }
                 for (package, criterion) in carried_amendments {
-                    if !carried.contains(package.as_str()) {
-                        return Err(PackageDriverError::EventAfterTerminal {
+                    if !known.contains(package.as_str()) {
+                        return Err(PackageDriverError::UnknownPackage {
                             package: package.clone(),
                         });
                     }
@@ -959,7 +1050,9 @@ pub fn derive_driver_snapshot(
             _ => {}
         }
         let package = match event {
-            DriverEvent::PlanVersionAdvanced { .. } | DriverEvent::RecoveryConfigured { .. } => {
+            DriverEvent::PlanVersionAdvanced { .. }
+            | DriverEvent::WorkerEnvironmentDeclared { .. }
+            | DriverEvent::RecoveryConfigured { .. } => {
                 continue;
             }
             DriverEvent::PackageParkOverruled { package, .. }
@@ -1015,7 +1108,9 @@ pub fn derive_driver_snapshot(
             .get_mut(package)
             .unwrap_or_else(|| unreachable!("known package initialized"));
         match event {
-            DriverEvent::PlanVersionAdvanced { .. } | DriverEvent::RecoveryConfigured { .. } => {
+            DriverEvent::PlanVersionAdvanced { .. }
+            | DriverEvent::WorkerEnvironmentDeclared { .. }
+            | DriverEvent::RecoveryConfigured { .. } => {
                 unreachable!("configuration handled above")
             }
             DriverEvent::PackageParkOverruled {
@@ -1476,6 +1571,8 @@ pub fn derive_driver_snapshot(
         packages,
         ready,
         amendments,
+        criterion_revisions,
+        worker_environment: configured_worker_environment.unwrap_or_default(),
         recovery,
         assembly,
         outcome,

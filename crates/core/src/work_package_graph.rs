@@ -1,8 +1,9 @@
 //! readiness : WorkPackageGraph × RepositoryMergeObservations × RiskOrdering → ReadyReport
-//! criterion_floor : WorkPackageGraph × WorkPackageGraph → Option<CriteriaInvarianceViolation>
+//! criterion_floor : WorkPackageGraph × WorkPackageGraph → CriteriaInvarianceViolation*
+//! ratification : WorkPackageGraph × WorkPackageGraph × CriterionRevision* → Result
 //!
 //! A validated graph is a finite DAG whose hard ancestry remains connected when advisory edges
-//! are overridden.
+//! are overridden. A criterion floor changes only through an exact, attributed human revision.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -89,7 +90,8 @@ impl WorkPackage {
 }
 
 /// A human-readable observation paired with its driver command.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkPackageCriterion {
     name: String,
     input: String,
@@ -552,6 +554,125 @@ fn validate_soft_reduction(graph: &WorkPackageGraph) -> Result<(), WorkPackageGr
     Ok(())
 }
 
+/// One exact criterion edit or removal explicitly ratified by a human.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionRevision {
+    previous_package: String,
+    predecessor: WorkPackageCriterion,
+    successor: Option<WorkPackageCriterion>,
+    rationale: String,
+}
+
+impl CriterionRevision {
+    /// Return the predecessor package that owned the criterion occurrence.
+    pub fn previous_package(&self) -> &str {
+        &self.previous_package
+    }
+
+    /// Return the exact predecessor criterion.
+    pub const fn predecessor(&self) -> &WorkPackageCriterion {
+        &self.predecessor
+    }
+
+    /// Return the exact successor criterion, or `None` for removal.
+    pub const fn successor(&self) -> Option<&WorkPackageCriterion> {
+        self.successor.as_ref()
+    }
+
+    /// Return the human-authored reason for the revision.
+    pub fn rationale(&self) -> &str {
+        &self.rationale
+    }
+}
+
+/// The explicit human attribution and exact revisions supplied to one freeze.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionRevisionManifest {
+    schema_version: u64,
+    ratified_by: String,
+    revisions: Vec<CriterionRevision>,
+}
+
+impl CriterionRevisionManifest {
+    /// Return the manifest schema version.
+    pub const fn schema_version(&self) -> u64 {
+        self.schema_version
+    }
+
+    /// Return the human identity attributed with the ruling.
+    pub fn ratified_by(&self) -> &str {
+        &self.ratified_by
+    }
+
+    /// Return the exact criterion revisions in ratification order.
+    pub fn revisions(&self) -> &[CriterionRevision] {
+        &self.revisions
+    }
+}
+
+/// A criterion revision record does not exactly explain the graph difference.
+#[derive(Debug, Error)]
+pub enum CriterionRevisionError {
+    /// The revision bytes are not exactly one typed manifest JSON document.
+    #[error("criterion revision record is not valid typed JSON: {source}")]
+    InvalidJson { source: serde_json::Error },
+    /// The manifest uses an unsupported schema version.
+    #[error("criterion revision record schema_version must be 1, found {schema_version}")]
+    UnsupportedSchema { schema_version: u64 },
+    /// The human attribution is empty.
+    #[error("criterion revision record ratified_by must be non-empty")]
+    EmptyRatifier,
+    /// One revision rationale is empty.
+    #[error(
+        "criterion revision rationale for predecessor package {previous_package} must be non-empty"
+    )]
+    EmptyRationale { previous_package: String },
+    /// A record names predecessor bytes that are not an unmatched predecessor occurrence.
+    #[error(
+        "criterion revision record for package {previous_package} does not match an affected predecessor criterion exactly"
+    )]
+    PredecessorMismatch { previous_package: String },
+    /// A record names successor bytes that are not an unmatched successor occurrence.
+    #[error(
+        "criterion revision record for package {previous_package} does not match an affected successor criterion exactly"
+    )]
+    SuccessorMismatch { previous_package: String },
+    /// An affected predecessor criterion has no ratification.
+    #[error(
+        "criterion {criterion:?} from predecessor package {previous_package} changed or was removed without an explicit human revision record"
+    )]
+    MissingRevision {
+        previous_package: String,
+        criterion: String,
+    },
+}
+
+/// Parse one explicit human criterion-revision manifest.
+pub fn parse_criterion_revision_manifest(
+    bytes: &[u8],
+) -> Result<CriterionRevisionManifest, CriterionRevisionError> {
+    let manifest: CriterionRevisionManifest = serde_json::from_slice(bytes)
+        .map_err(|source| CriterionRevisionError::InvalidJson { source })?;
+    if manifest.schema_version != 1 {
+        return Err(CriterionRevisionError::UnsupportedSchema {
+            schema_version: manifest.schema_version,
+        });
+    }
+    if manifest.ratified_by.trim().is_empty() {
+        return Err(CriterionRevisionError::EmptyRatifier);
+    }
+    for revision in &manifest.revisions {
+        if revision.rationale.trim().is_empty() {
+            return Err(CriterionRevisionError::EmptyRationale {
+                previous_package: revision.previous_package.clone(),
+            });
+        }
+    }
+    Ok(manifest)
+}
+
 /// A predecessor criterion absent byte-for-byte from its successor plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CriteriaInvarianceViolation<'a> {
@@ -571,34 +692,123 @@ impl<'a> CriteriaInvarianceViolation<'a> {
     }
 }
 
-/// Return the first predecessor criterion that does not survive byte-identically in the successor.
-///
-/// Successor packaging and additional criteria are deliberately ignored. Matching consumes one
-/// successor occurrence so duplicate criteria in a predecessor must survive with equal multiplicity.
-pub fn criteria_invariance_violation<'a>(
+fn criterion_difference<'a, 'b>(
     previous: &'a WorkPackageGraph,
-    successor: &WorkPackageGraph,
-) -> Option<CriteriaInvarianceViolation<'a>> {
+    successor: &'b WorkPackageGraph,
+) -> (
+    Vec<CriteriaInvarianceViolation<'a>>,
+    Vec<&'b WorkPackageCriterion>,
+) {
     let mut unmatched_successor_criteria = successor
         .packages()
         .iter()
         .flat_map(WorkPackage::criteria)
         .collect::<Vec<_>>();
+    let mut violations = Vec::new();
     for package in previous.packages() {
         for criterion in package.criteria() {
-            let Some(position) = unmatched_successor_criteria
+            if let Some(position) = unmatched_successor_criteria
                 .iter()
                 .position(|candidate| *candidate == criterion)
-            else {
-                return Some(CriteriaInvarianceViolation {
+            {
+                unmatched_successor_criteria.remove(position);
+            } else {
+                violations.push(CriteriaInvarianceViolation {
                     previous_package: package.id(),
                     criterion,
                 });
-            };
-            unmatched_successor_criteria.swap_remove(position);
+            }
         }
     }
-    None
+    (violations, unmatched_successor_criteria)
+}
+
+/// Return every predecessor criterion that does not survive byte-identically in the successor.
+///
+/// Successor packaging and additional criteria are deliberately ignored. Matching consumes one
+/// successor occurrence so duplicate criteria in a predecessor must survive with equal multiplicity.
+pub fn criteria_invariance_violations<'a>(
+    previous: &'a WorkPackageGraph,
+    successor: &WorkPackageGraph,
+) -> Vec<CriteriaInvarianceViolation<'a>> {
+    criterion_difference(previous, successor).0
+}
+
+/// Return the first predecessor criterion that does not survive byte-identically in the successor.
+pub fn criteria_invariance_violation<'a>(
+    previous: &'a WorkPackageGraph,
+    successor: &WorkPackageGraph,
+) -> Option<CriteriaInvarianceViolation<'a>> {
+    criteria_invariance_violations(previous, successor)
+        .into_iter()
+        .next()
+}
+
+/// Require revision records to explain every changed or removed predecessor occurrence exactly.
+pub fn validate_criterion_revisions(
+    previous: &WorkPackageGraph,
+    successor: &WorkPackageGraph,
+    revisions: &[CriterionRevision],
+) -> Result<(), CriterionRevisionError> {
+    let mut unmatched_predecessors = previous
+        .packages()
+        .iter()
+        .flat_map(|package| {
+            package
+                .criteria()
+                .iter()
+                .map(move |criterion| (package.id(), criterion))
+        })
+        .collect::<Vec<_>>();
+    let mut unmatched_successors = successor
+        .packages()
+        .iter()
+        .flat_map(WorkPackage::criteria)
+        .collect::<Vec<_>>();
+    for revision in revisions {
+        if revision.successor() == Some(revision.predecessor()) {
+            return Err(CriterionRevisionError::PredecessorMismatch {
+                previous_package: revision.previous_package.clone(),
+            });
+        }
+        let Some(predecessor_position) =
+            unmatched_predecessors
+                .iter()
+                .position(|(package, criterion)| {
+                    package.as_str() == revision.previous_package()
+                        && *criterion == revision.predecessor()
+                })
+        else {
+            return Err(CriterionRevisionError::PredecessorMismatch {
+                previous_package: revision.previous_package.clone(),
+            });
+        };
+        unmatched_predecessors.remove(predecessor_position);
+        if let Some(successor_criterion) = revision.successor() {
+            let Some(successor_position) = unmatched_successors
+                .iter()
+                .position(|candidate| *candidate == successor_criterion)
+            else {
+                return Err(CriterionRevisionError::SuccessorMismatch {
+                    previous_package: revision.previous_package.clone(),
+                });
+            };
+            unmatched_successors.remove(successor_position);
+        }
+    }
+    for (package, criterion) in unmatched_predecessors {
+        let Some(position) = unmatched_successors
+            .iter()
+            .position(|candidate| *candidate == criterion)
+        else {
+            return Err(CriterionRevisionError::MissingRevision {
+                previous_package: package.as_str().to_owned(),
+                criterion: criterion.name().to_owned(),
+            });
+        };
+        unmatched_successors.remove(position);
+    }
+    Ok(())
 }
 
 /// Return package identifiers whose complete authored definitions are identical across plans.

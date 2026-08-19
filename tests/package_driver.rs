@@ -983,12 +983,180 @@ fn revised_plan_refuses_weakened_criterion_before_advancing() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("full suite"), "{stderr}");
-    assert!(stderr.contains("package A"), "{stderr}");
+    assert!(stderr.contains("A::"), "{stderr}");
+    assert!(stderr.contains("additive world-conformance"), "{stderr}");
     assert!(
-        stderr.contains("freezing the revised version is the human's ruling"),
+        stderr.contains("human-ratified revision recorded at freeze"),
         "{stderr}"
     );
-    assert_eq!(fs::read(&journal).expect("unchanged journal"), prefix);
+    let after = fs::read(&journal).expect("journal after refusal");
+    assert!(after.starts_with(&prefix));
+    assert!(!String::from_utf8_lossy(&after).contains("plan-version-advanced"));
+}
+
+#[test]
+fn ratified_criterion_revision_advances_and_forfeits_only_its_package_completion() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = repository(temp.path(), "repo", "base");
+    let vision_dir = temp.path().join("driver-test");
+    fs::create_dir(&vision_dir).expect("vision directory");
+    let source = vision_dir.join("graph.json");
+    let journal = vision_dir.join("driver.jsonl");
+    let criterion = |command: &str| json!({"name":"criterion","input":"repo","observation":"zero","command":command});
+    let package = |id: &str, command: &str| json!({"id":id,"title":id,"repositories":["repo"],"criteria":[criterion(command)],"depends_on":[]});
+    let v1 = json!({"vision":"driver-test","plan_version":1,"authored_at_ref":"HEAD","packages":[package("A", "true"),package("B", "printf stable")]});
+    fs::write(&source, serde_json::to_vec_pretty(&v1).expect("v1 JSON")).expect("v1");
+    let mapping = format!("repo={}", repo.display());
+    let first = run(
+        temp.path(),
+        &[
+            "graph".into(),
+            "freeze".into(),
+            "--vision-dir".into(),
+            vision_dir.display().to_string(),
+            "--repository".into(),
+            mapping.clone(),
+        ],
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let v2 = json!({"vision":"driver-test","plan_version":2,"authored_at_ref":"HEAD","packages":[package("A", "true # ratified revision"),package("B", "printf stable")]});
+    fs::write(&source, serde_json::to_vec_pretty(&v2).expect("v2 JSON")).expect("v2");
+    let record = vision_dir.join("human-revision.json");
+    fs::write(
+        &record,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version":1,
+            "ratified_by":"Nicolas",
+            "revisions":[{
+                "previous_package":"A",
+                "predecessor":criterion("true"),
+                "successor":criterion("true # ratified revision"),
+                "rationale":"The old command names an unavailable mode.\n```exact human text```"
+            }]
+        }))
+        .expect("record JSON"),
+    )
+    .expect("record");
+    let second = run(
+        temp.path(),
+        &[
+            "graph".into(),
+            "freeze".into(),
+            "--vision-dir".into(),
+            vision_dir.display().to_string(),
+            "--criterion-revisions".into(),
+            record.display().to_string(),
+            "--repository".into(),
+            mapping.clone(),
+        ],
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    for (package, issuance) in [("A", 1), ("B", 2)] {
+        append(
+            &journal,
+            json!({"event":"worker-dispatched","package":package,"issuance":issuance}),
+        );
+        append(
+            &journal,
+            json!({"event":"worker-done","package":package,"issuance":issuance}),
+        );
+        if package == "A" {
+            append(
+                &journal,
+                json!({
+                    "event":"finding-replayed",
+                    "package":"A",
+                    "gate":"gate-1",
+                    "finding":0,
+                    "command":"test -f durable-guard",
+                    "repository_refs":[{"repository":"repo","witness_ref":"witness","repair_ref":"repair"}],
+                    "witness":{"command":"test -f durable-guard","working_directory":"repo","exit_status":{"kind":"exited","code":1},"stdout":"","stderr":"missing"},
+                    "repair":{"command":"test -f durable-guard","working_directory":"repo","exit_status":{"kind":"exited","code":0},"stdout":"","stderr":""},
+                    "decision":{"decision":"accepted"}
+                }),
+            );
+        }
+        append(
+            &journal,
+            json!({"event":"package-completed","package":package}),
+        );
+    }
+    let invocations = vision_dir.join("invocations");
+    let worker = vision_dir.join("worker.sh");
+    fs::write(&worker, format!(r#"#!/bin/sh
+printf '%s\n' "$PCE_PACKAGE" >> '{}'
+printf '%s' '{{"outcome":"mis-specified","fault":{{"kind":"criterion","name":"criterion"}}}}' > "$PCE_PACKAGE_OUTCOME"
+"#, invocations.display())).expect("worker");
+    let output = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "driver-run".into(),
+            "--graph".into(),
+            vision_dir.join("graph.v2.json").display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--repository".into(),
+            mapping,
+            "--worker-override".into(),
+            "--".into(),
+            "/bin/sh".into(),
+            worker.display().to_string(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(events.contains(r#""event":"plan-version-advanced""#));
+    assert!(events.contains(r#""carried_completions":["B"]"#));
+    assert!(events.contains(r#""criterion_revisions_ratified_by":"Nicolas""#));
+    assert!(events.contains(r#""command":"true # ratified revision""#));
+    assert!(events.contains(r#""carried_amendments":[["A""#));
+    assert!(events.contains("test -f durable-guard"));
+    assert!(events.contains(r"The old command names an unavailable mode.\n```exact human text```"));
+    assert_eq!(
+        fs::read_to_string(&invocations)
+            .expect("invocations")
+            .trim(),
+        "A"
+    );
+    let rendered = vision_dir.join("run.html");
+    let render = run(
+        temp.path(),
+        &[
+            "package".into(),
+            "render".into(),
+            "--graph".into(),
+            vision_dir.join("graph.v2.json").display().to_string(),
+            "--journal".into(),
+            journal.display().to_string(),
+            "--output".into(),
+            rendered.display().to_string(),
+        ],
+    );
+    assert!(
+        render.status.success(),
+        "{}",
+        String::from_utf8_lossy(&render.stderr)
+    );
+    let html = fs::read_to_string(rendered).expect("rendered run");
+    assert!(html.contains("Human-ratified criterion revisions"));
+    assert!(html.contains("Ratified by: Nicolas"));
+    assert!(html.contains("true # ratified revision"));
+    assert!(html.contains("The old command names an unavailable mode.\n```exact human text```"));
 }
 
 #[test]

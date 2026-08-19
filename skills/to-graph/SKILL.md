@@ -153,6 +153,14 @@ Two of the incidence run's parks were exactly this.
 
 ## 6. Write the graph, then run the mechanical check
 
+Author criterion commands from commands you have executed successfully against the named input.
+Never write a command because a tool or flag is expected to exist. Recorded evidence must establish
+that the exact command surface exists before it becomes a criterion.
+
+A frozen criterion is immutable for every machine role. Only an explicit human-ratified revision at
+a later freeze may edit or remove it, and that ruling forfeits the affected package's carried
+completion. This skill never authors or supplies a criterion revision record.
+
 Write the draft to `<vision-dir>/graph.json` in the shape given in step 8. It is a draft until it is
 frozen; nothing reads it as authority yet.
 
@@ -223,7 +231,13 @@ ways. It is the one thing on the page that is a decision rather than a fact, and
 
 ## 8. Freeze
 
-Only once the human is settled. The frozen shape is:
+Only once the human is settled. For plan version 1, or a later version with no criterion changes,
+freeze normally. A later draft that edits or removes frozen criterion bytes will refuse unless the
+human independently writes and explicitly supplies the exact attributed revision record. Do not
+create that record for them. A mechanical freeze, when available, is definition-preserving and can
+never include a revision record.
+
+The frozen shape is:
 
 ```json
 {

@@ -18,6 +18,9 @@ pub enum RunRenderError {
     /// The journal contradicts the frozen graph or itself.
     #[error("cannot render contradictory driver history: {source}")]
     InvalidJournal { source: PackageDriverError },
+    /// A typed criterion revision could not be serialized verbatim.
+    #[error("cannot render typed criterion revision verbatim: {source}")]
+    CriterionRevisionSerialization { source: serde_json::Error },
 }
 
 #[derive(Clone, Copy)]
@@ -486,6 +489,35 @@ pub fn render_package_run(
         details.push_str("</article>");
     }
 
+    let mut revisions = String::new();
+    for ratified in snapshot.criterion_revisions() {
+        let revision = ratified.revision();
+        let predecessor = serde_json::to_string_pretty(revision.predecessor())
+            .map_err(|source| RunRenderError::CriterionRevisionSerialization { source })?;
+        let successor = revision
+            .successor()
+            .map(serde_json::to_string_pretty)
+            .transpose()
+            .map_err(|source| RunRenderError::CriterionRevisionSerialization { source })?
+            .unwrap_or_else(|| "<removed>".to_owned());
+        revisions.push_str(&format!(
+            r#"<article class="package criterion-revision"><h3>Criterion revision · plan v{from_plan_version} → v{to_plan_version}</h3><p class="criterion-meta">Predecessor package: {package} · Ratified by: {ratified_by}</p><h4>Predecessor</h4><pre>{predecessor}</pre><h4>Successor</h4><pre>{successor}</pre><h4>Human rationale</h4><pre>{rationale}</pre></article>"#,
+            from_plan_version = ratified.from_plan_version(),
+            to_plan_version = ratified.to_plan_version(),
+            package = escaped(revision.previous_package()),
+            ratified_by = escaped(ratified.ratified_by()),
+            predecessor = escaped(&predecessor),
+            successor = escaped(&successor),
+            rationale = escaped(revision.rationale()),
+        ));
+    }
+    let revision_section = if revisions.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<section><h2>Human-ratified criterion revisions</h2><p class="sub">Exact frozen transition records</p><div class="packages">{revisions}</div></section>"#
+        )
+    };
     let run_copy = if events.is_empty() {
         "Plan structure · run not started"
     } else {
@@ -498,7 +530,7 @@ pub fn render_package_run(
         .collect::<Vec<_>>()
         .join(", ");
     Ok(format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{vision} · work-package run</title><style>{STYLE}</style></head><body><div class=\"wrap\"><header class=\"mast\"><p class=\"eyebrow\">Plan v{version} · authored at {authored}</p><h1>{vision}</h1><p class=\"thesis\">{run_copy}. The highlighted binding chain is the computed critical path.</p></header><main><section><h2>The run, rendered</h2><p class=\"sub\">Dependency depth flows left to right</p><div class=\"graph-scroll\">{svg}</div><div class=\"legend\"><div><b>━━ B · Buildability</b><p>Solid code fact. Binding.</p></div><div><b>━━━━ S · Safety</b><p>Heavy irreversible-act guard. Binding.</p></div><div><b>┄┄ R · Risk ordering</b><p>Overridable choice, not a fact.</p></div></div></section><section><h2>Packages and evidence</h2><p class=\"sub\">Last criterion executions and every gate finding</p><div class=\"packages\">{details}</div></section></main><footer>Deterministic rendering · no clock or external assets</footer></div></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{vision} · work-package run</title><style>{STYLE}</style></head><body><div class=\"wrap\"><header class=\"mast\"><p class=\"eyebrow\">Plan v{version} · authored at {authored}</p><h1>{vision}</h1><p class=\"thesis\">{run_copy}. The highlighted binding chain is the computed critical path.</p></header><main><section><h2>The run, rendered</h2><p class=\"sub\">Dependency depth flows left to right</p><div class=\"graph-scroll\">{svg}</div><div class=\"legend\"><div><b>━━ B · Buildability</b><p>Solid code fact. Binding.</p></div><div><b>━━━━ S · Safety</b><p>Heavy irreversible-act guard. Binding.</p></div><div><b>┄┄ R · Risk ordering</b><p>Overridable choice, not a fact.</p></div></div></section><section><h2>Packages and evidence</h2><p class=\"sub\">Last criterion executions and every gate finding</p><div class=\"packages\">{details}</div></section>{revision_section}</main><footer>Deterministic rendering · no clock or external assets</footer></div></body></html>",
         vision = escaped(graph.vision()),
         version = graph.plan_version(),
         authored = escaped(&authored_refs)

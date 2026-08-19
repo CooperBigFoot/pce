@@ -3,7 +3,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use jsonschema::Validator;
-use pce_core::parse_work_package_graph;
+use pce_core::{
+    parse_criterion_revision_manifest, parse_work_package_graph, validate_criterion_revisions,
+};
 use serde_json::Value;
 use tempfile::tempdir;
 
@@ -109,6 +111,44 @@ fn freezing_version_two_preserves_readable_version_one_bytes() {
     assert_eq!(fs::read(&frozen_v1).expect("v1 remains readable"), v1_bytes);
     let frozen_v2 = vision_dir.join("graph.v2.json");
     let v2_bytes = fs::read(&frozen_v2).expect("frozen v2 readable");
+    let predecessor = v2["packages"][0]["criteria"][0].clone();
+    let mut conflicting_successor = predecessor.clone();
+    conflicting_successor["command"] = Value::from("conflicting command");
+    v2["packages"][0]["criteria"][0] = conflicting_successor.clone();
+    fs::write(
+        &source,
+        serde_json::to_vec_pretty(&v2).expect("conflict JSON"),
+    )
+    .expect("conflicting graph");
+    let record = vision_dir.join("conflicting-human-record.json");
+    fs::write(
+        &record,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version":1,
+            "ratified_by":"Nicolas",
+            "revisions":[{"previous_package":"RR1","predecessor":predecessor,"successor":conflicting_successor,"rationale":"Conflicts with the already frozen version."}]
+        }))
+        .expect("record JSON"),
+    )
+    .expect("record");
+    let conflicting = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .args([
+            "--criterion-revisions",
+            record.to_str().expect("UTF-8 path"),
+        ])
+        .args(["--repository", &mapping])
+        .output()
+        .expect("conflicting freeze");
+    assert!(!conflicting.status.success());
+    assert!(
+        !vision_dir
+            .join("graph.v2.criterion-revisions.json")
+            .exists()
+    );
+
+    v2 = serde_json::from_slice(&v2_bytes).expect("restore v2 value");
     v2["packages"][0]["title"] = Value::from("attempted rewrite");
     fs::write(
         &source,
@@ -138,6 +178,142 @@ fn freezing_version_two_preserves_readable_version_one_bytes() {
             String::from_utf8_lossy(&checked.stderr)
         );
     }
+}
+
+#[test]
+fn criterion_edit_requires_explicit_human_revision_record_at_freeze() {
+    let directory = tempdir().expect("temporary directory");
+    let repository = directory.path().join("repository");
+    fs::create_dir(&repository).expect("repository directory");
+    git(&repository, &["init", "-q"]);
+    git(&repository, &["config", "user.email", "test@example.com"]);
+    git(&repository, &["config", "user.name", "Test"]);
+    fs::write(repository.join("seed"), "seed").expect("seed");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "seed"]);
+    let authored_ref = git(&repository, &["rev-parse", "HEAD"]);
+    let mapping = format!("RivRetrieve={}", repository.display());
+    let vision_dir = directory
+        .path()
+        .join("2026-08-11-the-store-is-the-only-copy");
+    fs::create_dir(&vision_dir).expect("vision directory");
+    let source = vision_dir.join("graph.json");
+    let mut v1: Value = serde_json::from_slice(FIXTURE).expect("fixture JSON");
+    v1["authored_at_ref"] = Value::from(authored_ref);
+    fs::write(&source, serde_json::to_vec_pretty(&v1).expect("v1 JSON")).expect("v1");
+    let first = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .args(["--repository", &mapping])
+        .output()
+        .expect("freeze v1");
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let predecessor = v1["packages"][0]["criteria"][0].clone();
+    let mut successor = predecessor.clone();
+    successor["command"] = Value::from("uv run pytest tests/store/test_value_states.py --strict");
+    let mut v2 = v1;
+    v2["plan_version"] = Value::from(2);
+    v2["packages"][0]["criteria"][0] = successor.clone();
+    fs::write(&source, serde_json::to_vec_pretty(&v2).expect("v2 JSON")).expect("v2");
+
+    let refused = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .args(["--repository", &mapping])
+        .output()
+        .expect("unratified freeze");
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("Four value states survive compile"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--criterion-revisions"), "{stderr}");
+    assert!(!vision_dir.join("graph.v2.json").exists());
+
+    let mismatch = vision_dir.join("mismatched-revision.v2.json");
+    let mut wrong_predecessor = predecessor.clone();
+    wrong_predecessor["command"] = Value::from("not the frozen predecessor bytes");
+    fs::write(
+        &mismatch,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "ratified_by": "Nicolas",
+            "revisions": [{
+                "previous_package": "RR1",
+                "predecessor": wrong_predecessor,
+                "successor": successor.clone(),
+                "rationale": "Attempted stale record."
+            }]
+        }))
+        .expect("mismatch JSON"),
+    )
+    .expect("mismatch record");
+    let mismatched = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .args([
+            "--criterion-revisions",
+            mismatch.to_str().expect("UTF-8 path"),
+        ])
+        .args(["--repository", &mapping])
+        .output()
+        .expect("mismatched freeze");
+    assert!(!mismatched.status.success());
+    assert!(!vision_dir.join("graph.v2.json").exists());
+    assert!(
+        !vision_dir
+            .join("graph.v2.criterion-revisions.json")
+            .exists()
+    );
+
+    let revisions = vision_dir.join("criterion-revisions.v2.json");
+    fs::write(
+        &revisions,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "ratified_by": "Nicolas",
+            "revisions": [{
+                "previous_package": "RR1",
+                "predecessor": predecessor,
+                "successor": successor,
+                "rationale": "The delivered command requires strict mode."
+            }]
+        }))
+        .expect("revision JSON"),
+    )
+    .expect("revision record");
+    let ratified = pce()
+        .args(["graph", "freeze", "--vision-dir"])
+        .arg(&vision_dir)
+        .args([
+            "--criterion-revisions",
+            revisions.to_str().expect("UTF-8 path"),
+        ])
+        .args(["--repository", &mapping])
+        .output()
+        .expect("ratified freeze");
+    assert!(
+        ratified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ratified.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&ratified.stdout).expect("freeze receipt");
+    assert_eq!(
+        receipt["criterion_revisions_sha256"].as_str().map(str::len),
+        Some(64)
+    );
+    assert!(vision_dir.join("graph.v2.json").exists());
+    assert!(
+        vision_dir
+            .join("graph.v2.criterion-revisions.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -233,4 +409,80 @@ fn graph_check_verifies_each_repository_authored_ref() {
     assert!(stderr.contains("second"), "{stderr}");
     assert!(stderr.contains("missing-ref"), "{stderr}");
     assert!(!vision_dir.join("graph.v1.json").exists());
+}
+
+#[test]
+fn graph_skills_preserve_human_only_criterion_revision_authority() {
+    let work_graph = include_str!("../skills/work-graph/SKILL.md");
+    assert!(work_graph.contains("The skill never writes the revision record"));
+    assert!(work_graph.contains("--criterion-revisions <human-authored-record-path>"));
+    assert!(work_graph.contains("quoting the predecessor criterion bytes"));
+    assert!(work_graph.contains("cannot be correlated exactly"));
+    let to_graph = include_str!("../skills/to-graph/SKILL.md");
+    assert!(to_graph.contains("commands you have executed successfully"));
+    assert!(to_graph.contains("Only an explicit human-ratified revision"));
+    assert!(to_graph.contains("ruling forfeits the affected package's carried"));
+}
+
+#[test]
+fn revision_matching_preserves_duplicates_and_allows_ratified_package_removal() {
+    let criterion = |command: &str| serde_json::json!({"name":"same","input":"repo","observation":"zero","command":command});
+    let graph = |version: u64, packages: Value| {
+        parse_work_package_graph(
+            &serde_json::to_vec(&serde_json::json!({
+                "vision":"revision-edges",
+                "plan_version":version,
+                "authored_at_ref":"HEAD",
+                "packages":packages
+            }))
+            .expect("graph JSON"),
+        )
+        .expect("valid graph")
+    };
+    let previous = graph(
+        1,
+        serde_json::json!([
+            {"id":"A","title":"A","repositories":["repo"],"criteria":[criterion("old"),criterion("old")],"depends_on":[]},
+            {"id":"B","title":"B","repositories":["repo"],"criteria":[criterion("stable")],"depends_on":[]}
+        ]),
+    );
+    let successor = graph(
+        2,
+        serde_json::json!([
+            {"id":"A","title":"A","repositories":["repo"],"criteria":[criterion("old"),criterion("new")],"depends_on":[]},
+            {"id":"B","title":"B","repositories":["repo"],"criteria":[criterion("stable")],"depends_on":[]}
+        ]),
+    );
+    let duplicate_manifest = parse_criterion_revision_manifest(
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version":1,
+            "ratified_by":"Nicolas",
+            "revisions":[{"previous_package":"A","predecessor":criterion("old"),"successor":criterion("new"),"rationale":"Revise exactly one duplicate occurrence."}]
+        }))
+        .expect("manifest JSON"),
+    )
+    .expect("manifest");
+    validate_criterion_revisions(&previous, &successor, duplicate_manifest.revisions())
+        .expect("one duplicate revision is exact");
+
+    let removed = graph(
+        2,
+        serde_json::json!([
+            {"id":"B","title":"B","repositories":["repo"],"criteria":[criterion("stable")],"depends_on":[]}
+        ]),
+    );
+    let removal_manifest = parse_criterion_revision_manifest(
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version":1,
+            "ratified_by":"Nicolas",
+            "revisions":[
+                {"previous_package":"A","predecessor":criterion("old"),"successor":null,"rationale":"Remove first occurrence."},
+                {"previous_package":"A","predecessor":criterion("old"),"successor":null,"rationale":"Remove second occurrence."}
+            ]
+        }))
+        .expect("manifest JSON"),
+    )
+    .expect("manifest");
+    validate_criterion_revisions(&previous, &removed, removal_manifest.revisions())
+        .expect("removing the package ratifies every removed occurrence");
 }
