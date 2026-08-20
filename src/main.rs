@@ -112,7 +112,7 @@ const USAGE: &str = concat!(
     "       pce log meter\n",
     "       pce status --file <LOG_PATH> --vision-dir <VISION_DIR> [--human]\n",
     "       pce ready --file <LOG_PATH> --vision-dir <VISION_DIR> [--graph <APPROVED_ARTIFACT_PATH>] [--override-risk-ordering]\n",
-    "       pce graph check --file <GRAPH_PATH> [--strict] [--repository <NAME=SOURCE_WORKTREE>]...\n",
+    "       pce graph check --file <GRAPH_PATH> [--strict] [--journal <DRIVER_JOURNAL>] [--repository <NAME=SOURCE_WORKTREE>]...\n",
     "       pce graph freeze --vision-dir <VISION_DIR> [--mechanical] [--criterion-revisions <HUMAN_RECORD_PATH>] [--accept-base-currency-risk <HUMAN_RECORD_PATH>] --repository <NAME=SOURCE_WORKTREE> [--repository <NAME=SOURCE_WORKTREE>]...\n",
     "       pce package brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --outcome <ABSOLUTE_OUTCOME_PATH> [--brief <ABSOLUTE_BRIEF_PATH>] -- <WORKER_ARG>...\n",
@@ -405,6 +405,7 @@ enum Command {
     GraphCheck {
         path: PathBuf,
         repositories: Vec<(String, PathBuf)>,
+        journal: Option<PathBuf>,
         strict: bool,
     },
     GraphFreeze {
@@ -833,8 +834,9 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::GraphCheck {
             path,
             repositories,
+            journal,
             strict,
-        } => run_graph_check(&path, &repositories, strict),
+        } => run_graph_check(&path, &repositories, journal.as_deref(), strict),
         Command::GraphFreeze {
             vision_dir,
             repositories,
@@ -3536,54 +3538,90 @@ fn compose_git_commits(
     result
 }
 
+fn binding_dependency_ids(graph: &WorkPackageGraph, package_id: &str) -> Result<BTreeSet<String>> {
+    let by_id = graph
+        .packages()
+        .iter()
+        .map(|package| (package.id().as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+    let mut result = BTreeSet::new();
+    let mut pending = vec![package_id];
+    while let Some(id) = pending.pop() {
+        let package = by_id
+            .get(id)
+            .with_context(|| format!("package {id} is absent from graph"))?;
+        for dependency in package
+            .depends_on()
+            .iter()
+            .filter(|dependency| dependency.kind().is_binding())
+        {
+            if result.insert(dependency.id().as_str().to_owned()) {
+                pending.push(dependency.id().as_str());
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn delivered_repository_names(graph: &WorkPackageGraph, package_id: &str) -> Result<Vec<String>> {
+    let package = graph
+        .packages()
+        .iter()
+        .find(|candidate| candidate.id().as_str() == package_id)
+        .with_context(|| format!("package {package_id} is absent from graph"))?;
+    let dependencies = binding_dependency_ids(graph, package_id)?;
+    let mut names = package.repositories().to_vec();
+    for candidate in graph.packages() {
+        if dependencies.contains(candidate.id().as_str()) {
+            for repository in candidate.repositories() {
+                if !names.contains(repository) {
+                    names.push(repository.clone());
+                }
+            }
+        }
+    }
+    Ok(names)
+}
+
 fn ensure_driver_package_bases(
     graph: &WorkPackageGraph,
     command: &DriverRunCommand,
     package_id: &str,
     issuance: u64,
 ) -> Result<bool> {
-    let package = graph
-        .packages()
-        .iter()
-        .find(|package| package.id().as_str() == package_id)
-        .with_context(|| format!("package {package_id} is absent from graph"))?;
     let events = read_driver_journal(&command.journal_path)?;
-    for repository in package.repositories() {
+    for repository in delivered_repository_names(graph, package_id)? {
         if active_driver_events(&events).iter().any(|event| {
             matches!(event,
             DriverEvent::PackageBaseComposed { package, repository: recorded, .. }
                 | DriverEvent::PackageJoinConflicted { package, repository: recorded, .. }
-                if package == package_id && recorded == repository)
+                if package == package_id && recorded == &repository)
         }) {
             continue;
         }
         let source = command
             .repositories
             .iter()
-            .find(|(name, _)| name == repository)
+            .find(|(name, _)| name == &repository)
             .map(|(_, path)| path)
             .with_context(|| format!("missing repository mapping for `{repository}`"))?;
         let mut dependencies = Vec::new();
-        for dependency in package
-            .depends_on()
-            .iter()
-            .filter(|dependency| dependency.kind().is_binding())
-        {
+        for dependency_id in binding_dependency_ids(graph, package_id)? {
             let dependency_package = graph
                 .packages()
                 .iter()
-                .find(|candidate| candidate.id() == dependency.id())
-                .with_context(|| format!("dependency {} is absent", dependency.id().as_str()))?;
-            if !dependency_package.repositories().contains(repository) {
+                .find(|candidate| candidate.id().as_str() == dependency_id)
+                .with_context(|| format!("dependency {dependency_id} is absent"))?;
+            if !dependency_package.repositories().contains(&repository) {
                 continue;
             }
-            ensure_hardened_package_lineage(graph, command, dependency.id().as_str())?;
-            let issuance = completed_package_issuance(&events, dependency.id().as_str())?;
+            ensure_hardened_package_lineage(graph, command, &dependency_id)?;
+            let dependency_issuance = completed_package_issuance(&events, &dependency_id)?;
             dependencies.push(CompositionInput {
-                package: dependency.id().as_str().to_owned(),
+                package: dependency_id.clone(),
                 oid: git_oid(
                     source,
-                    &package_branch(graph, dependency.id().as_str(), issuance),
+                    &package_branch(graph, &dependency_id, dependency_issuance),
                 )?,
             });
         }
@@ -3591,7 +3629,7 @@ fn ensure_driver_package_bases(
             &command.journal_path,
             &format!("package-{package_id}-{repository}"),
             source,
-            graph_authored_ref(graph, repository)?,
+            graph_authored_ref(graph, &repository)?,
             &dependencies,
         ) {
             Ok(GitComposition::Clean { base_oid }) => append_driver_event(
@@ -3666,10 +3704,11 @@ fn driver_package_worktrees(
         .with_context(|| format!("package {package_id} is absent from graph"))?;
     let vision = DispatchVisionSource::parse(graph.vision().to_owned())?;
     let base_refs = driver_package_base_refs(command, package_id)?;
+    let delivered_repositories = delivered_repository_names(graph, package_id)?;
     let inputs = command
         .repositories
         .iter()
-        .filter(|(name, _)| package.repositories().contains(name))
+        .filter(|(name, _)| delivered_repositories.contains(name))
         .map(|(name, root)| -> Result<RepositoryDispatchInput> {
             let base_ref = match base_refs.get(name) {
                 Some(base_ref) => base_ref.clone(),
@@ -3722,6 +3761,36 @@ fn compose_driver_worker_brief(
     let worktrees = driver_package_worktrees(command, graph, package_id, issuance)?;
     let mut brief = compose_package_worker_brief(&goal, &criteria, graph, package_id, &worktrees)
         .context("failed to compose driver-owned worker brief")?;
+    let package = graph
+        .packages()
+        .iter()
+        .find(|candidate| candidate.id().as_str() == package_id)
+        .with_context(|| format!("package {package_id} is absent from graph"))?;
+    let delivered = worktrees
+        .iter()
+        .enumerate()
+        .filter(|(_, worktree)| {
+            !package
+                .repositories()
+                .iter()
+                .any(|name| name == worktree.repository())
+        })
+        .collect::<Vec<_>>();
+    if !delivered.is_empty() {
+        brief.push_str("
+## Delivered cross-repository dependency worktrees
+
+Binding dependency outputs are local and proven. Treat these worktrees as read-only inputs. Use these worktrees directly; do not probe public remotes for them. Changes in these dependency-only worktrees are outside this package and are not delivered.
+");
+        for (index, worktree) in delivered {
+            brief.push_str(&format!(
+                "- `{}`: `$PCE_WORKTREE_{index}` (`{}`)
+",
+                worktree.repository(),
+                worktree.path().display()
+            ));
+        }
+    }
     let events = read_driver_journal(&command.journal_path)?;
     let conflicts = events
         .iter()
@@ -3948,15 +4017,11 @@ fn issue_driver_package_dispatch(
             brief_path.display()
         )
     })?;
-    let package = graph
-        .packages()
-        .iter()
-        .find(|package| package.id().as_str() == package_id)
-        .with_context(|| format!("package {package_id} is absent from graph"))?;
+    let delivered_repositories = delivered_repository_names(graph, package_id)?;
     let repositories = command
         .repositories
         .iter()
-        .filter(|(name, _)| package.repositories().contains(name))
+        .filter(|(name, _)| delivered_repositories.contains(name))
         .cloned()
         .collect();
     let worker_arguments = vec![
@@ -6329,6 +6394,27 @@ fn package_repository_sources(
         .collect()
 }
 
+fn delivered_repository_sources(
+    graph: &WorkPackageGraph,
+    package_id: &str,
+    repositories: &[(String, PathBuf)],
+) -> Result<Vec<(String, PathBuf)>> {
+    let names = delivered_repository_names(graph, package_id)?;
+    let by_name = repositories
+        .iter()
+        .map(|(name, path)| (name.as_str(), path.as_path()))
+        .collect::<BTreeMap<_, _>>();
+    names
+        .into_iter()
+        .map(|name| {
+            by_name
+                .get(name.as_str())
+                .map(|path| (name.clone(), (*path).to_path_buf()))
+                .with_context(|| format!("driver omitted delivered repository mapping `{name}`"))
+        })
+        .collect()
+}
+
 fn graph_authored_ref<'a>(graph: &'a WorkPackageGraph, repository: &str) -> Result<&'a str> {
     graph
         .authored_ref(repository)
@@ -6820,12 +6906,7 @@ fn prepare_driver_materialization(
 
 fn execute_driver_criteria(command: DriverCriteriaCommand) -> Result<DriverStatusCommand> {
     let graph = read_driver_graph(&command.graph_path)?;
-    let package = graph
-        .packages()
-        .iter()
-        .find(|package| package.id().as_str() == command.package_id)
-        .with_context(|| format!("package {} is absent from graph", command.package_id))?;
-    let sources = package_repository_sources(package, &command.repositories)?;
+    let sources = delivered_repository_sources(&graph, &command.package_id, &command.repositories)?;
     let references = sources
         .iter()
         .map(|(name, source)| Ok((name.clone(), git_oid(source, "HEAD")?)))
@@ -10201,15 +10282,38 @@ fn parse_graph_command(action: &str, args: &[String]) -> Result<Command> {
     };
     match action {
         "check" if flag == "--file" && is_value(raw_value) => {
-            let strict = trailing.iter().any(|argument| argument == "--strict");
-            let repository_arguments = trailing
-                .iter()
-                .filter(|argument| argument.as_str() != "--strict")
-                .cloned()
-                .collect::<Vec<_>>();
+            let mut strict = false;
+            let mut journal = None;
+            let mut repository_arguments = Vec::new();
+            let mut index = 0;
+            while index < trailing.len() {
+                match trailing[index].as_str() {
+                    "--strict" if !strict => {
+                        strict = true;
+                        index += 1;
+                    }
+                    "--journal"
+                        if journal.is_none()
+                            && index + 1 < trailing.len()
+                            && is_value(&trailing[index + 1]) =>
+                    {
+                        journal = Some(PathBuf::from(&trailing[index + 1]));
+                        index += 2;
+                    }
+                    "--repository"
+                        if index + 1 < trailing.len() && is_value(&trailing[index + 1]) =>
+                    {
+                        repository_arguments.push(trailing[index].clone());
+                        repository_arguments.push(trailing[index + 1].clone());
+                        index += 2;
+                    }
+                    _ => bail!(USAGE),
+                }
+            }
             Ok(Command::GraphCheck {
                 path: PathBuf::from(raw_value),
                 repositories: parse_graph_repositories(&repository_arguments)?,
+                journal,
                 strict,
             })
         }
@@ -10394,6 +10498,13 @@ enum GraphAuthoringWarning {
         path: String,
         message: String,
     },
+    LineageDelivery {
+        package: String,
+        predecessor_package: String,
+        repository: String,
+        path: String,
+        message: String,
+    },
     ActOwnershipTitle {
         package: String,
         predecessor_package: String,
@@ -10427,6 +10538,25 @@ fn package_artifact_references(package: &pce_core::WorkPackage) -> Vec<(String, 
     references.sort();
     references.dedup();
     references
+}
+
+fn package_produced_artifacts(package: &pce_core::WorkPackage) -> Vec<(String, String)> {
+    let mut outputs = Vec::new();
+    for declaration in package.produces() {
+        for artifact in extract_conservative_artifact_references(declaration) {
+            let repository = match artifact.repository_index() {
+                Some(index) => package.repositories().get(index.position()),
+                None if package.repositories().len() == 1 => package.repositories().first(),
+                None => None,
+            };
+            if let Some(repository) = repository {
+                outputs.push((repository.clone(), artifact.path().to_owned()));
+            }
+        }
+    }
+    outputs.sort();
+    outputs.dedup();
+    outputs
 }
 
 fn strict_upstream_ids(graph: &WorkPackageGraph, package_id: &str) -> BTreeSet<String> {
@@ -10469,17 +10599,173 @@ fn artifact_exists_at_authored_ref(
     Ok(Some(output.status.success()))
 }
 
+fn lineage_delivery_warnings(
+    graph: &WorkPackageGraph,
+    repositories: &[(String, PathBuf)],
+    journal: &Path,
+) -> Result<Vec<GraphAuthoringWarning>> {
+    let contents = fs::read_to_string(journal)
+        .with_context(|| format!("failed to read driver journal {}", journal.display()))?;
+    let mut completed = BTreeSet::new();
+    let mut completed_issuances = BTreeMap::<String, u64>::new();
+    let mut worker_done_issuances = BTreeMap::<String, u64>::new();
+    let mut proven = BTreeMap::<(String, String), String>::new();
+    for (line_index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line)
+            .with_context(|| format!("invalid driver journal record {}", line_index + 1))?;
+        match value.get("event").and_then(Value::as_str) {
+            Some("worker-done") => {
+                if let (Some(package), Some(issuance)) = (
+                    value.get("package").and_then(Value::as_str),
+                    value.get("issuance").and_then(Value::as_u64),
+                ) {
+                    worker_done_issuances.insert(package.to_owned(), issuance);
+                }
+            }
+            Some("package-completed") => {
+                if let Some(package) = value.get("package").and_then(Value::as_str) {
+                    completed.insert(package.to_owned());
+                    if let Some(issuance) = worker_done_issuances.get(package) {
+                        completed_issuances.insert(package.to_owned(), *issuance);
+                    }
+                }
+            }
+            Some("driver-ref-materialized")
+                if value.pointer("/product/kind").and_then(Value::as_str)
+                    == Some("package-attempt") =>
+            {
+                if let (Some(package), Some(repository), Some(oid)) = (
+                    value.pointer("/product/package").and_then(Value::as_str),
+                    value.get("repository").and_then(Value::as_str),
+                    value.get("oid").and_then(Value::as_str),
+                ) {
+                    proven.insert((package.to_owned(), repository.to_owned()), oid.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    for package in graph.packages() {
+        let package_id = package.id().as_str();
+        let Some(issuance) = completed_issuances.get(package_id) else {
+            continue;
+        };
+        let branch = package_branch(graph, package_id, *issuance);
+        for repository in package.repositories() {
+            let (_, source) = repositories
+                .iter()
+                .find(|(name, _)| name == repository)
+                .with_context(|| {
+                    format!("lineage delivery check requires repository mapping `{repository}`")
+                })?;
+            let output = git_output(
+                source,
+                &["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
+            )?;
+            if output.status.success() {
+                let oid = String::from_utf8(output.stdout)
+                    .context("proven package ref oid is not UTF-8")?
+                    .trim()
+                    .to_owned();
+                proven.insert((package_id.to_owned(), repository.clone()), oid);
+            }
+        }
+    }
+    for package in graph
+        .packages()
+        .iter()
+        .filter(|package| completed.contains(package.id().as_str()))
+    {
+        let package_id = package.id().as_str();
+        for repository in package.repositories() {
+            if proven.contains_key(&(package_id.to_owned(), repository.clone())) {
+                continue;
+            }
+            let attempted_ref = completed_issuances.get(package_id).map_or_else(
+                || {
+                    format!(
+                        "pce/{}/{package_id}/attempt-<missing-worker-issuance>",
+                        graph.vision()
+                    )
+                },
+                |issuance| package_branch(graph, package_id, *issuance),
+            );
+            bail!(
+                "lineage delivery cannot resolve proven oid for completed package {package_id}, repository {repository}, attempted ref `{attempted_ref}`; retain the local package attempt ref or provide a compatible driver-ref-materialized package record before running graph check --journal"
+            );
+        }
+    }
+    let mut warnings = Vec::new();
+    let mut emitted = BTreeSet::new();
+    for (package_index, package) in graph.packages().iter().enumerate() {
+        let upstream = strict_upstream_ids(graph, package.id().as_str());
+        let referenced = package_artifact_references(package);
+        for predecessor in &graph.packages()[..package_index] {
+            let predecessor_id = predecessor.id().as_str();
+            if !completed.contains(predecessor_id) || upstream.contains(predecessor_id) {
+                continue;
+            }
+            for predecessor_repository in predecessor.repositories() {
+                let Some(oid) =
+                    proven.get(&(predecessor_id.to_owned(), predecessor_repository.clone()))
+                else {
+                    continue;
+                };
+                let (_, source) = repositories
+                    .iter()
+                    .find(|(name, _)| name == predecessor_repository)
+                    .with_context(|| format!("lineage delivery check requires repository mapping `{predecessor_repository}`"))?;
+                let authored = graph_authored_ref(graph, predecessor_repository)?;
+                let output = git_output(source, &["diff", "--name-only", authored, oid])?;
+                if !output.status.success() {
+                    bail!(
+                        "failed to inspect proven range for package {predecessor_id} repository {predecessor_repository}: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+                let changed = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::to_owned)
+                    .collect::<BTreeSet<_>>();
+                for (_, repository, path) in &referenced {
+                    let key = (
+                        package.id().as_str().to_owned(),
+                        predecessor_id.to_owned(),
+                        repository.clone(),
+                        path.clone(),
+                    );
+                    if repository == predecessor_repository
+                        && changed.contains(path)
+                        && emitted.insert(key)
+                    {
+                        warnings.push(GraphAuthoringWarning::LineageDelivery {
+                            package: package.id().as_str().to_owned(), predecessor_package: predecessor_id.to_owned(), repository: repository.clone(), path: path.clone(),
+                            message: "an earlier completed package changed a criterion-command path but is absent from this package's transitive depends_on delivery lineage".to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(warnings)
+}
+
 fn graph_authoring_warnings(
     path: &Path,
     graph: &WorkPackageGraph,
     repositories: &[(String, PathBuf)],
+    journal: Option<&Path>,
 ) -> Result<Vec<GraphAuthoringWarning>> {
-    let references = graph
+    let outputs = graph
         .packages()
         .iter()
-        .map(|package| (package.id().as_str(), package_artifact_references(package)))
+        .map(|package| (package.id().as_str(), package_produced_artifacts(package)))
         .collect::<BTreeMap<_, _>>();
     let mut warnings = Vec::new();
+    let mut emitted = BTreeSet::new();
     for package in graph.packages() {
         let upstream = strict_upstream_ids(graph, package.id().as_str());
         for (criterion, repository, artifact_path) in package_artifact_references(package) {
@@ -10488,31 +10774,61 @@ fn graph_authoring_warnings(
             {
                 continue;
             }
-            let strict_upstream_references = upstream
-                .iter()
-                .filter(|upstream_id| {
-                    references.get(upstream_id.as_str()).is_some_and(|items| {
-                        items
-                            .iter()
-                            .any(|(_, candidate_repository, candidate_path)| {
-                                candidate_repository == &repository
-                                    && candidate_path == &artifact_path
-                            })
+            let producer_ids = std::iter::once(package.id().as_str())
+                .chain(upstream.iter().map(String::as_str))
+                .filter(|id| {
+                    outputs.get(id).is_some_and(|items| {
+                        items.contains(&(repository.clone(), artifact_path.clone()))
                     })
                 })
-                .cloned()
+                .map(str::to_owned)
                 .collect::<Vec<_>>();
-            if !strict_upstream_references.is_empty() {
+            if !producer_ids.is_empty() {
                 continue;
             }
-            warnings.push(GraphAuthoringWarning::ArtifactProvenance {
-                package: package.id().as_str().to_owned(),
-                criterion,
-                repository,
-                path: artifact_path,
-                strict_upstream_references,
-                message: "artifact does not exist at the authored ref; a producer cannot be proven because the graph has no output declarations".to_owned(),
-            });
+            let key = (
+                "artifact-provenance",
+                package.id().as_str().to_owned(),
+                String::new(),
+                repository.clone(),
+                artifact_path.clone(),
+            );
+            if emitted.insert(key) {
+                warnings.push(GraphAuthoringWarning::ArtifactProvenance {
+                    package: package.id().as_str().to_owned(), criterion, repository, path: artifact_path,
+                    strict_upstream_references: Vec::new(),
+                    message: "artifact does not exist at the authored ref and is not declared in produces by this package or a strictly upstream package".to_owned(),
+                });
+            }
+        }
+    }
+    for (index, package) in graph.packages().iter().enumerate() {
+        let current_outputs = package_produced_artifacts(package);
+        for predecessor_package in &graph.packages()[..index] {
+            for (repository, artifact_path) in &current_outputs {
+                if package_produced_artifacts(predecessor_package)
+                    .contains(&(repository.clone(), artifact_path.clone()))
+                {
+                    let key = (
+                        "act-ownership-artifact",
+                        package.id().as_str().to_owned(),
+                        predecessor_package.id().as_str().to_owned(),
+                        repository.clone(),
+                        artifact_path.clone(),
+                    );
+                    if emitted.insert(key) {
+                        warnings.push(GraphAuthoringWarning::ActOwnershipArtifact {
+                            package: package.id().as_str().to_owned(),
+                            predecessor_package: predecessor_package.id().as_str().to_owned(),
+                            repository: repository.clone(),
+                            path: artifact_path.clone(),
+                            message:
+                                "two current graph packages declare the same produced artifact"
+                                    .to_owned(),
+                        });
+                    }
+                }
+            }
         }
     }
     if graph.plan_version() > 1 {
@@ -10524,23 +10840,28 @@ fn graph_authoring_warnings(
             Ok(bytes) => {
                 let predecessor = parse_work_package_graph(&bytes).with_context(|| format!("failed to validate predecessor graph {}", predecessor_path.display()))?;
                 let predecessor_ids = predecessor.packages().iter().map(|package| package.id().as_str()).collect::<BTreeSet<_>>();
-                let predecessor_references = predecessor.packages().iter().map(|package| (package, package_artifact_references(package))).collect::<Vec<_>>();
                 for package in graph.packages().iter().filter(|package| !predecessor_ids.contains(package.id().as_str())) {
-                    let current_references = package_artifact_references(package);
-                    for (predecessor_package, frozen_references) in &predecessor_references {
-                        for (_, repository, artifact_path) in &current_references {
-                            if frozen_references.iter().any(|(_, frozen_repository, frozen_path)| frozen_repository == repository && frozen_path == artifact_path) {
-                                warnings.push(GraphAuthoringWarning::ActOwnershipArtifact {
-                                    package: package.id().as_str().to_owned(), predecessor_package: predecessor_package.id().as_str().to_owned(), repository: repository.clone(), path: artifact_path.clone(),
-                                    message: "new package references the exact canonical artifact already referenced by a predecessor package".to_owned(),
-                                });
+                    let current_outputs = package_produced_artifacts(package);
+                    for predecessor_package in predecessor.packages() {
+                        for (repository, artifact_path) in &current_outputs {
+                            if package_produced_artifacts(predecessor_package).contains(&(repository.clone(), artifact_path.clone())) {
+                                let key = ("act-ownership-artifact", package.id().as_str().to_owned(), predecessor_package.id().as_str().to_owned(), repository.clone(), artifact_path.clone());
+                                if emitted.insert(key) {
+                                    warnings.push(GraphAuthoringWarning::ActOwnershipArtifact {
+                                        package: package.id().as_str().to_owned(), predecessor_package: predecessor_package.id().as_str().to_owned(), repository: repository.clone(), path: artifact_path.clone(),
+                                        message: "new package declares the same produced artifact as a predecessor package".to_owned(),
+                                    });
+                                }
                             }
                         }
                         if titles_conservatively_overlap(package.title(), predecessor_package.title()) {
-                            warnings.push(GraphAuthoringWarning::ActOwnershipTitle {
-                                package: package.id().as_str().to_owned(), predecessor_package: predecessor_package.id().as_str().to_owned(), title: package.title().to_owned(),
-                                message: "new package title has conservative normalized overlap with a predecessor package title".to_owned(),
-                            });
+                            let key = ("act-ownership-title", package.id().as_str().to_owned(), predecessor_package.id().as_str().to_owned(), String::new(), package.title().to_owned());
+                            if emitted.insert(key) {
+                                warnings.push(GraphAuthoringWarning::ActOwnershipTitle {
+                                    package: package.id().as_str().to_owned(), predecessor_package: predecessor_package.id().as_str().to_owned(), title: package.title().to_owned(),
+                                    message: "new package title has conservative normalized overlap with a predecessor package title".to_owned(),
+                                });
+                            }
                         }
                     }
                 }
@@ -10551,16 +10872,24 @@ fn graph_authoring_warnings(
             Err(error) => return Err(error).with_context(|| format!("failed to read predecessor graph {}", predecessor_path.display())),
         }
     }
+    if let Some(journal) = journal {
+        warnings.extend(lineage_delivery_warnings(graph, repositories, journal)?);
+    }
     Ok(warnings)
 }
 
-fn run_graph_check(path: &Path, repositories: &[(String, PathBuf)], strict: bool) -> Result<()> {
+fn run_graph_check(
+    path: &Path,
+    repositories: &[(String, PathBuf)],
+    journal: Option<&Path>,
+    strict: bool,
+) -> Result<()> {
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read work-package graph {}", path.display()))?;
     let graph = parse_work_package_graph(&bytes)
         .with_context(|| format!("failed to validate work-package graph {}", path.display()))?;
     verify_graph_repository_refs(&graph, repositories)?;
-    let warnings = graph_authoring_warnings(path, &graph, repositories)?;
+    let warnings = graph_authoring_warnings(path, &graph, repositories, journal)?;
     if strict && !warnings.is_empty() {
         bail!(
             "graph check strict mode refused {} authoring warning(s): {}",
@@ -23251,5 +23580,22 @@ None.
             crate::validate_codex_output_schema(&path)
                 .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
         }
+    }
+
+    #[test]
+    fn binding_dependencies_deliver_foreign_repositories_transitively() {
+        let graph = pce_core::parse_work_package_graph(br#"{
+          "vision":"delivery","plan_version":1,
+          "authored_at_refs":{"library":"main","bridge":"main","app":"main"},
+          "packages":[
+            {"id":"A","title":"library","repositories":["library"],"criteria":[{"name":"a","input":"x","observation":"x","command":"true"}],"depends_on":[]},
+            {"id":"B","title":"bridge","repositories":["bridge"],"criteria":[{"name":"b","input":"x","observation":"x","command":"true"}],"depends_on":[{"id":"A","kind":"buildability","reason":"imports library"}]},
+            {"id":"C","title":"app","repositories":["app"],"criteria":[{"name":"c","input":"x","observation":"x","command":"true"}],"depends_on":[{"id":"B","kind":"safety","reason":"bridge proves migration"}]}
+          ]}"#).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            crate::delivered_repository_names(&graph, "C")
+                .unwrap_or_else(|error| panic!("{error}")),
+            vec!["app", "library", "bridge"]
+        );
     }
 }

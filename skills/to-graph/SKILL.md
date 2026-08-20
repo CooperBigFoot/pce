@@ -96,7 +96,10 @@ Rules that decide the hard cases:
   that needs the named thing refuses to invent it. The incidence run stalled three workers on one
   unowned name before the graph was revised to add its owning package.
 
-Give each package an id, a title, the repositories it touches, and its criteria.
+Give each package an id, a title, the repositories it touches, the repository-relative artifacts it
+owns in `produces`, and its criteria. Shared harness files belong in `produces` only for the package
+that creates or changes ownership of them. Merely executing or reading a shared harness is not
+production.
 
 ## 4. Write each criterion as a command
 
@@ -113,6 +116,14 @@ When an observation asserts a numeric threshold, tolerance, or bound, the number
 literally in the criterion's `command`. The called script must take it as a required flag with no
 script-owned default. Criteria invariance protects command bytes, not a constant hidden in a script,
 and `graph check` cannot infer which observations assert numeric standards.
+
+A fixture is a recording, not the criterion. The command must enforce the criterion's prose rather
+than equality with one recorded run. In the seven-basin campaign, the prose required every recorded
+ambiguous reach pair to become unambiguous. Its verifier also compared each resolved pair with a
+hardcoded transcript of campaign 1. Campaign 2 produced different valid pairs, so the recording had
+quietly replaced the criterion. A correct command reads the current campaign record and checks that
+each pair is resolved. It does not pin the old pair values unless the prose explicitly requires those
+exact values. Review every fixture-backed command for this substitution before freezing.
 
 Prefer a criterion that proves a capability over one that names one privileged artifact. For
 example, require prefix listing and a read beneath that prefix rather than reading one named S3
@@ -187,7 +198,7 @@ frozen; nothing reads it as authority yet.
 ```bash
 pce graph check --file <vision-dir>/graph.json \
   --repository <NAME>=<ABSOLUTE_PATH> \
-  [--repository <NAME>=<ABSOLUTE_PATH> ...] [--strict]
+  [--repository <NAME>=<ABSOLUTE_PATH> ...] [--journal <driver-journal.jsonl>] [--strict]
 ```
 
 Supply exactly one path for every repository named by the graph. The check resolves each
@@ -288,6 +299,7 @@ The frozen shape is:
       "id": "RR1",
       "title": "The shared store reader",
       "repositories": ["RivRetrieve"],
+      "produces": ["src/store/reader.py"],
       "criteria": [
         {
           "name": "Unrecognised manifest is refused",
@@ -302,6 +314,7 @@ The frozen shape is:
       "id": "RR2",
       "title": "The certification harness",
       "repositories": ["RivRetrieve"],
+      "produces": ["tests/store/test_certification.py"],
       "criteria": [
         {
           "name": "Verification catches a mutated store",

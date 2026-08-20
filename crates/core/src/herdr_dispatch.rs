@@ -609,8 +609,8 @@ fn worktree_component(index: usize, repository: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`HerdrDispatchPlanError`] unless repository inputs are a one-to-one match for the
-/// package repository set.
+/// Returns [`HerdrDispatchPlanError`] unless inputs uniquely contain every package repository.
+/// Additional inputs are dependency repositories delivered after the package-owned repositories.
 pub fn compose_herdr_work_package_dispatch(
     vision: &DispatchVisionSource,
     package: &WorkPackage,
@@ -635,7 +635,6 @@ pub fn compose_herdr_work_package_dispatch(
         if by_name
             .insert(repository.repository.as_str(), repository)
             .is_some()
-            || !package_repositories.contains(repository.repository.as_str())
         {
             return Err(HerdrDispatchPlanError::RepositoryInputMismatch {
                 repository: repository.repository.clone(),
@@ -652,8 +651,12 @@ pub fn compose_herdr_work_package_dispatch(
 
     let agent_name = derive_herdr_agent_name(vision, package.id(), attempt);
     let package_root = worktree_root.0.join(agent_name.as_str());
-    let mut worktrees = Vec::with_capacity(package.repositories().len());
-    for (index, repository_name) in package.repositories().iter().enumerate() {
+    let mut ordered_repositories = package.repositories().iter().collect::<Vec<_>>();
+    ordered_repositories.extend(repositories.iter().filter_map(|input| {
+        (!package_repositories.contains(input.repository.as_str())).then_some(&input.repository)
+    }));
+    let mut worktrees = Vec::with_capacity(ordered_repositories.len());
+    for (index, repository_name) in ordered_repositories.into_iter().enumerate() {
         let repository = by_name[repository_name.as_str()];
         let path = package_root.join(worktree_component(index, repository_name));
         let label = format!(
@@ -1097,6 +1100,38 @@ mod tests {
                 .argv()
                 .iter()
                 .any(|argument| argument == "w8")
+        );
+    }
+    #[test]
+    fn dependency_repository_input_is_delivered_after_owned_repositories() {
+        let graph = package_graph(&["app"]);
+        let inputs = vec![repository("app"), repository("library")];
+        let plan = compose_herdr_work_package_dispatch(
+            &DispatchVisionSource::parse("vision-one").unwrap_or_else(|error| panic!("{error}")),
+            &graph.packages()[0],
+            DispatchAttempt::parse(1).unwrap_or_else(|error| panic!("{error}")),
+            None,
+            &inputs,
+            &AbsoluteWorktreeRoot::parse(PathBuf::from("/worktrees"))
+                .unwrap_or_else(|error| panic!("{error}")),
+            &AbsoluteDispatchTemporaryDirectory::parse(PathBuf::from("/binary/tmp"))
+                .unwrap_or_else(|error| panic!("{error}")),
+            WorkerEnvironment::parse(BTreeMap::new()).unwrap_or_else(|error| panic!("{error}")),
+            WorkerArgumentVector::parse(vec!["prime-agent".to_owned()])
+                .unwrap_or_else(|error| panic!("{error}")),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            plan.worktrees()
+                .iter()
+                .map(|worktree| worktree.repository())
+                .collect::<Vec<_>>(),
+            vec!["app", "library"]
+        );
+        assert!(
+            plan.environment()
+                .iter()
+                .any(|(name, value)| name == "PCE_WORKTREE_1" && value.ends_with("/01-library"))
         );
     }
 }

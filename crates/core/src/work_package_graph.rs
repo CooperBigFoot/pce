@@ -115,6 +115,7 @@ pub struct WorkPackage {
     title: String,
     repositories: Vec<String>,
     criteria: Vec<WorkPackageCriterion>,
+    produces: Vec<String>,
     depends_on: Vec<WorkPackageDependency>,
 }
 impl WorkPackage {
@@ -133,6 +134,10 @@ impl WorkPackage {
     /// Return executable completion criteria without executing them.
     pub fn criteria(&self) -> &[WorkPackageCriterion] {
         &self.criteria
+    }
+    /// Return repository-relative artifacts this package owns and produces.
+    pub fn produces(&self) -> &[String] {
+        &self.produces
     }
     /// Return the package's typed dependencies.
     pub fn depends_on(&self) -> &[WorkPackageDependency] {
@@ -228,6 +233,8 @@ struct RawPackage {
     title: String,
     repositories: Vec<String>,
     criteria: Vec<RawCriterion>,
+    #[serde(default)]
+    produces: Vec<String>,
     depends_on: Vec<RawDependency>,
 }
 #[derive(Debug, Deserialize)]
@@ -276,6 +283,14 @@ pub enum WorkPackageGraphError {
     /// A package identifier occurs more than once.
     #[error("duplicate package id {package}")]
     DuplicatePackage { package: String },
+    /// A package declares the same produced artifact more than once.
+    #[error("package {package} declares produced artifact {artifact} more than once")]
+    DuplicateProducedArtifact { package: String, artifact: String },
+    /// A produced artifact is not one unambiguous repository-relative path.
+    #[error(
+        "package {package} has invalid produced artifact {artifact}: use a repository-relative path, prefixed by $PCE_WORKTREE_N/ for multi-repository packages"
+    )]
+    InvalidProducedArtifact { package: String, artifact: String },
     /// A dependency names no package in this graph.
     #[error("package {package} references unknown dependency {dependency}")]
     UnknownDependency { package: String, dependency: String },
@@ -326,6 +341,38 @@ fn nonempty(
     } else {
         Ok(())
     }
+}
+
+fn produced_artifact_is_unambiguous(artifact: &str, repository_count: usize) -> bool {
+    let (repository_index, path) =
+        artifact
+            .strip_prefix("$PCE_WORKTREE_")
+            .map_or((None, artifact), |rest| {
+                rest.split_once('/')
+                    .map_or((Some(usize::MAX), ""), |(index, path)| {
+                        (index.parse::<usize>().ok(), path)
+                    })
+            });
+    if repository_count > 1 && repository_index.is_none() {
+        return false;
+    }
+    if repository_index.is_some_and(|index| index >= repository_count) {
+        return false;
+    }
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with('-')
+        && !path.contains("://")
+        && !path
+            .chars()
+            .any(|character| "*?[]{}$`|;&<>()!\\\"'".contains(character))
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && (path.contains('/')
+            || path
+                .rsplit_once('.')
+                .is_some_and(|(stem, suffix)| !stem.is_empty() && !suffix.is_empty()))
 }
 
 /// Parse and semantically validate exact graph bytes.
@@ -387,6 +434,26 @@ pub fn parse_work_package_graph(bytes: &[u8]) -> Result<WorkPackageGraph, WorkPa
             nonempty(&criterion.input, "input", &location)?;
             nonempty(&criterion.observation, "observation", &location)?;
             nonempty(&criterion.command, "command", &location)?;
+        }
+        let mut produced = HashSet::new();
+        for artifact in &package.produces {
+            nonempty(
+                artifact,
+                "produces artifact",
+                format!("package {}", package.id),
+            )?;
+            if !produced_artifact_is_unambiguous(artifact, package.repositories.len()) {
+                return Err(WorkPackageGraphError::InvalidProducedArtifact {
+                    package: package.id.clone(),
+                    artifact: artifact.clone(),
+                });
+            }
+            if !produced.insert(artifact.as_str()) {
+                return Err(WorkPackageGraphError::DuplicateProducedArtifact {
+                    package: package.id.clone(),
+                    artifact: artifact.clone(),
+                });
+            }
         }
     }
     let repositories = raw
@@ -491,6 +558,7 @@ pub fn parse_work_package_graph(bytes: &[u8]) -> Result<WorkPackageGraph, WorkPa
                         command: c.command,
                     })
                     .collect(),
+                produces: p.produces,
                 depends_on: p
                     .depends_on
                     .into_iter()

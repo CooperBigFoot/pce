@@ -133,6 +133,13 @@
             "$ref": "#/$defs/dependency"
           },
           "uniqueItems": true
+        },
+        "produces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonempty"
+          },
+          "uniqueItems": true
         }
       }
     }
