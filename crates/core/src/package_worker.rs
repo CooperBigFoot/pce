@@ -4,7 +4,7 @@
 //! A brief gives one worker global intent, graph-wide summary context, and exactly one package's
 //! executable detail. An outcome is the worker's strict, non-self-certifying status report.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -244,8 +244,8 @@ fn render_cross_package_file_references(
 ///
 /// # Errors
 ///
-/// Returns [`PackageWorkerError`] if the package is absent or its repository worktrees are not an
-/// exact one-to-one match.
+/// Returns [`PackageWorkerError`] if the package is absent, an owned repository is missing, or a
+/// repository worktree is repeated. Extra worktrees carry binding dependency repositories.
 pub fn compose_package_worker_brief(
     goal: &VisionGoal,
     vision_criteria: &AcceptanceCriteria,
@@ -260,17 +260,11 @@ pub fn compose_package_worker_brief(
         .ok_or_else(|| PackageWorkerError::UnknownPackage {
             package: package_id.to_owned(),
         })?;
-    let expected = package
-        .repositories()
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
     let mut by_repository = HashMap::new();
     for worktree in worktrees {
-        if !expected.contains(worktree.repository.as_str())
-            || by_repository
-                .insert(worktree.repository.as_str(), worktree)
-                .is_some()
+        if by_repository
+            .insert(worktree.repository.as_str(), worktree)
+            .is_some()
         {
             return Err(PackageWorkerError::RepositoryWorktreeMismatch {
                 repository: worktree.repository.clone(),
