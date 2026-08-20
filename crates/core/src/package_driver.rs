@@ -464,7 +464,16 @@ pub enum DriverEvent {
         observation: DispatchEnvironmentObservation,
         detail: String,
     },
-    /// Best-effort cleanup was attempted only after this package attempt completed.
+    /// One exact worktree capability and its evidence-retention deadline were recorded at dispatch.
+    DispatchWorktreeOpened {
+        package: String,
+        issuance: u64,
+        repository: String,
+        source: String,
+        path: String,
+        retain_until_unix_secs: u64,
+    },
+    /// Best-effort workspace cleanup was attempted after a terminal attempt's retention window.
     DispatchPaneCleanup {
         package: String,
         issuance: u64,
@@ -472,6 +481,14 @@ pub enum DriverEvent {
         workspace_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         herdr_session: Option<String>,
+        outcome: PaneCleanupOutcome,
+        detail: String,
+    },
+    /// Best-effort worktree cleanup was attempted after a terminal attempt's retention window.
+    DispatchWorktreeCleanup {
+        package: String,
+        issuance: u64,
+        path: String,
         outcome: PaneCleanupOutcome,
         detail: String,
     },
@@ -1309,9 +1326,11 @@ pub fn derive_driver_snapshot(
             | DriverEvent::WorkerSpawnFailed { package, .. }
             | DriverEvent::WorkerDispatched { package, .. }
             | DriverEvent::DispatchPaneOpened { package, .. }
+            | DriverEvent::DispatchWorktreeOpened { package, .. }
             | DriverEvent::DispatchWorkerIdentified { package, .. }
             | DriverEvent::DispatchEnvironmentObserved { package, .. }
             | DriverEvent::DispatchPaneCleanup { package, .. }
+            | DriverEvent::DispatchWorktreeCleanup { package, .. }
             | DriverEvent::DispatchPaneOwnershipUnresolved { package, .. }
             | DriverEvent::DriverStoppedWaiting { package, .. }
             | DriverEvent::WorkerDone { package, .. }
@@ -1512,6 +1531,7 @@ pub fn derive_driver_snapshot(
                 };
             }
             DriverEvent::DispatchPaneOpened { issuance, .. }
+            | DriverEvent::DispatchWorktreeOpened { issuance, .. }
             | DriverEvent::DispatchWorkerIdentified { issuance, .. }
             | DriverEvent::DispatchEnvironmentObserved { issuance, .. }
             | DriverEvent::DispatchPaneOwnershipUnresolved { issuance, .. } => match state {
@@ -1525,8 +1545,9 @@ pub fn derive_driver_snapshot(
                     });
                 }
             },
-            DriverEvent::DispatchPaneCleanup { issuance, .. } => {
-                if *issuance == 0 || !matches!(state, DriverPackageState::Complete) {
+            DriverEvent::DispatchPaneCleanup { issuance, .. }
+            | DriverEvent::DispatchWorktreeCleanup { issuance, .. } => {
+                if *issuance == 0 {
                     return Err(PackageDriverError::UnmatchedOutcome {
                         package: package.clone(),
                         issuance: *issuance,
@@ -1878,7 +1899,7 @@ pub fn derive_driver_snapshot(
     })
 }
 
-/// One exact pane capability belonging to a package attempt that completed.
+/// One exact pane capability belonging to a terminal package attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingPaneCleanup {
     package: String,
@@ -1889,37 +1910,63 @@ pub struct PendingPaneCleanup {
 }
 
 impl PendingPaneCleanup {
-    /// Return the completed package identity.
+    /// Return the terminal package identity.
     pub fn package(&self) -> &str {
         &self.package
     }
-
-    /// Return the attempt whose worker and gate panes may be removed.
+    /// Return the terminal attempt.
     pub const fn issuance(&self) -> u64 {
         self.issuance
     }
-
     /// Return the exact pane capability supplied by Herdr at creation.
     pub fn pane_id(&self) -> &str {
         &self.pane_id
     }
-
-    /// Return the exact worktree workspace containing the run-created root pane.
+    /// Return the exact workspace containing the run-created root pane.
     pub fn workspace_id(&self) -> &str {
         &self.workspace_id
     }
-
-    /// Return the Herdr session that scopes the capability, if it is not the default session.
+    /// Return the Herdr session that scopes the capability.
     pub fn herdr_session(&self) -> Option<&str> {
         self.herdr_session.as_deref()
     }
 }
 
-/// Derive exact, not-yet-attempted cleanup targets only for completed package attempts.
-pub fn pending_completed_pane_cleanups(events: &[DriverEvent]) -> Vec<PendingPaneCleanup> {
+/// One exact git worktree belonging to a terminal package attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWorktreeCleanup {
+    package: String,
+    issuance: u64,
+    repository: String,
+    source: String,
+    path: String,
+}
+impl PendingWorktreeCleanup {
+    /// Return the terminal package identity.
+    pub fn package(&self) -> &str {
+        &self.package
+    }
+    /// Return the terminal attempt.
+    pub const fn issuance(&self) -> u64 {
+        self.issuance
+    }
+    /// Return the repository name.
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+    /// Return the source repository used to create the worktree.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    /// Return the exact worktree path.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+fn terminal_attempts(events: &[DriverEvent]) -> HashSet<(&str, u64)> {
+    let mut terminal = HashSet::new();
     let mut last_done = HashMap::<&str, u64>::new();
-    let mut completed = HashSet::<(&str, u64)>::new();
-    let mut accounted = HashSet::<(&str, u64, &str)>::new();
     for event in events {
         match event {
             DriverEvent::WorkerDone { package, issuance } => {
@@ -1927,20 +1974,92 @@ pub fn pending_completed_pane_cleanups(events: &[DriverEvent]) -> Vec<PendingPan
             }
             DriverEvent::PackageCompleted { package } => {
                 if let Some(issuance) = last_done.get(package.as_str()) {
-                    completed.insert((package, *issuance));
+                    terminal.insert((package.as_str(), *issuance));
                 }
             }
-            DriverEvent::DispatchPaneCleanup {
-                package,
-                issuance,
-                pane_id,
-                ..
+            DriverEvent::WorkerFailed {
+                package, issuance, ..
+            }
+            | DriverEvent::PackageParked {
+                package, issuance, ..
+            }
+            | DriverEvent::WorkerEnvironmentFailed {
+                package, issuance, ..
+            }
+            | DriverEvent::PackageEnvironmentBlocked {
+                package, issuance, ..
+            }
+            | DriverEvent::WorkerSpawnFailed {
+                package, issuance, ..
+            }
+            | DriverEvent::GateFailed {
+                package, issuance, ..
+            }
+            | DriverEvent::PackageGateBlocked {
+                package, issuance, ..
             } => {
-                accounted.insert((package, *issuance, pane_id));
+                terminal.insert((package.as_str(), *issuance));
+            }
+            DriverEvent::RecoveryParked {
+                package, attempts, ..
+            } => {
+                if let Some(issuance) = attempts.iter().rev().find_map(|attempt| attempt.issuance) {
+                    terminal.insert((package.as_str(), issuance));
+                }
+            }
+            DriverEvent::DriverAborted { .. } => {
+                for candidate in events {
+                    if let DriverEvent::WorkerDispatched { package, issuance } = candidate {
+                        terminal.insert((package.as_str(), *issuance));
+                    }
+                }
             }
             _ => {}
         }
     }
+    terminal
+}
+
+/// Derive exact workspace cleanup targets whose attempts are terminal and retention has elapsed.
+pub fn pending_terminal_pane_cleanups(
+    events: &[DriverEvent],
+    now_unix_secs: u64,
+) -> Vec<PendingPaneCleanup> {
+    pending_terminal_pane_cleanups_with_legacy_deadline(events, now_unix_secs, None)
+}
+
+/// Derive terminal workspace targets, applying one conservative deadline to legacy journals.
+pub fn pending_terminal_pane_cleanups_with_legacy_deadline(
+    events: &[DriverEvent],
+    now_unix_secs: u64,
+    legacy_retain_until_unix_secs: Option<u64>,
+) -> Vec<PendingPaneCleanup> {
+    let terminal = terminal_attempts(events);
+    let deadlines = events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::DispatchWorktreeOpened {
+                package,
+                issuance,
+                retain_until_unix_secs,
+                ..
+            } => Some(((package.as_str(), *issuance), *retain_until_unix_secs)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let accounted = events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::DispatchPaneCleanup {
+                package,
+                issuance,
+                pane_id,
+                outcome: PaneCleanupOutcome::Closed,
+                ..
+            } => Some((package.as_str(), *issuance, pane_id.as_str())),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
     events
         .iter()
         .filter_map(|event| match event {
@@ -1950,7 +2069,12 @@ pub fn pending_completed_pane_cleanups(events: &[DriverEvent]) -> Vec<PendingPan
                 pane_id,
                 workspace_id,
                 herdr_session,
-            } if completed.contains(&(package.as_str(), *issuance))
+            } if terminal.contains(&(package.as_str(), *issuance))
+                && deadlines
+                    .get(&(package.as_str(), *issuance))
+                    .copied()
+                    .or(legacy_retain_until_unix_secs)
+                    .is_some_and(|deadline| deadline <= now_unix_secs)
                 && !accounted.contains(&(package.as_str(), *issuance, pane_id.as_str())) =>
             {
                 Some(PendingPaneCleanup {
@@ -1964,6 +2088,57 @@ pub fn pending_completed_pane_cleanups(events: &[DriverEvent]) -> Vec<PendingPan
             _ => None,
         })
         .collect()
+}
+
+/// Derive exact worktree cleanup targets whose attempts are terminal and retention has elapsed.
+pub fn pending_terminal_worktree_cleanups(
+    events: &[DriverEvent],
+    now_unix_secs: u64,
+) -> Vec<PendingWorktreeCleanup> {
+    let terminal = terminal_attempts(events);
+    let accounted = events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::DispatchWorktreeCleanup {
+                package,
+                issuance,
+                path,
+                outcome: PaneCleanupOutcome::Closed,
+                ..
+            } => Some((package.as_str(), *issuance, path.as_str())),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::DispatchWorktreeOpened {
+                package,
+                issuance,
+                repository,
+                source,
+                path,
+                retain_until_unix_secs,
+            } if terminal.contains(&(package.as_str(), *issuance))
+                && *retain_until_unix_secs <= now_unix_secs
+                && !accounted.contains(&(package.as_str(), *issuance, path.as_str())) =>
+            {
+                Some(PendingWorktreeCleanup {
+                    package: package.clone(),
+                    issuance: *issuance,
+                    repository: repository.clone(),
+                    source: source.clone(),
+                    path: path.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Backward-compatible completed cleanup view. New resources require a recorded retention deadline.
+pub fn pending_completed_pane_cleanups(events: &[DriverEvent]) -> Vec<PendingPaneCleanup> {
+    pending_terminal_pane_cleanups(events, u64::MAX)
 }
 
 /// Construct the zero-charge outcome for one incomplete gate judgment from durable history.
@@ -2799,6 +2974,14 @@ mod tests {
                 workspace_id: "owned-workspace".to_owned(),
                 herdr_session: Some("pce-work".to_owned()),
             },
+            DriverEvent::DispatchWorktreeOpened {
+                package: "A".to_owned(),
+                issuance: 2,
+                repository: "r".to_owned(),
+                source: "/source".to_owned(),
+                path: "/worktree".to_owned(),
+                retain_until_unix_secs: 0,
+            },
             DriverEvent::WorkerDone {
                 package: "A".to_owned(),
                 issuance: 2,
@@ -2850,8 +3033,149 @@ mod tests {
                 .iter()
                 .map(super::PendingPaneCleanup::pane_id)
                 .collect::<Vec<_>>(),
-            ["completed-gate"]
+            ["completed-worker", "completed-gate"]
         );
+    }
+
+    #[test]
+    fn terminal_cleanup_waits_for_retention_and_includes_parked_attempts() {
+        let events = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 7,
+            },
+            DriverEvent::DispatchPaneOpened {
+                package: "A".to_owned(),
+                issuance: 7,
+                pane_id: "pane-7".to_owned(),
+                workspace_id: "workspace-7".to_owned(),
+                herdr_session: None,
+            },
+            DriverEvent::DispatchWorktreeOpened {
+                package: "A".to_owned(),
+                issuance: 7,
+                repository: "r".to_owned(),
+                source: "/source".to_owned(),
+                path: "/owned/attempt-7".to_owned(),
+                retain_until_unix_secs: 200,
+            },
+            DriverEvent::PackageParked {
+                package: "A".to_owned(),
+                issuance: 7,
+                reason: "specification dispute".to_owned(),
+            },
+        ];
+        assert!(super::pending_terminal_pane_cleanups(&events, 199).is_empty());
+        assert!(super::pending_terminal_worktree_cleanups(&events, 199).is_empty());
+        assert_eq!(
+            super::pending_terminal_pane_cleanups(&events, 200)[0].workspace_id(),
+            "workspace-7"
+        );
+        assert_eq!(
+            super::pending_terminal_worktree_cleanups(&events, 200)[0].path(),
+            "/owned/attempt-7"
+        );
+    }
+
+    #[test]
+    fn failed_cleanup_remains_pending_until_a_closed_outcome_is_recorded() {
+        let mut events = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 9,
+            },
+            DriverEvent::DispatchWorktreeOpened {
+                package: "A".to_owned(),
+                issuance: 9,
+                repository: "r".to_owned(),
+                source: "/source".to_owned(),
+                path: "/owned/retry".to_owned(),
+                retain_until_unix_secs: 0,
+            },
+            DriverEvent::WorkerFailed {
+                package: "A".to_owned(),
+                issuance: 9,
+                reason: "worker failed".to_owned(),
+            },
+            DriverEvent::DispatchWorktreeCleanup {
+                package: "A".to_owned(),
+                issuance: 9,
+                path: "/owned/retry".to_owned(),
+                outcome: super::PaneCleanupOutcome::Failed,
+                detail: "git unavailable".to_owned(),
+            },
+        ];
+        assert_eq!(
+            super::pending_terminal_worktree_cleanups(&events, 1).len(),
+            1
+        );
+        events.push(DriverEvent::DispatchWorktreeCleanup {
+            package: "A".to_owned(),
+            issuance: 9,
+            path: "/owned/retry".to_owned(),
+            outcome: super::PaneCleanupOutcome::Closed,
+            detail: "removed".to_owned(),
+        });
+        assert!(super::pending_terminal_worktree_cleanups(&events, 1).is_empty());
+    }
+
+    #[test]
+    fn explicit_sweep_applies_retention_to_legacy_terminal_workspace_capabilities() {
+        let events = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 3,
+            },
+            DriverEvent::DispatchPaneOpened {
+                package: "A".to_owned(),
+                issuance: 3,
+                pane_id: "legacy-pane".to_owned(),
+                workspace_id: "legacy-workspace".to_owned(),
+                herdr_session: None,
+            },
+            DriverEvent::PackageParked {
+                package: "A".to_owned(),
+                issuance: 3,
+                reason: "legacy park".to_owned(),
+            },
+        ];
+        assert!(super::pending_terminal_pane_cleanups(&events, u64::MAX).is_empty());
+        assert!(
+            super::pending_terminal_pane_cleanups_with_legacy_deadline(&events, 99, Some(100))
+                .is_empty()
+        );
+        assert_eq!(
+            super::pending_terminal_pane_cleanups_with_legacy_deadline(&events, 100, Some(100))[0]
+                .workspace_id(),
+            "legacy-workspace"
+        );
+    }
+
+    #[test]
+    fn sweep_derivation_refuses_live_attempt_resources() {
+        let events = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 8,
+            },
+            DriverEvent::DispatchPaneOpened {
+                package: "A".to_owned(),
+                issuance: 8,
+                pane_id: "live-pane".to_owned(),
+                workspace_id: "live-workspace".to_owned(),
+                herdr_session: None,
+            },
+            DriverEvent::DispatchWorktreeOpened {
+                package: "A".to_owned(),
+                issuance: 8,
+                repository: "r".to_owned(),
+                source: "/source".to_owned(),
+                path: "/owned/live".to_owned(),
+                retain_until_unix_secs: 0,
+            },
+        ];
+        assert!(super::pending_terminal_pane_cleanups(&events, u64::MAX).is_empty());
+        assert!(super::pending_terminal_worktree_cleanups(&events, u64::MAX).is_empty());
     }
 
     #[test]

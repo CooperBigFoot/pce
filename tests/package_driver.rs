@@ -1767,3 +1767,145 @@ printf '%s' '{"outcome":"mis-specified","fault":{"kind":"missing-dependency","id
     assert_eq!(status["packages"][0][1]["state"], "parked");
     assert_eq!(status["packages"][0][1]["reason"], expected);
 }
+
+#[test]
+fn sweep_reclaims_terminal_resources_and_refuses_live_dispatch_resources() {
+    let temp = TempDir::new().expect("tempdir");
+    let journal = temp.path().join("driver.jsonl");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("source directory");
+    let terminal = temp.path().join("terminal-worktree");
+    let live = temp.path().join("live-worktree");
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"dispatch-worktree-opened","package":"A","issuance":1,"repository":"repo","source":source,"path":terminal,"retain_until_unix_secs":0}),
+    );
+    append(
+        &journal,
+        json!({"event":"package-parked","package":"A","issuance":1,"reason":"blocked"}),
+    );
+    append(
+        &journal,
+        json!({"event":"dispatch-worktree-cleanup","package":"A","issuance":1,"path":terminal,"outcome":"failed","detail":"transient git failure"}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"B","issuance":2}),
+    );
+    append(
+        &journal,
+        json!({"event":"dispatch-worktree-opened","package":"B","issuance":2,"repository":"repo","source":source,"path":live,"retain_until_unix_secs":0}),
+    );
+    let already_closed = temp.path().join("already-closed-worktree");
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"C","issuance":3}),
+    );
+    append(
+        &journal,
+        json!({"event":"dispatch-worktree-opened","package":"C","issuance":3,"repository":"repo","source":source,"path":already_closed,"retain_until_unix_secs":0}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-failed","package":"C","issuance":3,"reason":"failed"}),
+    );
+    append(
+        &journal,
+        json!({"event":"dispatch-worktree-cleanup","package":"C","issuance":3,"path":already_closed,"outcome":"closed","detail":"removed"}),
+    );
+
+    let output = run(
+        temp.path(),
+        &[
+            "package".to_owned(),
+            "sweep".to_owned(),
+            "--journal".to_owned(),
+            journal.display().to_string(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("sweep report");
+    assert_eq!(report["reclaimed"], 1);
+    assert_eq!(report["refused_live_or_retained"], 1);
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(events.contains("dispatch-worktree-cleanup"));
+    assert!(events.contains(terminal.to_str().expect("terminal path")));
+    let terminal_cleanup_events = events
+        .lines()
+        .filter(|line| {
+            line.contains("dispatch-worktree-cleanup")
+                && line.contains(terminal.to_str().expect("terminal path"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_cleanup_events.len(), 2);
+    assert!(terminal_cleanup_events[0].contains("\"outcome\":\"failed\""));
+    assert!(terminal_cleanup_events[1].contains("\"outcome\":\"closed\""));
+    assert!(
+        !events
+            .lines()
+            .any(|line| line.contains("dispatch-worktree-cleanup")
+                && line.contains(live.to_str().expect("live path")))
+    );
+}
+
+#[test]
+fn sweep_reports_failed_cleanup_as_zero_and_retries_the_capability_later() {
+    let temp = TempDir::new().expect("tempdir");
+    let journal = temp.path().join("driver.jsonl");
+    let source = temp.path().join("not-a-git-repository");
+    let worktree = temp.path().join("unreclaimed-worktree");
+    fs::create_dir(&source).expect("source directory");
+    fs::create_dir(&worktree).expect("worktree directory");
+    append(
+        &journal,
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+    );
+    append(
+        &journal,
+        json!({"event":"dispatch-worktree-opened","package":"A","issuance":1,"repository":"repo","source":source,"path":worktree,"retain_until_unix_secs":0}),
+    );
+    append(
+        &journal,
+        json!({"event":"worker-failed","package":"A","issuance":1,"reason":"failed"}),
+    );
+
+    for expected_failures in 1..=2 {
+        let output = run(
+            temp.path(),
+            &[
+                "package".to_owned(),
+                "sweep".to_owned(),
+                "--journal".to_owned(),
+                journal.display().to_string(),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).expect("sweep report");
+        assert_eq!(report["reclaimed"], 0);
+        assert!(worktree.exists(), "failed cleanup must not claim removal");
+        let events = fs::read_to_string(&journal).expect("journal");
+        assert_eq!(
+            events
+                .lines()
+                .filter(|line| {
+                    line.contains("dispatch-worktree-cleanup")
+                        && line.contains("\"outcome\":\"failed\"")
+                })
+                .count(),
+            expected_failures,
+            "the failed capability must remain pending for the next sweep",
+        );
+    }
+}

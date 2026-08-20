@@ -167,13 +167,11 @@ fi
         0,
         "completed implementation and gate attempt roots remain"
     );
-    let closed = fs::read_to_string(temp.path().join("herdr-closed-panes"))
-        .unwrap_or_else(|error| panic!("closed pane log: {error}; journal: {journal}"));
-    assert_eq!(
-        closed.lines().collect::<Vec<_>>(),
-        ["owned-workspace-1", "owned-workspace-2"]
+    assert!(
+        !temp.path().join("herdr-closed-panes").exists(),
+        "terminal workspaces must remain available during the evidence-retention window"
     );
-    assert!(!closed.contains("unrelated-workspace"));
+    assert!(!journal.contains("dispatch-pane-cleanup"));
     assert!(journal.contains("owned-pane-1"));
     assert!(journal.contains("owned-pane-2"));
     let dispatch_identity = journal
@@ -188,10 +186,6 @@ fi
             .display()
             .to_string()
     );
-    assert!(journal.contains("dispatch-pane-cleanup"));
-    assert!(journal.contains("simulated close refusal"));
-    assert!(journal.contains("\"outcome\":\"failed\""));
-
     let mismatched_restart = Command::new(env!("CARGO_BIN_EXE_pce"))
         .args(["package", "driver-run", "--graph"])
         .arg(&graph)
