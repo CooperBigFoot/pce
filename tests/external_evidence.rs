@@ -143,7 +143,26 @@ fn carried_completion_reports_changed_external_evidence_root() {
         .expect("mismatch");
     assert_eq!(mismatch["package"], "A");
     assert_eq!(mismatch["environment"], "CAMPAIGN_EVIDENCE");
-    assert_ne!(mismatch["completed_identity"], mismatch["current_identity"]);
+    assert_eq!(mismatch["current"]["state"], "identified");
+    assert_ne!(
+        mismatch["completed_identity"],
+        mismatch["current"]["identity"]
+    );
     let status: Value = serde_json::from_slice(&second.stdout).expect("status");
     assert_eq!(status["external_evidence_mismatches"][0]["package"], "A");
+
+    let graph3 = temp.path().join("graph.v3.json");
+    write_graph(&graph3, 3);
+    fs::remove_dir_all(&evidence).expect("remove external evidence root");
+    let missing = run_driver(temp.path(), &graph3, &journal, &repo, &evidence, &worker);
+    assert!(
+        missing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    let missing_status: Value = serde_json::from_slice(&missing.stdout).expect("missing status");
+    assert_eq!(
+        missing_status["external_evidence_mismatches"][0]["current"]["state"],
+        "root-missing"
+    );
 }

@@ -225,6 +225,20 @@ pub struct ExternalEvidenceIdentity {
     pub manifest_sha256: String,
 }
 
+/// The current observation of a declared external evidence root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ExternalEvidenceObservation {
+    /// The root was readable and has a deterministic identity.
+    Identified { identity: ExternalEvidenceIdentity },
+    /// The declared environment name was not supplied to this driver process.
+    EnvironmentMissing,
+    /// The environment value named a root that no longer exists.
+    RootMissing,
+    /// The root exists but its manifest could not be read.
+    RootUnreadable { detail: String },
+}
+
 /// One carried completion whose declared external evidence changed after completion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -232,7 +246,7 @@ pub struct ExternalEvidenceMismatch {
     pub package: String,
     pub environment: String,
     pub completed_identity: ExternalEvidenceIdentity,
-    pub current_identity: Option<ExternalEvidenceIdentity>,
+    pub current: ExternalEvidenceObservation,
 }
 
 /// The best-effort result of closing one run-owned dispatch pane.
@@ -645,8 +659,7 @@ pub enum DriverEvent {
         package: String,
         environment: String,
         completed_identity: ExternalEvidenceIdentity,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        current_identity: Option<ExternalEvidenceIdentity>,
+        current: ExternalEvidenceObservation,
     },
     /// All effective criteria and the gate accepted this package.
     PackageCompleted { package: String },
@@ -1916,12 +1929,12 @@ pub fn derive_driver_snapshot(
                 package,
                 environment,
                 completed_identity,
-                current_identity,
+                current,
             } => Some(ExternalEvidenceMismatch {
                 package: package.clone(),
                 environment: environment.clone(),
                 completed_identity: completed_identity.clone(),
-                current_identity: current_identity.clone(),
+                current: current.clone(),
             }),
             _ => None,
         })

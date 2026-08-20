@@ -2300,29 +2300,32 @@ fn append_worker_environment_outcome(
 
 fn external_evidence_identity(root: &Path) -> Result<pce_core::ExternalEvidenceIdentity> {
     fn hash_path(root: &Path, path: &Path, hasher: &mut Sha256) -> Result<()> {
+        let relative = path
+            .strip_prefix(root)
+            .context("external evidence traversal escaped its declared root")?;
+        let label = if relative.as_os_str().is_empty() {
+            "<root>".to_owned()
+        } else {
+            relative.display().to_string()
+        };
         let metadata = fs::symlink_metadata(path)
-            .with_context(|| format!("failed to inspect external evidence {}", path.display()))?;
-        let relative = path.strip_prefix(root).unwrap_or(Path::new(""));
+            .with_context(|| format!("failed to inspect external evidence {label}"))?;
         hasher.update(relative.as_os_str().as_bytes());
         hasher.update([0]);
         if metadata.file_type().is_symlink() {
             hasher.update(b"symlink\0");
-            let target = fs::read_link(path).with_context(|| {
-                format!(
-                    "failed to read external evidence symlink {}",
-                    path.display()
-                )
-            })?;
+            let target = fs::read_link(path)
+                .with_context(|| format!("failed to read external evidence symlink {label}"))?;
             hasher.update(target.as_os_str().as_bytes());
         } else if metadata.is_file() {
             hasher.update(b"file\0");
             let mut file = File::open(path)
-                .with_context(|| format!("failed to open external evidence {}", path.display()))?;
+                .with_context(|| format!("failed to open external evidence {label}"))?;
             let mut buffer = [0_u8; 64 * 1024];
             loop {
-                let count = file.read(&mut buffer).with_context(|| {
-                    format!("failed to read external evidence {}", path.display())
-                })?;
+                let count = file
+                    .read(&mut buffer)
+                    .with_context(|| format!("failed to read external evidence {label}"))?;
                 if count == 0 {
                     break;
                 }
@@ -2331,17 +2334,14 @@ fn external_evidence_identity(root: &Path) -> Result<pce_core::ExternalEvidenceI
         } else if metadata.is_dir() {
             hasher.update(b"directory\0");
             let mut children = fs::read_dir(path)
-                .with_context(|| format!("failed to list external evidence {}", path.display()))?
+                .with_context(|| format!("failed to list external evidence {label}"))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             children.sort_by_key(|entry| entry.file_name());
             for child in children {
                 hash_path(root, &child.path(), hasher)?;
             }
         } else {
-            bail!(
-                "external evidence {} has an unsupported file type",
-                path.display()
-            );
+            bail!("external evidence {label} has an unsupported file type");
         }
         hasher.update([0xff]);
         Ok(())
@@ -2352,6 +2352,37 @@ fn external_evidence_identity(root: &Path) -> Result<pce_core::ExternalEvidenceI
     Ok(pce_core::ExternalEvidenceIdentity {
         manifest_sha256: format!("{:x}", hasher.finalize()),
     })
+}
+
+fn observe_external_evidence(
+    command: &DriverRunCommand,
+    environment: &str,
+) -> pce_core::ExternalEvidenceObservation {
+    let Some(root) = command.worker_environment.get(environment) else {
+        return pce_core::ExternalEvidenceObservation::EnvironmentMissing;
+    };
+    match Path::new(root).try_exists() {
+        Ok(false) => pce_core::ExternalEvidenceObservation::RootMissing,
+        Err(error) => pce_core::ExternalEvidenceObservation::RootUnreadable {
+            detail: error.to_string(),
+        },
+        Ok(true) => match external_evidence_identity(Path::new(root)) {
+            Ok(identity) => pce_core::ExternalEvidenceObservation::Identified { identity },
+            Err(error) => pce_core::ExternalEvidenceObservation::RootUnreadable {
+                detail: error.root_cause().to_string(),
+            },
+        },
+    }
+}
+
+fn external_evidence_matches(
+    observation: &pce_core::ExternalEvidenceObservation,
+    completed: &pce_core::ExternalEvidenceIdentity,
+) -> bool {
+    matches!(
+        observation,
+        pce_core::ExternalEvidenceObservation::Identified { identity } if identity == completed
+    )
 }
 
 fn package_external_evidence_identity(
@@ -5521,15 +5552,20 @@ fn ensure_driver_plan_version(
         }
         carried_amendments.push((package.clone(), amendment.clone()));
     }
-    let carried_external_mismatches = carried_completions
-        .iter()
-        .filter_map(|package_id| {
-            let package = next
-                .packages()
-                .iter()
-                .find(|package| package.id().as_str() == package_id)?;
-            let environment = package.external_evidence_root()?;
-            let completed_identity = events.iter().rev().find_map(|event| match event {
+    let mut carried_external_mismatches = Vec::new();
+    for package_id in &carried_completions {
+        let package = next
+            .packages()
+            .iter()
+            .find(|package| package.id().as_str() == package_id)
+            .with_context(|| format!("carried package {package_id} is absent from next graph"))?;
+        let Some(environment) = package.external_evidence_root() else {
+            continue;
+        };
+        let completed_identity = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
                 DriverEvent::ExternalEvidenceRecorded {
                     package,
                     environment: recorded_environment,
@@ -5538,21 +5574,22 @@ fn ensure_driver_plan_version(
                     Some(identity.clone())
                 }
                 _ => None,
-            })?;
-            let current_identity = command
-                .worker_environment
-                .get(environment)
-                .and_then(|root| external_evidence_identity(Path::new(root)).ok());
-            (current_identity.as_ref() != Some(&completed_identity)).then(|| {
-                (
-                    package_id.clone(),
-                    environment.to_owned(),
-                    completed_identity,
-                    current_identity,
-                )
             })
-        })
-        .collect::<Vec<_>>();
+            .with_context(|| {
+                format!(
+                    "carried completion {package_id} has no recorded external evidence identity for `{environment}`"
+                )
+            })?;
+        let current = observe_external_evidence(command, environment);
+        if !external_evidence_matches(&current, &completed_identity) {
+            carried_external_mismatches.push((
+                package_id.clone(),
+                environment.to_owned(),
+                completed_identity,
+                current,
+            ));
+        }
+    }
     append_driver_event(
         &command.journal_path,
         &DriverEvent::PlanVersionAdvanced {
@@ -5564,15 +5601,14 @@ fn ensure_driver_plan_version(
             criterion_revisions,
         },
     )?;
-    for (package, environment, completed_identity, current_identity) in carried_external_mismatches
-    {
+    for (package, environment, completed_identity, current) in carried_external_mismatches {
         append_driver_event(
             &command.journal_path,
             &DriverEvent::CarriedCompletionExternalEvidenceMismatch {
                 package,
                 environment,
                 completed_identity,
-                current_identity,
+                current,
             },
         )?;
     }
@@ -5638,11 +5674,8 @@ fn report_carried_external_evidence_mismatches(
                     "carried completion {package_id} has no recorded external evidence identity for `{environment}`"
                 )
             })?;
-        let current_identity = command
-            .worker_environment
-            .get(environment)
-            .and_then(|root| external_evidence_identity(Path::new(root)).ok());
-        if current_identity.as_ref() == Some(&completed_identity) {
+        let current = observe_external_evidence(command, environment);
+        if external_evidence_matches(&current, &completed_identity) {
             continue;
         }
         append_driver_event(
@@ -5651,7 +5684,7 @@ fn report_carried_external_evidence_mismatches(
                 package: package_id.clone(),
                 environment: environment.to_owned(),
                 completed_identity,
-                current_identity,
+                current,
             },
         )?;
         reported += 1;
