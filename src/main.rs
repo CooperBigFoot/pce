@@ -2313,6 +2313,205 @@ fn append_worker_environment_outcome(
     append_driver_event(&command.journal_path, &event)
 }
 
+fn external_evidence_identity(root: &Path) -> Result<pce_core::ExternalEvidenceIdentity> {
+    fn hash_path(root: &Path, path: &Path, hasher: &mut Sha256) -> Result<()> {
+        let relative = path
+            .strip_prefix(root)
+            .context("external evidence traversal escaped its declared root")?;
+        let label = if relative.as_os_str().is_empty() {
+            "<root>".to_owned()
+        } else {
+            relative.display().to_string()
+        };
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("failed to inspect external evidence {label}"))?;
+        hasher.update(relative.as_os_str().as_bytes());
+        hasher.update([0]);
+        if metadata.file_type().is_symlink() {
+            hasher.update(b"symlink\0");
+            let target = fs::read_link(path)
+                .with_context(|| format!("failed to read external evidence symlink {label}"))?;
+            hasher.update(target.as_os_str().as_bytes());
+        } else if metadata.is_file() {
+            hasher.update(b"file\0");
+            let mut file = File::open(path)
+                .with_context(|| format!("failed to open external evidence {label}"))?;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = file
+                    .read(&mut buffer)
+                    .with_context(|| format!("failed to read external evidence {label}"))?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+            }
+        } else if metadata.is_dir() {
+            hasher.update(b"directory\0");
+            let mut children = fs::read_dir(path)
+                .with_context(|| format!("failed to list external evidence {label}"))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            children.sort_by_key(|entry| entry.file_name());
+            for child in children {
+                hash_path(root, &child.path(), hasher)?;
+            }
+        } else {
+            bail!("external evidence {label} has an unsupported file type");
+        }
+        hasher.update([0xff]);
+        Ok(())
+    }
+
+    let mut hasher = Sha256::new();
+    hash_path(root, root, &mut hasher)?;
+    Ok(pce_core::ExternalEvidenceIdentity {
+        manifest_sha256: format!("{:x}", hasher.finalize()),
+    })
+}
+
+fn observe_external_evidence(
+    command: &DriverRunCommand,
+    environment: &str,
+) -> pce_core::ExternalEvidenceObservation {
+    let Some(root) = command.worker_environment.get(environment) else {
+        return pce_core::ExternalEvidenceObservation::EnvironmentMissing;
+    };
+    match Path::new(root).try_exists() {
+        Ok(false) => pce_core::ExternalEvidenceObservation::RootMissing,
+        Err(error) => pce_core::ExternalEvidenceObservation::RootUnreadable {
+            detail: error.to_string(),
+        },
+        Ok(true) => match external_evidence_identity(Path::new(root)) {
+            Ok(identity) => pce_core::ExternalEvidenceObservation::Identified { identity },
+            Err(error) => pce_core::ExternalEvidenceObservation::RootUnreadable {
+                detail: error.root_cause().to_string(),
+            },
+        },
+    }
+}
+
+fn external_evidence_matches(
+    observation: &pce_core::ExternalEvidenceObservation,
+    completed: &pce_core::ExternalEvidenceIdentity,
+) -> bool {
+    matches!(
+        observation,
+        pce_core::ExternalEvidenceObservation::Identified { identity } if identity == completed
+    )
+}
+
+fn package_external_evidence_identity(
+    command: &DriverRunCommand,
+    graph: &WorkPackageGraph,
+    package_id: &str,
+) -> Result<Option<(String, pce_core::ExternalEvidenceIdentity)>> {
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == package_id)
+        .with_context(|| format!("package {package_id} is absent from graph"))?;
+    let Some(environment) = package.external_evidence_root() else {
+        return Ok(None);
+    };
+    let root = command.worker_environment.get(environment).with_context(|| {
+        format!("package {package_id} declares external evidence root `{environment}`; pass it with --worker-env {environment}")
+    })?;
+    let identity = external_evidence_identity(Path::new(root)).with_context(|| {
+        format!(
+            "failed to identify external evidence root `{environment}` for package {package_id}"
+        )
+    })?;
+    Ok(Some((environment.to_owned(), identity)))
+}
+
+fn append_package_completion(
+    command: &DriverRunCommand,
+    graph: &WorkPackageGraph,
+    package_id: &str,
+) -> Result<()> {
+    if let Some((environment, identity)) =
+        package_external_evidence_identity(command, graph, package_id)?
+    {
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::ExternalEvidenceRecorded {
+                package: package_id.to_owned(),
+                environment,
+                identity,
+            },
+        )?;
+    }
+    append_driver_event(
+        &command.journal_path,
+        &DriverEvent::PackageCompleted {
+            package: package_id.to_owned(),
+        },
+    )
+}
+
+fn criterion_outcome_matrix(
+    graph: &WorkPackageGraph,
+    events: &[DriverEvent],
+    package_id: &str,
+) -> Result<Vec<pce_core::AttemptCriterionOutcomes>> {
+    let package = graph
+        .packages()
+        .iter()
+        .find(|package| package.id().as_str() == package_id)
+        .with_context(|| format!("package {package_id} is absent from graph"))?;
+    let active = events
+        .iter()
+        .rposition(|event| matches!(event, DriverEvent::PlanVersionAdvanced { .. }))
+        .map_or(events, |index| &events[index + 1..]);
+    let mut attempts = Vec::<pce_core::AttemptCriterionOutcomes>::new();
+    for event in active {
+        match event {
+            DriverEvent::WorkerDispatched {
+                package: dispatched_package,
+                issuance,
+            } if dispatched_package == package_id => {
+                attempts.push(pce_core::AttemptCriterionOutcomes {
+                    issuance: *issuance,
+                    criteria: package
+                        .criteria()
+                        .iter()
+                        .map(|criterion| pce_core::AttemptCriterionResult {
+                            name: criterion.name().to_owned(),
+                            outcome: pce_core::AttemptCriterionOutcome::NotExecuted,
+                        })
+                        .collect(),
+                });
+            }
+            DriverEvent::CriterionExecuted {
+                package,
+                name,
+                execution,
+                ..
+            } if package == package_id => {
+                let attempt = attempts
+                    .last_mut()
+                    .context("criterion execution precedes this package's dispatch")?;
+                let outcome = if execution.exit_status().is_success() {
+                    pce_core::AttemptCriterionOutcome::Passed
+                } else {
+                    pce_core::AttemptCriterionOutcome::Failed
+                };
+                if let Some(criterion) = attempt.criteria.iter_mut().find(|item| item.name == *name)
+                {
+                    criterion.outcome = outcome;
+                } else {
+                    attempt.criteria.push(pce_core::AttemptCriterionResult {
+                        name: name.clone(),
+                        outcome,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(attempts)
+}
+
 fn park_if_recovery_exhausted(
     command: &DriverRunCommand,
     package_id: &str,
@@ -2326,6 +2525,8 @@ fn park_if_recovery_exhausted(
     }
     let evidence = latest_criterion_failure_evidence(&events, package_id);
     let attempts = recovery_attempt_records(&events, package_id, evidence);
+    let graph = read_driver_graph(&command.graph_path)?;
+    let criterion_outcomes = criterion_outcome_matrix(&graph, &events, package_id)?;
     append_driver_event(
         &command.journal_path,
         &DriverEvent::RecoveryParked {
@@ -2335,6 +2536,7 @@ fn park_if_recovery_exhausted(
             ),
             blocked_by: blocked_by.map(str::to_owned),
             attempts,
+            criterion_outcomes,
         },
     )
 }
@@ -2348,6 +2550,8 @@ fn park_if_worker_blocker_repeated(command: &DriverRunCommand, package_id: &str)
     };
     let evidence = latest_criterion_failure_evidence(&events, package_id);
     let attempts = recovery_attempt_records(&events, package_id, evidence);
+    let graph = read_driver_graph(&command.graph_path)?;
+    let criterion_outcomes = criterion_outcome_matrix(&graph, &events, package_id)?;
     append_driver_event(
         &command.journal_path,
         &DriverEvent::RecoveryParked {
@@ -2355,6 +2559,7 @@ fn park_if_worker_blocker_repeated(command: &DriverRunCommand, package_id: &str)
             reason: "repeated identical worker blocker; package work cannot resolve it".to_owned(),
             blocked_by: Some(blocked_by),
             attempts,
+            criterion_outcomes,
         },
     )?;
     Ok(true)
@@ -2630,12 +2835,7 @@ fn run_composed_driver_gate(
         )?;
         return Ok(());
     }
-    append_driver_event(
-        &command.journal_path,
-        &DriverEvent::PackageCompleted {
-            package: package_id.to_owned(),
-        },
-    )?;
+    append_package_completion(command, graph, package_id)?;
     remove_clean_gate_worktrees(&response, &implementation_worktrees)?;
     remove_clean_driver_worktrees(command, graph, package_id, issuance)
 }
@@ -2886,12 +3086,7 @@ fn observe_driver_worker_outcome(
                             gate: "worker-override-no-findings".to_owned(),
                         },
                     )?;
-                    append_driver_event(
-                        &command.journal_path,
-                        &DriverEvent::PackageCompleted {
-                            package: package_id,
-                        },
-                    )?;
+                    append_package_completion(command, graph, &package_id)?;
                 } else {
                     run_composed_driver_gate(graph, command, &package_id, issuance)?;
                 }
@@ -2930,12 +3125,15 @@ fn observe_driver_worker_outcome(
                     )
                 }
             };
+            let events = read_driver_journal(&command.journal_path)?;
+            let criterion_outcomes = criterion_outcome_matrix(graph, &events, &package_id)?;
             append_driver_event(
                 &command.journal_path,
                 &DriverEvent::PackageParked {
                     package: package_id,
                     issuance,
                     reason,
+                    criterion_outcomes,
                 },
             )?;
         }
@@ -5610,6 +5808,44 @@ fn ensure_driver_plan_version(
         }
         carried_amendments.push((package.clone(), amendment.clone()));
     }
+    let mut carried_external_mismatches = Vec::new();
+    for package_id in &carried_completions {
+        let package = next
+            .packages()
+            .iter()
+            .find(|package| package.id().as_str() == package_id)
+            .with_context(|| format!("carried package {package_id} is absent from next graph"))?;
+        let Some(environment) = package.external_evidence_root() else {
+            continue;
+        };
+        let completed_identity = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                DriverEvent::ExternalEvidenceRecorded {
+                    package,
+                    environment: recorded_environment,
+                    identity,
+                } if package == package_id && recorded_environment == environment => {
+                    Some(identity.clone())
+                }
+                _ => None,
+            })
+            .with_context(|| {
+                format!(
+                    "carried completion {package_id} has no recorded external evidence identity for `{environment}`"
+                )
+            })?;
+        let current = observe_external_evidence(command, environment);
+        if !external_evidence_matches(&current, &completed_identity) {
+            carried_external_mismatches.push((
+                package_id.clone(),
+                environment.to_owned(),
+                completed_identity,
+                current,
+            ));
+        }
+    }
     append_driver_event(
         &command.journal_path,
         &DriverEvent::PlanVersionAdvanced {
@@ -5621,7 +5857,95 @@ fn ensure_driver_plan_version(
             criterion_revisions,
         },
     )?;
+    for (package, environment, completed_identity, current) in carried_external_mismatches {
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::CarriedCompletionExternalEvidenceMismatch {
+                package,
+                environment,
+                completed_identity,
+                current,
+            },
+        )?;
+    }
     Ok(true)
+}
+
+fn report_carried_external_evidence_mismatches(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    events: &[DriverEvent],
+) -> Result<usize> {
+    let Some(boundary) = events
+        .iter()
+        .rposition(|event| matches!(event, DriverEvent::PlanVersionAdvanced { .. }))
+    else {
+        return Ok(0);
+    };
+    let DriverEvent::PlanVersionAdvanced {
+        carried_completions,
+        ..
+    } = &events[boundary]
+    else {
+        unreachable!("boundary identifies plan advance");
+    };
+    let active_events = &events[boundary + 1..];
+    let mut reported = 0_usize;
+    for package_id in carried_completions {
+        let package = graph
+            .packages()
+            .iter()
+            .find(|package| package.id().as_str() == package_id)
+            .with_context(|| format!("carried package {package_id} is absent from graph"))?;
+        let Some(environment) = package.external_evidence_root() else {
+            continue;
+        };
+        if active_events.iter().any(|event| {
+            matches!(
+                event,
+                DriverEvent::CarriedCompletionExternalEvidenceMismatch {
+                    package,
+                    environment: recorded_environment,
+                    ..
+                } if package == package_id && recorded_environment == environment
+            )
+        }) {
+            continue;
+        }
+        let completed_identity = events[..boundary]
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                DriverEvent::ExternalEvidenceRecorded {
+                    package,
+                    environment: recorded_environment,
+                    identity,
+                } if package == package_id && recorded_environment == environment => {
+                    Some(identity.clone())
+                }
+                _ => None,
+            })
+            .with_context(|| {
+                format!(
+                    "carried completion {package_id} has no recorded external evidence identity for `{environment}`"
+                )
+            })?;
+        let current = observe_external_evidence(command, environment);
+        if external_evidence_matches(&current, &completed_identity) {
+            continue;
+        }
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::CarriedCompletionExternalEvidenceMismatch {
+                package: package_id.clone(),
+                environment: environment.to_owned(),
+                completed_identity,
+                current,
+            },
+        )?;
+        reported += 1;
+    }
+    Ok(reported)
 }
 
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
@@ -5674,6 +5998,9 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
         }
         ensure_worker_environment_contract(&command, &events)?;
         let events = read_driver_journal(&command.journal_path)?;
+        if report_carried_external_evidence_mismatches(&graph, &command, &events)? > 0 {
+            continue;
+        }
         if repair_driver_environment_closures(&command, &events)? > 0 {
             continue;
         }

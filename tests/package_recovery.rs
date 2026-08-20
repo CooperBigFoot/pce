@@ -526,3 +526,80 @@ printf '{{"outcome":"failed","blocked_by":"%s"}}' "$blocker" > "$PCE_PACKAGE_OUT
         .expect("recovery park");
     assert_eq!(parked["blocked_by"], blocker);
 }
+
+#[test]
+fn recovery_park_reports_per_criterion_outcomes_across_attempts() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    fs::write(repo.join("value"), "base").expect("value");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "base"]);
+
+    let counter = temp.path().join("counter");
+    let graph_path = temp.path().join("graph.json");
+    fs::write(&graph_path, serde_json::to_vec(&json!({
+        "vision":"criterion-matrix", "plan_version":1, "authored_at_ref":"HEAD",
+        "packages":[{"id":"A","title":"A","repositories":["repo"],"criteria":[
+            {"name":"first","input":"attempt","observation":"first attempt","command":format!(r#"test "$(cat {})" = 1"#, counter.display())},
+            {"name":"second","input":"attempt","observation":"second attempt","command":format!(r#"test "$(cat {})" = 2"#, counter.display())}
+        ],"depends_on":[]}]
+    })).expect("graph")).expect("graph write");
+    let worker = temp.path().join("worker.sh");
+    fs::write(
+        &worker,
+        format!(
+            r#"#!/bin/sh
+value=0; test ! -f '{0}' || value=$(cat '{0}')
+value=$((value + 1)); printf '%s' "$value" > '{0}'
+printf '%s' '{{"outcome":"done"}}' > "$PCE_PACKAGE_OUTCOME"
+"#,
+            counter.display()
+        ),
+    )
+    .expect("worker");
+    let journal = temp.path().join("journal.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "package",
+            "driver-run",
+            "--graph",
+            graph_path.to_str().expect("graph"),
+            "--journal",
+            journal.to_str().expect("journal"),
+            "--repository",
+            &format!("repo={}", repo.display()),
+            "--retry-limit",
+            "1",
+            "--local-patch-limit",
+            "0",
+            "--worker-override",
+            "--",
+            "/bin/sh",
+            worker.to_str().expect("worker"),
+        ])
+        .current_dir(temp.path())
+        .output()
+        .expect("pce");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parked = fs::read_to_string(&journal)
+        .expect("journal")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("event"))
+        .find(|event| event["event"] == "recovery-parked")
+        .expect("recovery park");
+    assert_eq!(
+        parked["criterion_outcomes"],
+        json!([
+            {"issuance":1,"criteria":[{"name":"first","outcome":"passed"},{"name":"second","outcome":"failed"}]},
+            {"issuance":2,"criteria":[{"name":"first","outcome":"failed"},{"name":"second","outcome":"passed"}]}
+        ])
+    );
+}

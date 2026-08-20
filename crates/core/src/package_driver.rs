@@ -193,6 +193,62 @@ pub struct RecoveryAttemptRecord {
     pub evidence: Vec<RecoveryCriterionEvidence>,
 }
 
+/// The result of one criterion in one package attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AttemptCriterionOutcome {
+    Passed,
+    Failed,
+    NotExecuted,
+}
+
+/// One criterion result in an attempt outcome matrix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptCriterionResult {
+    pub name: String,
+    pub outcome: AttemptCriterionOutcome,
+}
+
+/// All criterion results observed for one package issuance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptCriterionOutcomes {
+    pub issuance: u64,
+    pub criteria: Vec<AttemptCriterionResult>,
+}
+
+/// A deterministic identity of one declared external evidence root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalEvidenceIdentity {
+    pub manifest_sha256: String,
+}
+
+/// The current observation of a declared external evidence root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ExternalEvidenceObservation {
+    /// The root was readable and has a deterministic identity.
+    Identified { identity: ExternalEvidenceIdentity },
+    /// The declared environment name was not supplied to this driver process.
+    EnvironmentMissing,
+    /// The environment value named a root that no longer exists.
+    RootMissing,
+    /// The root exists but its manifest could not be read.
+    RootUnreadable { detail: String },
+}
+
+/// One carried completion whose declared external evidence changed after completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalEvidenceMismatch {
+    pub package: String,
+    pub environment: String,
+    pub completed_identity: ExternalEvidenceIdentity,
+    pub current: ExternalEvidenceObservation,
+}
+
 /// The best-effort result of closing one run-owned dispatch pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -399,6 +455,9 @@ pub enum DriverEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocked_by: Option<String>,
         attempts: Vec<RecoveryAttemptRecord>,
+        /// Per-criterion outcomes for every attempt in the active plan version.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        criterion_outcomes: Vec<AttemptCriterionOutcomes>,
     },
     /// The spawning code observed that no child was produced.
     WorkerSpawnFailed {
@@ -517,6 +576,9 @@ pub enum DriverEvent {
         package: String,
         issuance: u64,
         reason: String,
+        /// Per-criterion outcomes for every attempt in the active plan version.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        criterion_outcomes: Vec<AttemptCriterionOutcomes>,
     },
     /// One repository environment was prepared inside a driver-owned materialization.
     EnvironmentPreparationExecuted {
@@ -620,6 +682,19 @@ pub enum DriverEvent {
         finding: u64,
         repair_ref: String,
         detail: String,
+    },
+    /// Completion captured the identity of the package's declared external evidence root.
+    ExternalEvidenceRecorded {
+        package: String,
+        environment: String,
+        identity: ExternalEvidenceIdentity,
+    },
+    /// A carried completion's declared external root no longer has its completed identity.
+    CarriedCompletionExternalEvidenceMismatch {
+        package: String,
+        environment: String,
+        completed_identity: ExternalEvidenceIdentity,
+        current: ExternalEvidenceObservation,
     },
     /// All effective criteria and the gate accepted this package.
     PackageCompleted { package: String },
@@ -778,6 +853,8 @@ pub struct DriverSnapshot {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     worker_environment: Vec<String>,
     recovery: Vec<(String, RecoveryBudget)>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    external_evidence_mismatches: Vec<ExternalEvidenceMismatch>,
     assembly: DriverAssemblyState,
     outcome: DriverLoopOutcome,
 }
@@ -804,6 +881,10 @@ impl DriverSnapshot {
     }
     pub fn recovery(&self) -> &[(String, RecoveryBudget)] {
         &self.recovery
+    }
+    /// Return carried completions whose external evidence identity diverged.
+    pub fn external_evidence_mismatches(&self) -> &[ExternalEvidenceMismatch] {
+        &self.external_evidence_mismatches
     }
     pub const fn assembly(&self) -> &DriverAssemblyState {
         &self.assembly
@@ -1349,6 +1430,8 @@ pub fn derive_driver_snapshot(
             | DriverEvent::PackageRepairRolledBack { package, .. }
             | DriverEvent::RepairCreditStale { package, .. }
             | DriverEvent::PackageHardeningInvalidated { package, .. }
+            | DriverEvent::ExternalEvidenceRecorded { package, .. }
+            | DriverEvent::CarriedCompletionExternalEvidenceMismatch { package, .. }
             | DriverEvent::PackageCompleted { package }
             | DriverEvent::PackageFailed { package, .. } => package,
             DriverEvent::AssemblyRepositoryComposed { .. }
@@ -1791,6 +1874,20 @@ pub fn derive_driver_snapshot(
                 }
                 *state = DriverPackageState::Pending;
             }
+            DriverEvent::ExternalEvidenceRecorded { .. } => {
+                if !matches!(state, DriverPackageState::Judging { .. }) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+            }
+            DriverEvent::CarriedCompletionExternalEvidenceMismatch { .. } => {
+                if !matches!(state, DriverPackageState::Complete) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+            }
             DriverEvent::PackageCompleted { .. } => {
                 if !matches!(state, DriverPackageState::Judging { .. }) {
                     return Err(PackageDriverError::EventAfterTerminal {
@@ -1886,6 +1983,23 @@ pub fn derive_driver_snapshot(
             )
         })
         .collect();
+    let external_evidence_mismatches = active_events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::CarriedCompletionExternalEvidenceMismatch {
+                package,
+                environment,
+                completed_identity,
+                current,
+            } => Some(ExternalEvidenceMismatch {
+                package: package.clone(),
+                environment: environment.clone(),
+                completed_identity: completed_identity.clone(),
+                current: current.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
     Ok(DriverSnapshot {
         packages,
         ready,
@@ -1894,6 +2008,7 @@ pub fn derive_driver_snapshot(
         base_currency_acceptances,
         worker_environment: configured_worker_environment.unwrap_or_default(),
         recovery,
+        external_evidence_mismatches,
         assembly,
         outcome,
     })
@@ -2864,6 +2979,7 @@ mod tests {
                 package: "A".to_owned(),
                 issuance: 1,
                 reason: "criterion: wrong".to_owned(),
+                criterion_outcomes: Vec::new(),
             },
         ];
         let snapshot = derive_driver_snapshot(&graph, &parked, false).expect("parked fold");
@@ -3376,6 +3492,7 @@ mod tests {
                 package: "A".to_owned(),
                 issuance: 2,
                 reason: "replan: criterion: wrong boundary".to_owned(),
+                criterion_outcomes: Vec::new(),
             },
             DriverEvent::PackageParkOverruled {
                 package: "A".to_owned(),
@@ -3435,6 +3552,7 @@ mod tests {
                 package: "A".to_owned(),
                 issuance: 2,
                 reason: "replan: criterion: wrong boundary".to_owned(),
+                criterion_outcomes: Vec::new(),
             },
             advance(),
             failure(3),

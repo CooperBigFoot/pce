@@ -53,11 +53,13 @@ pub use package_completion::{
     parse_package_worker_result, serialize_package_worker_result,
 };
 pub use package_driver::{
-    AmendmentProof, AmendmentRepositoryRefs, BaseCurrencyRiskAcceptance, BaseCurrencyRiskEntry,
+    AmendmentProof, AmendmentRepositoryRefs, AttemptCriterionOutcome, AttemptCriterionOutcomes,
+    AttemptCriterionResult, BaseCurrencyRiskAcceptance, BaseCurrencyRiskEntry,
     BaseCurrencyRiskMode, CommandExitStatus, CompositionInput, CriterionExecution, CriterionOrigin,
     DispatchEnvironmentObservation, DispatchWorkerProcessObservation, DriverAssemblyState,
     DriverEvent, DriverLoopOutcome, DriverPackageState, DriverRefProduct, DriverSnapshot,
-    EffectiveCriterion, EnvironmentPreparationOutcome, FindingRejectionReason,
+    EffectiveCriterion, EnvironmentPreparationOutcome, ExternalEvidenceIdentity,
+    ExternalEvidenceMismatch, ExternalEvidenceObservation, FindingRejectionReason,
     FindingReplayDecision, PackageDriverError, PaneCleanupOutcome, ParentCriterionFailure,
     PendingPaneCleanup, PendingWorktreeCleanup, RatifiedCriterionRevision, RecoveryAttemptRecord,
     StaleRepairCreditReason, charged_failure_count, derive_driver_snapshot, effective_criteria,

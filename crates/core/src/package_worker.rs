@@ -346,6 +346,7 @@ pub fn compose_package_worker_brief(
         let _ = writeln!(output, "  Command: {}", criterion.command());
     }
     render_cross_package_file_references(&mut output, graph, package);
+    output.push_str("\nAttempts do not accumulate. This attempt starts from the composed base, and the composed base is the only inheritance from prior work. No uncompleted change from a previous attempt of this package survives. Satisfy every criterion in this attempt.\n");
     output.push_str("\nThe commands above are exposed as targets only. Do not execute them as a substitute for independent judgement. Your own assessment is not the judgement: the criteria will be executed independently by the driver, which will use each command's exit status to judge the package.\n");
 
     output.push_str("\n## 4. Scope boundary\n\n");

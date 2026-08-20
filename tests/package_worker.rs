@@ -67,6 +67,8 @@ fn rr2_brief_contains_global_context_target_detail_and_scope_boundary() {
     assert!(brief.contains("executed independently"));
     assert!(brief.contains("Commit all completed work before reporting done"));
     assert!(brief.contains("uncommitted work will not be judged"));
+    assert!(brief.contains("Attempts do not accumulate"));
+    assert!(brief.contains("composed base is the only inheritance"));
 
     // Other-package summary criteria are visible, but their commands, repositories, and edges are not.
     assert!(brief.contains("Four value states survive compile"));

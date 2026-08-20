@@ -116,6 +116,7 @@ pub struct WorkPackage {
     repositories: Vec<String>,
     criteria: Vec<WorkPackageCriterion>,
     produces: Vec<String>,
+    external_evidence_root: Option<String>,
     depends_on: Vec<WorkPackageDependency>,
 }
 impl WorkPackage {
@@ -138,6 +139,10 @@ impl WorkPackage {
     /// Return repository-relative artifacts this package owns and produces.
     pub fn produces(&self) -> &[String] {
         &self.produces
+    }
+    /// Return the environment name whose value identifies this package's external evidence root.
+    pub fn external_evidence_root(&self) -> Option<&str> {
+        self.external_evidence_root.as_deref()
     }
     /// Return the package's typed dependencies.
     pub fn depends_on(&self) -> &[WorkPackageDependency] {
@@ -235,6 +240,7 @@ struct RawPackage {
     criteria: Vec<RawCriterion>,
     #[serde(default)]
     produces: Vec<String>,
+    external_evidence_root: Option<String>,
     depends_on: Vec<RawDependency>,
 }
 #[derive(Debug, Deserialize)]
@@ -314,6 +320,14 @@ pub enum WorkPackageGraphError {
     /// A repository occurs more than once in one package.
     #[error("package {package} declares repository {repository} more than once")]
     DuplicateRepository { package: String, repository: String },
+    /// An external evidence root does not name an environment variable.
+    #[error(
+        "package {package} external evidence root `{environment}` must match [A-Za-z_][A-Za-z0-9_]*"
+    )]
+    InvalidExternalEvidenceRoot {
+        package: String,
+        environment: String,
+    },
     /// A merge observation names a package outside this graph.
     #[error("merge observation package {package} is unknown")]
     UnknownMergeObservationPackage { package: String },
@@ -455,6 +469,23 @@ pub fn parse_work_package_graph(bytes: &[u8]) -> Result<WorkPackageGraph, WorkPa
                 });
             }
         }
+        if let Some(environment) = &package.external_evidence_root {
+            nonempty(
+                environment,
+                "external_evidence_root",
+                format!("package {}", package.id),
+            )?;
+            let mut bytes = environment.bytes();
+            let valid_start = bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+            if !valid_start || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+                return Err(WorkPackageGraphError::InvalidExternalEvidenceRoot {
+                    package: package.id.clone(),
+                    environment: environment.clone(),
+                });
+            }
+        }
     }
     let repositories = raw
         .packages
@@ -548,6 +579,7 @@ pub fn parse_work_package_graph(bytes: &[u8]) -> Result<WorkPackageGraph, WorkPa
                 id: WorkPackageId(p.id),
                 title: p.title,
                 repositories: p.repositories,
+                external_evidence_root: p.external_evidence_root,
                 criteria: p
                     .criteria
                     .into_iter()
