@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 use notify::{RecursiveMode, Watcher};
@@ -87,14 +87,14 @@ use pce_core::{
     parse_dispatch_process_identity, parse_event_line, parse_gate_execution_evidence,
     parse_gate_stimulus, parse_package_gate_outcome, parse_package_worker_result,
     parse_paired_falsification_verdict, parse_replay_output_path, parse_replay_schema_path,
-    parse_tracked_repository_contract, parse_work_package_graph, pending_completed_pane_cleanups,
-    pending_gate_challenges, ready_work_packages, rebase_gate_stimulus, recovery_attempt_records,
-    recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
-    render_package_run, repeated_identical_worker_blocker, seatbelt_capability_probe,
-    serialize_dispatch_check_in, serialize_dispatch_process_identity,
-    serialize_package_worker_result, serialize_tracked_repository_contract,
-    titles_conservatively_overlap, unchanged_package_ids, validate_artifact,
-    validate_criterion_revisions, validate_package_gate_finding_repositories,
+    parse_tracked_repository_contract, parse_work_package_graph, pending_gate_challenges,
+    pending_terminal_pane_cleanups_with_legacy_deadline, pending_terminal_worktree_cleanups,
+    ready_work_packages, rebase_gate_stimulus, recovery_attempt_records, recovery_base_brief,
+    recovery_budget, render_dispatch_projection, render_human_snapshot, render_package_run,
+    repeated_identical_worker_blocker, seatbelt_capability_probe, serialize_dispatch_check_in,
+    serialize_dispatch_process_identity, serialize_package_worker_result,
+    serialize_tracked_repository_contract, titles_conservatively_overlap, unchanged_package_ids,
+    validate_artifact, validate_criterion_revisions, validate_package_gate_finding_repositories,
     validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
     validated_dispatch_completion_payload, verify_criterion_change, verify_mechanical_freeze,
     worker_environment_outcome,
@@ -118,6 +118,7 @@ const USAGE: &str = concat!(
     "       pce package gate-brief --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --worktree <NAME=ABSOLUTE_PATH>...\n",
     "       pce package gate-agent --vision <VISION_PATH> --graph <GRAPH_PATH> --package <PACKAGE_ID> --artifact-ref <REF> --outcome <ABSOLUTE_OUTCOME_PATH> [--issuance <N>] [--attempt <N>] [--challenges <ABSOLUTE_PATH>] [--defer-finding-validation] -- <WORKER_ARG>...\n",
     "       pce package render --graph <GRAPH_PATH> [--journal <DRIVER_JOURNAL>] --output <HTML_PATH>\n",
+    "       pce package sweep --journal <DRIVER_JOURNAL>\n",
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
     "       pce package materialize-refs --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>...\n",
     "       pce package driver-overrule --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --rationale <TEXT>\n",
@@ -143,6 +144,7 @@ const USAGE: &str = concat!(
     "       --worker-env forwards that named driver variable only to package and gate worker workspaces; criteria and --prepare commands continue to inherit the driver's full launch environment."
 );
 static GRAPH_FREEZE_NONCE: AtomicU64 = AtomicU64::new(0);
+const ATTEMPT_EVIDENCE_RETENTION: Duration = Duration::from_secs(6 * 60 * 60);
 const GATE_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const GATE_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 // A silent child may make no observable progress for this long before it is terminated.
@@ -292,6 +294,11 @@ struct PackageRenderCommand {
 }
 
 #[derive(Debug)]
+struct ResourceSweepCommand {
+    journal_path: PathBuf,
+}
+
+#[derive(Debug)]
 struct DriverStatusCommand {
     graph_path: PathBuf,
     journal_path: PathBuf,
@@ -370,6 +377,7 @@ enum Command {
     PackageGateAgent(PackageGateAgentCommand),
     PackageDispatch(PackageDispatchCommand),
     PackageRender(PackageRenderCommand),
+    ResourceSweep(ResourceSweepCommand),
     DriverStatus(DriverStatusCommand),
     MaterializeRefs(MaterializeRefsCommand),
     DriverCriteria(DriverCriteriaCommand),
@@ -782,6 +790,7 @@ fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
         Command::PackageGateAgent(command) => run_package_gate_agent(command),
         Command::PackageDispatch(command) => run_package_dispatch(command),
         Command::PackageRender(command) => run_package_render(command),
+        Command::ResourceSweep(command) => run_resource_sweep(command),
         Command::DriverStatus(command) => run_driver_status(command),
         Command::MaterializeRefs(command) => run_materialize_refs(command),
         Command::DriverCriteria(command) => run_driver_criteria(command),
@@ -956,6 +965,9 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         }
         [verb, action, rest @ ..] if verb == "package" && action == "render" => {
             parse_package_render(rest)
+        }
+        [verb, action, rest @ ..] if verb == "package" && action == "sweep" => {
+            parse_resource_sweep(rest)
         }
         [verb, action, rest @ ..] if verb == "package" && action == "driver-status" => {
             parse_driver_status(rest)
@@ -3753,6 +3765,57 @@ Git conflict evidence:
     }))
 }
 
+fn unix_time_now() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_secs())
+}
+
+fn record_driver_dispatch_worktrees(
+    command: &DriverRunCommand,
+    package: &str,
+    issuance: u64,
+    response: &Value,
+) -> Result<()> {
+    let worktrees = response
+        .get("worktrees")
+        .and_then(Value::as_array)
+        .context("package dispatch omitted worktrees")?;
+    let retain_until_unix_secs =
+        unix_time_now()?.saturating_add(ATTEMPT_EVIDENCE_RETENTION.as_secs());
+    for worktree in worktrees {
+        let repository = worktree
+            .get("repository")
+            .and_then(Value::as_str)
+            .context("package dispatch worktree omitted repository")?;
+        let path = worktree
+            .get("path")
+            .and_then(Value::as_str)
+            .context("package dispatch worktree omitted path")?;
+        let source = command
+            .repositories
+            .iter()
+            .find(|(name, _)| name == repository)
+            .map(|(_, source)| source)
+            .with_context(|| {
+                format!("package dispatch returned unknown repository `{repository}`")
+            })?;
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::DispatchWorktreeOpened {
+                package: package.to_owned(),
+                issuance,
+                repository: repository.to_owned(),
+                source: source.display().to_string(),
+                path: path.to_owned(),
+                retain_until_unix_secs,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn record_driver_dispatch_panes(
     journal: &Path,
     package: &str,
@@ -3943,6 +4006,7 @@ fn issue_driver_package_dispatch(
         worker_arguments,
     })?;
     record_driver_dispatch_identity(&command.journal_path, package_id, issuance, &response)?;
+    record_driver_dispatch_worktrees(command, package_id, issuance, &response)?;
     record_driver_dispatch_panes(&command.journal_path, package_id, issuance, &response)?;
     let result_path = response["result_path"]
         .as_str()
@@ -4346,11 +4410,21 @@ fn wait_for_driver_results(paths: &[PathBuf], timeout: Option<Duration>) -> Resu
     }
 }
 
-fn reconcile_completed_dispatch_panes(journal: &Path, events: &[DriverEvent]) -> Result<usize> {
-    let pending = pending_completed_pane_cleanups(events);
-    for target in &pending {
-        // A worktree root pane is the workspace's last pane, so close the exact workspace returned
-        // alongside it rather than attempting a pattern-based or last-pane closure.
+fn reconcile_terminal_dispatch_resources(
+    journal: &Path,
+    events: &[DriverEvent],
+    legacy_retain_until_unix_secs: Option<u64>,
+) -> Result<usize> {
+    let now = unix_time_now()?;
+    let panes = pending_terminal_pane_cleanups_with_legacy_deadline(
+        events,
+        now,
+        legacy_retain_until_unix_secs,
+    );
+    let worktrees = pending_terminal_worktree_cleanups(events, now);
+    let mut reclaimed = 0;
+    for target in &panes {
+        // The exact workspace capability comes from Herdr's create response. No label is consulted.
         let result = target
             .herdr_session()
             .map(parse_herdr_session_name)
@@ -4365,11 +4439,13 @@ fn reconcile_completed_dispatch_panes(journal: &Path, events: &[DriverEvent]) ->
         let (outcome, detail) = match result {
             Ok(_) => (
                 PaneCleanupOutcome::Closed,
-                "herdr confirmed closure of the exact workspace containing the run-created pane"
-                    .to_owned(),
+                "herdr confirmed closure of the exact dispatch workspace".to_owned(),
             ),
             Err(source) => (PaneCleanupOutcome::Failed, format!("{source:#}")),
         };
+        if outcome == PaneCleanupOutcome::Closed {
+            reclaimed += 1;
+        }
         append_driver_event(
             journal,
             &DriverEvent::DispatchPaneCleanup {
@@ -4383,7 +4459,58 @@ fn reconcile_completed_dispatch_panes(journal: &Path, events: &[DriverEvent]) ->
             },
         )?;
     }
-    Ok(pending.len())
+    for target in &worktrees {
+        let path = Path::new(target.path());
+        let result = if path.exists() {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(target.source())
+                .args(["worktree", "remove", "--force"])
+                .arg(path)
+                .output()
+                .with_context(|| {
+                    format!(
+                        "failed to execute git worktree remove for {}",
+                        path.display()
+                    )
+                });
+            match output {
+                Ok(output) if output.status.success() => Ok(()),
+                Ok(output) => Err(anyhow!(
+                    "git worktree remove failed with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+                Err(source) => Err(source),
+            }
+        } else {
+            Ok(())
+        };
+        let (outcome, detail) = match result {
+            Ok(()) => (
+                PaneCleanupOutcome::Closed,
+                format!(
+                    "reclaimed exact worktree for repository {}",
+                    target.repository()
+                ),
+            ),
+            Err(source) => (PaneCleanupOutcome::Failed, format!("{source:#}")),
+        };
+        if outcome == PaneCleanupOutcome::Closed {
+            reclaimed += 1;
+        }
+        append_driver_event(
+            journal,
+            &DriverEvent::DispatchWorktreeCleanup {
+                package: target.package().to_owned(),
+                issuance: target.issuance(),
+                path: target.path().to_owned(),
+                outcome,
+                detail,
+            },
+        )?;
+    }
+    Ok(reclaimed)
 }
 
 fn ensure_assembly_checkout(source: &Path, path: &Path, oid: &str) -> Result<()> {
@@ -5421,7 +5548,7 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
         if repair_driver_environment_closures(&command, &events)? > 0 {
             continue;
         }
-        if reconcile_completed_dispatch_panes(&command.journal_path, &events)? > 0 {
+        if reconcile_terminal_dispatch_resources(&command.journal_path, &events, None)? > 0 {
             continue;
         }
         let snapshot = derive_driver_snapshot(&graph, &events, command.override_risk_ordering)
@@ -5942,6 +6069,94 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
     }
 }
 
+fn parse_resource_sweep(rest: &[String]) -> Result<Command> {
+    let [flag, journal] = rest else {
+        bail!(USAGE);
+    };
+    if flag != "--journal" || journal.is_empty() {
+        bail!(USAGE);
+    }
+    Ok(Command::ResourceSweep(ResourceSweepCommand {
+        journal_path: PathBuf::from(journal),
+    }))
+}
+
+fn outstanding_dispatch_resource_count(events: &[DriverEvent]) -> usize {
+    let closed_panes = events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::DispatchPaneCleanup {
+                package,
+                issuance,
+                pane_id,
+                outcome: PaneCleanupOutcome::Closed,
+                ..
+            } => Some((package.as_str(), *issuance, pane_id.as_str())),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let closed_worktrees = events
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::DispatchWorktreeCleanup {
+                package,
+                issuance,
+                path,
+                outcome: PaneCleanupOutcome::Closed,
+                ..
+            } => Some((package.as_str(), *issuance, path.as_str())),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    events
+        .iter()
+        .filter(|event| match event {
+            DriverEvent::DispatchPaneOpened {
+                package,
+                issuance,
+                pane_id,
+                ..
+            } => !closed_panes.contains(&(package.as_str(), *issuance, pane_id.as_str())),
+            DriverEvent::DispatchWorktreeOpened {
+                package,
+                issuance,
+                path,
+                ..
+            } => !closed_worktrees.contains(&(package.as_str(), *issuance, path.as_str())),
+            _ => false,
+        })
+        .count()
+}
+
+fn run_resource_sweep(command: ResourceSweepCommand) -> Result<()> {
+    let events = read_driver_journal(&command.journal_path)?;
+    let legacy_retain_until = fs::metadata(&command.journal_path)
+        .and_then(|metadata| metadata.modified())
+        .context("failed to read legacy journal retention timestamp")?
+        .duration_since(UNIX_EPOCH)
+        .context("driver journal modification time is before the Unix epoch")?
+        .as_secs()
+        .saturating_add(ATTEMPT_EVIDENCE_RETENTION.as_secs());
+    let reclaimable = pending_terminal_pane_cleanups_with_legacy_deadline(
+        &events,
+        unix_time_now()?,
+        Some(legacy_retain_until),
+    )
+    .len()
+        + pending_terminal_worktree_cleanups(&events, unix_time_now()?).len();
+    let live_resources = outstanding_dispatch_resource_count(&events).saturating_sub(reclaimable);
+    let reclaimed = reconcile_terminal_dispatch_resources(
+        &command.journal_path,
+        &events,
+        Some(legacy_retain_until),
+    )?;
+    write_json_stdout(&json!({
+        "reclaimed": reclaimed,
+        "refused_live_or_retained": live_resources,
+        "identification": "exact journaled workspace and worktree capabilities; no labels",
+    }))
+}
+
 fn read_driver_journal(path: &Path) -> Result<Vec<DriverEvent>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -6423,26 +6638,6 @@ fn remove_clean_worktree(source: &Path, worktree: &Path) -> Result<()> {
                 });
             }
         }
-    }
-    Ok(())
-}
-
-fn remove_clean_created_worktrees(
-    worktrees: &[HerdrWorktreeSpec],
-    repositories: &[(String, PathBuf)],
-) -> Result<()> {
-    for worktree in worktrees {
-        let source = repositories
-            .iter()
-            .find(|(name, _)| name == worktree.repository())
-            .map(|(_, path)| path)
-            .with_context(|| {
-                format!(
-                    "dispatch omitted repository mapping `{}`",
-                    worktree.repository()
-                )
-            })?;
-        remove_clean_worktree(source, worktree.path())?;
     }
     Ok(())
 }
@@ -7758,6 +7953,70 @@ fn require_supported_herdr_version() -> Result<String> {
     Ok(detected)
 }
 
+fn reclaim_failed_package_dispatch(
+    created: &[Value],
+    worktrees: &[HerdrWorktreeSpec],
+    repositories: &[(String, PathBuf)],
+    session: Option<&HerdrSessionName>,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for item in created {
+        let workspace = item
+            .pointer("/response/result/workspace/workspace_id")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                item.pointer("/response/result/root_pane/workspace_id")
+                    .and_then(Value::as_str)
+            });
+        match workspace.map(HerdrWorkspaceId::parse) {
+            Some(Ok(workspace)) => {
+                if let Err(source) = execute_herdr(&workspace.close_invocation(session)) {
+                    failures.push(format!("workspace {}: {source:#}", workspace.as_str()));
+                }
+            }
+            Some(Err(source)) => failures.push(format!("invalid workspace capability: {source}")),
+            None => failures.push("worktree response omitted workspace capability".to_owned()),
+        }
+    }
+    for worktree in worktrees {
+        if !worktree.path().exists() {
+            continue;
+        }
+        let Some((_, source)) = repositories
+            .iter()
+            .find(|(name, _)| name == worktree.repository())
+        else {
+            failures.push(format!(
+                "missing source for repository {}",
+                worktree.repository()
+            ));
+            continue;
+        };
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(source)
+            .args(["worktree", "remove", "--force"])
+            .arg(worktree.path())
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => failures.push(format!(
+                "worktree {}: {}",
+                worktree.path().display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(source) => {
+                failures.push(format!("worktree {}: {source}", worktree.path().display()))
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("failed dispatch reclamation: {}", failures.join("; "))
+    }
+}
+
 fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
         bail!("package dispatch requires HERDR_ENV=1 inside a Herdr-managed pane");
@@ -7876,21 +8135,40 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             Ok(response) => response,
             Err(source) => {
                 record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
-                remove_clean_created_worktrees(
+                reclaim_failed_package_dispatch(
+                    &created,
                     &plan.worktrees()[..created.len()],
                     &command.repositories,
+                    plan.session(),
                 )?;
                 return Err(source);
             }
         };
-        if first_location.is_none() {
-            first_location = Some(herdr_location(&response)?);
-        }
         created.push(json!({
             "repository": worktree.repository(),
             "path": worktree.path(),
             "response": response,
         }));
+        if first_location.is_none() {
+            let location = created
+                .last()
+                .and_then(|item| item.get("response"))
+                .context("created dispatch omitted Herdr response")
+                .and_then(herdr_location);
+            match location {
+                Ok(location) => first_location = Some(location),
+                Err(source) => {
+                    record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+                    reclaim_failed_package_dispatch(
+                        &created,
+                        &plan.worktrees()[..created.len()],
+                        &command.repositories,
+                        plan.session(),
+                    )?;
+                    return Err(source);
+                }
+            }
+        }
     }
     for worktree in plan.worktrees() {
         let Some((input, expected_paths)) = command.conflicted_joins.get(worktree.repository())
@@ -7921,6 +8199,12 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             .collect::<Vec<_>>();
         if merge.status.success() || actual_paths != *expected_paths {
             record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+            reclaim_failed_package_dispatch(
+                &created,
+                plan.worktrees(),
+                &command.repositories,
+                plan.session(),
+            )?;
             bail!(
                 "conflicted join for repository {} did not reproduce: expected {:?}, observed {:?}; stdout: {}; stderr: {}",
                 worktree.repository(),
@@ -7942,7 +8226,12 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
         materialize_worker_launch_script(plan.launch_script_path(), &plan.launch_script())
     {
         record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
-        remove_clean_created_worktrees(plan.worktrees(), &command.repositories)?;
+        reclaim_failed_package_dispatch(
+            &created,
+            plan.worktrees(),
+            &command.repositories,
+            plan.session(),
+        )?;
         return Err(source);
     }
     let pane_run_response =
@@ -7951,19 +8240,34 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             HerdrPaneRunOutcome::Refused(source) => {
                 record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
                 let _ignored = fs::remove_file(plan.launch_script_path());
-                remove_clean_created_worktrees(plan.worktrees(), &command.repositories)?;
+                reclaim_failed_package_dispatch(
+                    &created,
+                    plan.worktrees(),
+                    &command.repositories,
+                    plan.session(),
+                )?;
                 return Err(source);
             }
             HerdrPaneRunOutcome::SpawnObservedButUnusable(source) => {
+                record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+                reclaim_failed_package_dispatch(
+                    &created,
+                    plan.worktrees(),
+                    &command.repositories,
+                    plan.session(),
+                )?;
                 return Err(Error::new(SpawnObservedDispatchError { source }));
             }
         };
     if !wait_for_worker_launch(plan.launch_script_path(), result_path.as_path()) {
         record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
-        let workspace = HerdrWorkspaceId::parse(location.workspace_id())?;
-        let _ignored = execute_herdr(&workspace.close_invocation(plan.session()));
         let _ignored = fs::remove_file(plan.launch_script_path());
-        remove_clean_created_worktrees(plan.worktrees(), &command.repositories)?;
+        reclaim_failed_package_dispatch(
+            &created,
+            plan.worktrees(),
+            &command.repositories,
+            plan.session(),
+        )?;
         bail!(
             "worker launch timed out before the pane consumed {}",
             plan.launch_script_path().display()
