@@ -39,7 +39,7 @@ fn journal_events(path: &Path) -> Vec<Value> {
 }
 
 #[test]
-fn dependent_contains_two_dependencies_and_finished_assembly_is_gated() {
+fn relative_launch_composes_dependencies_without_dirtying_the_source() {
     let temp = tempdir().expect("tempdir");
     let repository = temp.path().join("repo");
     fs::create_dir(&repository).expect("repository");
@@ -104,10 +104,8 @@ fi
     let journal = temp.path().join("driver.jsonl");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
     let output = Command::new(env!("CARGO_BIN_EXE_pce"))
-        .args(["package", "driver-run", "--graph"])
-        .arg(&graph_path)
-        .args(["--journal"])
-        .arg(&journal)
+        .args(["package", "driver-run", "--graph", "graph.json"])
+        .args(["--journal", "driver.jsonl"])
         .args(["--repository"])
         .arg(format!("repo={}", repository.display()))
         .env("HERDR_ENV", "1")
@@ -115,9 +113,11 @@ fi
             "PCE_WORK_PACKAGE_WORKTREE_ROOT",
             temp.path().join("worktrees"),
         )
+        .env("PCE_COMPOSITION_ROOT", temp.path().join("compositions"))
         .env("PATH", path)
         .env("HOME", temp.path())
         .env("USER", "tester")
+        .current_dir(temp.path())
         .output()
         .expect("driver");
     assert!(
@@ -135,6 +135,7 @@ fi
     assert!(!events.contains("join-criterion-executed"));
     assert_eq!(events.matches("assembly-criterion-executed").count(), 3);
     assert!(events.contains("assembly-completed"));
+    assert_eq!(git(&repository, &["status", "--short"]), "");
     let worktrees = fs::read_to_string(temp.path().join("herdr-worktrees")).expect("herdr log");
     let c = worktrees
         .lines()
@@ -887,5 +888,48 @@ fi
         !events
             .iter()
             .any(|event| event["event"] == "package-failed")
+    );
+}
+
+#[test]
+fn driver_refuses_an_already_dirty_source_before_composition() {
+    let temp = tempdir().expect("tempdir");
+    let repository = temp.path().join("repo");
+    fs::create_dir(&repository).expect("repository");
+    git(&repository, &["init", "-q"]);
+    git(&repository, &["config", "user.email", "test@example.com"]);
+    git(&repository, &["config", "user.name", "Test"]);
+    fs::write(repository.join("tracked"), "base\n").expect("tracked file");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "base"]);
+    fs::write(repository.join("unrelated-local-change"), "dirty\n").expect("dirty file");
+
+    let vision = temp.path().join("vision");
+    fs::create_dir(&vision).expect("vision directory");
+    fs::write(vision.join("graph.json"), b"{}").expect("graph fixture");
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).expect("bin");
+    executable(
+        &bin.join("herdr"),
+        "#!/bin/sh\nif [ \"${1-}\" = --version ]; then echo 'herdr 0.8.2'; exit 0; fi\nexit 1\n",
+    );
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "driver-run", "--graph", "graph.json"])
+        .args(["--journal", "driver.jsonl"])
+        .args(["--repository"])
+        .arg(format!("repo={}", repository.display()))
+        .env("PATH", path)
+        .current_dir(&vision)
+        .output()
+        .expect("driver");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains(
+        "source repository `repo` is dirty; commit, stash, or remove its changes before driver-run"
+    ));
+    assert_eq!(
+        git(&repository, &["status", "--short"]),
+        "?? unrelated-local-change"
     );
 }

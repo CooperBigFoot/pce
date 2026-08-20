@@ -269,3 +269,12 @@
 | Hand a claimed Effort ticket to `/to-graph`, not directly to `/to-vision`. | `/to-graph` invokes `/to-vision` to materialize the vision and then freezes the work-package graph required by `/work-graph`. `/work-ticket` still reserves and stamps the vision directory at claim time, and it only presents the command; it does not invoke `/to-graph`, `/pce`, or `/work-graph`. |
 | Keep the completion report action-first and name verification categories in one line. | The user needs the two-or-three-sentence end state, genuinely unresolved items when any exist, and the exact handoff command. Ticket, Map, glossary, ADR, directory, and linkage checks remain available on request without burying the command in an enumerated audit trail; acceptance criteria are not repeated because `/to-graph` re-derives and settles them in its own workflow. |
 | Carry the same-day warning through the full delegation chain. | `/to-graph` invokes `/to-vision`, which runs `pce vision new` with the retained byte-identical name. A same-day call reuses the reserved directory untouched, while crossing midnight can create a different date-stamped directory and diverge from the ticket's stamped `Vision:` line. |
+
+
+## 2026-08-20 composition path hygiene decisions
+
+| Decision | Rationale and boundary |
+|---|---|
+| Resolve `driver-run` graph, journal, and repository inputs against the launch directory once, before reading driver state. | Relative CLI paths remain an input convenience, but all later composition and Git operations receive absolute paths. The canonical graph parent is the vision-directory authority. |
+| Allocate transient composition worktrees under the binary-owned `/tmp/pce-compositions/<vision-digest>` root. | The vision digest separates concurrent visions without placing `.pce/compositions` in any source repository. `PCE_COMPOSITION_ROOT` may relocate the owner root, but it must be absolute. |
+| Refuse an already dirty mapped source repository at `driver-run` startup. | Composition reads committed refs and must not guess whether unrelated local changes are safe. The refusal names the repository and requires the operator to commit, stash, or remove changes. Ignored files do not count as dirty. PCE does not clean or alter pre-existing changes. |

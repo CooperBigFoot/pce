@@ -3336,8 +3336,81 @@ fn maximal_composition_inputs(
     Ok(maximal)
 }
 
+fn driver_vision_dir(command: &DriverRunCommand) -> Result<&Path> {
+    command
+        .graph_path
+        .parent()
+        .context("driver graph has no parent vision directory")
+}
+
+fn composition_worktree_root(vision_dir: &Path) -> Result<PathBuf> {
+    if !vision_dir.is_absolute() {
+        bail!(
+            "composition vision directory must be absolute: {}",
+            vision_dir.display()
+        );
+    }
+    let owner = std::env::var_os("PCE_COMPOSITION_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/pce-compositions"));
+    if !owner.is_absolute() {
+        bail!("PCE_COMPOSITION_ROOT must be absolute: {}", owner.display());
+    }
+    Ok(owner.join(composition_component(&vision_dir.to_string_lossy())))
+}
+
+fn resolve_driver_startup_paths(mut command: DriverRunCommand) -> Result<DriverRunCommand> {
+    let launch_dir =
+        std::env::current_dir().context("failed to resolve driver launch directory")?;
+    let graph_input = if command.graph_path.is_absolute() {
+        command.graph_path.clone()
+    } else {
+        launch_dir.join(&command.graph_path)
+    };
+    command.graph_path = fs::canonicalize(&graph_input)
+        .with_context(|| format!("failed to resolve driver graph {}", graph_input.display()))?;
+    command.journal_path = if command.journal_path.is_absolute() {
+        command.journal_path
+    } else {
+        launch_dir.join(command.journal_path)
+    };
+    for (_, source) in &mut command.repositories {
+        let input = if source.is_absolute() {
+            source.clone()
+        } else {
+            launch_dir.join(&*source)
+        };
+        *source = fs::canonicalize(&input)
+            .with_context(|| format!("failed to resolve repository source {}", input.display()))?;
+    }
+    Ok(command)
+}
+
+fn refuse_dirty_source_repositories(command: &DriverRunCommand) -> Result<()> {
+    for (name, source) in &command.repositories {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(source)
+            .args(["status", "--porcelain", "--untracked-files=normal"])
+            .output()
+            .with_context(|| format!("failed to inspect source repository `{name}`"))?;
+        if !output.status.success() {
+            bail!(
+                "failed to inspect source repository `{name}`: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        if !output.stdout.is_empty() {
+            bail!(
+                "source repository `{name}` is dirty; commit, stash, or remove its changes before driver-run"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn compose_git_commits(
-    journal: &Path,
+    vision_dir: &Path,
     label: &str,
     source: &Path,
     authored_base: &str,
@@ -3348,10 +3421,7 @@ fn compose_git_commits(
             base_oid: git_oid(source, authored_base)?,
         });
     }
-    let root = journal
-        .parent()
-        .context("driver journal has no parent")?
-        .join(".pce/compositions");
+    let root = composition_worktree_root(vision_dir)?;
     fs::create_dir_all(&root)?;
     let worktree = root.join(format!(
         "{}-{}-{}",
@@ -3524,7 +3594,7 @@ fn ensure_driver_package_bases(
             });
         }
         match compose_git_commits(
-            &command.journal_path,
+            driver_vision_dir(command)?,
             &format!("package-{package_id}-{repository}"),
             source,
             graph_authored_ref(graph, repository)?,
@@ -4699,7 +4769,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
             oid.clone()
         } else {
             match compose_git_commits(
-                &command.journal_path,
+                driver_vision_dir(command)?,
                 &format!("assembly-{repository}"),
                 source,
                 graph_authored_ref(graph, repository)?,
@@ -4750,7 +4820,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                     )?;
                     if !remaining_inputs.is_empty() {
                         match compose_git_commits(
-                            &command.journal_path,
+                            driver_vision_dir(command)?,
                             &format!("assembly-{repository}-remaining"),
                             source,
                             &resolved_oid,
@@ -5369,9 +5439,13 @@ fn ensure_driver_plan_version(
 }
 
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
-    require_herdr_session_running(command.herdr_session.as_ref())?;
+    let command = resolve_driver_startup_paths(command)?;
     let journal_path = command.journal_path.clone();
-    let result = run_driver_loop_inner(command);
+    let result = (|| {
+        require_herdr_session_running(command.herdr_session.as_ref())?;
+        refuse_dirty_source_repositories(&command)?;
+        run_driver_loop_inner(command)
+    })();
     if let Err(error) = &result {
         let reason = format!("{error:#}");
         if let Err(append_error) =
