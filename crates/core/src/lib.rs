@@ -161,9 +161,9 @@ pub use gate_replay::{
 pub use herdr_dispatch::{
     AbsoluteDispatchTemporaryDirectory, AbsoluteWorktreeRoot, DispatchAttempt,
     DispatchVisionSource, HerdrAgentLocation, HerdrAgentName, HerdrDispatchPlanError,
-    HerdrInvocation, HerdrPaneId, HerdrTabId, HerdrWorkPackageDispatchPlan, HerdrWorkspaceId,
-    HerdrWorktreeSpec, RepositoryDispatchInput, WorkerArgumentVector, WorkerEnvironment,
-    compose_herdr_work_package_dispatch, derive_herdr_agent_name,
+    HerdrInvocation, HerdrPaneId, HerdrSessionName, HerdrTabId, HerdrWorkPackageDispatchPlan,
+    HerdrWorkspaceId, HerdrWorktreeSpec, RepositoryDispatchInput, WorkerArgumentVector,
+    WorkerEnvironment, compose_herdr_work_package_dispatch, derive_herdr_agent_name,
 };
 pub use landing_readiness::{
     CompletionCriterionIndex, LandingCriterionEvidence, LandingReadinessDecision,

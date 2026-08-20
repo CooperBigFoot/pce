@@ -1,5 +1,6 @@
-//! herdr_dispatch_plan : Vision × WorkPackage × DispatchAttempt × RepositoryDispatchInput* × WorkerEnvironment × WorkerArgv → HerdrWorkPackageDispatchPlan
-//! pane_close : PaneId → HerdrInvocation
+//! herdr_dispatch_plan : Vision × WorkPackage × DispatchAttempt × HerdrSession? × RepositoryDispatchInput* × WorkerEnvironment × WorkerArgv → HerdrWorkPackageDispatchPlan
+//! pane_close : PaneId × HerdrSession? → HerdrInvocation
+//! workspace_close : WorkspaceId × HerdrSession? → HerdrInvocation
 //!
 //! The result is a pure, ordered description of Herdr worktree creation followed by one command
 //! run in the first worktree's root pane, plus exact cleanup composition for that pane. This module
@@ -38,6 +39,38 @@ impl DispatchAttempt {
 
 const ENV_EXECUTABLE: &str = "/usr/bin/env";
 const HERDR_EXECUTABLE: &str = "herdr";
+const MAX_HERDR_SESSION_NAME_LEN: usize = 64;
+
+/// A validated Herdr session selected for all objects and observations in one dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HerdrSessionName(String);
+
+impl HerdrSessionName {
+    /// Parse the session-name grammar supported by Herdr 0.8.x.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HerdrDispatchPlanError::InvalidSessionName`] for a name Herdr would reject.
+    pub fn parse(value: impl Into<String>) -> Result<Self, HerdrDispatchPlanError> {
+        let value = value.into();
+        let valid = !value.is_empty()
+            && value.len() <= MAX_HERDR_SESSION_NAME_LEN
+            && value != "."
+            && value != ".."
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+        if !valid {
+            return Err(HerdrDispatchPlanError::InvalidSessionName { value });
+        }
+        Ok(Self(value))
+    }
+
+    /// Return the exact validated session name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// A non-empty vision identity used to derive package branches and dispatch names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,10 +275,11 @@ impl HerdrWorkspaceId {
     }
 
     /// Compose closure of the exact worktree workspace containing the run-created root pane.
-    pub fn close_invocation(&self) -> HerdrInvocation {
-        HerdrInvocation {
-            argv: vec!["workspace".to_owned(), "close".to_owned(), self.0.clone()],
-        }
+    pub fn close_invocation(&self, session: Option<&HerdrSessionName>) -> HerdrInvocation {
+        HerdrInvocation::compose(
+            session,
+            vec!["workspace".to_owned(), "close".to_owned(), self.0.clone()],
+        )
     }
 }
 
@@ -296,10 +330,11 @@ impl HerdrPaneId {
     }
 
     /// Compose the exact pane-close invocation.
-    pub fn close_invocation(&self) -> HerdrInvocation {
-        HerdrInvocation {
-            argv: vec!["pane".to_owned(), "close".to_owned(), self.0.clone()],
-        }
+    pub fn close_invocation(&self, session: Option<&HerdrSessionName>) -> HerdrInvocation {
+        HerdrInvocation::compose(
+            session,
+            vec!["pane".to_owned(), "close".to_owned(), self.0.clone()],
+        )
     }
 }
 
@@ -344,6 +379,15 @@ pub struct HerdrInvocation {
 }
 
 impl HerdrInvocation {
+    fn compose(session: Option<&HerdrSessionName>, arguments: Vec<String>) -> Self {
+        let mut argv = Vec::with_capacity(arguments.len() + usize::from(session.is_some()) * 2);
+        if let Some(session) = session {
+            argv.extend(["--session".to_owned(), session.as_str().to_owned()]);
+        }
+        argv.extend(arguments);
+        Self { argv }
+    }
+
     /// The Herdr control executable selected by this protocol.
     pub const fn executable(&self) -> &'static str {
         HERDR_EXECUTABLE
@@ -381,6 +425,7 @@ impl HerdrWorktreeSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrWorkPackageDispatchPlan {
     agent_name: HerdrAgentName,
+    session: Option<HerdrSessionName>,
     worktrees: Vec<HerdrWorktreeSpec>,
     environment: BTreeMap<String, String>,
     worker_arguments: WorkerArgumentVector,
@@ -391,6 +436,10 @@ impl HerdrWorkPackageDispatchPlan {
     /// Return the restart-stable agent identity.
     pub const fn agent_name(&self) -> &HerdrAgentName {
         &self.agent_name
+    }
+    /// Return the selected Herdr session, or `None` for the default session.
+    pub const fn session(&self) -> Option<&HerdrSessionName> {
+        self.session.as_ref()
     }
     /// Return one worktree spec per package repository, in package order.
     pub fn worktrees(&self) -> &[HerdrWorktreeSpec] {
@@ -431,14 +480,15 @@ impl HerdrWorkPackageDispatchPlan {
 
     /// Compose the Herdr 0.8.2 pane-run command for the first worktree's root pane.
     pub fn pane_run(&self, location: &HerdrAgentLocation) -> HerdrInvocation {
-        HerdrInvocation {
-            argv: vec![
+        HerdrInvocation::compose(
+            self.session(),
+            vec![
                 "pane".to_owned(),
                 "run".to_owned(),
                 location.pane.0.clone(),
                 shell_quote(&self.launch_script_path.display().to_string()),
             ],
-        }
+        )
     }
 }
 
@@ -459,6 +509,11 @@ pub enum HerdrDispatchPlanError {
     /// A branch-bearing identity is outside the closed safe grammar.
     #[error("{field} identity `{value}` must contain only ASCII letters, digits, `_`, or `-`")]
     InvalidIdentity { field: &'static str, value: String },
+    /// A Herdr session name is outside the Herdr 0.8.x grammar.
+    #[error(
+        "invalid Herdr session name `{value}`; expected 1..=64 ASCII letters, digits, `.`, `_`, or `-`, excluding `.` and `..`"
+    )]
+    InvalidSessionName { value: String },
     /// A required string was empty.
     #[error("{field} must be non-empty")]
     EmptyValue { field: &'static str },
@@ -532,6 +587,7 @@ pub fn compose_herdr_work_package_dispatch(
     vision: &DispatchVisionSource,
     package: &WorkPackage,
     attempt: DispatchAttempt,
+    session: Option<HerdrSessionName>,
     repositories: &[RepositoryDispatchInput],
     worktree_root: &AbsoluteWorktreeRoot,
     temporary_directory: &AbsoluteDispatchTemporaryDirectory,
@@ -602,7 +658,7 @@ pub fn compose_herdr_work_package_dispatch(
         worktrees.push(HerdrWorktreeSpec {
             repository: repository_name.clone(),
             path,
-            invocation: HerdrInvocation { argv },
+            invocation: HerdrInvocation::compose(session.as_ref(), argv),
         });
     }
 
@@ -640,6 +696,7 @@ pub fn compose_herdr_work_package_dispatch(
         .collect::<String>();
     Ok(HerdrWorkPackageDispatchPlan {
         agent_name,
+        session,
         worktrees,
         environment,
         worker_arguments,
@@ -658,7 +715,7 @@ mod tests {
 
     use super::{
         AbsoluteDispatchTemporaryDirectory, AbsoluteWorktreeRoot, DispatchAttempt,
-        DispatchVisionSource, HerdrAgentLocation, HerdrTabId, HerdrWorkspaceId,
+        DispatchVisionSource, HerdrAgentLocation, HerdrSessionName, HerdrTabId, HerdrWorkspaceId,
         RepositoryDispatchInput, WorkerArgumentVector, WorkerEnvironment,
         compose_herdr_work_package_dispatch,
     };
@@ -685,6 +742,15 @@ mod tests {
         vision: &str,
         attempt: u64,
     ) -> super::HerdrWorkPackageDispatchPlan {
+        compose_with_session(repositories, vision, attempt, None)
+    }
+
+    fn compose_with_session(
+        repositories: &[&str],
+        vision: &str,
+        attempt: u64,
+        session: Option<HerdrSessionName>,
+    ) -> super::HerdrWorkPackageDispatchPlan {
         let graph = package_graph(repositories);
         let inputs = repositories
             .iter()
@@ -694,6 +760,7 @@ mod tests {
             &DispatchVisionSource::parse(vision).unwrap_or_else(|error| panic!("{error}")),
             &graph.packages()[0],
             DispatchAttempt::parse(attempt).unwrap_or_else(|error| panic!("{error}")),
+            session,
             &inputs,
             &AbsoluteWorktreeRoot::parse(PathBuf::from("/worktrees"))
                 .unwrap_or_else(|error| panic!("{error}")),
@@ -777,6 +844,41 @@ mod tests {
             )
         );
         assert!(!run.argv().iter().any(|argument| argument == "agent"));
+    }
+
+    #[test]
+    fn configured_session_prefixes_every_composed_invocation() {
+        let session = HerdrSessionName::parse("pce-work").unwrap_or_else(|error| panic!("{error}"));
+        let plan = compose_with_session(&["pce"], "vision-one", 1, Some(session.clone()));
+        assert_eq!(
+            &plan.worktrees()[0].invocation().argv()[..4],
+            ["--session", "pce-work", "worktree", "create"]
+        );
+        let location = HerdrAgentLocation::new(
+            HerdrWorkspaceId::parse("w9").unwrap_or_else(|error| panic!("{error}")),
+            HerdrTabId::parse("w9:t2").unwrap_or_else(|error| panic!("{error}")),
+            super::HerdrPaneId::parse("w9:p7").unwrap_or_else(|error| panic!("{error}")),
+        );
+        assert_eq!(
+            &plan.pane_run(&location).argv()[..4],
+            ["--session", "pce-work", "pane", "run"]
+        );
+        assert_eq!(
+            location.pane().close_invocation(Some(&session)).argv(),
+            ["--session", "pce-work", "pane", "close", "w9:p7"]
+        );
+        let workspace = HerdrWorkspaceId::parse("w9").unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            workspace.close_invocation(Some(&session)).argv(),
+            ["--session", "pce-work", "workspace", "close", "w9"]
+        );
+    }
+
+    #[test]
+    fn invalid_session_names_are_refused() {
+        for name in ["", ".", "..", "has/slash", &"x".repeat(65)] {
+            assert!(HerdrSessionName::parse(name).is_err(), "accepted {name:?}");
+        }
     }
 
     #[test]
@@ -875,6 +977,7 @@ mod tests {
             &DispatchVisionSource::parse("vision-one").unwrap_or_else(|error| panic!("{error}")),
             &graph.packages()[0],
             DispatchAttempt::parse(1).unwrap_or_else(|error| panic!("{error}")),
+            None,
             &[repository("pce")],
             &AbsoluteWorktreeRoot::parse(PathBuf::from("/worktrees"))
                 .unwrap_or_else(|error| panic!("{error}")),
@@ -911,14 +1014,14 @@ mod tests {
     #[test]
     fn pane_close_targets_only_the_exact_returned_opaque_identity() {
         let pane = super::HerdrPaneId::parse("w9:p73").unwrap_or_else(|error| panic!("{error}"));
-        let close = pane.close_invocation();
+        let close = pane.close_invocation(None);
         assert_eq!(close.executable(), "herdr");
         assert_eq!(close.argv(), ["pane", "close", "w9:p73"]);
         assert!(!close.argv().iter().any(|argument| argument == "unrelated"));
 
         let workspace =
             super::HerdrWorkspaceId::parse("w9").unwrap_or_else(|error| panic!("{error}"));
-        let workspace_close = workspace.close_invocation();
+        let workspace_close = workspace.close_invocation(None);
         assert_eq!(workspace_close.argv(), ["workspace", "close", "w9"]);
         assert!(
             !workspace_close

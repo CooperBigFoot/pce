@@ -427,6 +427,8 @@ pub enum DriverEvent {
         issuance: u64,
         pane_id: String,
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        herdr_session: Option<String>,
     },
     /// Herdr identified the pane occupied by the worker and the process observed there at spawn.
     DispatchWorkerIdentified {
@@ -436,6 +438,8 @@ pub enum DriverEvent {
         agent_name: String,
         pane_id: String,
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        herdr_session: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_path: Option<String>,
         process: DispatchWorkerProcessObservation,
@@ -454,6 +458,8 @@ pub enum DriverEvent {
         issuance: u64,
         pane_id: String,
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        herdr_session: Option<String>,
         outcome: PaneCleanupOutcome,
         detail: String,
     },
@@ -1839,6 +1845,7 @@ pub struct PendingPaneCleanup {
     issuance: u64,
     pane_id: String,
     workspace_id: String,
+    herdr_session: Option<String>,
 }
 
 impl PendingPaneCleanup {
@@ -1860,6 +1867,11 @@ impl PendingPaneCleanup {
     /// Return the exact worktree workspace containing the run-created root pane.
     pub fn workspace_id(&self) -> &str {
         &self.workspace_id
+    }
+
+    /// Return the Herdr session that scopes the capability, if it is not the default session.
+    pub fn herdr_session(&self) -> Option<&str> {
+        self.herdr_session.as_deref()
     }
 }
 
@@ -1897,6 +1909,7 @@ pub fn pending_completed_pane_cleanups(events: &[DriverEvent]) -> Vec<PendingPan
                 issuance,
                 pane_id,
                 workspace_id,
+                herdr_session,
             } if completed.contains(&(package.as_str(), *issuance))
                 && !accounted.contains(&(package.as_str(), *issuance, pane_id.as_str())) =>
             {
@@ -1905,6 +1918,7 @@ pub fn pending_completed_pane_cleanups(events: &[DriverEvent]) -> Vec<PendingPan
                     issuance: *issuance,
                     pane_id: pane_id.clone(),
                     workspace_id: workspace_id.clone(),
+                    herdr_session: herdr_session.clone(),
                 })
             }
             _ => None,
@@ -2299,7 +2313,7 @@ mod tests {
     }
 
     #[test]
-    fn old_dispatch_worker_identity_without_session_path_deserializes() {
+    fn old_dispatch_worker_identity_without_session_fields_deserializes() {
         let event: DriverEvent = serde_json::from_value(serde_json::json!({
             "event": "dispatch-worker-identified",
             "package": "A",
@@ -2318,6 +2332,7 @@ mod tests {
         assert!(matches!(
             event,
             DriverEvent::DispatchWorkerIdentified {
+                herdr_session: None,
                 session_path: None,
                 ..
             }
@@ -2726,6 +2741,7 @@ mod tests {
                 issuance: 1,
                 pane_id: "failed-attempt".to_owned(),
                 workspace_id: "owned-workspace".to_owned(),
+                herdr_session: None,
             },
             DriverEvent::WorkerFailed {
                 package: "A".to_owned(),
@@ -2741,6 +2757,7 @@ mod tests {
                 issuance: 2,
                 pane_id: "completed-worker".to_owned(),
                 workspace_id: "owned-workspace".to_owned(),
+                herdr_session: Some("pce-work".to_owned()),
             },
             DriverEvent::WorkerDone {
                 package: "A".to_owned(),
@@ -2751,6 +2768,7 @@ mod tests {
                 issuance: 2,
                 pane_id: "completed-gate".to_owned(),
                 workspace_id: "owned-workspace".to_owned(),
+                herdr_session: None,
             },
             DriverEvent::PackageCompleted {
                 package: "A".to_owned(),
@@ -2764,6 +2782,7 @@ mod tests {
                 issuance: 3,
                 pane_id: "unrelated-running".to_owned(),
                 workspace_id: "owned-workspace".to_owned(),
+                herdr_session: None,
             },
         ];
         let pending = super::pending_completed_pane_cleanups(&events);
@@ -2774,12 +2793,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["completed-worker", "completed-gate"]
         );
+        assert_eq!(pending[0].herdr_session(), Some("pce-work"));
+        assert_eq!(pending[1].herdr_session(), None);
         let mut accounted = events;
         accounted.push(DriverEvent::DispatchPaneCleanup {
             package: "A".to_owned(),
             issuance: 2,
             pane_id: "completed-worker".to_owned(),
             workspace_id: "owned-workspace".to_owned(),
+            herdr_session: None,
             outcome: super::PaneCleanupOutcome::Failed,
             detail: "herdr unavailable".to_owned(),
         });

@@ -46,7 +46,7 @@ use pce_core::{
     GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
     GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
-    HerdrPaneId, HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, KnownPayload,
+    HerdrPaneId, HerdrSessionName, HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, KnownPayload,
     LandingReadinessDecision, LegacyRepositoryContractPayload, LocalPatchLimit,
     MeasuredContractSnapshot, MergeStatus, MergeSubject, MilestoneMergeSubject, MilestoneNode,
     NamedReplayRef, NodeId, NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus,
@@ -121,7 +121,7 @@ const USAGE: &str = concat!(
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
     "       pce package materialize-refs --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>...\n",
     "       pce package driver-overrule --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --rationale <TEXT>\n",
-    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--worker-env <NAME>]... [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--gate-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
+    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--worker-env <NAME>]... [--herdr-session <NAME>] [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--gate-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
@@ -279,6 +279,7 @@ struct PackageDispatchCommand {
     repositories: Vec<(String, PathBuf)>,
     base_refs: BTreeMap<String, String>,
     conflicted_joins: BTreeMap<String, (CompositionInput, Vec<String>)>,
+    herdr_session: Option<HerdrSessionName>,
     environment: BTreeMap<String, String>,
     worker_arguments: Vec<String>,
 }
@@ -340,6 +341,7 @@ struct DriverRunCommand {
     repositories: Vec<(String, PathBuf)>,
     preparations: BTreeMap<String, String>,
     worker_environment: BTreeMap<String, String>,
+    herdr_session: Option<HerdrSessionName>,
     override_risk_ordering: bool,
     recovery_limits: RecoveryLimits,
     worker_override: Option<Vec<String>>,
@@ -1733,6 +1735,7 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
         .context("failed to parse package required artifact path")?;
     let mut repositories = Vec::new();
     let mut environment = BTreeMap::new();
+    let mut herdr_session = None;
     let mut index = 0;
     while index < trailing.len() && trailing[index] != "--" {
         if index + 1 >= trailing.len() {
@@ -1760,6 +1763,12 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
                     bail!("package dispatch environment names must be unique");
                 }
             }
+            "--herdr-session" => {
+                if herdr_session.is_some() {
+                    bail!("package dispatch Herdr session is repeated");
+                }
+                herdr_session = Some(HerdrSessionName::parse(trailing[index + 1].clone())?);
+            }
             _ => bail!(USAGE),
         }
         index += 2;
@@ -1782,6 +1791,7 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
         repositories,
         base_refs: BTreeMap::new(),
         conflicted_joins: BTreeMap::new(),
+        herdr_session,
         environment,
         worker_arguments,
     }))
@@ -2075,6 +2085,7 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
     let mut gate_failure_limit = 3_u32;
     let mut wait_timeout = None;
     let mut worker_environment = BTreeMap::new();
+    let mut herdr_session = None;
     let mut mapping_args = Vec::new();
     let mut index = 4;
     while index < options.len() {
@@ -2113,6 +2124,15 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
                 bail!("worker environment name `{name}` is repeated");
             }
             index += 2;
+        } else if options[index] == "--herdr-session" {
+            if herdr_session.is_some() {
+                bail!("driver Herdr session is repeated");
+            }
+            let value = options
+                .get(index + 1)
+                .context("--herdr-session requires a session name")?;
+            herdr_session = Some(HerdrSessionName::parse(value.clone())?);
+            index += 2;
         } else if options[index] == "--wait-timeout-ms" {
             let value = options
                 .get(index + 1)
@@ -2136,6 +2156,7 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
         repositories,
         preparations,
         worker_environment,
+        herdr_session,
         override_risk_ordering,
         recovery_limits: RecoveryLimits::new(
             RetryLimit::new(retry_limit),
@@ -2496,6 +2517,7 @@ fn run_composed_driver_gate(
             .collect(),
         base_refs: gate_base_refs,
         conflicted_joins: BTreeMap::new(),
+        herdr_session: command.herdr_session.clone(),
         environment: route_environment(command)?,
         worker_arguments,
     })?;
@@ -3600,6 +3622,7 @@ fn driver_package_worktrees(
         &vision,
         package,
         DispatchAttempt::parse(issuance)?,
+        command.herdr_session.clone(),
         &inputs,
         &AbsoluteWorktreeRoot::parse(package_worktree_root()?)?,
         &AbsoluteDispatchTemporaryDirectory::parse(package_temporary_directory(
@@ -3749,6 +3772,10 @@ fn record_driver_dispatch_panes(
             .get("workspace_id")
             .and_then(Value::as_str)
             .context("package dispatch pane target omitted workspace_id")?;
+        let herdr_session = target
+            .get("herdr_session")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         append_driver_event(
             journal,
             &DriverEvent::DispatchPaneOpened {
@@ -3756,6 +3783,7 @@ fn record_driver_dispatch_panes(
                 issuance,
                 pane_id: pane_id.to_owned(),
                 workspace_id: workspace_id.to_owned(),
+                herdr_session,
             },
         )?;
     }
@@ -3797,6 +3825,10 @@ fn record_driver_dispatch_identity(
         .get("workspace_id")
         .and_then(Value::as_str)
         .context("package dispatch identity omitted workspace_id")?;
+    let herdr_session = identity
+        .get("herdr_session")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let process = serde_json::from_value(
         identity
             .get("process")
@@ -3817,6 +3849,7 @@ fn record_driver_dispatch_identity(
             agent_name: agent_name.to_owned(),
             pane_id: pane_id.to_owned(),
             workspace_id: workspace_id.to_owned(),
+            herdr_session,
             session_path,
             process,
         },
@@ -3905,6 +3938,7 @@ fn issue_driver_package_dispatch(
                 _ => None,
             })
             .collect(),
+        herdr_session: command.herdr_session.clone(),
         environment: route_environment(command)?,
         worker_arguments,
     })?;
@@ -3934,6 +3968,7 @@ struct DriverDispatchRuntimeIdentity {
     agent_name: String,
     pane_id: String,
     workspace_id: String,
+    herdr_session: Option<String>,
     process: Option<DispatchWorkerProcessObservation>,
 }
 
@@ -3950,6 +3985,7 @@ fn driver_dispatch_runtime_identity(
             agent_name,
             pane_id,
             workspace_id,
+            herdr_session,
             process,
             ..
         } if event_package == package && *event_issuance == issuance => {
@@ -3957,6 +3993,7 @@ fn driver_dispatch_runtime_identity(
                 agent_name: agent_name.clone(),
                 pane_id: pane_id.clone(),
                 workspace_id: workspace_id.clone(),
+                herdr_session: herdr_session.clone(),
                 process: Some(process.clone()),
             })
         }
@@ -3964,17 +4001,20 @@ fn driver_dispatch_runtime_identity(
     }) {
         return Ok(Some(identity));
     }
-    let Some((pane_id, workspace_id)) = events.iter().rev().find_map(|event| match event {
-        DriverEvent::DispatchPaneOpened {
-            package: event_package,
-            issuance: event_issuance,
-            pane_id,
-            workspace_id,
-        } if event_package == package && *event_issuance == issuance => {
-            Some((pane_id.clone(), workspace_id.clone()))
-        }
-        _ => None,
-    }) else {
+    let Some((pane_id, workspace_id, herdr_session)) =
+        events.iter().rev().find_map(|event| match event {
+            DriverEvent::DispatchPaneOpened {
+                package: event_package,
+                issuance: event_issuance,
+                pane_id,
+                workspace_id,
+                herdr_session,
+            } if event_package == package && *event_issuance == issuance => {
+                Some((pane_id.clone(), workspace_id.clone(), herdr_session.clone()))
+            }
+            _ => None,
+        })
+    else {
         return Ok(None);
     };
     let work_package = graph
@@ -3992,19 +4032,30 @@ fn driver_dispatch_runtime_identity(
         agent_name: agent_name.as_str().to_owned(),
         pane_id,
         workspace_id,
+        herdr_session,
         process: None,
     }))
 }
 
-fn herdr_command_output(arguments: &[&str]) -> Result<Value> {
+fn scoped_herdr_arguments(session: Option<&HerdrSessionName>, arguments: &[&str]) -> Vec<String> {
+    let mut scoped = Vec::with_capacity(arguments.len() + usize::from(session.is_some()) * 2);
+    if let Some(session) = session {
+        scoped.extend(["--session".to_owned(), session.as_str().to_owned()]);
+    }
+    scoped.extend(arguments.iter().map(|argument| (*argument).to_owned()));
+    scoped
+}
+
+fn herdr_command_output(session: Option<&HerdrSessionName>, arguments: &[&str]) -> Result<Value> {
+    let scoped_arguments = scoped_herdr_arguments(session, arguments);
     let output = std::process::Command::new("herdr")
-        .args(arguments)
+        .args(&scoped_arguments)
         .output()
         .context("failed to execute herdr liveness observation")?;
     if !output.status.success() {
         bail!(
             "herdr liveness observation {:?} failed with {}: {}",
-            arguments,
+            scoped_arguments,
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -4062,10 +4113,17 @@ fn observe_driver_dispatch_environment(
     let Some(identity) = driver_dispatch_runtime_identity(graph, events, package, issuance)? else {
         return Ok(DriverDispatchEnvironmentLiveness::Unknown);
     };
-    let legacy_agent = identity
-        .process
-        .is_none()
-        .then(|| herdr_command_output(&["agent", "get", &identity.agent_name]));
+    let herdr_session = identity
+        .herdr_session
+        .clone()
+        .map(HerdrSessionName::parse)
+        .transpose()?;
+    let legacy_agent = identity.process.is_none().then(|| {
+        herdr_command_output(
+            herdr_session.as_ref(),
+            &["agent", "get", &identity.agent_name],
+        )
+    });
     let legacy_agent_matches = legacy_agent.as_ref().is_some_and(|agent| {
         agent.as_ref().is_ok_and(|response| {
             let observed = response.pointer("/result/agent");
@@ -4084,7 +4142,10 @@ fn observe_driver_dispatch_environment(
     if legacy_agent_matches {
         return Ok(DriverDispatchEnvironmentLiveness::Alive);
     }
-    let process = herdr_command_output(&["pane", "process-info", "--pane", &identity.pane_id]);
+    let process = herdr_command_output(
+        herdr_session.as_ref(),
+        &["pane", "process-info", "--pane", &identity.pane_id],
+    );
     let process = match process {
         Ok(response) => response,
         Err(source) => {
@@ -4290,9 +4351,18 @@ fn reconcile_completed_dispatch_panes(journal: &Path, events: &[DriverEvent]) ->
     for target in &pending {
         // A worktree root pane is the workspace's last pane, so close the exact workspace returned
         // alongside it rather than attempting a pattern-based or last-pane closure.
-        let result = HerdrWorkspaceId::parse(target.workspace_id())
+        let result = target
+            .herdr_session()
+            .map(HerdrSessionName::parse)
+            .transpose()
             .map_err(Error::new)
-            .and_then(|workspace_id| execute_herdr(&workspace_id.close_invocation()));
+            .and_then(|session| {
+                HerdrWorkspaceId::parse(target.workspace_id())
+                    .map_err(Error::new)
+                    .and_then(|workspace_id| {
+                        execute_herdr(&workspace_id.close_invocation(session.as_ref()))
+                    })
+            });
         let (outcome, detail) = match result {
             Ok(_) => (
                 PaneCleanupOutcome::Closed,
@@ -4308,6 +4378,7 @@ fn reconcile_completed_dispatch_panes(journal: &Path, events: &[DriverEvent]) ->
                 issuance: target.issuance(),
                 pane_id: target.pane_id().to_owned(),
                 workspace_id: target.workspace_id().to_owned(),
+                herdr_session: target.herdr_session().map(str::to_owned),
                 outcome,
                 detail,
             },
@@ -5299,6 +5370,7 @@ fn ensure_driver_plan_version(
 }
 
 fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
+    require_herdr_session_running(command.herdr_session.as_ref())?;
     let journal_path = command.journal_path.clone();
     let result = run_driver_loop_inner(command);
     if let Err(error) = &result {
@@ -7145,6 +7217,43 @@ fn herdr_082_compatible_versions_are_named_and_bounded() {
 
 #[cfg(test)]
 #[test]
+fn herdr_session_prefix_is_optional_and_precedes_the_subcommand() {
+    assert_eq!(
+        scoped_herdr_arguments(None, &["pane", "process-info"]),
+        ["pane", "process-info"]
+    );
+    let session = HerdrSessionName::parse("pce-work").expect("valid Herdr session");
+    assert_eq!(
+        scoped_herdr_arguments(Some(&session), &["pane", "process-info"]),
+        ["--session", "pce-work", "pane", "process-info"]
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn driver_run_parser_accepts_a_named_herdr_session() {
+    let arguments = [
+        "--graph",
+        "/tmp/graph.json",
+        "--journal",
+        "/tmp/journal.jsonl",
+        "--repository",
+        "pce=/tmp/pce",
+        "--herdr-session",
+        "pce-work",
+    ]
+    .map(str::to_owned);
+    let Command::DriverRun(command) = parse_driver_run(&arguments).expect("driver command") else {
+        panic!("unexpected command");
+    };
+    assert_eq!(
+        command.herdr_session.as_ref().map(HerdrSessionName::as_str),
+        Some("pce-work")
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn worker_launch_script_is_private_and_never_replaces_an_existing_file() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("worker-launch.sh");
@@ -7335,12 +7444,16 @@ fn parse_herdr_foreground_process(response: &Value) -> Option<DispatchWorkerProc
     })
 }
 
-fn observe_spawned_herdr_process(pane_id: &str) -> DispatchWorkerProcessObservation {
+fn observe_spawned_herdr_process(
+    session: Option<&HerdrSessionName>,
+    pane_id: &str,
+) -> DispatchWorkerProcessObservation {
     let started = Instant::now();
     let mut detail = "worker pane had no foreground process".to_owned();
+    let arguments = scoped_herdr_arguments(session, &["pane", "process-info", "--pane", pane_id]);
     while started.elapsed() < Duration::from_millis(500) {
         match std::process::Command::new("herdr")
-            .args(["pane", "process-info", "--pane", pane_id])
+            .args(&arguments)
             .output()
         {
             Ok(output) if output.status.success() => match serde_json::from_slice(&output.stdout) {
@@ -7557,6 +7670,25 @@ fn herdr_version_is_supported(detected: &str) -> bool {
         && matches!((major, minor, patch), (Some(0), Some(8), Some(patch)) if patch >= 2)
 }
 
+fn require_herdr_session_running(session: Option<&HerdrSessionName>) -> Result<()> {
+    let Some(session) = session else {
+        return Ok(());
+    };
+    let arguments = scoped_herdr_arguments(Some(session), &["workspace", "list"]);
+    let output = std::process::Command::new("herdr")
+        .args(&arguments)
+        .output()
+        .with_context(|| format!("failed to check Herdr session `{}`", session.as_str()))?;
+    if !output.status.success() {
+        bail!(
+            "Herdr session `{}` is not available: {}",
+            session.as_str(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 fn require_supported_herdr_version() -> Result<String> {
     let output = std::process::Command::new("herdr")
         .arg("--version")
@@ -7582,6 +7714,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
         bail!("package dispatch requires HERDR_ENV=1 inside a Herdr-managed pane");
     }
+    require_herdr_session_running(command.herdr_session.as_ref())?;
     let herdr_version = require_supported_herdr_version()?;
     let graph_bytes = fs::read(&command.graph_path).with_context(|| {
         format!(
@@ -7646,6 +7779,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
         &vision,
         package,
         attempt,
+        command.herdr_session.clone(),
         &repository_inputs,
         &worktree_root,
         &temporary_directory,
@@ -7680,6 +7814,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
         &vision,
         package,
         attempt,
+        command.herdr_session.clone(),
         &repository_inputs,
         &worktree_root,
         &temporary_directory,
@@ -7778,7 +7913,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     if !wait_for_worker_launch(plan.launch_script_path(), result_path.as_path()) {
         record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
         let workspace = HerdrWorkspaceId::parse(location.workspace_id())?;
-        let _ignored = execute_herdr(&workspace.close_invocation());
+        let _ignored = execute_herdr(&workspace.close_invocation(plan.session()));
         let _ignored = fs::remove_file(plan.launch_script_path());
         remove_clean_created_worktrees(plan.worktrees(), &command.repositories)?;
         bail!(
@@ -7788,7 +7923,8 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     }
     let worker_pane_id = location.pane().as_str().to_owned();
     let worker_workspace_id = location.workspace_id().to_owned();
-    let worker_process = observe_spawned_herdr_process(&worker_pane_id);
+    let worker_process =
+        observe_spawned_herdr_process(command.herdr_session.as_ref(), &worker_pane_id);
     let mut pane_cleanup_targets = Vec::new();
     let mut pane_ownership_errors = Vec::new();
     for item in &created {
@@ -7806,6 +7942,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             (Ok(pane_id), Ok(workspace_id)) => pane_cleanup_targets.push(json!({
                 "pane_id": pane_id.as_str(),
                 "workspace_id": workspace_id.as_str(),
+                "herdr_session": command.herdr_session.as_ref().map(HerdrSessionName::as_str),
             })),
             (pane, workspace) => pane_ownership_errors.push(format!(
                 "pane identity: {}; workspace identity: {}",
@@ -7837,6 +7974,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             "agent_name": plan.agent_name().as_str(),
             "pane_id": worker_pane_id,
             "workspace_id": worker_workspace_id,
+            "herdr_session": command.herdr_session.as_ref().map(HerdrSessionName::as_str),
             "session_path": session_path,
             "process": worker_process,
         },
@@ -21856,6 +21994,7 @@ None.
                 .iter()
                 .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
                 .collect(),
+            herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
             worker_override: None,
@@ -21990,6 +22129,7 @@ None.
             repositories: Vec::new(),
             preparations: std::collections::BTreeMap::new(),
             worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
             worker_override: None,
@@ -22017,6 +22157,7 @@ None.
             repositories: Vec::new(),
             preparations: std::collections::BTreeMap::new(),
             worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
             worker_override: None,
@@ -22086,6 +22227,7 @@ None.
             repositories: vec![("repo".to_owned(), repository)],
             preparations: std::collections::BTreeMap::new(),
             worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: limits,
             worker_override: None,
@@ -22114,6 +22256,7 @@ None.
             repositories: Vec::new(),
             preparations: std::collections::BTreeMap::new(),
             worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
             worker_override: None,
@@ -22240,6 +22383,7 @@ None.
             repositories: vec![("first".to_owned(), first), ("second".to_owned(), second)],
             preparations: std::collections::BTreeMap::new(),
             worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
             worker_override: None,
@@ -22401,6 +22545,7 @@ None.
             repositories: command.repositories.clone(),
             preparations: std::collections::BTreeMap::new(),
             worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
             worker_override: None,
@@ -22469,6 +22614,7 @@ None.
             repositories: command.repositories.clone(),
             preparations: std::collections::BTreeMap::new(),
             worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
             worker_override: None,
@@ -22641,6 +22787,7 @@ None.
             repositories: vec![("repo".to_owned(), repository)],
             preparations: std::collections::BTreeMap::new(),
             worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
             worker_override: None,
@@ -22719,6 +22866,7 @@ None.
             repositories: command.repositories.clone(),
             preparations: std::collections::BTreeMap::new(),
             worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
             worker_override: None,
@@ -22910,6 +23058,7 @@ None.
             worker_override: None,
             wait_timeout: None,
             worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
         };
         let graph = crate::read_driver_graph(&graph_path).expect("graph");
 

@@ -6766,6 +6766,31 @@ fn work_graph_declares_names_only_worker_environment() {
 }
 
 #[test]
+fn work_graph_persists_and_recovers_named_herdr_sessions_safely() {
+    let skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/work-graph/SKILL.md"),
+    )
+    .expect("work-graph skill");
+
+    for clause in [
+        r#""herdr_session": "pce-workers-<vision-slug>""#,
+        "[--herdr-session NAME]",
+        "herdr --session <name> workspace list",
+        "Do not start or attach the session automatically",
+        "exact `workspace_id` capabilities",
+        "a live, unknown, or inconclusive worker blocks closure",
+        "The label is corroboration,",
+        "never selection",
+        "Never bulk-close regex matches",
+    ] {
+        assert!(
+            skill.contains(clause),
+            "missing Herdr isolation clause: {clause}"
+        );
+    }
+}
+
+#[test]
 fn work_graph_limits_supervisor_freeze_authority_to_binary_verified_mechanical_freezes() {
     let skill = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/work-graph/SKILL.md"),

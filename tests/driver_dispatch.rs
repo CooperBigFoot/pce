@@ -913,3 +913,60 @@ fn repeated_identical_worker_environment_failure_terminates_without_spending_rec
     }
     assert!(!journal.contains("recovery-rung-attempted"));
 }
+
+#[test]
+fn named_herdr_session_must_be_running_before_driver_journal_mutation() {
+    let temp = tempdir().expect("tempdir");
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).expect("bin");
+    executable(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+printf '%s
+' "$*" >> "$HOME/herdr-invocations"
+if [ "$*" = "--session pce-workers workspace list" ]; then
+  printf '%s
+' '{"error":{"code":"server_not_running","message":"named server is not running"}}' >&2
+  exit 70
+fi
+exit 99
+"#,
+    );
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
+    let journal = temp.path().join("driver.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "package",
+            "driver-run",
+            "--graph",
+            "/tmp/not-read.json",
+            "--journal",
+        ])
+        .arg(&journal)
+        .args([
+            "--repository",
+            "repo=/tmp/repo",
+            "--herdr-session",
+            "pce-workers",
+        ])
+        .env("PATH", path)
+        .env("HOME", temp.path())
+        .output()
+        .expect("driver");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("server_not_running"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("herdr-invocations")).expect("invocations"),
+        "--session pce-workers workspace list
+"
+    );
+    assert!(
+        !journal.exists(),
+        "launch precondition must not mutate the journal"
+    );
+}

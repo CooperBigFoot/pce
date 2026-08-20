@@ -61,6 +61,7 @@ shape atomically:
   "local_patch_limit": null,
   "environment_failure_limit": null,
   "wait_timeout_ms": null,
+  "herdr_session": "pce-workers-<vision-slug>",
   "tmux_session": "pce-work-<vision-slug>"
 }
 ```
@@ -74,6 +75,11 @@ record in `supervision.md`. Run the driver under a least-privilege credential sc
 the criteria need, with explicit Denies for IAM, cloud, or account mutations that must never occur.
 Workers inherit this authority. The credentials are the fence; criterion prose and worker guidance
 are not an enforcement boundary.
+
+`herdr_session` is optional names-only launch configuration. When present, it selects the Herdr
+server that owns every worker workspace and pane; when absent, the default session retains legacy
+behavior. Persist the value once and reuse it on every relaunch. Never derive it from `HERDR_SESSION`,
+which does not select the client session in Herdr 0.8.2, and never silently change it during a run.
 
 On later invocations, reuse these values without asking. Recovery limits are once per journal, not
 plan-scoped. A plan advance clears disputed parks and consumed overrules and re-scopes package
@@ -90,7 +96,7 @@ dispatch. This is the cheapest correction because a worker environment need that
 harness should not consume a plan-version extension.
 
 Reject duplicate names, relative paths, prepare commands without a matching repository, malformed
-types, and unknown fields. Reject duplicate or unset environment names before launch, and report
+types, invalid Herdr session names, and unknown fields. Reject duplicate or unset environment names before launch, and report
 each unset name. Environment names must match `[A-Za-z_][A-Za-z0-9_]*` and must not claim
 binary-owned `TMPDIR`, `PCE_DISPATCH_TMPDIR`, `PCE_WORKTREES`, or `PCE_WORKTREE_*`. Never fill a
 missing value by guesswork. Never write an environment value to `run.json`, `supervision.md`, or the
@@ -108,9 +114,14 @@ following command with the stored optional flags included only when non-null or 
 pce package driver-run --graph <frozen-graph> \
   --journal <vision-dir>/driver-journal.jsonl \
   --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... \
-  [--worker-env NAME]... [--override-risk-ordering] [--retry-limit N] [--local-patch-limit N] \
-  [--environment-failure-limit N] [--wait-timeout-ms N]
+  [--worker-env NAME]... [--herdr-session NAME] [--override-risk-ordering] [--retry-limit N] \
+  [--local-patch-limit N] [--environment-failure-limit N] [--wait-timeout-ms N]
 ```
+
+Before every launch with `herdr_session` configured, run
+`herdr --session <name> workspace list`. If Herdr reports `server_not_running`, preserve that typed
+message and refuse the launch. Do not start or attach the session automatically. The operator owns
+that precondition. With no configured session, do not add a selector or a new preflight.
 
 `--worker-env` is names-only pass-through from the driver's launch environment. It applies to the
 package worker and every gate worker spawned in that workspace, including later attempts after a
@@ -199,10 +210,11 @@ Before analysis or narration, correlate package and issuance with the latest
 `dispatch-pane-opened`. Immediately append an evidence section to `supervision.md` containing:
 
 1. the raw journal record;
-2. `herdr pane read <pane_id> --source recent-unwrapped --lines 10000 --format text` output, or the
-   exact read failure if cleanup already won the race;
-3. `herdr workspace get <workspace_id>` and `herdr worktree list --workspace <workspace_id>
-   --json`, followed for every resolved checkout by `git -C <worktree> rev-parse HEAD`,
+2. `herdr [--session <journaled-herdr-session>] pane read <pane_id> --source recent-unwrapped
+   --lines 10000 --format text` output, or the exact read failure if cleanup already won the race;
+3. `herdr [--session <journaled-herdr-session>] workspace get <workspace_id>` and `herdr
+   [--session <journaled-herdr-session>] worktree list --workspace <workspace_id> --json`, followed
+   for every resolved checkout by `git -C <worktree> rev-parse HEAD`,
    `git -C <worktree> status --short --branch`, and `git -C <worktree> diff --stat`;
 4. `<vision-dir>/package-outcomes/<PACKAGE>/<ISSUANCE>.json` and
    `<vision-dir>/.pce/package-briefs/<PACKAGE>/<ISSUANCE>.md`, or an explicit missing-file
@@ -236,6 +248,20 @@ Act without prior approval, then append and report the action, only in these cas
   graph revision; do not spend another retry trying to recreate the cheap door.
 - **Rebuild disposable state.** Re-run a configured prepare command, remove a corrupt disposable
   worktree, or clear a cache. Record what was removed and how it can be reconstructed.
+- **Close stale work-package workspaces only from one retired run's proof.** Start from a known
+  `<vision-dir>`, not from a global label search. Refuse unless its `run.json` tmux driver is absent
+  or dead, the operator has retired the run and will not relaunch it, and its journal proves that no
+  matching worker is live. For an attempt without a terminal worker outcome, apply the guarded
+  whole-tree liveness procedure in section 3; a live, unknown, or inconclusive worker blocks closure.
+  Select only exact `workspace_id` capabilities from that journal's `dispatch-pane-opened` records
+  that have no successful `dispatch-pane-cleanup`. Resolve their scope from the record's
+  `herdr_session`; its absence means the default session for a legacy record. In that exact session,
+  require `workspace get` to return the same ID and a label matching the expected
+  `<PACKAGE>:<repository>:attempt-<n>` derived from the frozen graph. The label is corroboration,
+  never selection. Then run only
+  `herdr [--session <name>] workspace close <exact-journaled-workspace-id>`. Refuse on missing or
+  ambiguous journal provenance. Never bulk-close regex matches, never manually append cleanup
+  records, and record every command and result in `supervision.md`.
 - **Resolve an assembly conflict only within its assigned paths.** The resolution worker may edit
   only the exact conflicted paths named by the driver. It must not run repository-wide formatters or
   change any other path; if another path is required, it refuses instead of widening scope. The
