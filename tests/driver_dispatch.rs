@@ -189,9 +189,8 @@ fi
             .to_string()
     );
     assert_eq!(dispatch_identity["session_observation"], "observed");
-    assert!(journal.contains("dispatch-pane-cleanup"));
-    assert!(journal.contains("simulated close refusal"));
-    assert!(journal.contains("\"outcome\":\"failed\""));
+    // Terminal dispatch resources are now reclaimed behind a retention window rather than closed
+    // at completion, so this run records no cleanup outcome; retention is covered by its own tests.
 
     let mismatched_restart = Command::new(env!("CARGO_BIN_EXE_pce"))
         .args(["package", "driver-run", "--graph"])

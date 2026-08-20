@@ -321,3 +321,11 @@
 | Resolve `driver-run` graph, journal, and repository inputs against the launch directory once, before reading driver state. | Relative CLI paths remain an input convenience, but all later composition and Git operations receive absolute paths. The canonical graph parent is the vision-directory authority. |
 | Allocate transient composition worktrees under the binary-owned `/tmp/pce-compositions/<vision-digest>` root. | The vision digest separates concurrent visions without placing `.pce/compositions` in any source repository. `PCE_COMPOSITION_ROOT` may relocate the owner root, but it must be absolute. |
 | Refuse an already dirty mapped source repository at `driver-run` startup. | Composition reads committed refs and must not guess whether unrelated local changes are safe. The refusal names the repository and requires the operator to commit, stash, or remove changes. Ignored files do not count as dirty. PCE does not clean or alter pre-existing changes. |
+## 2026-08-20 recovery spending reset decisions
+
+| Decision | Rationale and boundary |
+|---|---|
+| Keep recovery spending journal-scoped across plan-version advances. | The once-per-journal contract prevents supervisors from minting plan versions to launder attributable failures. Both rung selection and `driver-status` now derive the same per-package count from the full journal. |
+| Open an exhausted ladder with `driver-run --recovery-reset <HUMAN_RECORD_PATH>`. | The strict schema-v1 JSON record names one package, `reset_by`, and `rationale`. PCE journals those fields plus the source SHA-256 before dispatch. Replay accepts the reset only for a package currently parked with an exhausted ladder. |
+| Limit each reset record to one package. | Recovery exhaustion and its rationale are package-specific. One-package records minimize authority and keep each human ruling independently auditable. A later batch format is unnecessary while the existing flag can import one exact ruling per launch. |
+| Describe the reset boundary as a journal recovery epoch. | A plan advance does not reset spending. A valid attributed reset begins the next epoch for that package, clears stale rung evidence and repeated-worker-blocker history, and appears in `driver-status` under `recovery_spending_resets`. The exhaustion park message names `--recovery-reset` as the real door. |
