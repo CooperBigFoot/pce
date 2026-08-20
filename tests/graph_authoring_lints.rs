@@ -260,6 +260,7 @@ fn journal_lineage_warns_only_for_earlier_completed_undeclared_delivery() {
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-qm", "repair"]);
     let repaired = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["branch", "pce/lineage/Q/attempt-1", &repaired]);
     let graph = json!({"vision":"lineage","plan_version":1,"authored_at_refs":{"repo":base},"packages":[
       {"id":"Q","title":"Repair","repositories":["repo"],"produces":["scripts/check.py"],"criteria":[criterion("true")],"depends_on":[]},
       {"id":"P","title":"Consume","repositories":["repo"],"produces":[],"criteria":[criterion("python scripts/check.py")],"depends_on":[]},
@@ -268,7 +269,7 @@ fn journal_lineage_warns_only_for_earlier_completed_undeclared_delivery() {
     let path = directory.path().join("graph.json");
     fs::write(&path, serde_json::to_vec(&graph).expect("JSON")).expect("graph");
     let journal = directory.path().join("journal.jsonl");
-    fs::write(&journal, format!("{{\"event\":\"driver-ref-materialized\",\"repository\":\"repo\",\"reference\":\"refs/pce/q\",\"oid\":\"{repaired}\",\"product\":{{\"kind\":\"package-attempt\",\"package\":\"Q\",\"issuance\":1}}}}\n{{\"event\":\"package-completed\",\"package\":\"Q\"}}\n")).expect("journal");
+    fs::write(&journal, "{\"event\":\"worker-dispatched\",\"package\":\"Q\",\"issuance\":1}\n{\"event\":\"worker-done\",\"package\":\"Q\",\"issuance\":1}\n{\"event\":\"package-completed\",\"package\":\"Q\"}\n").expect("journal");
     let output = pce()
         .args(["graph", "check", "--file"])
         .arg(&path)
@@ -293,4 +294,47 @@ fn journal_lineage_warns_only_for_earlier_completed_undeclared_delivery() {
     assert_eq!(warnings[0]["package"], "P");
     assert_eq!(warnings[0]["predecessor_package"], "Q");
     assert_eq!(warnings[0]["path"], "scripts/check.py");
+}
+
+#[test]
+fn ownership_compares_outputs_within_the_current_graph_once() {
+    let directory = tempdir().expect("temp");
+    let (repo, oid) = repository(directory.path(), "repo", &[]);
+    let graph = json!({"vision":"current-ownership","plan_version":1,"authored_at_refs":{"repo":oid},"packages":[
+      {"id":"A","title":"First","repositories":["repo"],"produces":["shared/result.json"],"criteria":[criterion("cat shared/result.json shared/result.json")],"depends_on":[]},
+      {"id":"B","title":"Second","repositories":["repo"],"produces":["shared/result.json"],"criteria":[criterion("cat shared/result.json")],"depends_on":[]}
+    ]});
+    let path = directory.path().join("graph.json");
+    fs::write(&path, serde_json::to_vec(&graph).expect("JSON")).expect("graph");
+    let output = check(&path, &[format!("repo={}", repo.display())], false);
+    assert!(output.status.success());
+    let receipt: Value = serde_json::from_slice(&output.stdout).expect("receipt");
+    let warnings = receipt["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter(|warning| warning["kind"] == "act-ownership-artifact")
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0]["package"], "B");
+    assert_eq!(warnings[0]["predecessor_package"], "A");
+    assert_eq!(warnings[0]["path"], "shared/result.json");
+}
+
+#[test]
+fn shared_harness_reference_is_not_duplicate_output_ownership() {
+    let directory = tempdir().expect("temp");
+    let (repo, oid) = repository(directory.path(), "repo", &["scripts/shared_harness.py"]);
+    let graph = json!({"vision":"shared-harness","plan_version":1,"authored_at_refs":{"repo":oid},"packages":[
+      {"id":"A","title":"Fixture","repositories":["repo"],"produces":["generated/a.json"],"criteria":[criterion("python scripts/shared_harness.py generated/a.json")],"depends_on":[]},
+      {"id":"B","title":"Report","repositories":["repo"],"produces":["generated/b.json"],"criteria":[criterion("python scripts/shared_harness.py generated/b.json")],"depends_on":[{"id":"A","kind":"buildability","reason":"uses fixture"}]}
+    ]});
+    let path = directory.path().join("graph.json");
+    fs::write(&path, serde_json::to_vec(&graph).expect("JSON")).expect("graph");
+    let output = check(&path, &[format!("repo={}", repo.display())], true);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

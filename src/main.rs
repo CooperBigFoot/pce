@@ -10543,6 +10543,8 @@ fn lineage_delivery_warnings(
     let contents = fs::read_to_string(journal)
         .with_context(|| format!("failed to read driver journal {}", journal.display()))?;
     let mut completed = BTreeSet::new();
+    let mut completed_issuances = BTreeMap::<String, u64>::new();
+    let mut worker_done_issuances = BTreeMap::<String, u64>::new();
     let mut proven = BTreeMap::<(String, String), String>::new();
     for (line_index, line) in contents.lines().enumerate() {
         if line.trim().is_empty() {
@@ -10551,9 +10553,20 @@ fn lineage_delivery_warnings(
         let value: Value = serde_json::from_str(line)
             .with_context(|| format!("invalid driver journal record {}", line_index + 1))?;
         match value.get("event").and_then(Value::as_str) {
+            Some("worker-done") => {
+                if let (Some(package), Some(issuance)) = (
+                    value.get("package").and_then(Value::as_str),
+                    value.get("issuance").and_then(Value::as_u64),
+                ) {
+                    worker_done_issuances.insert(package.to_owned(), issuance);
+                }
+            }
             Some("package-completed") => {
                 if let Some(package) = value.get("package").and_then(Value::as_str) {
                     completed.insert(package.to_owned());
+                    if let Some(issuance) = worker_done_issuances.get(package) {
+                        completed_issuances.insert(package.to_owned(), *issuance);
+                    }
                 }
             }
             Some("driver-ref-materialized")
@@ -10569,6 +10582,32 @@ fn lineage_delivery_warnings(
                 }
             }
             _ => {}
+        }
+    }
+    for package in graph.packages() {
+        let package_id = package.id().as_str();
+        let Some(issuance) = completed_issuances.get(package_id) else {
+            continue;
+        };
+        let branch = package_branch(graph, package_id, *issuance);
+        for repository in package.repositories() {
+            let (_, source) = repositories
+                .iter()
+                .find(|(name, _)| name == repository)
+                .with_context(|| {
+                    format!("lineage delivery check requires repository mapping `{repository}`")
+                })?;
+            let output = git_output(
+                source,
+                &["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
+            )?;
+            if output.status.success() {
+                let oid = String::from_utf8(output.stdout)
+                    .context("proven package ref oid is not UTF-8")?
+                    .trim()
+                    .to_owned();
+                proven.insert((package_id.to_owned(), repository.clone()), oid);
+            }
         }
     }
     let mut warnings = Vec::new();
@@ -10672,6 +10711,35 @@ fn graph_authoring_warnings(
                     strict_upstream_references: Vec::new(),
                     message: "artifact does not exist at the authored ref and is not declared in produces by this package or a strictly upstream package".to_owned(),
                 });
+            }
+        }
+    }
+    for (index, package) in graph.packages().iter().enumerate() {
+        let current_outputs = package_produced_artifacts(package);
+        for predecessor_package in &graph.packages()[..index] {
+            for (repository, artifact_path) in &current_outputs {
+                if package_produced_artifacts(predecessor_package)
+                    .contains(&(repository.clone(), artifact_path.clone()))
+                {
+                    let key = (
+                        "act-ownership-artifact",
+                        package.id().as_str().to_owned(),
+                        predecessor_package.id().as_str().to_owned(),
+                        repository.clone(),
+                        artifact_path.clone(),
+                    );
+                    if emitted.insert(key) {
+                        warnings.push(GraphAuthoringWarning::ActOwnershipArtifact {
+                            package: package.id().as_str().to_owned(),
+                            predecessor_package: predecessor_package.id().as_str().to_owned(),
+                            repository: repository.clone(),
+                            path: artifact_path.clone(),
+                            message:
+                                "two current graph packages declare the same produced artifact"
+                                    .to_owned(),
+                        });
+                    }
+                }
             }
         }
     }
