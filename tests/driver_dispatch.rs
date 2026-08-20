@@ -92,8 +92,10 @@ set -eu
 cat >/dev/null
 mkdir -p "$HOME/.prime/agent/daemon-workers/test-daemon"
 session_path="$HOME/known-prime-session.jsonl"
+# Exercise the real descriptor race: Prime may publish well after the old 500 ms budget.
+sleep 1.2
 printf '{"createCommand":{"config":{"cwd":"%s"},"sessionPath":"%s"}}\n' "$(pwd -P)" "$session_path" > "$HOME/.prime/agent/daemon-workers/test-daemon/worker-$$.json"
-sleep 0.35
+sleep 0.2
 if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
   printf 'known\n' > known.txt
   git add known.txt; git commit -m implementation >/dev/null
@@ -186,6 +188,11 @@ fi
             .display()
             .to_string()
     );
+    assert_eq!(dispatch_identity["session_observation"], "observed");
+    assert!(journal.contains("dispatch-pane-cleanup"));
+    assert!(journal.contains("simulated close refusal"));
+    assert!(journal.contains("\"outcome\":\"failed\""));
+
     let mismatched_restart = Command::new(env!("CARGO_BIN_EXE_pce"))
         .args(["package", "driver-run", "--graph"])
         .arg(&graph)
@@ -762,6 +769,12 @@ fi
     let first_journal = fs::read_to_string(&journal).expect("journal");
     assert!(first_journal.contains("worker-dispatched"));
     assert!(first_journal.contains("worker-spawn-failed"));
+    let spawn_failure = first_journal
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("journal event JSON"))
+        .find(|event| event["event"] == "worker-spawn-failed")
+        .expect("spawn failure event");
+    assert_eq!(spawn_failure["scope"], "dispatch-environment");
     assert!(!first_journal.contains("driver-stopped-waiting"));
     let dispatch =
         fs::read_to_string(temp.path().join(".pce/package-dispatch.jsonl")).expect("dispatch");
@@ -1000,4 +1013,141 @@ fn overlong_named_herdr_session_is_refused_before_driver_preflight() {
         !journal.exists(),
         "parse refusal must not mutate the journal"
     );
+}
+
+#[test]
+fn completed_composed_worker_is_harvested_while_sibling_remains_live() {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let temp = tempdir().expect("tempdir");
+    let repository = temp.path().join("repo");
+    fs::create_dir(&repository).expect("repository");
+    for args in [
+        ["init"].as_slice(),
+        ["config", "user.email", "test@example.com"].as_slice(),
+        ["config", "user.name", "Test"].as_slice(),
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(&repository)
+                .args(args)
+                .status()
+                .expect("git")
+                .success()
+        );
+    }
+    fs::write(repository.join("seed"), "seed\n").expect("seed");
+    assert!(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["add", "."])
+            .status()
+            .expect("add")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["commit", "-m", "seed"])
+            .status()
+            .expect("commit")
+            .success()
+    );
+    let vision = temp.path().join("vision.md");
+    fs::write(&vision, "# Vision: harvest\n\n## Goal / Why\n\nHarvest independently.\n\n## Acceptance criteria (vision-level \"done\")\n\n```json\n{\"criteria\":[{\"name\":\"known\",\"input\":\"file\",\"observation\":\"known\"}]}\n```\n").expect("vision");
+    let graph = temp.path().join("graph.json");
+    fs::write(&graph, r#"{"vision":"harvest","plan_version":1,"authored_at_ref":"HEAD","packages":[{"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"known-a","input":"repo","observation":"known","command":"test -f A.txt"}],"depends_on":[]},{"id":"B","title":"B","repositories":["repo"],"criteria":[{"name":"known-b","input":"repo","observation":"known","command":"test -f B.txt"}],"depends_on":[]}]}"#).expect("graph");
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).expect("bin");
+    executable(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+set -eu
+if [ "${1-}" = "--version" ]; then echo "herdr 0.8.2"; exit 0; fi
+if [ "$1 $2" = "worktree create" ]; then
+  shift 2; cwd= path= branch= base=
+  while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
+  git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
+  count=1; [ ! -f "$HOME/count" ] || count=$(( $(cat "$HOME/count") + 1 )); printf '%s' "$count" > "$HOME/count"
+  printf '{"result":{"workspace":{"workspace_id":"w%s"},"tab":{"tab_id":"w%s:t1"},"root_pane":{"pane_id":"p%s","workspace_id":"w%s"}}}\n' "$count" "$count" "$count" "$count"
+elif [ "$1 $2" = "pane run" ]; then
+  /usr/bin/python3 - "$4" <<'PY'
+import subprocess, sys
+with open('/dev/null', 'rb') as stdin, open('/dev/null', 'wb') as output:
+    subprocess.Popen(['/bin/sh', '-c', sys.argv[1]], stdin=stdin, stdout=output, stderr=output, start_new_session=True)
+PY
+  printf '{}\n'
+elif [ "$1 $2" = "workspace close" ]; then printf '{"result":{"closed":true}}\n'
+else printf '{}\n'; fi
+"#,
+    );
+    executable(
+        &bin.join("prime-agent"),
+        r#"#!/bin/sh
+set -eu
+cat >/dev/null
+package=$(basename "$(dirname "$PCE_PACKAGE_OUTCOME")")
+if [ "$package" = A ]; then
+  mkdir -p "$HOME/.prime/agent/daemon-workers/test"
+  printf '{"createCommand":{"config":{"cwd":"%s"},"sessionPath":"%s/session-%s.jsonl"}}\n' "$(pwd -P)" "$HOME" "$$" > "$HOME/.prime/agent/daemon-workers/test/worker-$$.json"
+fi
+if [ "$package" = B ]; then printf '%s' "$$" > "$HOME/b-worker-pid"; sleep 30; fi
+printf '%s\n' "$package" > "$package.txt"
+git add "$package.txt"; git commit -m implementation >/dev/null
+printf '%s' '{"outcome":"done"}' > "$PCE_PACKAGE_OUTCOME"
+"#,
+    );
+    let journal = temp.path().join("driver.jsonl");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args(["package", "driver-run", "--graph"])
+        .arg(&graph)
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository"])
+        .arg(format!("repo={}", repository.display()))
+        .env("HERDR_ENV", "1")
+        .env(
+            "PCE_WORK_PACKAGE_WORKTREE_ROOT",
+            temp.path().join("worktrees"),
+        )
+        .env("PATH", path)
+        .env("HOME", temp.path())
+        .env("USER", "tester")
+        .spawn()
+        .expect("driver");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let harvested = loop {
+        let text = fs::read_to_string(&journal).unwrap_or_default();
+        if text.lines().any(|line| {
+            line.contains("\"event\":\"worker-done\"") && line.contains("\"package\":\"A\"")
+        }) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Ok(pid) = fs::read_to_string(temp.path().join("b-worker-pid")) {
+        let _ = Command::new("kill").arg(pid).status();
+    }
+    let text = fs::read_to_string(&journal).unwrap_or_default();
+    assert!(
+        harvested,
+        "A was not harvested while B remained live: {text}"
+    );
+    assert!(!text.lines().any(
+        |line| line.contains("\"event\":\"worker-done\"") && line.contains("\"package\":\"B\"")
+    ));
+    let b_identity = text
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("journal event JSON"))
+        .find(|event| event["event"] == "dispatch-worker-identified" && event["package"] == "B")
+        .expect("B dispatch identity");
+    assert!(b_identity["session_path"].is_null());
+    assert_eq!(b_identity["session_observation"], "descriptor-not-found");
 }

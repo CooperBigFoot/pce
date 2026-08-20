@@ -273,6 +273,36 @@ pub enum DispatchWorkerProcessObservation {
     Inconclusive { detail: String },
 }
 
+/// Outcome of correlating a Prime worker descriptor with one dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrimeSessionObservation {
+    /// An older journal predates typed descriptor observation.
+    #[default]
+    NotRecorded,
+    /// The dispatched program is not Prime Agent.
+    NotPrimeAgent,
+    /// Exactly one absolute Prime session path was observed.
+    Observed,
+    /// No matching descriptor appeared within the bounded retry window.
+    DescriptorNotFound,
+    /// More than one descriptor matched the dispatch worktree.
+    MultipleDescriptors,
+    /// A matching descriptor omitted a usable absolute session path.
+    SessionPathUnavailable,
+}
+
+/// Scope of a failure before a worker process was successfully dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpawnFailureScope {
+    /// An older journal predates typed spawn-failure scope.
+    #[default]
+    Unclassified,
+    /// The shared dispatch mechanism or its environment failed.
+    DispatchEnvironment,
+}
+
 /// The driver's conclusion from one attempted read of its dispatch environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -463,6 +493,8 @@ pub enum DriverEvent {
     WorkerSpawnFailed {
         package: String,
         issuance: u64,
+        #[serde(default)]
+        scope: SpawnFailureScope,
         reason: String,
     },
     /// One repository base containing all composing dependencies was produced for a package.
@@ -513,6 +545,8 @@ pub enum DriverEvent {
         herdr_session: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_path: Option<String>,
+        #[serde(default)]
+        session_observation: PrimeSessionObservation,
         process: DispatchWorkerProcessObservation,
     },
     /// The driver recorded the evidence used to close one environment-lost dispatch.
@@ -2602,7 +2636,7 @@ mod tests {
     use super::{
         CommandExitStatus, CompositionInput, CriterionExecution, CriterionOrigin,
         DriverAssemblyState, DriverEvent, DriverLoopOutcome, DriverPackageState,
-        PackageDriverError, charged_failure_count, derive_driver_snapshot,
+        PackageDriverError, SpawnFailureScope, charged_failure_count, derive_driver_snapshot,
         repeated_identical_worker_blocker, worker_environment_outcome,
     };
     use crate::{
@@ -3040,6 +3074,7 @@ mod tests {
             DriverEvent::WorkerSpawnFailed {
                 package: "A".to_owned(),
                 issuance: 1,
+                scope: SpawnFailureScope::DispatchEnvironment,
                 reason: "Herdr refused before creating a child".to_owned(),
             },
         ];
