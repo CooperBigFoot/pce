@@ -951,6 +951,7 @@ exit 99
         ])
         .env("PATH", path)
         .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", "/tmp/pce-herdr-test")
         .output()
         .expect("driver");
 
@@ -968,5 +969,41 @@ exit 99
     assert!(
         !journal.exists(),
         "launch precondition must not mutate the journal"
+    );
+}
+
+#[test]
+fn overlong_named_herdr_session_is_refused_before_driver_preflight() {
+    let temp = tempdir().expect("tempdir");
+    let journal = temp.path().join("driver.jsonl");
+    let name = "pce-workers-2026-08-20-silence-means-the-run-has-stalled";
+    let socket_path = format!("/Users/nicolaslazaro/.config/herdr/sessions/{name}/herdr.sock");
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "package",
+            "driver-run",
+            "--graph",
+            "/tmp/not-read.json",
+            "--journal",
+        ])
+        .arg(&journal)
+        .args(["--repository", "repo=/tmp/repo", "--herdr-session", name])
+        .env("HOME", "/Users/nicolaslazaro")
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .expect("driver");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(name), "{stderr}");
+    assert!(stderr.contains(&socket_path), "{stderr}");
+    assert!(stderr.contains("length 111 bytes"), "{stderr}");
+    assert!(
+        stderr.contains("portable Unix socket path limit of 104 bytes"),
+        "{stderr}"
+    );
+    assert!(
+        !journal.exists(),
+        "parse refusal must not mutate the journal"
     );
 }

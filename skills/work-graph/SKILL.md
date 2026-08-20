@@ -61,7 +61,7 @@ shape atomically:
   "local_patch_limit": null,
   "environment_failure_limit": null,
   "wait_timeout_ms": null,
-  "herdr_session": "pce-workers-<vision-slug>",
+  "herdr_session": "pce-<short-slug>",
   "tmux_session": "pce-work-<vision-slug>"
 }
 ```
@@ -78,8 +78,10 @@ are not an enforcement boundary.
 
 `herdr_session` is optional names-only launch configuration. When present, it selects the Herdr
 server that owns every worker workspace and pane; when absent, the default session retains legacy
-behavior. Persist the value once and reuse it on every relaunch. Never derive it from `HERDR_SESSION`,
-which does not select the client session in Herdr 0.8.2, and never silently change it during a run.
+behavior. Prefer a compact name such as `pce-<short-slug>` because Herdr's derived Unix socket path
+must fit the operator's configuration directory. Persist the value once and reuse it on every relaunch.
+Never derive it from `HERDR_SESSION`, which does not select the client session in Herdr 0.8.2, and never
+silently change it during a run.
 
 On later invocations, reuse these values without asking. Recovery limits are once per journal, not
 plan-scoped. A plan advance clears disputed parks and consumed overrules and re-scopes package

@@ -1767,7 +1767,7 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
                 if herdr_session.is_some() {
                     bail!("package dispatch Herdr session is repeated");
                 }
-                herdr_session = Some(HerdrSessionName::parse(trailing[index + 1].clone())?);
+                herdr_session = Some(parse_herdr_session_name(trailing[index + 1].clone())?);
             }
             _ => bail!(USAGE),
         }
@@ -2131,7 +2131,7 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
             let value = options
                 .get(index + 1)
                 .context("--herdr-session requires a session name")?;
-            herdr_session = Some(HerdrSessionName::parse(value.clone())?);
+            herdr_session = Some(parse_herdr_session_name(value.clone())?);
             index += 2;
         } else if options[index] == "--wait-timeout-ms" {
             let value = options
@@ -4116,7 +4116,7 @@ fn observe_driver_dispatch_environment(
     let herdr_session = identity
         .herdr_session
         .clone()
-        .map(HerdrSessionName::parse)
+        .map(parse_herdr_session_name)
         .transpose()?;
     let legacy_agent = identity.process.is_none().then(|| {
         herdr_command_output(
@@ -4353,9 +4353,8 @@ fn reconcile_completed_dispatch_panes(journal: &Path, events: &[DriverEvent]) ->
         // alongside it rather than attempting a pattern-based or last-pane closure.
         let result = target
             .herdr_session()
-            .map(HerdrSessionName::parse)
+            .map(parse_herdr_session_name)
             .transpose()
-            .map_err(Error::new)
             .and_then(|session| {
                 HerdrWorkspaceId::parse(target.workspace_id())
                     .map_err(Error::new)
@@ -7222,7 +7221,7 @@ fn herdr_session_prefix_is_optional_and_precedes_the_subcommand() {
         scoped_herdr_arguments(None, &["pane", "process-info"]),
         ["pane", "process-info"]
     );
-    let session = HerdrSessionName::parse("pce-work").expect("valid Herdr session");
+    let session = parse_herdr_session_name("pce-work").expect("valid Herdr session");
     assert_eq!(
         scoped_herdr_arguments(Some(&session), &["pane", "process-info"]),
         ["--session", "pce-work", "pane", "process-info"]
@@ -7656,6 +7655,49 @@ fn package_temporary_directory(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     PathBuf::from("/tmp/pce-tmp").join(suffix)
+}
+
+fn herdr_config_dir() -> PathBuf {
+    if let Ok(directory) = std::env::var("XDG_CONFIG_HOME") {
+        return PathBuf::from(directory).join("herdr");
+    }
+    herdr_platform_config_dir()
+}
+
+#[cfg(windows)]
+fn herdr_platform_config_dir() -> PathBuf {
+    if let Ok(directory) = std::env::var("APPDATA") {
+        return PathBuf::from(directory).join("herdr");
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        return PathBuf::from(profile)
+            .join("AppData")
+            .join("Roaming")
+            .join("herdr");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".config").join("herdr");
+    }
+    std::env::temp_dir().join("herdr")
+}
+
+#[cfg(not(windows))]
+fn herdr_platform_config_dir() -> PathBuf {
+    std::env::var("HOME").map_or_else(
+        |_| std::env::temp_dir().join("herdr"),
+        |home| PathBuf::from(home).join(".config").join("herdr"),
+    )
+}
+
+fn herdr_session_socket_path(value: &str) -> PathBuf {
+    herdr_config_dir()
+        .join("sessions")
+        .join(value)
+        .join("herdr.sock")
+}
+
+fn parse_herdr_session_name(value: impl Into<String>) -> Result<HerdrSessionName> {
+    HerdrSessionName::parse(value, herdr_session_socket_path).map_err(Error::new)
 }
 
 fn herdr_version_is_supported(detected: &str) -> bool {

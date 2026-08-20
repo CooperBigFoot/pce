@@ -40,18 +40,26 @@ impl DispatchAttempt {
 const ENV_EXECUTABLE: &str = "/usr/bin/env";
 const HERDR_EXECUTABLE: &str = "herdr";
 const MAX_HERDR_SESSION_NAME_LEN: usize = 64;
+// macOS has the smaller supported sun_path field (104 bytes versus Linux's 108). Reserve one
+// byte for the terminating NUL so a session remains usable when a repository moves between them.
+const PORTABLE_UNIX_SOCKET_PATH_CAPACITY: usize = 104;
 
 /// A validated Herdr session selected for all objects and observations in one dispatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrSessionName(String);
 
 impl HerdrSessionName {
-    /// Parse the session-name grammar supported by Herdr 0.8.x.
+    /// Parse the session-name grammar supported by Herdr 0.8.x and its derived socket path.
     ///
     /// # Errors
     ///
-    /// Returns [`HerdrDispatchPlanError::InvalidSessionName`] for a name Herdr would reject.
-    pub fn parse(value: impl Into<String>) -> Result<Self, HerdrDispatchPlanError> {
+    /// Returns [`HerdrDispatchPlanError::InvalidSessionName`] for a name Herdr would reject, or
+    /// [`HerdrDispatchPlanError::SessionSocketPathTooLong`] when Herdr could not bind the path produced by the supplied
+    /// derivation on every supported Unix platform.
+    pub fn parse(
+        value: impl Into<String>,
+        socket_path_for: impl FnOnce(&str) -> PathBuf,
+    ) -> Result<Self, HerdrDispatchPlanError> {
         let value = value.into();
         let valid = !value.is_empty()
             && value.len() <= MAX_HERDR_SESSION_NAME_LEN
@@ -62,6 +70,16 @@ impl HerdrSessionName {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
         if !valid {
             return Err(HerdrDispatchPlanError::InvalidSessionName { value });
+        }
+        let socket_path = socket_path_for(&value);
+        let path_length = socket_path.as_os_str().as_encoded_bytes().len();
+        if path_length.saturating_add(1) > PORTABLE_UNIX_SOCKET_PATH_CAPACITY {
+            return Err(HerdrDispatchPlanError::SessionSocketPathTooLong {
+                value,
+                socket_path,
+                path_length,
+                limit: PORTABLE_UNIX_SOCKET_PATH_CAPACITY,
+            });
         }
         Ok(Self(value))
     }
@@ -514,6 +532,16 @@ pub enum HerdrDispatchPlanError {
         "invalid Herdr session name `{value}`; expected 1..=64 ASCII letters, digits, `.`, `_`, or `-`, excluding `.` and `..`"
     )]
     InvalidSessionName { value: String },
+    /// A derived Herdr session socket path cannot fit every supported Unix `sun_path` field.
+    #[error(
+        "Herdr session name `{value}` produces socket path `{socket_path}` with length {path_length} bytes; with its terminating NUL it exceeds the portable Unix socket path limit of {limit} bytes; shorten the session name"
+    )]
+    SessionSocketPathTooLong {
+        value: String,
+        socket_path: PathBuf,
+        path_length: usize,
+        limit: usize,
+    },
     /// A required string was empty.
     #[error("{field} must be non-empty")]
     EmptyValue { field: &'static str },
@@ -848,11 +876,32 @@ mod tests {
 
     #[test]
     fn configured_session_prefixes_every_composed_invocation() {
-        let session = HerdrSessionName::parse("pce-work").unwrap_or_else(|error| panic!("{error}"));
+        let session = HerdrSessionName::parse("pce-work", |_| {
+            PathBuf::from("/Users/operator/.config/herdr/sessions/pce-work/herdr.sock")
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
         let plan = compose_with_session(&["pce"], "vision-one", 1, Some(session.clone()));
+        let target = format!("/worktrees/{}/00-pce", plan.agent_name().as_str());
         assert_eq!(
-            &plan.worktrees()[0].invocation().argv()[..4],
-            ["--session", "pce-work", "worktree", "create"]
+            plan.worktrees()[0].invocation().argv(),
+            [
+                "--session",
+                "pce-work",
+                "worktree",
+                "create",
+                "--cwd",
+                "/repos/pce",
+                "--branch",
+                "pce/vision-one/WP4/attempt-1",
+                "--base",
+                "main",
+                "--path",
+                &target,
+                "--label",
+                "WP4:pce:attempt-1",
+                "--no-focus",
+                "--json",
+            ]
         );
         let location = HerdrAgentLocation::new(
             HerdrWorkspaceId::parse("w9").unwrap_or_else(|error| panic!("{error}")),
@@ -877,8 +926,28 @@ mod tests {
     #[test]
     fn invalid_session_names_are_refused() {
         for name in ["", ".", "..", "has/slash", &"x".repeat(65)] {
-            assert!(HerdrSessionName::parse(name).is_err(), "accepted {name:?}");
+            assert!(
+                HerdrSessionName::parse(name, |_| PathBuf::from("/short/herdr.sock")).is_err(),
+                "accepted {name:?}"
+            );
         }
+    }
+
+    #[test]
+    fn session_name_is_refused_when_derived_socket_path_exceeds_portable_capacity() {
+        let name = "pce-workers-2026-08-20-silence-means-the-run-has-stalled";
+        let socket_path = PathBuf::from(format!(
+            "/Users/nicolaslazaro/.config/herdr/sessions/{name}/herdr.sock"
+        ));
+        let error = HerdrSessionName::parse(name, |_| socket_path.clone())
+            .expect_err("socket path exceeds macOS sun_path capacity");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Herdr session name `{name}` produces socket path `{}` with length 111 bytes; with its terminating NUL it exceeds the portable Unix socket path limit of 104 bytes; shorten the session name",
+                socket_path.display()
+            )
+        );
     }
 
     #[test]

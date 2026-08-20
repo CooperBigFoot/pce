@@ -6773,9 +6773,10 @@ fn work_graph_persists_and_recovers_named_herdr_sessions_safely() {
     .expect("work-graph skill");
 
     for clause in [
-        r#""herdr_session": "pce-workers-<vision-slug>""#,
+        r#""herdr_session": "pce-<short-slug>""#,
         "[--herdr-session NAME]",
         "herdr --session <name> workspace list",
+        "derived Unix socket path",
         "Do not start or attach the session automatically",
         "exact `workspace_id` capabilities",
         "a live, unknown, or inconclusive worker blocks closure",
