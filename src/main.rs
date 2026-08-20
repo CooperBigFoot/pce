@@ -52,8 +52,9 @@ use pce_core::{
     NamedReplayRef, NodeId, NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus,
     ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PackageGateChallenge,
     PackageWorkerResult, PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError,
-    PairedReplayClassification, PaneCleanupOutcome, ProcessIdentityObservation, ProcessNumber,
-    ProcessStartIdentity, PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
+    PairedReplayClassification, PaneCleanupOutcome, PrimeSessionObservation,
+    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
+    PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
     RecoveryLimits, RecoveryLogPath, RecoveryRung, ReferenceValidation, ReplayArtifactObservation,
     ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
@@ -61,26 +62,26 @@ use pce_core::{
     RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
     RepositoryRelativePath, RepositoryRoot, RepositoryWorktree, RequiredArtifactPresence,
     RetryLimit, RiskOrdering, RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest,
-    SignalNumber, SpawnDispatchOutcome, SpawnFailedDispatchCompletionPayload, SquashCommitOid,
-    StdinBinding, StepAuthorityObservation, StepNode, StructuredArtifactObservation,
-    SurvivingProcesses, TagName, TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload,
-    UsageAbsenceReason, VersionPolicy, VisionGoal, VisionName, VisionSlug,
-    WorkPackageClassification, WorkPackageGraph, WorkPackageId, WorkPackageMergeObservation,
-    WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment, WorktreeIdentity,
-    WorktreeState, WriteKind, admit_recurrent_finding, append_event, charged_failure_count,
-    classify_claude_result, classify_codex_terminal_usage, classify_dispatch_admission,
-    classify_dispatch_check_in, classify_replay_pair, classify_seatbelt_capability,
-    compose_gate_arguments, compose_herdr_work_package_dispatch, compose_local_patch_brief,
-    compose_package_gate_brief, compose_package_worker_argv, compose_package_worker_brief,
-    compose_planning_role_frame, compute_dispatchability, create_vision,
-    criteria_invariance_violations, derive_dispatch_outcome_state, derive_driver_snapshot,
-    derive_herdr_agent_name, derive_merge_status, derive_milestone_merge_status,
-    derive_package_result_path, derive_run_state, derive_run_state_with_dispatch_artifacts,
-    derive_run_state_with_exceptional_merge_chains, derive_work_package_merge_status,
-    dispatch_completion_payload, dispatch_invocation, dispatch_payload, effective_criteria,
-    evaluate_completion, evaluate_landing_readiness, event_record_matches,
-    extract_conservative_artifact_references, fold_dispatch_ledger, fold_paired_execution_proof,
-    fold_replay_runs, gate_failure_outcome, judge_finding_replay,
+    SignalNumber, SpawnDispatchOutcome, SpawnFailedDispatchCompletionPayload, SpawnFailureScope,
+    SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
+    StructuredArtifactObservation, SurvivingProcesses, TagName, TagState, TagTarget,
+    TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionGoal,
+    VisionName, VisionSlug, WorkPackageClassification, WorkPackageGraph, WorkPackageId,
+    WorkPackageMergeObservation, WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment,
+    WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
+    charged_failure_count, classify_claude_result, classify_codex_terminal_usage,
+    classify_dispatch_admission, classify_dispatch_check_in, classify_replay_pair,
+    classify_seatbelt_capability, compose_gate_arguments, compose_herdr_work_package_dispatch,
+    compose_local_patch_brief, compose_package_gate_brief, compose_package_worker_argv,
+    compose_package_worker_brief, compose_planning_role_frame, compute_dispatchability,
+    create_vision, criteria_invariance_violations, derive_dispatch_outcome_state,
+    derive_driver_snapshot, derive_herdr_agent_name, derive_merge_status,
+    derive_milestone_merge_status, derive_package_result_path, derive_run_state,
+    derive_run_state_with_dispatch_artifacts, derive_run_state_with_exceptional_merge_chains,
+    derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
+    dispatch_payload, effective_criteria, evaluate_completion, evaluate_landing_readiness,
+    event_record_matches, extract_conservative_artifact_references, fold_dispatch_ledger,
+    fold_paired_execution_proof, fold_replay_runs, gate_failure_outcome, judge_finding_replay,
     latest_criterion_failure_evidence, measure_contract_snapshot, meter_dispatches,
     next_gate_attempt, normalize_replay_observation, paired_stimulus_identity,
     parse_acceptance_criteria, parse_claude_result, parse_criterion_revision_manifest,
@@ -3840,6 +3841,13 @@ fn record_driver_dispatch_identity(
         .get("session_path")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let session_observation = serde_json::from_value(
+        identity
+            .get("session_observation")
+            .cloned()
+            .context("package dispatch identity omitted Prime session observation")?,
+    )
+    .context("package dispatch Prime session observation is invalid")?;
     append_driver_event(
         journal,
         &DriverEvent::DispatchWorkerIdentified {
@@ -3851,6 +3859,7 @@ fn record_driver_dispatch_identity(
             workspace_id: workspace_id.to_owned(),
             herdr_session,
             session_path,
+            session_observation,
             process,
         },
     )
@@ -4291,8 +4300,12 @@ fn repair_driver_environment_closures(
     Ok(repaired)
 }
 
-fn wait_for_driver_results(paths: &[PathBuf], timeout: Option<Duration>) -> Result<bool> {
-    if paths.iter().all(|path| path.is_file()) {
+fn wait_for_driver_results_matching(
+    paths: &[PathBuf],
+    timeout: Option<Duration>,
+    ready: impl Fn(&[PathBuf]) -> bool,
+) -> Result<bool> {
+    if ready(paths) {
         return Ok(true);
     }
     let roots = paths
@@ -4314,7 +4327,7 @@ fn wait_for_driver_results(paths: &[PathBuf], timeout: Option<Duration>) -> Resu
             .watch(root, RecursiveMode::NonRecursive)
             .with_context(|| format!("failed to watch {}", root.display()))?;
     }
-    if paths.iter().all(|path| path.is_file()) {
+    if ready(paths) {
         return Ok(true);
     }
     let started = Instant::now();
@@ -4340,10 +4353,22 @@ fn wait_for_driver_results(paths: &[PathBuf], timeout: Option<Duration>) -> Resu
                     .context("package result watcher failed")?;
             }
         }
-        if paths.iter().all(|path| path.is_file()) {
+        if ready(paths) {
             return Ok(true);
         }
     }
+}
+
+fn wait_for_driver_results(paths: &[PathBuf], timeout: Option<Duration>) -> Result<bool> {
+    wait_for_driver_results_matching(paths, timeout, |paths| {
+        paths.iter().all(|path| path.is_file())
+    })
+}
+
+fn wait_for_any_driver_result(paths: &[PathBuf], timeout: Option<Duration>) -> Result<bool> {
+    wait_for_driver_results_matching(paths, timeout, |paths| {
+        paths.iter().any(|path| path.is_file())
+    })
 }
 
 fn reconcile_completed_dispatch_panes(journal: &Path, events: &[DriverEvent]) -> Result<usize> {
@@ -5563,7 +5588,7 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
                         .iter()
                         .map(|(_, _, _, _, path)| path.clone())
                         .collect::<Vec<_>>();
-                    if !wait_for_driver_results(&paths, command.wait_timeout)? {
+                    if !wait_for_any_driver_result(&paths, command.wait_timeout)? {
                         let waited_ms =
                             u64::try_from(command.wait_timeout.unwrap_or_default().as_millis())
                                 .context("driver wait timeout exceeds u64")?;
@@ -5624,7 +5649,10 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
                         });
                     }
                     let _completions = collect_package_completions(&dispatch_log, &vision_dir)?;
-                    for (package, issuance, _, outcome, result_path) in retained {
+                    for (package, issuance, _, outcome, result_path) in retained
+                        .into_iter()
+                        .filter(|(_, _, _, _, path)| path.is_file())
+                    {
                         let result = read_package_result(&result_path)?
                             .context("durable dispatch result vanished")?;
                         let healthy = matches!(result.exit_status(), DispatchExitStatus::Exited { code } if code.get() == 0)
@@ -5791,6 +5819,7 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
                             &DriverEvent::WorkerSpawnFailed {
                                 package: package_id.clone(),
                                 issuance,
+                                scope: SpawnFailureScope::DispatchEnvironment,
                                 reason: format!("failed to spawn worker override: {source}"),
                             },
                         )?;
@@ -5833,6 +5862,7 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
                             &DriverEvent::WorkerSpawnFailed {
                                 package: package_id.clone(),
                                 issuance,
+                                scope: SpawnFailureScope::DispatchEnvironment,
                                 reason: format!("worker spawn failed: {source:#}"),
                             },
                         )?;
@@ -5873,7 +5903,7 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
                 .iter()
                 .map(|(_, _, _, result)| result.clone())
                 .collect::<Vec<_>>();
-            if !wait_for_driver_results(&paths, command.wait_timeout)? {
+            if !wait_for_any_driver_result(&paths, command.wait_timeout)? {
                 let waited_ms = u64::try_from(command.wait_timeout.unwrap_or_default().as_millis())
                     .context("driver wait timeout exceeds u64")?;
                 for (package, issuance, _, result) in &composed_dispatches {
@@ -5897,7 +5927,10 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
             let vision_dir = driver_vision_directory(&command)?;
             let dispatch_log = driver_dispatch_log(&command)?;
             let _completions = collect_package_completions(&dispatch_log, &vision_dir)?;
-            for (package_id, issuance, outcome_path, result_path) in composed_dispatches {
+            for (package_id, issuance, outcome_path, result_path) in composed_dispatches
+                .into_iter()
+                .filter(|(_, _, _, result_path)| result_path.is_file())
+            {
                 let result = read_package_result(&result_path)?.with_context(|| {
                     format!(
                         "notified package result vanished: {}",
@@ -7541,17 +7574,23 @@ fn matching_prime_sessions(worktree_path: &str) -> Vec<Option<String>> {
         .collect()
 }
 
-fn observe_prime_session_path(worktree_path: &str) -> Option<String> {
+fn observe_prime_session_path(worktree_path: &str) -> (Option<String>, PrimeSessionObservation) {
     let started = Instant::now();
-    while started.elapsed() < Duration::from_millis(500) {
+    while started.elapsed() < Duration::from_secs(1) {
         let matches = matching_prime_sessions(worktree_path);
         match matches.as_slice() {
-            [Some(session_path)] => return Some(session_path.clone()),
-            [None] | [_, _, ..] => return None,
+            [Some(session_path)] => {
+                return (
+                    Some(session_path.clone()),
+                    PrimeSessionObservation::Observed,
+                );
+            }
+            [None] => return (None, PrimeSessionObservation::SessionPathUnavailable),
+            [_, _, ..] => return (None, PrimeSessionObservation::MultipleDescriptors),
             [] => std::thread::sleep(Duration::from_millis(25)),
         }
     }
-    None
+    (None, PrimeSessionObservation::DescriptorNotFound)
 }
 
 fn record_dispatch_spawn_failure(
@@ -8004,14 +8043,18 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     }
     let pane_ownership_error =
         (!pane_ownership_errors.is_empty()).then(|| pane_ownership_errors.join("; "));
-    let session_path = if is_prime_agent_dispatch(&command.worker_arguments) {
+    let (session_path, session_observation) = if is_prime_agent_dispatch(&command.worker_arguments)
+    {
         created
             .first()
             .and_then(|worktree| worktree.get("path"))
             .and_then(Value::as_str)
-            .and_then(observe_prime_session_path)
+            .map_or(
+                (None, PrimeSessionObservation::DescriptorNotFound),
+                observe_prime_session_path,
+            )
     } else {
-        None
+        (None, PrimeSessionObservation::NotPrimeAgent)
     };
     Ok(json!({
         "herdr_version": herdr_version,
@@ -8024,6 +8067,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             "workspace_id": worker_workspace_id,
             "herdr_session": command.herdr_session.as_ref().map(HerdrSessionName::as_str),
             "session_path": session_path,
+            "session_observation": session_observation,
             "process": worker_process,
         },
         "pane_cleanup_targets": pane_cleanup_targets,

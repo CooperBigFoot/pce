@@ -269,3 +269,13 @@
 | Hand a claimed Effort ticket to `/to-graph`, not directly to `/to-vision`. | `/to-graph` invokes `/to-vision` to materialize the vision and then freezes the work-package graph required by `/work-graph`. `/work-ticket` still reserves and stamps the vision directory at claim time, and it only presents the command; it does not invoke `/to-graph`, `/pce`, or `/work-graph`. |
 | Keep the completion report action-first and name verification categories in one line. | The user needs the two-or-three-sentence end state, genuinely unresolved items when any exist, and the exact handoff command. Ticket, Map, glossary, ADR, directory, and linkage checks remain available on request without burying the command in an enumerated audit trail; acceptance criteria are not repeated because `/to-graph` re-derives and settles them in its own workflow. |
 | Carry the same-day warning through the full delegation chain. | `/to-graph` invokes `/to-vision`, which runs `pce vision new` with the retained byte-identical name. A same-day call reuses the reserved directory untouched, while crossing midnight can create a different date-stamped directory and diverge from the ticket's stamped `Vision:` line. |
+
+
+## 2026-08-20 dispatch observability decisions
+
+| Decision | Rationale and boundary |
+|---|---|
+| Record `session_observation` on every `dispatch-worker-identified` event. | `session_path` remains optional for journal compatibility, while the typed outcome distinguishes `observed`, `not-prime-agent`, `descriptor-not-found`, `multiple-descriptors`, and `session-path-unavailable`; old records deserialize as `not-recorded`. A null path therefore no longer hides whether observation ran. |
+| Observe the Prime descriptor after foreground-process observation and retry for one second. | This is later than the former immediate 500 ms window and gives descriptor publication up to roughly 1.5 seconds after pane launch. A real-path regression publishes at 1.2 seconds. The retry remains bounded so a missing descriptor cannot delay an antichain indefinitely. |
+| Wake and harvest when any composed dispatch result becomes durable. | The result watcher and restart path process only ready result files, then re-derive driver state while unfinished siblings remain running. Journal records may interleave by package; one wedged worker no longer withholds a completed sibling. Attempts still do not accumulate. |
+| Classify `worker-spawn-failed` with typed scope `dispatch-environment`. | Spawn refusal occurs before package work exists and reflects the shared dispatch mechanism. Old records deserialize as `unclassified`; new supervisors can avoid charging or retrying it as a package fault. |
