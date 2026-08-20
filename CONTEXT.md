@@ -93,6 +93,7 @@
 | Challenged finding | The substance of a structurally rejected finding — its description, its repair claim, and its proposed command — carried into the next gate attempt's brief as a claim to confirm with proper witness and repair commits or to refute. It is stated as a challenge because the re-run gate judges the artifact, not the predecessor's report. |
 | Gate-blocked | The terminal state a package reaches when gate misbehaviour recurs to its ceiling. It names the judge, not the package, and it is not completion: a package whose gate never spoke does not ship. |
 | Gate ref anchoring | The binary-owned act of naming a gate's witness and repair commits in the shared ref store before the outcome is accepted. Every worktree is detached, so a gate's commits are reachable from nothing unless something names them, and the driver validates findings in the worker's worktree rather than the gate's. Anchoring is the binary's obligation and not an instruction the gate can drop. |
+| Criterion worktree projection | The ordered absolute paths of every repository materialized for one criterion, exported individually as `PCE_WORKTREE_<n>` and together as the JSON `PCE_WORKTREES` value. The first path is also the criterion's working directory. |
 
 ## Aliases to avoid
 
@@ -218,6 +219,7 @@
 | Mechanical freeze and observed interruption | Pure plan bumps interrupted gridded-statics v2, left hfx v2 waiting, and would have interrupted the observed bluesmith recovery even though no definition changed. The opposite boundary is bluesmith W4's proposed `1.25` tolerance: it changed semantic acceptance and correctly stopped at a human freeze. These cases justify removing the empty ruling while retaining the semantic one. |
 
 | Criterion hook path and decision evidence | Bash protection enumerates active `planning/<vision>/vision.md` files and refuses only commands that contain one of those exact absolute or repository-relative paths at path boundaries; `supervision.md` and prose that merely contains its name are unrelated. Edit and Write protection reconstructs the whole proposed document and sends those exact bytes to `pce criteria check` on stdin. A structured refusal reports the first differing criterion position and required/proposed names; verifier transport failures remain fail-closed with the generic diagnostic because no comparison exists to name. |
+| Criterion worktree projection and driver materialization | The driver lexically absolutizes a relative journal path against its process working directory before deriving the materialization root. It does not canonicalize, so symlink components supplied in the path are not deliberately resolved. Every new criterion execution therefore records and exports absolute checkout paths regardless of launch spelling. Existing journal `working_directory` strings remain unchanged and compatible: status derivation and rendering treat them as recorded evidence, and replay never uses them to find a materialization. |
 
 ## Ambiguities
 

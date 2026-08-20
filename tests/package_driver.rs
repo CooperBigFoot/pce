@@ -130,6 +130,102 @@ fn criteria_record_command_status_and_output_and_block_dependents() {
 }
 
 #[test]
+fn criteria_run_exports_absolute_worktrees_for_relative_and_absolute_launch_paths() {
+    let temp = TempDir::new().expect("tempdir");
+    let first = repository(temp.path(), "first", "first");
+    let second = repository(temp.path(), "second", "second");
+    let graph_path = temp.path().join("graph.json");
+    graph(
+        &graph_path,
+        &["first", "second"],
+        json!([{
+            "name":"second repository is reachable",
+            "input":"coordinated repositories",
+            "observation":"the second checkout is the shell working directory",
+            "command":r#"cd "$PCE_WORKTREE_1" && pwd && printf '%s\n%s\n%s\n' "$PCE_WORKTREE_0" "$PCE_WORKTREE_1" "$PCE_WORKTREES""#
+        }]),
+    );
+
+    for (journal_name, graph_argument, journal_argument) in [
+        (
+            "relative-driver.jsonl",
+            "graph.json".to_owned(),
+            "relative-driver.jsonl".to_owned(),
+        ),
+        (
+            "absolute-driver.jsonl",
+            graph_path.display().to_string(),
+            temp.path()
+                .join("absolute-driver.jsonl")
+                .display()
+                .to_string(),
+        ),
+    ] {
+        let journal = temp.path().join(journal_name);
+        append(
+            &journal,
+            json!({"event":"worker-dispatched","package":"A","issuance":1}),
+        );
+        append(
+            &journal,
+            json!({"event":"worker-done","package":"A","issuance":1}),
+        );
+        let output = run(
+            temp.path(),
+            &[
+                "package".into(),
+                "criteria-run".into(),
+                "--graph".into(),
+                graph_argument,
+                "--journal".into(),
+                journal_argument,
+                "--package".into(),
+                "A".into(),
+                "--repository".into(),
+                format!("first={}", first.display()),
+                "--repository".into(),
+                format!("second={}", second.display()),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let event = fs::read_to_string(&journal)
+            .expect("journal")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("event JSON"))
+            .find(|event| event["event"] == "criterion-executed")
+            .expect("criterion execution");
+        let execution = &event["execution"];
+        let working_directory = Path::new(
+            execution["working_directory"]
+                .as_str()
+                .expect("working directory"),
+        );
+        assert!(working_directory.is_absolute());
+
+        let stdout = execution["stdout"].as_str().expect("criterion stdout");
+        let mut lines = stdout.lines();
+        let pwd = Path::new(lines.next().expect("pwd output"));
+        let first_export = Path::new(lines.next().expect("first worktree export"));
+        let second_export = Path::new(lines.next().expect("second worktree export"));
+        let projection: Vec<std::path::PathBuf> =
+            serde_json::from_str(lines.next().expect("coordinated worktree projection"))
+                .expect("worktree projection JSON");
+        assert!(pwd.is_absolute());
+        assert!(first_export.is_absolute());
+        assert!(second_export.is_absolute());
+        assert_eq!(pwd, second_export);
+        assert_eq!(working_directory, first_export);
+        assert_eq!(projection, vec![first_export, second_export]);
+        assert!(projection.iter().all(|path| path.is_absolute()));
+    }
+}
+
+#[test]
 fn coordinated_replay_accepts_amendment_and_rejects_false_findings() {
     let temp = TempDir::new().expect("tempdir");
     let a = repository(temp.path(), "a", "witness");

@@ -6537,6 +6537,12 @@ fn materialize_driver_state(
         .parent()
         .context("driver journal has no parent")?
         .join("driver-materializations");
+    let parent = std::path::absolute(&parent).with_context(|| {
+        format!(
+            "failed to absolutize driver materialization parent {}",
+            parent.display()
+        )
+    })?;
     fs::create_dir_all(&parent)
         .with_context(|| format!("failed to create {}", parent.display()))?;
     let nonce = SystemTime::now()
