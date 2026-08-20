@@ -258,3 +258,11 @@
 | Herdr worktree root pane and worker dispatch | The first root pane returned by `worktree create` is both the worker's exact runtime identity and its cleanup target; no second pane is created or inferred. |
 | Logical dispatch identity and Herdr agent identity | The deterministic PCE name survives for attempt identity, but it does not claim Herdr agent lifecycle authority for an ordinary command. A bounded self-deletion/result handshake proves that the pane consumed the launch before identity is recorded. Restart liveness first uses the journaled pane/process identity; Herdr agent lookup is legacy-only when no process observation exists. |
 | Environment scrubbing and pane command text | `/usr/bin/env -i` remains the worker boundary. Shell quoting preserves each assignment and argv word, while diagnostics reveal environment names but never their values. |
+
+## 2026-08-20 work-ticket handoff decisions
+
+| Decision | Rationale and boundary |
+|---|---|
+| Hand a claimed Effort ticket to `/to-graph`, not directly to `/to-vision`. | `/to-graph` invokes `/to-vision` to materialize the vision and then freezes the work-package graph required by `/work-graph`. `/work-ticket` still reserves and stamps the vision directory at claim time, and it only presents the command; it does not invoke `/to-graph`, `/pce`, or `/work-graph`. |
+| Keep the completion report action-first and name verification categories in one line. | The user needs the two-or-three-sentence end state, genuinely unresolved items when any exist, and the exact handoff command. Ticket, Map, glossary, ADR, directory, and linkage checks remain available on request without burying the command in an enumerated audit trail; acceptance criteria are not repeated because `/to-graph` re-derives and settles them in its own workflow. |
+| Carry the same-day warning through the full delegation chain. | `/to-graph` invokes `/to-vision`, which runs `pce vision new` with the retained byte-identical name. A same-day call reuses the reserved directory untouched, while crossing midnight can create a different date-stamped directory and diverge from the ticket's stamped `Vision:` line. |

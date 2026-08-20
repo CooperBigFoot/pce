@@ -1,6 +1,6 @@
 ---
 name: work-ticket
-description: Use `/work-ticket <n>` to claim one Effort ticket from the single active Program, reconstruct its ticket, Map, and domain context, Grill-with-docs toward one contained vision, reserve and record its vision directory, and hand off without automatically invoking `/to-vision` or `/pce`.
+description: Use `/work-ticket <n>` to claim one Effort ticket from the single active Program, reconstruct its ticket, Map, and domain context, Grill-with-docs toward one contained vision, reserve and record its vision directory, and hand off without automatically invoking `/to-graph`, `/pce`, or `/work-graph`.
 ---
 
 # Work Ticket
@@ -106,17 +106,17 @@ Conduct a **deep** survey of this one Effort ticket toward one ambitious, contai
 
 Ask exactly one prose question at a time, with a recommended answer and its reason. Inspect code and committed documentation instead of asking questions those sources answer. Resolve decision branches and dependencies, challenge language against `CONTEXT.md`, test boundaries with concrete edge cases, and capture crystallized terminology or qualifying decisions after each answer. Apply the sibling's domain-modeling formats and documentation rule during the interview: update glossary language immediately and offer an ADR only when all three of its durable-decision conditions hold. Finish only after every relevant branch is resolved or explicitly left open, then recap shared understanding, glossary entries updated, ADRs created, and unresolved questions without inventing answers.
 
-The grill is not finished until three things exist, and `/to-vision` will need all three:
+The grill is not finished until three things exist, and `/to-graph` will carry all three into its internal `/to-vision` step:
 
 1. **An end-state picture** the user has reacted to — what is true today, what is true after, **what disappears**, and how the follow-on work happens once this lands. Plain language, no jargon, concrete enough that the user could repeat it to someone else. Show what goes away every time; that is where silent assumptions live.
-2. **Acceptance criteria**, one per claim the vision makes. Each has exactly the three fields handed to `/to-vision`: a non-blank name, input, and observation, never a test that must exist. At least one names an input designed to make the thing fail. **You** name the concrete way it could go wrong, derived from the code and the corpus, and supply the probe; the user reacts to it. Never ask the user what they are afraid of — they do not know, and the question produces silence or an invented answer. Never ask them to ratify something they cannot evaluate. Flag any acceptance criterion checkable only outside the run that delivers it.
+2. **Acceptance criteria**, one per claim the vision makes. Each has exactly the three fields consumed by `/to-vision` inside `/to-graph`: a non-blank name, input, and observation, never a test that must exist. At least one names an input designed to make the thing fail. **You** name the concrete way it could go wrong, derived from the code and the corpus, and supply the probe; the user reacts to it. Never ask the user what they are afraid of — they do not know, and the question produces silence or an invented answer. Never ask them to ratify something they cannot evaluate. Flag any acceptance criterion checkable only outside the run that delivers it.
 3. **A reversibility judgement.** State whether this vision contains an act that cannot be repeated — minting an immutable artifact, publishing a release or tag, consuming a one-shot quota, destroying history. Where it does, name that act; it is the only place that earns front-loaded proof. Where it does not, say so, and expect a light brief with heavy falsification of what was built.
 
 Require the result to be sufficiently settled to name one contained vision. If discovery cannot converge on one contained vision, report the mismatch and stop without reserving a directory or stamping a speculative linkage.
 
 ## 6. Derive the name once and reserve the directory
 
-After convergence, derive one human-readable `<name>` from the contained vision exactly once. Retain that exact byte sequence, including case, spacing, and punctuation. Use the retained value for both `pce vision new` and the final `/to-vision` handoff; never reconstruct it from the slug, issue title, or recap.
+After convergence, derive one human-readable `<name>` from the contained vision exactly once. Retain that exact byte sequence, including case, spacing, and punctuation. Use the retained value for both this `pce vision new` reservation and the final `/to-graph` handoff, whose internal `/to-vision` step runs the same command; never reconstruct it from the slug, issue title, or recap.
 
 Reserve the directory with the existing CLI verb:
 
@@ -128,7 +128,7 @@ Apply this existing `pce vision new` contract exactly:
 
 - Its **sole stdout output** is the relative path of the vision directory (`planning/<YYYY-MM-DD>-<slug>`). All diagnostics and warnings go to **stderr**, so the command substitution above captures exactly the directory path and nothing else. After a zero exit, trust `$VISION_DIR` unconditionally.
 - **Different-date duplicate — warn and proceed**: if the same slug already exists under another date (e.g. `planning/2020-01-01-auth-refactor`), the command warns on stderr and proceeds, creating a fresh directory under today's date. Do not treat the warning as an error; do not stop.
-- **Same-date rerun — idempotent no-op**: if today's directory already exists, the command leaves its contents — including any existing `vision.md` — **untouched**, and prints the existing directory path. Rerunning `/to-vision` on the same day never destroys prior work.
+- **Same-date rerun — idempotent no-op**: if today's directory already exists, the command leaves its contents — including any existing `vision.md` — **untouched**, and prints the existing directory path. When `/to-graph` invokes its internal `/to-vision` step on the same day, rerunning this command never destroys prior work.
 - **Non-zero exit** (empty or unsluggable name, `pce` not on PATH): show the user the stderr output and stop. If the binary is missing, tell the user to run `install.sh` from the pce repo first.
 
 Do not implement or request a Rust CLI change. If reservation fails, stop and report that the Effort ticket was claimed but the directory was not reserved or linked.
@@ -155,23 +155,14 @@ After the edit, re-fetch the complete issue body. Verify that exactly one root-l
 
 ## 8. Report and hand off
 
-Lead with what the user can act on. Bookkeeping goes underneath, or waits until they ask.
+End the report with these three things, in this order:
 
-Open with the **end-state picture** in plain words — where we start, where we end, what disappears, what someone does next. Then the **acceptance criteria**, one line each with the exact three fields handed to `/to-vision`: name, input, and observation. Then anything still open, without guessing at answers. Then the reversibility judgement in one sentence.
-
-Only after that, and clearly marked as detail they may skip:
-
-1. The selected Effort ticket and active Program Map.
-2. Glossary entries updated and ADRs created.
-3. The reserved directory and verified `Vision: $VISION_DIR` linkage line.
-4. This exact invocation, substituting the byte-identical retained `<name>`:
+1. The **end-state picture** in two or three plain sentences: where we start, where we end, what disappears, and what someone does next. Include no ticket number, path, linkage, or validation result. Add the reversibility judgement as a final sentence only when it is not obvious from this picture.
+2. An **unresolved items** section only when something is genuinely open. Do not guess at answers, and omit the heading entirely when nothing is open.
+3. A **handoff block**. Tell the user to complete it in the same session and on the same calendar day: `/to-graph` invokes `/to-vision`, which runs `pce vision new "<name>"`; the same byte-identical name on the same day reuses the reserved directory untouched, while crossing midnight can create a new date-stamped directory that diverges from the stamped `Vision:` line. State in one short line that the verified ticket, Program Map, glossary and ADR changes, reserved directory, and linkage are available on request; do not enumerate that bookkeeping or repeat the acceptance criteria. Finish with this exact command, substituting the byte-identical retained `<name>`:
 
    ```text
-   /to-vision "<name>"
+   /to-graph "<name>"
    ```
 
-Never open a report with an issue number, a directory path, a linkage line, or a validation result. Those are yours to have verified, not theirs to read first.
-
-Tell the user to complete the `/to-vision` handoff in the same session and on the same calendar day. `/to-vision` runs its own `pce vision new "<name>"`; the same byte-identical name on the same day reuses the reserved directory untouched. Warn that if the handoff crosses midnight, the date-stamped directory can diverge because `pce vision new` creates a new current-date directory.
-
-Do **not** automatically invoke `/to-vision`. Do **not** automatically invoke `/pce`. Present only the exact handoff command. Do not write `vision.md`; `/to-vision` owns it. Do not begin Work, close the Effort ticket, edit the Map's Decisions-so-far index, graduate Fog, or run `/land-ticket`.
+Do **not** automatically invoke `/to-graph`, `/pce`, or `/work-graph`. Present only the exact handoff command. Do not write `vision.md`; `/to-vision` owns it inside `/to-graph`. Do not begin Work, close the Effort ticket, edit the Map's Decisions-so-far index, graduate Fog, or run `/land-ticket`.
