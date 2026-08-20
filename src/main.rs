@@ -10610,6 +10610,30 @@ fn lineage_delivery_warnings(
             }
         }
     }
+    for package in graph
+        .packages()
+        .iter()
+        .filter(|package| completed.contains(package.id().as_str()))
+    {
+        let package_id = package.id().as_str();
+        for repository in package.repositories() {
+            if proven.contains_key(&(package_id.to_owned(), repository.clone())) {
+                continue;
+            }
+            let attempted_ref = completed_issuances.get(package_id).map_or_else(
+                || {
+                    format!(
+                        "pce/{}/{package_id}/attempt-<missing-worker-issuance>",
+                        graph.vision()
+                    )
+                },
+                |issuance| package_branch(graph, package_id, *issuance),
+            );
+            bail!(
+                "lineage delivery cannot resolve proven oid for completed package {package_id}, repository {repository}, attempted ref `{attempted_ref}`; retain the local package attempt ref or provide a compatible driver-ref-materialized package record before running graph check --journal"
+            );
+        }
+    }
     let mut warnings = Vec::new();
     let mut emitted = BTreeSet::new();
     for (package_index, package) in graph.packages().iter().enumerate() {

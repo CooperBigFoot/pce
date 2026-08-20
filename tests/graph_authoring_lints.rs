@@ -338,3 +338,71 @@ fn shared_harness_reference_is_not_duplicate_output_ownership() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn lineage_check_refuses_completed_package_without_resolvable_proof() {
+    let directory = tempdir().expect("temp");
+    let (repo, oid) = repository(directory.path(), "repo", &[]);
+    let graph = json!({"vision":"missing-proof","plan_version":1,"authored_at_refs":{"repo":oid},"packages":[
+      {"id":"Q","title":"Repair","repositories":["repo"],"produces":["scripts/check.py"],"criteria":[criterion("true")],"depends_on":[]},
+      {"id":"P","title":"Consumer","repositories":["repo"],"produces":[],"criteria":[criterion("python scripts/check.py")],"depends_on":[]}
+    ]});
+    let path = directory.path().join("graph.json");
+    fs::write(&path, serde_json::to_vec(&graph).expect("JSON")).expect("graph");
+    let journal = directory.path().join("journal.jsonl");
+    fs::write(&journal, "{\"event\":\"worker-dispatched\",\"package\":\"Q\",\"issuance\":1}\n{\"event\":\"worker-done\",\"package\":\"Q\",\"issuance\":1}\n{\"event\":\"package-completed\",\"package\":\"Q\"}\n").expect("journal");
+    let output = pce()
+        .args(["graph", "check", "--file"])
+        .arg(&path)
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository", &format!("repo={}", repo.display())])
+        .output()
+        .expect("check");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("package Q"), "{stderr}");
+    assert!(stderr.contains("repository repo"), "{stderr}");
+    assert!(stderr.contains("pce/missing-proof/Q/attempt-1"), "{stderr}");
+    assert!(stderr.contains("driver-ref-materialized"), "{stderr}");
+}
+
+#[test]
+fn materialized_package_ref_is_compatible_lineage_fallback() {
+    let directory = tempdir().expect("temp");
+    let (repo, base) = repository(directory.path(), "repo", &[]);
+    fs::create_dir_all(repo.join("scripts")).expect("scripts");
+    fs::write(repo.join("scripts/check.py"), "fixed").expect("repair");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "repair"]);
+    let repaired = git(&repo, &["rev-parse", "HEAD"]);
+    let graph = json!({"vision":"fallback","plan_version":1,"authored_at_refs":{"repo":base},"packages":[
+      {"id":"Q","title":"Repair","repositories":["repo"],"produces":["scripts/check.py"],"criteria":[criterion("true")],"depends_on":[]},
+      {"id":"P","title":"Consumer","repositories":["repo"],"produces":[],"criteria":[criterion("python scripts/check.py")],"depends_on":[]}
+    ]});
+    let path = directory.path().join("graph.json");
+    fs::write(&path, serde_json::to_vec(&graph).expect("JSON")).expect("graph");
+    let journal = directory.path().join("journal.jsonl");
+    fs::write(&journal, format!("{{\"event\":\"package-completed\",\"package\":\"Q\"}}\n{{\"event\":\"driver-ref-materialized\",\"repository\":\"repo\",\"reference\":\"refs/pce/q\",\"oid\":\"{repaired}\",\"product\":{{\"kind\":\"package-attempt\",\"package\":\"Q\",\"issuance\":1}}}}\n")).expect("journal");
+    let output = pce()
+        .args(["graph", "check", "--file"])
+        .arg(&path)
+        .args(["--journal"])
+        .arg(&journal)
+        .args(["--repository", &format!("repo={}", repo.display())])
+        .output()
+        .expect("check");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&output.stdout).expect("receipt");
+    assert!(
+        receipt["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning["kind"] == "lineage-delivery")
+    );
+}
