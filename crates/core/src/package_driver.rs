@@ -279,6 +279,18 @@ pub struct BaseCurrencyRiskAcceptance {
     pub sidecar_sha256: String,
 }
 
+/// One parent criterion that was red before a dependent package's conflicted join.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParentCriterionFailure {
+    pub parent: String,
+    pub name: String,
+    pub origin: CriterionOrigin,
+    pub execution: CriterionExecution,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amendment_proof: Option<AmendmentProof>,
+}
+
 /// One append-only fact in the driver journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
@@ -507,6 +519,12 @@ pub enum DriverEvent {
         execution: CriterionExecution,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         amendment_proof: Option<AmendmentProof>,
+    },
+    /// Parent criteria were already red at their own refs, so this package parked uncharged.
+    ParentCriteriaAlreadyFailing {
+        package: String,
+        issuance: u64,
+        failures: Vec<ParentCriterionFailure>,
     },
     /// One authored or amended criterion was executed.
     CriterionExecuted {
@@ -1301,6 +1319,7 @@ pub fn derive_driver_snapshot(
             | DriverEvent::PackageParked { package, .. }
             | DriverEvent::EnvironmentPreparationExecuted { package, .. }
             | DriverEvent::JoinCriterionExecuted { package, .. }
+            | DriverEvent::ParentCriteriaAlreadyFailing { package, .. }
             | DriverEvent::CriterionExecuted { package, .. }
             | DriverEvent::FindingRejected { package, .. }
             | DriverEvent::FindingReplayed { package, .. }
@@ -1603,6 +1622,27 @@ pub fn derive_driver_snapshot(
                     };
                 }
             }
+            DriverEvent::ParentCriteriaAlreadyFailing {
+                issuance, failures, ..
+            } => match state {
+                DriverPackageState::Judging { issuance: judging } if judging == issuance => {
+                    let criteria = failures
+                        .iter()
+                        .map(|failure| format!("{}:{}", failure.parent, failure.name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    *state = DriverPackageState::Parked {
+                        reason: format!("parent criteria already failing at own refs: {criteria}"),
+                        blocked_by: None,
+                    };
+                }
+                _ => {
+                    return Err(PackageDriverError::UnmatchedOutcome {
+                        package: package.clone(),
+                        issuance: *issuance,
+                    });
+                }
+            },
             DriverEvent::JoinCriterionExecuted { .. }
             | DriverEvent::CriterionExecuted { .. }
             | DriverEvent::GateFinished { .. }

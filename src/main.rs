@@ -52,8 +52,9 @@ use pce_core::{
     NamedReplayRef, NodeId, NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus,
     ObservedWorkflowName, OracleFailure, OracleStage, OrderingEdge, PackageGateChallenge,
     PackageWorkerResult, PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError,
-    PairedReplayClassification, PaneCleanupOutcome, ProcessIdentityObservation, ProcessNumber,
-    ProcessStartIdentity, PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
+    PairedReplayClassification, PaneCleanupOutcome, ParentCriterionFailure,
+    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
+    PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
     RecoveryLimits, RecoveryLogPath, RecoveryRung, ReferenceValidation, ReplayArtifactObservation,
     ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
@@ -2652,7 +2653,8 @@ fn run_join_parent_criteria(
         .find(|package| package.id().as_str() == package_id)
         .with_context(|| format!("package {package_id} is absent from graph"))?;
     let worktrees = driver_package_worktrees(command, graph, package_id, issuance)?;
-    let mut failed = Vec::new();
+    let mut join_failures = Vec::new();
+    let mut already_failing = Vec::new();
     for dependency in dependent
         .depends_on()
         .iter()
@@ -2711,39 +2713,101 @@ fn run_join_parent_criteria(
             .named_paths(&sources)
             .into_iter()
             .collect::<BTreeMap<_, _>>();
+        let mut failed_criteria = Vec::new();
         for criterion in effective_criteria(graph, parent.id().as_str(), &events)? {
             let (execution, amendment_proof, passed) =
                 execute_effective_criterion(&criterion, &paths, &named_paths)?;
-            if !passed {
-                failed.push(format!("{}:{}", parent.id().as_str(), criterion.name));
-            }
             append_driver_event(
                 &command.journal_path,
                 &DriverEvent::JoinCriterionExecuted {
                     package: package_id.to_owned(),
                     parent: parent.id().as_str().to_owned(),
-                    name: criterion.name,
-                    origin: criterion.origin,
+                    name: criterion.name.clone(),
+                    origin: criterion.origin.clone(),
                     execution,
                     amendment_proof,
                 },
             )?;
+            if !passed {
+                failed_criteria.push(criterion);
+            }
+        }
+        if failed_criteria.is_empty() {
+            continue;
+        }
+
+        let parent_sources = package_repository_sources(parent, &command.repositories)?;
+        let parent_issuance = completed_package_issuance(&events, parent.id().as_str())?;
+        let parent_branch = package_branch(graph, parent.id().as_str(), parent_issuance);
+        let parent_refs = parent_sources
+            .iter()
+            .map(|(repository, path)| Ok((repository.clone(), git_oid(path, &parent_branch)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let parent_label = format!(
+            "parent-{}-before-join-{package_id}-{issuance}",
+            parent.id().as_str()
+        );
+        let parent_materialization = materialize_driver_state(
+            &command.journal_path,
+            &parent_label,
+            &parent_sources,
+            &parent_refs,
+        )?;
+        if !prepare_driver_materialization(
+            &command.journal_path,
+            package_id,
+            &parent_label,
+            &parent_materialization,
+            &parent_sources,
+            &command.preparations,
+        )? {
+            return Ok(false);
+        }
+        let parent_paths = parent_materialization.paths()?;
+        let parent_named_paths = parent_materialization
+            .named_paths(&parent_sources)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        for criterion in failed_criteria {
+            let (execution, amendment_proof, passed_at_parent) =
+                execute_effective_criterion(&criterion, &parent_paths, &parent_named_paths)?;
+            if passed_at_parent {
+                join_failures.push(format!("{}:{}", parent.id().as_str(), criterion.name));
+            } else {
+                already_failing.push(ParentCriterionFailure {
+                    parent: parent.id().as_str().to_owned(),
+                    name: criterion.name,
+                    origin: criterion.origin,
+                    execution,
+                    amendment_proof,
+                });
+            }
         }
     }
-    if failed.is_empty() {
-        Ok(true)
-    } else {
+    if !join_failures.is_empty() {
         append_driver_event(
             &command.journal_path,
             &DriverEvent::PackageFailed {
                 package: package_id.to_owned(),
                 reason: format!(
                     "conflicted join broke parent criteria: {}",
-                    failed.join(", ")
+                    join_failures.join(", ")
                 ),
             },
         )?;
         Ok(false)
+    } else if !already_failing.is_empty() {
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::ParentCriteriaAlreadyFailing {
+                package: package_id.to_owned(),
+                issuance,
+                failures: already_failing,
+            },
+        )?;
+        Ok(false)
+    } else {
+        Ok(true)
     }
 }
 
@@ -3687,7 +3751,7 @@ fn compose_driver_worker_brief(
 
 ## Conflicted join: resolve before dependent work
 
-This worktree intentionally starts with an unresolved dependency merge. Resolve it first, retain every parent's guarantee, commit the merge, then perform this package's authored work. After completion, the driver will re-run every parent criterion before judging this package.
+This worktree intentionally starts with an unresolved dependency merge. Resolve it first, preserve every parent's changes without assuming that its current criteria are green, commit the merge, then perform this package's authored work. After completion, the driver will re-run every parent criterion on the joined tree. If one fails, the driver will compare it with the parent's own ref before attributing the failure to this join.
 ");
         for conflict in conflicts {
             brief.push_str(

@@ -480,6 +480,7 @@ fi
 
 fn run_conflicting_dependency_composition(
     fail_join_preparation: bool,
+    attribution_case: Option<&str>,
 ) -> (tempfile::TempDir, std::path::PathBuf, std::process::Output) {
     let temp = tempdir().expect("tempdir");
     let repository = temp.path().join("repo");
@@ -497,12 +498,23 @@ fn run_conflicting_dependency_composition(
     .expect("vision");
 
     let graph_path = temp.path().join("graph.json");
+    let parent_a_command = match attribution_case {
+        Some("already-red") => r#"test ! -e "$HOME/parent-red""#,
+        Some("join-broke") => r#"test "$(cat shared.txt)" = A"#,
+        Some(other) => panic!("unknown attribution case {other}"),
+        None => "test -x ./prepared-tool && ./prepared-tool A",
+    };
+    let parent_a_observation = if attribution_case == Some("already-red") {
+        "A won its branch; parent-red marker controls current evidence"
+    } else {
+        "A won its branch"
+    };
     let graph = json!({
         "vision": format!("composition-conflict-{}", std::process::id()),
         "plan_version": 1,
         "authored_at_ref": "HEAD",
         "packages": [
-            {"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"a","input":"repo","observation":"A won its branch","command":"test -x ./prepared-tool && ./prepared-tool A"}],"depends_on":[]},
+            {"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"a","input":"repo","observation":parent_a_observation,"command":parent_a_command}],"depends_on":[]},
             {"id":"B","title":"B","repositories":["repo"],"criteria":[{"name":"b","input":"repo","observation":"B won its branch","command":"test -x ./prepared-tool && ./prepared-tool B"}],"depends_on":[]},
             {"id":"C","title":"C","repositories":["repo"],"criteria":[{"name":"composed","input":"repo","observation":"dependencies compose","command":"true"}],"depends_on":[
                 {"id":"A","kind":"buildability","reason":"needs A"},
@@ -545,7 +557,10 @@ if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
     */C/*)
       git diff --name-only --diff-filter=U | grep -qx shared.txt
       grep -q 'shared.txt' "$HOME/last-brief"
+      grep -q "compare it with the parent's own ref before attributing" "$HOME/last-brief"
+      if grep -q "retain every parent's guarantee" "$HOME/last-brief"; then exit 81; fi
       printf 'A\nB\n' > shared.txt
+      if grep -q 'parent-red' "$HOME/last-brief"; then touch "$HOME/parent-red"; fi
       git add shared.txt
       ;;
     *) exit 80;;
@@ -590,7 +605,7 @@ fi
 
 #[test]
 fn conflicting_dependency_composition_dispatches_owner_and_reproves_parents() {
-    let (temp, journal, output) = run_conflicting_dependency_composition(false);
+    let (temp, journal, output) = run_conflicting_dependency_composition(false, None);
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -696,8 +711,92 @@ fn conflicting_dependency_composition_dispatches_owner_and_reproves_parents() {
 }
 
 #[test]
+fn parent_criterion_already_failing_parks_without_charging_joining_package() {
+    let (temp, journal, output) =
+        run_conflicting_dependency_composition(false, Some("already-red"));
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&journal).unwrap_or_default()
+    );
+    assert!(
+        temp.path().join("parent-red").is_file(),
+        "parent marker missing"
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status");
+    let c_state = status["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|entry| entry[0] == "C")
+        .map(|entry| &entry[1])
+        .expect("C state");
+    assert_eq!(c_state["state"], "parked");
+
+    let events = journal_events(&journal);
+    let already_failing = events
+        .iter()
+        .find(|event| event["event"] == "parent-criteria-already-failing")
+        .expect("typed pre-existing parent failure");
+    assert_eq!(already_failing["package"], "C");
+    assert_eq!(already_failing["failures"][0]["parent"], "A");
+    assert_eq!(already_failing["failures"][0]["name"], "a");
+    assert!(
+        !events
+            .iter()
+            .any(|event| { event["event"] == "package-failed" && event["package"] == "C" })
+    );
+    assert!(
+        !events.iter().any(|event| {
+            event["event"] == "recovery-rung-attempted" && event["package"] == "C"
+        })
+    );
+    let typed_events = fs::read_to_string(&journal)
+        .expect("journal")
+        .lines()
+        .map(|line| serde_json::from_str::<pce_core::DriverEvent>(line).expect("typed event"))
+        .collect::<Vec<_>>();
+    assert_eq!(pce_core::charged_failure_count(&typed_events, "C"), 0);
+}
+
+#[test]
+fn parent_criterion_broken_only_by_join_remains_attributed_to_joining_package() {
+    let (_temp, journal, output) =
+        run_conflicting_dependency_composition(false, Some("join-broke"));
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&journal).unwrap_or_default()
+    );
+    let events = journal_events(&journal);
+    assert!(events.iter().any(|event| {
+        event["event"] == "environment-preparation-executed"
+            && event["package"] == "C"
+            && event["materialization"] == "parent-A-before-join-C-3"
+    }));
+    assert!(events.iter().any(|event| {
+        event["event"] == "package-failed"
+            && event["package"] == "C"
+            && event["reason"] == "conflicted join broke parent criteria: A:a"
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["event"] == "parent-criteria-already-failing")
+    );
+    let typed_events = fs::read_to_string(&journal)
+        .expect("journal")
+        .lines()
+        .map(|line| serde_json::from_str::<pce_core::DriverEvent>(line).expect("typed event"))
+        .collect::<Vec<_>>();
+    assert!(pce_core::charged_failure_count(&typed_events, "C") > 0);
+}
+
+#[test]
 fn failed_join_preparation_is_environmental_and_does_not_charge_the_package() {
-    let (_temp, journal, output) = run_conflicting_dependency_composition(true);
+    let (_temp, journal, output) = run_conflicting_dependency_composition(true, None);
     assert!(
         output.status.success(),
         "{}\n{}",
