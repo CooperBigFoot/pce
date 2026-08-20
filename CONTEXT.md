@@ -313,3 +313,11 @@
 | Observe the Prime descriptor after foreground-process observation and retry for one second. | This is later than the former immediate 500 ms window and gives descriptor publication up to roughly 1.5 seconds after pane launch. A real-path regression publishes at 1.2 seconds. The retry remains bounded so a missing descriptor cannot delay an antichain indefinitely. |
 | Wake and harvest when any composed dispatch result becomes durable. | The result watcher and restart path process only ready result files, then re-derive driver state while unfinished siblings remain running. Journal records may interleave by package; one wedged worker no longer withholds a completed sibling. Attempts still do not accumulate. |
 | Classify `worker-spawn-failed` with typed scope `dispatch-environment`. | Spawn refusal occurs before package work exists and reflects the shared dispatch mechanism. Old records deserialize as `unclassified`; new supervisors can avoid charging or retrying it as a package fault. |
+
+## 2026-08-20 composition path hygiene decisions
+
+| Decision | Rationale and boundary |
+|---|---|
+| Resolve `driver-run` graph, journal, and repository inputs against the launch directory once, before reading driver state. | Relative CLI paths remain an input convenience, but all later composition and Git operations receive absolute paths. The canonical graph parent is the vision-directory authority. |
+| Allocate transient composition worktrees under the binary-owned `/tmp/pce-compositions/<vision-digest>` root. | The vision digest separates concurrent visions without placing `.pce/compositions` in any source repository. `PCE_COMPOSITION_ROOT` may relocate the owner root, but it must be absolute. |
+| Refuse an already dirty mapped source repository at `driver-run` startup. | Composition reads committed refs and must not guess whether unrelated local changes are safe. The refusal names the repository and requires the operator to commit, stash, or remove changes. Ignored files do not count as dirty. PCE does not clean or alter pre-existing changes. |
