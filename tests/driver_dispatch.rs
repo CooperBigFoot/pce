@@ -63,6 +63,7 @@ fn default_driver_composes_dispatch_and_waits_for_durable_result() {
         &bin.join("herdr"),
         r#"#!/bin/sh
 set -eu
+if [ "${1-}" = "--version" ]; then echo "herdr 0.8.2"; exit 0; fi
 if [ "$1 $2" = "worktree create" ]; then
   shift 2; cwd= path= branch= base=
   while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
@@ -76,10 +77,10 @@ elif [ "$1 $2" = "workspace close" ]; then
   printf '%s\n' "$3" >> "$HOME/herdr-closed-panes"
   if [ "$3" = "owned-workspace-2" ]; then echo 'simulated close refusal' >&2; exit 71; fi
   printf '%s\n' '{"result":{"closed":true}}'
+elif [ "$1 $2" = "pane run" ]; then
+  (/bin/sh -c "$4") &
+  printf '%s\n' '{}'
 else
-  shift 2; agent_cwd=
-  while [ "$1" != "--" ]; do if [ "$1" = "--cwd" ]; then agent_cwd=$2; shift 2; else shift; fi; done; shift
-  (cd "$agent_cwd" && "$@") &
   printf '%s\n' '{}'
 fi"#,
     );
@@ -338,6 +339,7 @@ fn plan_boundary_extends_empty_worker_environment_for_pourpoint_shape() {
         &bin.join("herdr"),
         r#"#!/bin/sh
 set -eu
+if [ "${1-}" = "--version" ]; then echo "herdr 0.8.2"; exit 0; fi
 if [ "$1 $2" = "worktree create" ]; then
   shift 2; cwd= path= branch= base=
   while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
@@ -347,10 +349,10 @@ if [ "$1 $2" = "worktree create" ]; then
   printf '{"result":{"workspace":{"workspace_id":"workspace-%s"},"tab":{"tab_id":"workspace-%s:t1"},"root_pane":{"pane_id":"pane-%s","workspace_id":"workspace-%s"}}}\n' "$count" "$count" "$count" "$count"
 elif [ "$1 $2" = "workspace close" ]; then
   printf '%s\n' '{"result":{"closed":true}}'
+elif [ "$1 $2" = "pane run" ]; then
+  (/bin/sh -c "$4") &
+  printf '%s\n' '{}'
 else
-  shift 2; agent_cwd=
-  while [ "$1" != "--" ]; do if [ "$1" = "--cwd" ]; then agent_cwd=$2; shift 2; else shift; fi; done; shift
-  (cd "$agent_cwd" && "$@") &
   printf '%s\n' '{}'
 fi"#,
     );
@@ -492,6 +494,7 @@ fn deliberate_wait_bound_leaves_issuance_running_and_unaccounted() {
         &bin.join("herdr"),
         r#"#!/bin/sh
 set -eu
+if [ "${1-}" = "--version" ]; then echo "herdr 0.8.2"; exit 0; fi
 if [ -e "$HOME/herdr-unreachable" ]; then
   echo 'herdr socket unreachable' >&2
   exit 70
@@ -501,13 +504,11 @@ if [ "$1 $2" = "worktree create" ]; then
   while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
   git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
   printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"root-pane","workspace_id":"w1"}}}'
-elif [ "$1 $2" = "agent start" ]; then
-  name=$3; printf '%s' "$name" > "$HOME/agent-name"
-  printf '{"result":{"type":"agent_started","agent":{"name":"%s","pane_id":"worker-pane","workspace_id":"w1"}}}\n' "$name"
+elif [ "$1 $2" = "pane run" ]; then
+  rm -f "$4"
+  printf '%s\n' '{"result":{"type":"ok"}}'
 elif [ "$1 $2" = "agent get" ]; then
-  if [ -e "$HOME/herdr-unreachable" ]; then echo 'herdr socket unreachable' >&2; exit 70; fi
-  name=$(cat "$HOME/agent-name")
-  printf '{"result":{"type":"agent_info","agent":{"name":"%s","pane_id":"worker-pane","workspace_id":"w1"}}}\n' "$name"
+  echo 'agent_not_found' >&2; exit 1
 elif [ "$1 $2" = "pane process-info" ]; then
   if [ -e "$HOME/herdr-unreachable" ] && [ ! -e "$HOME/first-inconclusive-read" ]; then
     : > "$HOME/first-inconclusive-read"; echo 'herdr socket unreachable' >&2; exit 70
@@ -515,7 +516,7 @@ elif [ "$1 $2" = "pane process-info" ]; then
   if [ -e "$HOME/herdr-unreachable" ]; then
     printf '%s\n' '{"result":{"process_info":{"shell_pid":41,"foreground_processes":[]}}}' 
   else
-    printf '{"result":{"process_info":{"shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"worker","argv":["worker"]}]}}}\n' "$$" "$$"
+    printf '%s\n' '{"result":{"process_info":{"shell_pid":41,"foreground_processes":[{"pid":4242,"name":"worker","argv":["worker"]}]}}}'
   fi
 else
   printf '%s\n' '{"result":{"type":"ok"}}'
@@ -553,7 +554,7 @@ fi
     let events = fs::read_to_string(&journal).expect("journal");
     assert!(events.contains("driver-stopped-waiting"));
     assert!(events.contains("dispatch-worker-identified"));
-    assert!(events.contains("worker-pane"));
+    assert!(events.contains("root-pane"));
     assert!(events.contains("root-pane"));
     assert!(!events.contains("worker-failed"));
     assert!(!events.contains("worker-environment-failed"));
@@ -699,19 +700,21 @@ Prove restart.
         &bin.join("herdr"),
         r#"#!/bin/sh
 set -eu
+if [ "${1-}" = "--version" ]; then echo "herdr 0.8.2"; exit 0; fi
 marker="$HOME/herdr-refused-once"
 if [ "$1 $2" = "worktree create" ]; then
-  if [ ! -e "$marker" ]; then : > "$marker"; echo refused >&2; exit 73; fi
   shift 2; cwd= path= branch= base=
   while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
   git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
   printf '%s\t%s\n' "$path" "$branch" >> "$HOME/herdr-worktrees"
   printf '%s
-' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"}}}'
+' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"root-pane","workspace_id":"w1"}}}'
+elif [ "$1 $2" = "pane run" ]; then
+  if [ ! -e "$marker" ]; then : > "$marker"; echo 'pane run refused' >&2; exit 73; fi
+  (/bin/sh -c "$4") &
+  printf '%s
+' '{}'
 else
-  shift 2; agent_cwd=
-  while [ "$1" != "--" ]; do if [ "$1" = "--cwd" ]; then agent_cwd=$2; shift 2; else shift; fi; done; shift
-  (cd "$agent_cwd" && "$@") &
   printf '%s
 ' '{}'
 fi

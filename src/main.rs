@@ -1118,7 +1118,7 @@ fn run_package_gate_agent(command: PackageGateAgentCommand) -> Result<()> {
             &vision_identity,
             package.id(),
         ));
-    fs::create_dir_all(&temporary_directory).context("failed to create binary-owned TMPDIR")?;
+    prepare_private_dispatch_directory(&temporary_directory)?;
     let worktrees = package
         .repositories()
         .iter()
@@ -4062,21 +4062,26 @@ fn observe_driver_dispatch_environment(
     let Some(identity) = driver_dispatch_runtime_identity(graph, events, package, issuance)? else {
         return Ok(DriverDispatchEnvironmentLiveness::Unknown);
     };
-    let agent = herdr_command_output(&["agent", "get", &identity.agent_name]);
-    let agent_matches = agent.as_ref().is_ok_and(|response| {
-        let observed = response.pointer("/result/agent");
-        observed.is_some_and(|observed| {
-            observed.get("pane_id").and_then(Value::as_str) == Some(identity.pane_id.as_str())
-                && observed.get("workspace_id").and_then(Value::as_str)
-                    == Some(identity.workspace_id.as_str())
-                && observed
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .or_else(|| observed.get("agent").and_then(Value::as_str))
-                    == Some(identity.agent_name.as_str())
+    let legacy_agent = identity
+        .process
+        .is_none()
+        .then(|| herdr_command_output(&["agent", "get", &identity.agent_name]));
+    let legacy_agent_matches = legacy_agent.as_ref().is_some_and(|agent| {
+        agent.as_ref().is_ok_and(|response| {
+            let observed = response.pointer("/result/agent");
+            observed.is_some_and(|observed| {
+                observed.get("pane_id").and_then(Value::as_str) == Some(identity.pane_id.as_str())
+                    && observed.get("workspace_id").and_then(Value::as_str)
+                        == Some(identity.workspace_id.as_str())
+                    && observed
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .or_else(|| observed.get("agent").and_then(Value::as_str))
+                        == Some(identity.agent_name.as_str())
+            })
         })
     });
-    if agent_matches {
+    if legacy_agent_matches {
         return Ok(DriverDispatchEnvironmentLiveness::Alive);
     }
     let process = herdr_command_output(&["pane", "process-info", "--pane", &identity.pane_id]);
@@ -4093,8 +4098,8 @@ fn observe_driver_dispatch_environment(
     if foreground_is_only_shell(&process) {
         return Ok(DriverDispatchEnvironmentLiveness::Dead {
             detail: format!(
-                "worker pane {} contains only its login shell; agent lookup: absent or mismatched",
-                identity.pane_id,
+                "worker pane {} contains only its login shell",
+                identity.pane_id
             ),
         });
     }
@@ -4105,14 +4110,14 @@ fn observe_driver_dispatch_environment(
     {
         return Ok(DriverDispatchEnvironmentLiveness::Alive);
     }
-    if identity.process.is_none() && agent_matches {
-        return Ok(DriverDispatchEnvironmentLiveness::Alive);
-    }
+    let legacy_detail = legacy_agent.map_or_else(
+        || "not consulted for pane-run dispatch".to_owned(),
+        |agent| agent.map_or_else(|error| format!("{error:#}"), |_| "mismatched".to_owned()),
+    );
     Ok(DriverDispatchEnvironmentLiveness::Inconclusive {
         detail: format!(
-            "worker pane {} contains no process matching the recorded dispatch identity; agent lookup: {}",
-            identity.pane_id,
-            agent.map_or_else(|error| format!("{error:#}"), |_| "mismatched".to_owned())
+            "worker pane {} contains no process matching the recorded dispatch identity; legacy agent lookup: {}",
+            identity.pane_id, legacy_detail
         ),
     })
 }
@@ -4283,8 +4288,8 @@ fn wait_for_driver_results(paths: &[PathBuf], timeout: Option<Duration>) -> Resu
 fn reconcile_completed_dispatch_panes(journal: &Path, events: &[DriverEvent]) -> Result<usize> {
     let pending = pending_completed_pane_cleanups(events);
     for target in &pending {
-        // Herdr 0.7.1 refuses `pane close` for the last pane in a worktree group. Closing the exact
-        // workspace returned alongside that root pane removes the UI group without using a pattern.
+        // A worktree root pane is the workspace's last pane, so close the exact workspace returned
+        // alongside it rather than attempting a pattern-based or last-pane closure.
         let result = HerdrWorkspaceId::parse(target.workspace_id())
             .map_err(Error::new)
             .and_then(|workspace_id| execute_herdr(&workspace_id.close_invocation()));
@@ -7102,7 +7107,7 @@ impl std::fmt::Display for SpawnObservedDispatchError {
 
 impl std::error::Error for SpawnObservedDispatchError {}
 
-enum HerdrAgentStartOutcome {
+enum HerdrPaneRunOutcome {
     Started(Value),
     Refused(Error),
     SpawnObservedButUnusable(Error),
@@ -7127,21 +7132,38 @@ fn redact_environment_assignments(arguments: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn redact_herdr_stderr(arguments: &[String], stderr: &[u8]) -> String {
-    let mut redacted = String::from_utf8_lossy(stderr).into_owned();
-    for argument in arguments {
-        let Some(name) = environment_assignment_name(argument) else {
-            continue;
-        };
-        let Some((_, value)) = argument.split_once('=') else {
-            continue;
-        };
-        if !value.is_empty() {
-            redacted = redacted.replace(value, "<redacted>");
-        }
-        redacted = redacted.replace(argument, &format!("{name}=<redacted>"));
-    }
-    redacted
+#[cfg(test)]
+#[test]
+fn herdr_082_compatible_versions_are_named_and_bounded() {
+    assert!(herdr_version_is_supported("herdr 0.8.2"));
+    assert!(herdr_version_is_supported("herdr 0.8.9"));
+    assert!(!herdr_version_is_supported("herdr 0.8.1"));
+    assert!(!herdr_version_is_supported("herdr 0.9.0"));
+    assert!(!herdr_version_is_supported("herdr 0.8.2-alpha"));
+    assert!(!herdr_version_is_supported("herdr 0.8.2+build"));
+}
+
+#[cfg(test)]
+#[test]
+fn worker_launch_script_is_private_and_never_replaces_an_existing_file() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("worker-launch.sh");
+    prepare_private_dispatch_directory(directory.path()).expect("private directory");
+    materialize_worker_launch_script(&path, "original").expect("materialized script");
+    assert!(materialize_worker_launch_script(&path, "replacement").is_err());
+    assert_eq!(fs::read_to_string(&path).expect("script"), "original");
+    assert_eq!(
+        fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(directory.path())
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
 }
 
 #[cfg(test)]
@@ -7157,41 +7179,123 @@ fn herdr_environment_values_are_redacted_from_observations_and_errors() {
         redact_environment_assignments(&arguments),
         ["/usr/bin/env", "-i", "CAMPAIGN_TOKEN=<redacted>", "worker"]
     );
-    let stderr = redact_herdr_stderr(
-        &arguments,
-        b"refused CAMPAIGN_TOKEN=super-secret because super-secret is invalid",
+    let pane_stderr = redact_pane_run_stderr(
+        &BTreeMap::from([
+            ("SHORT".to_owned(), "sec".to_owned()),
+            ("LONG".to_owned(), "secret".to_owned()),
+        ]),
+        b"SHORT=sec LONG=secret secret",
     );
-    assert!(!stderr.contains("super-secret"));
-    assert!(stderr.contains("CAMPAIGN_TOKEN=<redacted>"));
+    assert!(!pane_stderr.contains("sec"));
 }
 
-fn execute_herdr_agent_start(invocation: &HerdrInvocation) -> HerdrAgentStartOutcome {
+fn redact_pane_run_stderr(environment: &BTreeMap<String, String>, stderr: &[u8]) -> String {
+    let mut redacted = String::from_utf8_lossy(stderr).into_owned();
+    let mut values = environment
+        .values()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    for value in values {
+        redacted = redacted.replace(value, "<redacted>");
+    }
+    redacted
+}
+
+fn prepare_private_dispatch_directory(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).with_context(|| {
+        format!(
+            "failed to create dispatch temporary directory {}",
+            path.display()
+        )
+    })?;
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "failed to inspect dispatch temporary directory {}",
+            path.display()
+        )
+    })?;
+    // SAFETY: geteuid has no preconditions and only reads the current process credential.
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() || metadata.uid() != effective_uid {
+        bail!(
+            "dispatch temporary directory must be a real directory owned by uid {}: {}",
+            effective_uid,
+            path.display()
+        );
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).with_context(|| {
+        format!(
+            "failed to secure dispatch temporary directory {}",
+            path.display()
+        )
+    })
+}
+
+fn materialize_worker_launch_script(path: &Path, contents: &str) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "failed to create unique worker launch script {}",
+                path.display()
+            )
+        })?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write worker launch script {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync worker launch script {}", path.display()))
+}
+
+fn execute_herdr_pane_run(
+    invocation: &HerdrInvocation,
+    environment: &BTreeMap<String, String>,
+) -> HerdrPaneRunOutcome {
     let output = match std::process::Command::new(invocation.executable())
         .args(invocation.argv())
         .output()
     {
         Ok(output) => output,
         Err(source) => {
-            return HerdrAgentStartOutcome::Refused(
+            return HerdrPaneRunOutcome::Refused(
                 Error::new(source)
                     .context(format!("failed to execute {}", invocation.executable())),
             );
         }
     };
     if !output.status.success() {
-        return HerdrAgentStartOutcome::Refused(anyhow!(
-            "herdr command failed with {} for {:?}: {}",
+        return HerdrPaneRunOutcome::Refused(anyhow!(
+            "herdr pane-run failed with {} for {:?}: {}",
             output.status,
-            redact_environment_assignments(invocation.argv()),
-            redact_herdr_stderr(invocation.argv(), &output.stderr).trim()
+            ["pane", "run", "<pane-id>", "<launch-script>"],
+            redact_pane_run_stderr(environment, &output.stderr).trim()
         ));
     }
+    if output.stdout.is_empty() {
+        return HerdrPaneRunOutcome::Started(json!({
+            "result": {"type": "pane_input_sent"}
+        }));
+    }
     match serde_json::from_slice(&output.stdout) {
-        Ok(response) => HerdrAgentStartOutcome::Started(response),
-        Err(source) => HerdrAgentStartOutcome::SpawnObservedButUnusable(
-            Error::new(source).context("herdr agent-start returned invalid JSON"),
+        Ok(response) => HerdrPaneRunOutcome::Started(response),
+        Err(source) => HerdrPaneRunOutcome::SpawnObservedButUnusable(
+            Error::new(source).context("herdr pane-run returned invalid JSON"),
         ),
     }
+}
+
+fn wait_for_worker_launch(script_path: &Path, result_path: &Path) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        if !script_path.exists() || result_path.is_file() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
 }
 
 fn parse_herdr_foreground_process(response: &Value) -> Option<DispatchWorkerProcessObservation> {
@@ -7381,9 +7485,14 @@ fn herdr_location(response: &Value) -> Result<HerdrAgentLocation> {
         .pointer("/result/tab/tab_id")
         .and_then(Value::as_str)
         .context("herdr worktree response omitted result.tab.tab_id")?;
+    let pane = response
+        .pointer("/result/root_pane/pane_id")
+        .and_then(Value::as_str)
+        .context("herdr worktree response omitted result.root_pane.pane_id")?;
     Ok(HerdrAgentLocation::new(
         HerdrWorkspaceId::parse(workspace)?,
         HerdrTabId::parse(tab)?,
+        HerdrPaneId::parse(pane)?,
     ))
 }
 
@@ -7436,10 +7545,44 @@ fn package_temporary_directory(
     PathBuf::from("/tmp/pce-tmp").join(suffix)
 }
 
+fn herdr_version_is_supported(detected: &str) -> bool {
+    let Some(version) = detected.strip_prefix("herdr ") else {
+        return false;
+    };
+    let mut parts = version.split('.');
+    let major = parts.next().and_then(|part| part.parse::<u64>().ok());
+    let minor = parts.next().and_then(|part| part.parse::<u64>().ok());
+    let patch = parts.next().and_then(|part| part.parse::<u64>().ok());
+    parts.next().is_none()
+        && matches!((major, minor, patch), (Some(0), Some(8), Some(patch)) if patch >= 2)
+}
+
+fn require_supported_herdr_version() -> Result<String> {
+    let output = std::process::Command::new("herdr")
+        .arg("--version")
+        .output()
+        .context("failed to detect Herdr version; PCE requires Herdr >=0.8.2,<0.9.0")?;
+    let detected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() {
+        bail!(
+            "failed to detect Herdr version (status {}): {}; PCE requires Herdr >=0.8.2,<0.9.0",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if !herdr_version_is_supported(&detected) {
+        bail!(
+            "unsupported Herdr version `{detected}`; PCE requires Herdr >=0.8.2,<0.9.0 for the pane-run dispatch protocol"
+        );
+    }
+    Ok(detected)
+}
+
 fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
     if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
         bail!("package dispatch requires HERDR_ENV=1 inside a Herdr-managed pane");
     }
+    let herdr_version = require_supported_herdr_version()?;
     let graph_bytes = fs::read(&command.graph_path).with_context(|| {
         format!(
             "failed to read package graph {}",
@@ -7612,53 +7755,40 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             return Err(source);
         }
     };
-    let start_response = match execute_herdr_agent_start(&plan.agent_start(&location)) {
-        HerdrAgentStartOutcome::Started(response) => response,
-        HerdrAgentStartOutcome::Refused(source) => {
-            record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
-            remove_clean_created_worktrees(plan.worktrees(), &command.repositories)?;
-            return Err(source);
-        }
-        HerdrAgentStartOutcome::SpawnObservedButUnusable(source) => {
-            return Err(Error::new(SpawnObservedDispatchError { source }));
-        }
-    };
-    let (worker_pane_id, worker_workspace_id, worker_process) = if let Some(started_agent) =
-        start_response.pointer("/result/agent")
+    if let Err(source) =
+        materialize_worker_launch_script(plan.launch_script_path(), &plan.launch_script())
     {
-        let started_name = started_agent
-            .get("name")
-            .and_then(Value::as_str)
-            .context("herdr agent-start response omitted result.agent.name")?;
-        if started_name != plan.agent_name().as_str() {
-            return Err(Error::new(SpawnObservedDispatchError {
-                source: anyhow!(
-                    "herdr agent-start returned name {started_name}; expected {}",
-                    plan.agent_name().as_str()
-                ),
-            }));
-        }
-        let pane_id = started_agent
-            .get("pane_id")
-            .and_then(Value::as_str)
-            .context("herdr agent-start response omitted result.agent.pane_id")?
-            .to_owned();
-        let workspace_id = started_agent
-            .get("workspace_id")
-            .and_then(Value::as_str)
-            .context("herdr agent-start response omitted result.agent.workspace_id")?
-            .to_owned();
-        let process = observe_spawned_herdr_process(&pane_id);
-        (pane_id, workspace_id, process)
-    } else {
-        (
-            "unrecorded-worker-pane".to_owned(),
-            location.workspace_id().to_owned(),
-            DispatchWorkerProcessObservation::Inconclusive {
-                detail: "herdr agent-start response omitted the worker pane identity".to_owned(),
-            },
-        )
-    };
+        record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+        remove_clean_created_worktrees(plan.worktrees(), &command.repositories)?;
+        return Err(source);
+    }
+    let pane_run_response =
+        match execute_herdr_pane_run(&plan.pane_run(&location), plan.environment()) {
+            HerdrPaneRunOutcome::Started(response) => response,
+            HerdrPaneRunOutcome::Refused(source) => {
+                record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+                let _ignored = fs::remove_file(plan.launch_script_path());
+                remove_clean_created_worktrees(plan.worktrees(), &command.repositories)?;
+                return Err(source);
+            }
+            HerdrPaneRunOutcome::SpawnObservedButUnusable(source) => {
+                return Err(Error::new(SpawnObservedDispatchError { source }));
+            }
+        };
+    if !wait_for_worker_launch(plan.launch_script_path(), result_path.as_path()) {
+        record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+        let workspace = HerdrWorkspaceId::parse(location.workspace_id())?;
+        let _ignored = execute_herdr(&workspace.close_invocation());
+        let _ignored = fs::remove_file(plan.launch_script_path());
+        remove_clean_created_worktrees(plan.worktrees(), &command.repositories)?;
+        bail!(
+            "worker launch timed out before the pane consumed {}",
+            plan.launch_script_path().display()
+        );
+    }
+    let worker_pane_id = location.pane().as_str().to_owned();
+    let worker_workspace_id = location.workspace_id().to_owned();
+    let worker_process = observe_spawned_herdr_process(&worker_pane_id);
     let mut pane_cleanup_targets = Vec::new();
     let mut pane_ownership_errors = Vec::new();
     for item in &created {
@@ -7699,6 +7829,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
         None
     };
     Ok(json!({
+        "herdr_version": herdr_version,
         "agent_name": plan.agent_name().as_str(),
         "issuance_sequence": issuance.sequence().get(),
         "result_path": result_path.as_str(),
@@ -7712,7 +7843,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
         "pane_cleanup_targets": pane_cleanup_targets,
         "pane_ownership_error": pane_ownership_error,
         "worktrees": created,
-        "agent_start": start_response,
+        "pane_run": pane_run_response,
     }))
 }
 

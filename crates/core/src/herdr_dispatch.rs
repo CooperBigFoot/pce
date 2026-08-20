@@ -1,9 +1,9 @@
 //! herdr_dispatch_plan : Vision × WorkPackage × DispatchAttempt × RepositoryDispatchInput* × WorkerEnvironment × WorkerArgv → HerdrWorkPackageDispatchPlan
 //! pane_close : PaneId → HerdrInvocation
 //!
-//! The result is a pure, ordered description of Herdr worktree creation followed by one agent
-//! start, plus exact cleanup composition for the pane returned by that start. This module performs
-//! no I/O.
+//! The result is a pure, ordered description of Herdr worktree creation followed by one command
+//! run in the first worktree's root pane, plus exact cleanup composition for that pane. This module
+//! performs no I/O.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -308,12 +308,17 @@ impl HerdrPaneId {
 pub struct HerdrAgentLocation {
     workspace: HerdrWorkspaceId,
     tab: HerdrTabId,
+    pane: HerdrPaneId,
 }
 
 impl HerdrAgentLocation {
-    /// Bind the opaque workspace and tab returned by Herdr.
-    pub const fn new(workspace: HerdrWorkspaceId, tab: HerdrTabId) -> Self {
-        Self { workspace, tab }
+    /// Bind the opaque workspace, tab, and root pane returned by Herdr.
+    pub const fn new(workspace: HerdrWorkspaceId, tab: HerdrTabId, pane: HerdrPaneId) -> Self {
+        Self {
+            workspace,
+            tab,
+            pane,
+        }
     }
 
     /// Return the exact workspace identifier.
@@ -325,9 +330,14 @@ impl HerdrAgentLocation {
     pub fn tab_id(&self) -> &str {
         &self.tab.0
     }
+
+    /// Return the exact root pane identifier.
+    pub const fn pane(&self) -> &HerdrPaneId {
+        &self.pane
+    }
 }
 
-/// One direct, shell-free CLI invocation.
+/// One direct Herdr CLI invocation; `pane run` carries quoted shell text as one argument.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrInvocation {
     argv: Vec<String>,
@@ -374,6 +384,7 @@ pub struct HerdrWorkPackageDispatchPlan {
     worktrees: Vec<HerdrWorktreeSpec>,
     environment: BTreeMap<String, String>,
     worker_arguments: WorkerArgumentVector,
+    launch_script_path: PathBuf,
 }
 
 impl HerdrWorkPackageDispatchPlan {
@@ -389,34 +400,57 @@ impl HerdrWorkPackageDispatchPlan {
     pub const fn environment(&self) -> &BTreeMap<String, String> {
         &self.environment
     }
-    /// Compose the installed Herdr 0.7.1 agent-start command using opaque returned IDs.
-    ///
-    /// No `--split` is emitted: worktree creation established the location.
-    pub fn agent_start(&self, location: &HerdrAgentLocation) -> HerdrInvocation {
-        let assignments = self
-            .environment
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>();
-        let mut argv = vec![
-            "agent".to_owned(),
-            "start".to_owned(),
-            self.agent_name.0.clone(),
-            "--cwd".to_owned(),
-            self.worktrees[0].path.display().to_string(),
-            "--workspace".to_owned(),
-            location.workspace.0.clone(),
-            "--tab".to_owned(),
-            location.tab.0.clone(),
-            "--no-focus".to_owned(),
-            "--".to_owned(),
-            ENV_EXECUTABLE.to_owned(),
-            "-i".to_owned(),
-        ];
-        argv.extend(assignments);
-        argv.extend(self.worker_arguments.0.iter().cloned());
-        HerdrInvocation { argv }
+    /// Return the binary-owned launch script path for execution-time materialization.
+    pub fn launch_script_path(&self) -> &Path {
+        &self.launch_script_path
     }
+
+    /// Compose the launch script bytes without performing I/O.
+    ///
+    /// The script deletes itself before replacing its process with the scrubbed worker. This keeps
+    /// long or sensitive environment values out of terminal input and scrollback.
+    pub fn launch_script(&self) -> String {
+        let mut command = vec![shell_quote(ENV_EXECUTABLE), "-i".to_owned()];
+        command.extend(
+            self.environment
+                .iter()
+                .map(|(name, value)| shell_quote(&format!("{name}={value}"))),
+        );
+        command.extend(
+            self.worker_arguments
+                .0
+                .iter()
+                .map(|argument| shell_quote(argument)),
+        );
+        format!(
+            "#!/bin/sh\nset -eu\nrm -f -- \"$0\"\ncd {}\nexec {}\n",
+            shell_quote(&self.worktrees[0].path.display().to_string()),
+            command.join(" "),
+        )
+    }
+
+    /// Compose the Herdr 0.8.2 pane-run command for the first worktree's root pane.
+    pub fn pane_run(&self, location: &HerdrAgentLocation) -> HerdrInvocation {
+        HerdrInvocation {
+            argv: vec![
+                "pane".to_owned(),
+                "run".to_owned(),
+                location.pane.0.clone(),
+                shell_quote(&self.launch_script_path.display().to_string()),
+            ],
+        }
+    }
+}
+
+fn shell_quote(argument: &str) -> String {
+    if !argument.is_empty()
+        && argument
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte))
+    {
+        return argument.to_owned();
+    }
+    format!("'{}'", argument.replace('\'', "'\"'\"'"))
 }
 
 /// Pure dispatch composition failure.
@@ -452,9 +486,6 @@ pub enum HerdrDispatchPlanError {
     /// A package repeated a repository, which would violate one-worktree-per-repository identity.
     #[error("package repeats repository `{repository}`")]
     DuplicatePackageRepository { repository: String },
-    /// More than one newly observed pane matched the exact agent-start location and cwd.
-    #[error("{count} newly observed panes match the run-owned agent-start identity")]
-    AmbiguousCreatedPane { count: usize },
 }
 
 /// Derive the stable agent name from length-framed vision and package identity.
@@ -598,11 +629,23 @@ pub fn compose_herdr_work_package_dispatch(
         environment.insert(format!("PCE_WORKTREE_{index}"), path.clone());
     }
 
+    let mut launch_digest = Sha256::new();
+    for argument in &worker_arguments.0 {
+        launch_digest.update(argument.len().to_be_bytes());
+        launch_digest.update(argument.as_bytes());
+    }
+    let launch_suffix = launch_digest.finalize()[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     Ok(HerdrWorkPackageDispatchPlan {
         agent_name,
         worktrees,
         environment,
         worker_arguments,
+        launch_script_path: temporary_directory
+            .0
+            .join(format!("worker-launch-{launch_suffix}.sh")),
     })
 }
 
@@ -706,39 +749,34 @@ mod tests {
                 ("USER".to_owned(), "worker".to_owned()),
             ])
         );
-        let start = plan.agent_start(&HerdrAgentLocation::new(
+        let run = plan.pane_run(&HerdrAgentLocation::new(
             HerdrWorkspaceId::parse("w9").unwrap_or_else(|error| panic!("{error}")),
             HerdrTabId::parse("w9:t2").unwrap_or_else(|error| panic!("{error}")),
+            super::HerdrPaneId::parse("w9:p7").unwrap_or_else(|error| panic!("{error}")),
         ));
-        assert_eq!(start.executable(), "herdr");
+        assert_eq!(run.executable(), "herdr");
         assert_eq!(
-            start.argv(),
+            run.argv(),
             [
-                "agent",
-                "start",
-                plan.agent_name().as_str(),
-                "--cwd",
-                &target,
-                "--workspace",
-                "w9",
-                "--tab",
-                "w9:t2",
-                "--no-focus",
-                "--",
-                "/usr/bin/env",
-                "-i",
-                "HOME=/home/worker",
-                "PATH=/usr/bin",
-                "PCE_DISPATCH_TMPDIR=/binary/tmp",
-                &format!("PCE_WORKTREES=[\"{target}\"]"),
-                &format!("PCE_WORKTREE_0={target}"),
-                "TMPDIR=/binary/tmp",
-                "USER=worker",
-                "prime-agent",
-                "-p",
+                "pane",
+                "run",
+                "w9:p7",
+                plan.launch_script_path().to_str().unwrap_or("invalid path"),
             ]
         );
-        assert!(!start.argv().iter().any(|argument| argument == "--split"));
+        assert!(
+            plan.launch_script_path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("worker-launch-") && name.ends_with(".sh"))
+        );
+        assert_eq!(
+            plan.launch_script(),
+            format!(
+                "#!/bin/sh\nset -eu\nrm -f -- \"$0\"\ncd {target}\nexec /usr/bin/env -i HOME=/home/worker PATH=/usr/bin PCE_DISPATCH_TMPDIR=/binary/tmp 'PCE_WORKTREES=[\"{target}\"]' PCE_WORKTREE_0={target} TMPDIR=/binary/tmp USER=worker prime-agent -p\n"
+            )
+        );
+        assert!(!run.argv().iter().any(|argument| argument == "agent"));
     }
 
     #[test]
@@ -830,6 +868,46 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn pane_run_shell_quotes_every_non_portable_worker_word() {
+        let graph = package_graph(&["pce"]);
+        let plan = compose_herdr_work_package_dispatch(
+            &DispatchVisionSource::parse("vision-one").unwrap_or_else(|error| panic!("{error}")),
+            &graph.packages()[0],
+            DispatchAttempt::parse(1).unwrap_or_else(|error| panic!("{error}")),
+            &[repository("pce")],
+            &AbsoluteWorktreeRoot::parse(PathBuf::from("/worktrees"))
+                .unwrap_or_else(|error| panic!("{error}")),
+            &AbsoluteDispatchTemporaryDirectory::parse(PathBuf::from("/binary/tmp"))
+                .unwrap_or_else(|error| panic!("{error}")),
+            WorkerEnvironment::parse(BTreeMap::from([(
+                "TOKEN".to_owned(),
+                "space and ' quote".to_owned(),
+            )]))
+            .unwrap_or_else(|error| panic!("{error}")),
+            WorkerArgumentVector::parse(vec![
+                "worker command".to_owned(),
+                "it's safe".to_owned(),
+                "$HOME; echo bad".to_owned(),
+                String::new(),
+            ])
+            .unwrap_or_else(|error| panic!("{error}")),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let run = plan.pane_run(&HerdrAgentLocation::new(
+            HerdrWorkspaceId::parse("w9").unwrap_or_else(|error| panic!("{error}")),
+            HerdrTabId::parse("w9:t2").unwrap_or_else(|error| panic!("{error}")),
+            super::HerdrPaneId::parse("w9:p7").unwrap_or_else(|error| panic!("{error}")),
+        ));
+        assert_eq!(
+            run.argv()[3],
+            plan.launch_script_path().display().to_string()
+        );
+        let script = plan.launch_script();
+        assert!(script.contains("'TOKEN=space and '\"'\"' quote'"));
+        assert!(script.contains("'worker command' 'it'\"'\"'s safe' '$HOME; echo bad' ''"));
+    }
+
     #[test]
     fn pane_close_targets_only_the_exact_returned_opaque_identity() {
         let pane = super::HerdrPaneId::parse("w9:p73").unwrap_or_else(|error| panic!("{error}"));

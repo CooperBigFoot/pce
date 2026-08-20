@@ -260,15 +260,16 @@ fn crashing_gate_retries_judgment_without_redispatching_or_charging_worker() {
     let herdr = bin.join("herdr");
     fs::write(&herdr, r#"#!/bin/sh
 set -eu
+if [ "${1-}" = "--version" ]; then echo "herdr 0.8.2"; exit 0; fi
 if [ "$1 $2" = "worktree create" ]; then
   shift 2; cwd= path= branch= base=
   while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
   git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
-  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"}}}'
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"root-pane","workspace_id":"w1"}}}'
+elif [ "$1 $2" = "pane run" ]; then
+  (/bin/sh -c "$4") &
+  printf '%s\n' '{}'
 else
-  shift 2; agent_cwd=
-  while [ "$1" != "--" ]; do if [ "$1" = "--cwd" ]; then agent_cwd=$2; shift 2; else shift; fi; done; shift
-  (cd "$agent_cwd" && "$@") &
   printf '%s\n' '{}'
 fi
 "#).expect("herdr");

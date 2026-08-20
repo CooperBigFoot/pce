@@ -124,10 +124,15 @@ fn live_herdr_package_dispatch_records_sleep_then_exit_three() {
     );
     let response: Value = serde_json::from_slice(&output.stdout).expect("dispatch JSON");
     assert_eq!(response["issuance_sequence"], 1);
-    assert_eq!(response["agent_start"]["result"]["type"], "agent_started");
+    assert!(
+        response["herdr_version"]
+            .as_str()
+            .is_some_and(|version| version.starts_with("herdr 0.8."))
+    );
+    assert!(response["pane_run"]["result"].is_object());
     assert_eq!(
         response["dispatch_identity"]["pane_id"],
-        response["agent_start"]["result"]["agent"]["pane_id"]
+        response["worktrees"][0]["response"]["result"]["root_pane"]["pane_id"]
     );
     assert!(response["dispatch_identity"]["process"].is_object());
     let result_path =
@@ -162,8 +167,8 @@ fn live_herdr_package_dispatch_records_sleep_then_exit_three() {
     assert_eq!(report["packages"][0]["state"], "finished");
     assert_eq!(report["packages"][0]["exit_status"]["code"], 3);
     eprintln!(
-        "PCE_LIVE_EVIDENCE agent_started={} result={} collection={}",
-        response["agent_start"]["result"]["type"], result, report
+        "PCE_LIVE_EVIDENCE pane_run={} result={} collection={}",
+        response["pane_run"], result, report
     );
     let records = fs::read_to_string(&log).expect("event log");
     assert_eq!(records.lines().count(), 2);
