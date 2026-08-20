@@ -512,12 +512,10 @@ printf '{{"outcome":"failed","blocked_by":"%s"}}' "$blocker" > "$PCE_PACKAGE_OUT
     let blocker = "final SDK probe: /opt/acme/sdk missing";
     assert_eq!(status["packages"][0][1]["state"], "parked");
     assert_eq!(status["packages"][0][1]["blocked_by"], blocker);
-    assert!(
-        status["packages"][0][1]["reason"]
-            .as_str()
-            .expect("reason")
-            .contains("spending exhausted")
-    );
+    let park_reason = status["packages"][0][1]["reason"].as_str().expect("reason");
+    assert!(park_reason.contains("spending exhausted"));
+    assert!(park_reason.contains("journal recovery epoch"));
+    assert!(park_reason.contains("--recovery-reset"));
     let parked = fs::read_to_string(&journal)
         .expect("journal")
         .lines()
@@ -525,4 +523,110 @@ printf '{{"outcome":"failed","blocked_by":"%s"}}' "$blocker" > "$PCE_PACKAGE_OUT
         .find(|event| event["event"] == "recovery-parked")
         .expect("recovery park");
     assert_eq!(parked["blocked_by"], blocker);
+}
+
+#[test]
+fn attributed_recovery_reset_reopens_exhausted_package_and_refreshes_status() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    fs::write(repo.join("value"), "base").expect("value");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "base"]);
+
+    let graph_path = temp.path().join("graph.json");
+    fs::write(
+        &graph_path,
+        serde_json::to_vec(&json!({
+            "vision":"recovery-reset",
+            "plan_version":1,
+            "authored_at_ref":"HEAD",
+            "packages":[{
+                "id":"A",
+                "title":"A",
+                "repositories":["repo"],
+                "criteria":[{"name":"green","input":"repo","observation":"zero","command":"true"}],
+                "depends_on":[]
+            }]
+        }))
+        .expect("graph"),
+    )
+    .expect("graph write");
+    let journal = temp.path().join("journal.jsonl");
+    let events = [
+        json!({"event":"recovery-configured","limits":{"retry_attempts":1,"local_patch_attempts":1,"environment_failures":6,"gate_failures":3}}),
+        json!({"event":"worker-dispatched","package":"A","issuance":1}),
+        json!({"event":"worker-failed","package":"A","issuance":1,"reason":"first"}),
+        json!({"event":"worker-dispatched","package":"A","issuance":2}),
+        json!({"event":"worker-failed","package":"A","issuance":2,"reason":"second"}),
+        json!({"event":"worker-dispatched","package":"A","issuance":3}),
+        json!({"event":"worker-failed","package":"A","issuance":3,"reason":"third"}),
+        json!({"event":"recovery-parked","package":"A","reason":"recovery spending exhausted after 3 attributable failures; supply an attributed recovery reset record","attempts":[]}),
+    ];
+    let journal_text = events
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&journal, format!("{journal_text}\n")).expect("journal");
+    let reset = temp.path().join("recovery-reset.json");
+    fs::write(
+        &reset,
+        serde_json::to_vec(&json!({
+            "schema_version":1,
+            "package":"A",
+            "reset_by":"operator@example.com",
+            "rationale":"the attributed harness defect was repaired"
+        }))
+        .expect("reset"),
+    )
+    .expect("reset write");
+    let worker = temp.path().join("worker.sh");
+    fs::write(
+        &worker,
+        "#!/bin/sh\nprintf '%s' '{\"outcome\":\"done\"}' > \"$PCE_PACKAGE_OUTCOME\"\n",
+    )
+    .expect("worker");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
+        .args([
+            "package",
+            "driver-run",
+            "--graph",
+            graph_path.to_str().expect("graph path"),
+            "--journal",
+            journal.to_str().expect("journal path"),
+            "--repository",
+            &format!("repo={}", repo.display()),
+            "--recovery-reset",
+            reset.to_str().expect("reset path"),
+            "--worker-override",
+            "--",
+            "/bin/sh",
+            worker.to_str().expect("worker path"),
+        ])
+        .current_dir(temp.path())
+        .output()
+        .expect("pce");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status");
+    assert_eq!(status["packages"][0][1]["state"], "complete");
+    assert_eq!(status["recovery"][0][1]["dispatches_remaining"], 2);
+    assert_eq!(status["recovery"][0][1]["next_rung"], "retry");
+    assert_eq!(status["recovery_spending_resets"][0]["package"], "A");
+    assert_eq!(
+        status["recovery_spending_resets"][0]["reset_by"],
+        "operator@example.com"
+    );
+    let log = fs::read_to_string(&journal).expect("journal after reset");
+    assert!(log.contains("\"event\":\"recovery-spending-reset\""));
+    assert!(log.contains("\"package\":\"A\",\"issuance\":4"));
 }

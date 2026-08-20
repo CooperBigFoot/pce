@@ -121,7 +121,7 @@ const USAGE: &str = concat!(
     "       pce package driver-status --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> [--override-risk-ordering]\n",
     "       pce package materialize-refs --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>...\n",
     "       pce package driver-overrule --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --rationale <TEXT>\n",
-    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--worker-env <NAME>]... [--herdr-session <NAME>] [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--gate-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
+    "       pce package driver-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]... [--worker-env <NAME>]... [--herdr-session <NAME>] [--recovery-reset <HUMAN_RECORD_PATH>] [--override-risk-ordering] [--retry-limit <N>] [--local-patch-limit <N>] [--environment-failure-limit <N>] [--gate-failure-limit <N>] [--wait-timeout-ms <N>] [--worker-override -- <WORKER_OVERRIDE_ARG>...]\n",
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
@@ -344,6 +344,7 @@ struct DriverRunCommand {
     herdr_session: Option<HerdrSessionName>,
     override_risk_ordering: bool,
     recovery_limits: RecoveryLimits,
+    recovery_reset: Option<PathBuf>,
     worker_override: Option<Vec<String>>,
     wait_timeout: Option<Duration>,
 }
@@ -2086,6 +2087,7 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
     let mut wait_timeout = None;
     let mut worker_environment = BTreeMap::new();
     let mut herdr_session = None;
+    let mut recovery_reset = None;
     let mut mapping_args = Vec::new();
     let mut index = 4;
     while index < options.len() {
@@ -2133,6 +2135,15 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
                 .context("--herdr-session requires a session name")?;
             herdr_session = Some(parse_herdr_session_name(value.clone())?);
             index += 2;
+        } else if options[index] == "--recovery-reset" {
+            if recovery_reset.is_some() {
+                bail!("driver recovery reset record is repeated");
+            }
+            let value = options
+                .get(index + 1)
+                .context("--recovery-reset requires a human record path")?;
+            recovery_reset = Some(PathBuf::from(value));
+            index += 2;
         } else if options[index] == "--wait-timeout-ms" {
             let value = options
                 .get(index + 1)
@@ -2164,6 +2175,7 @@ fn parse_driver_run(rest: &[String]) -> Result<Command> {
         )
         .with_environment_failure_limit(EnvironmentFailureLimit::new(environment_failure_limit))
         .with_gate_failure_limit(GateFailureLimit::new(gate_failure_limit)),
+        recovery_reset,
         worker_override,
         wait_timeout,
     }))
@@ -2316,7 +2328,7 @@ fn park_if_recovery_exhausted(
         &DriverEvent::RecoveryParked {
             package: package_id.to_owned(),
             reason: format!(
-                "recovery spending exhausted after {charged} attributable failures; re-author as plan version n+1"
+                "recovery spending exhausted after {charged} attributable failures in this journal recovery epoch; supply an attributed --recovery-reset record to open a fresh ladder"
             ),
             blocked_by: blocked_by.map(str::to_owned),
             attempts,
@@ -5106,6 +5118,45 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
     }
 }
 
+fn ensure_recovery_spending_reset_imported(
+    graph: &WorkPackageGraph,
+    command: &DriverRunCommand,
+    events: &[DriverEvent],
+) -> Result<bool> {
+    let Some(record_path) = command.recovery_reset.as_ref() else {
+        return Ok(false);
+    };
+    let bytes = fs::read(record_path).with_context(|| {
+        format!(
+            "failed to read attributed recovery reset {}",
+            record_path.display()
+        )
+    })?;
+    let record =
+        parse_recovery_reset_record(&bytes).context("failed to parse attributed recovery reset")?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let expected = DriverEvent::RecoverySpendingReset {
+        package: record.package,
+        reset_by: record.reset_by,
+        rationale: record.rationale,
+        record_sha256: digest.clone(),
+    };
+    if events.iter().any(|event| event == &expected) {
+        return Ok(false);
+    }
+    if events.iter().any(|event| {
+        matches!(event, DriverEvent::RecoverySpendingReset { record_sha256, .. } if record_sha256 == &digest)
+    }) {
+        bail!("driver journal already binds this recovery reset digest to different content");
+    }
+    let mut candidate = events.to_vec();
+    candidate.push(expected.clone());
+    derive_driver_snapshot(graph, &candidate, command.override_risk_ordering)
+        .context("recovery reset refused")?;
+    append_driver_event(&command.journal_path, &expected)?;
+    Ok(true)
+}
+
 fn ensure_base_currency_acceptance_imported(
     graph: &WorkPackageGraph,
     command: &DriverRunCommand,
@@ -5418,6 +5469,9 @@ fn run_driver_loop_inner(command: DriverRunCommand) -> Result<()> {
         }
         ensure_worker_environment_contract(&command, &events)?;
         let events = read_driver_journal(&command.journal_path)?;
+        if ensure_recovery_spending_reset_imported(&graph, &command, &events)? {
+            continue;
+        }
         if repair_driver_environment_closures(&command, &events)? > 0 {
             continue;
         }
@@ -10639,6 +10693,30 @@ fn highest_frozen_graph_version(vision_dir: &Path) -> Result<Option<u64>> {
         highest = Some(highest.map_or(version, |current: u64| current.max(version)));
     }
     Ok(highest)
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryResetRecord {
+    schema_version: u64,
+    package: String,
+    reset_by: String,
+    rationale: String,
+}
+
+fn parse_recovery_reset_record(bytes: &[u8]) -> Result<RecoveryResetRecord> {
+    let record: RecoveryResetRecord =
+        serde_json::from_slice(bytes).context("recovery reset must be valid JSON")?;
+    if record.schema_version != 1 {
+        bail!("recovery reset schema_version must be 1");
+    }
+    if record.package.trim().is_empty()
+        || record.reset_by.trim().is_empty()
+        || record.rationale.trim().is_empty()
+    {
+        bail!("recovery reset requires non-empty package, reset_by, and rationale");
+    }
+    Ok(record)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -22045,6 +22123,7 @@ None.
             herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
         }
@@ -22180,6 +22259,7 @@ None.
             herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
         };
@@ -22208,6 +22288,7 @@ None.
             herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
         };
@@ -22278,6 +22359,7 @@ None.
             herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: limits,
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
         };
@@ -22307,6 +22389,7 @@ None.
             herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
         };
@@ -22434,6 +22517,7 @@ None.
             herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
         };
@@ -22596,6 +22680,7 @@ None.
             herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
         };
@@ -22665,6 +22750,7 @@ None.
             herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
         };
@@ -22838,6 +22924,7 @@ None.
             herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
         };
@@ -22917,6 +23004,7 @@ None.
             herdr_session: None,
             override_risk_ordering: false,
             recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
         };
@@ -23103,6 +23191,7 @@ None.
             preparations: std::collections::BTreeMap::new(),
             override_risk_ordering: false,
             recovery_limits: limits,
+            recovery_reset: None,
             worker_override: None,
             wait_timeout: None,
             worker_environment: std::collections::BTreeMap::new(),

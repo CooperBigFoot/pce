@@ -269,3 +269,12 @@
 | Hand a claimed Effort ticket to `/to-graph`, not directly to `/to-vision`. | `/to-graph` invokes `/to-vision` to materialize the vision and then freezes the work-package graph required by `/work-graph`. `/work-ticket` still reserves and stamps the vision directory at claim time, and it only presents the command; it does not invoke `/to-graph`, `/pce`, or `/work-graph`. |
 | Keep the completion report action-first and name verification categories in one line. | The user needs the two-or-three-sentence end state, genuinely unresolved items when any exist, and the exact handoff command. Ticket, Map, glossary, ADR, directory, and linkage checks remain available on request without burying the command in an enumerated audit trail; acceptance criteria are not repeated because `/to-graph` re-derives and settles them in its own workflow. |
 | Carry the same-day warning through the full delegation chain. | `/to-graph` invokes `/to-vision`, which runs `pce vision new` with the retained byte-identical name. A same-day call reuses the reserved directory untouched, while crossing midnight can create a different date-stamped directory and diverge from the ticket's stamped `Vision:` line. |
+
+## 2026-08-20 recovery spending reset decisions
+
+| Decision | Rationale and boundary |
+|---|---|
+| Keep recovery spending journal-scoped across plan-version advances. | The once-per-journal contract prevents supervisors from minting plan versions to launder attributable failures. Both rung selection and `driver-status` now derive the same per-package count from the full journal. |
+| Open an exhausted ladder with `driver-run --recovery-reset <HUMAN_RECORD_PATH>`. | The strict schema-v1 JSON record names one package, `reset_by`, and `rationale`. PCE journals those fields plus the source SHA-256 before dispatch. Replay accepts the reset only for a package currently parked with an exhausted ladder. |
+| Limit each reset record to one package. | Recovery exhaustion and its rationale are package-specific. One-package records minimize authority and keep each human ruling independently auditable. A later batch format is unnecessary while the existing flag can import one exact ruling per launch. |
+| Describe the reset boundary as a journal recovery epoch. | A plan advance does not reset spending. A valid attributed reset begins the next epoch for that package, clears stale rung evidence and repeated-worker-blocker history, and appears in `driver-status` under `recovery_spending_resets`. The exhaustion park message names `--recovery-reset` as the real door. |
