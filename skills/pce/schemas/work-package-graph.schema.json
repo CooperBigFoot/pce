@@ -133,6 +133,10 @@
             "$ref": "#/$defs/dependency"
           },
           "uniqueItems": true
+        },
+        "external_evidence_root": {
+          "$ref": "#/$defs/nonempty",
+          "description": "Environment name whose value identifies this package external evidence root."
         }
       }
     }
