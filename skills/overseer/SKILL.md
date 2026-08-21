@@ -8,7 +8,7 @@ description: Triage durable fleet holds from the hold store, supply cross-run fa
 The hold store is the complete thread. **Cold reconstruction is mandatory on every invocation.**
 Do not rely on conversation history, a prior session, or an empty queue view.
 
-`PCE_HOLD_STORE` names the store root. Refuse to start if it is unset or is not an absolute path.
+`PCE_HOLD_STORE_ROOT` names the store root. Refuse to start if it is unset or is not an absolute path.
 The overseer has no repository authority. It reads the store and installed command surface. It writes
 only through hold and overseer store operations.
 
@@ -16,11 +16,11 @@ only through hold and overseer store operations.
 
 On every invocation, including the first turn after a respawn:
 
-1. Run `pce hold runs --root "$PCE_HOLD_STORE"` to recover every run and its frozen graph, journal,
+1. Run `pce hold runs --root "$PCE_HOLD_STORE_ROOT"` to recover every run and its frozen graph, journal,
    repository, vision directory, and Herdr session.
-2. Run `pce hold list --root "$PCE_HOLD_STORE"`. Do not infer calm from an empty notification
+2. Run `pce hold list --root "$PCE_HOLD_STORE_ROOT"`. Do not infer calm from an empty notification
    channel or from a dead overseer heartbeat.
-3. For every open hold, run `pce hold read --root "$PCE_HOLD_STORE" --key <key>`. Read the complete
+3. For every open hold, run `pce hold read --root "$PCE_HOLD_STORE_ROOT" --key <key>`. Read the complete
    `records` array in order, not only the opening report or latest answer.
 4. Resume any hold routed to `overseer` from its full stored thread. A human answer that ends in a
    question is a pending question for the overseer. Answer it from the store and available facts.
@@ -55,12 +55,12 @@ Apply this order once to each open report:
    source hold key, discriminating fact, and reproduction. Dispatch the brief to the binary repair
    pipeline. Do not route a human hold for that report.
 2. **The report asks for a choice but names no options.** Use
-   `pce hold route --root "$PCE_HOLD_STORE" --key <key> --to reporting-run`. The retained request must
+   `pce hold route --root "$PCE_HOLD_STORE_ROOT" --key <key> --to reporting-run`. The retained request must
    tell the run to name every option and consequence. Do not route it to the human.
 3. **The question is a non-delegable door.** Criterion revision, worker-environment extension,
    base-currency risk acceptance, park overrule, recovery spend authorisation, and fleet install
    authorisation always go through
-   `pce hold route --root "$PCE_HOLD_STORE" --key <key> --to human`. Never answer, learn a rule for,
+   `pce hold route --root "$PCE_HOLD_STORE_ROOT" --key <key> --to human`. Never answer, learn a rule for,
    or attribute one of these rulings to the overseer.
 4. **A stored routing rule matches on its discriminating fact.** Replay the rule against retained
    answered holds through the rule-proposal boundary before use. A symptom-only match is not a
@@ -81,7 +81,7 @@ and the complete named options with consequences. Preserve hedges and attributio
 routing history, tool diagnostics, or a request the overseer can answer from the store.
 
 Record the human's words unchanged with
-`pce hold answer --root "$PCE_HOLD_STORE" --key <key> --by human --answer <exact-answer>`.
+`pce hold answer --root "$PCE_HOLD_STORE_ROOT" --key <key> --by human --answer <exact-answer>`.
 Attribution belongs only to the actor who supplied the words. Then re-read the hold and perform the
 resulting route or close operation.
 
