@@ -322,6 +322,17 @@ pub fn request_install<F>(
 where
     F: FnOnce() -> Result<(), String>,
 {
+    let policy_path = policy_path(store);
+    let Some(directory) = policy_path.parent() else {
+        return Err(OverseerRoutingError::MissingPolicyParent { path: policy_path });
+    };
+    fs::create_dir_all(directory).map_err(|source| {
+        OverseerRoutingError::CreatePolicyDirectory {
+            path: directory.to_path_buf(),
+            source,
+        }
+    })?;
+    let _install_lock = PolicyLock::acquire(directory.join("install.lock"))?;
     let records = overseer_records(store)?;
     if records.iter().any(|record| {
         matches!(record, OverseerRecord::InstallCompleted { request_id, .. } if request_id == request.id())
