@@ -1246,8 +1246,12 @@ fn run_overseer_server(command: OverseerServeCommand) -> Result<()> {
             child = spawn_overseer_session(&command.session_program, &root, &journal)?;
         }
         match listener.accept() {
-            Ok((mut stream, _)) => {
-                serve_overseer_http(&mut stream, &store, &journal, command.heartbeat_stale)?;
+            Ok((mut stream, peer)) => {
+                if let Err(error) =
+                    serve_overseer_http(&mut stream, &store, &journal, command.heartbeat_stale)
+                {
+                    tracing::warn!(%peer, error = ?error, "rejected overseer HTTP request");
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(10));
