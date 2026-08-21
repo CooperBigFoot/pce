@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{CString, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::net::Shutdown;
+use std::net::{Shutdown, SocketAddr, TcpListener as InetTcpListener, TcpStream as InetTcpStream};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -50,11 +50,12 @@ use pce_core::{
     HoldKey, HoldRoute, HoldStore, KnownPayload, LandingReadinessDecision,
     LegacyRepositoryContractPayload, LocalPatchLimit, MeasuredContractSnapshot, MergeStatus,
     MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
-    NonProductionHoldOpenPayload, NonProductionKey, ObservedExitStatus, ObservedWorkflowName,
-    OpenDisposition, OracleFailure, OracleStage, OrderingEdge, PackageGateChallenge,
-    PackageWorkerResult, PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError,
-    PairedReplayClassification, PaneCleanupOutcome, ParentCriterionFailure,
-    PrimeSessionObservation, ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
+    NonProductionHoldOpenPayload, NonProductionKey, OVERSEER_MODEL, OVERSEER_REASONING_EFFORT,
+    ObservedExitStatus, ObservedWorkflowName, OpenDisposition, OracleFailure, OracleStage,
+    OrderingEdge, OverseerEvent, OverseerJournal, PackageGateChallenge, PackageWorkerResult,
+    PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
+    PaneCleanupOutcome, ParentCriterionFailure, PrimeSessionObservation,
+    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
     PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
     RecoveryLimits, RecoveryLogPath, RecoveryRung, ReferenceValidation, ReplayArtifactObservation,
@@ -77,7 +78,7 @@ use pce_core::{
     compose_package_worker_brief, compose_planning_role_frame, compute_dispatchability,
     create_vision, criteria_invariance_violations, derive_dispatch_outcome_state,
     derive_driver_snapshot, derive_herdr_agent_name, derive_merge_status,
-    derive_milestone_merge_status, derive_package_result_path, derive_run_state,
+    derive_milestone_merge_status, derive_package_result_path, derive_queue_view, derive_run_state,
     derive_run_state_with_dispatch_artifacts, derive_run_state_with_exceptional_merge_chains,
     derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
     dispatch_payload, effective_criteria, evaluate_completion, evaluate_landing_readiness,
@@ -93,10 +94,11 @@ use pce_core::{
     pending_terminal_pane_cleanups_with_legacy_deadline, pending_terminal_worktree_cleanups,
     ready_work_packages, rebase_gate_stimulus, recovery_attempt_records, recovery_base_brief,
     recovery_budget, render_dispatch_projection, render_human_snapshot, render_package_run,
-    repeated_identical_worker_blocker, seatbelt_capability_probe, serialize_dispatch_check_in,
-    serialize_dispatch_process_identity, serialize_package_worker_result,
-    serialize_tracked_repository_contract, titles_conservatively_overlap, unchanged_package_ids,
-    validate_artifact, validate_criterion_revisions, validate_package_gate_finding_repositories,
+    render_queue_html, repeated_identical_worker_blocker, seatbelt_capability_probe,
+    serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    serialize_package_worker_result, serialize_tracked_repository_contract,
+    titles_conservatively_overlap, unchanged_package_ids, validate_artifact,
+    validate_criterion_revisions, validate_package_gate_finding_repositories,
     validate_package_gate_repositories, validate_verdict_references, validate_workflow_coverage,
     validated_dispatch_completion_payload, verify_criterion_change, verify_mechanical_freeze,
     worker_environment_outcome,
@@ -135,6 +137,9 @@ const USAGE: &str = concat!(
     "       pce hold answer [--root <HOLD_STORE>] --key <HOLD_KEY> --by <ACTOR> --answer <TEXT>\n",
     "       pce hold route [--root <HOLD_STORE>] --key <HOLD_KEY> --to <human|overseer|reporting-run>\n",
     "       pce hold close [--root <HOLD_STORE>] --key <HOLD_KEY> --reason <TEXT>\n",
+    "       pce overseer view [--root <HOLD_STORE>] [--heartbeat-stale-ms <MILLISECONDS>]\n",
+    "       pce overseer heartbeat [--root <HOLD_STORE>]\n",
+    "       pce overseer serve [--root <HOLD_STORE>] [--listen <LOOPBACK_ADDRESS>] [--session-program <PROGRAM>] [--heartbeat-ms <MILLISECONDS>] [--heartbeat-stale-ms <MILLISECONDS>]\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
     "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
@@ -374,6 +379,27 @@ enum FreezeAuthority {
 }
 
 #[derive(Debug)]
+enum OverseerCommand {
+    View {
+        root: Option<PathBuf>,
+        heartbeat_stale: Duration,
+    },
+    Heartbeat {
+        root: Option<PathBuf>,
+    },
+    Serve(OverseerServeCommand),
+}
+
+#[derive(Debug)]
+struct OverseerServeCommand {
+    root: Option<PathBuf>,
+    listen: SocketAddr,
+    session_program: PathBuf,
+    heartbeat_interval: Duration,
+    heartbeat_stale: Duration,
+}
+
+#[derive(Debug)]
 enum HoldCommand {
     Open {
         root: Option<PathBuf>,
@@ -415,6 +441,7 @@ enum HoldCommand {
 #[derive(Debug)]
 enum Command {
     Hold(HoldCommand),
+    Overseer(OverseerCommand),
     DispatchContinuation,
     GateExec,
     GateReplay(GateReplayCommand),
@@ -833,6 +860,7 @@ fn main() -> Result<()> {
 fn run(args: impl Iterator<Item = String>, input: &mut dyn Read) -> Result<()> {
     match parse_command(args)? {
         Command::Hold(command) => run_hold(command, input),
+        Command::Overseer(command) => run_overseer(command),
         Command::DispatchContinuation => run_dispatch_continuation(input),
         Command::GateExec => run_gate_exec(input),
         Command::GateReplay(command) => exec_gate_replay_worker(command),
@@ -990,6 +1018,7 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
     let args: Vec<String> = args.collect();
     match args.as_slice() {
         [verb, action, rest @ ..] if verb == "hold" => parse_hold_command(action, rest),
+        [verb, action, rest @ ..] if verb == "overseer" => parse_overseer_command(action, rest),
         [command] if command == "__dispatch-continuation" => Ok(Command::DispatchContinuation),
         [verb, action] if verb == "gate" && action == "exec" => Ok(Command::GateExec),
         [verb, action, rest @ ..] if verb == "gate" && action == "replay" => {
@@ -1082,6 +1111,352 @@ fn parse_command(args: impl Iterator<Item = String>) -> Result<Command> {
         .with_context(|| USAGE),
         _ => bail!(USAGE),
     }
+}
+
+fn parse_overseer_command(action: &str, rest: &[String]) -> Result<Command> {
+    let mut options = parse_hold_options(rest)?;
+    let root = remove_hold_option(&mut options, &["--root", "--store", "--store-root"])?
+        .map(PathBuf::from);
+    let heartbeat_stale =
+        parse_duration_option(&mut options, "--heartbeat-stale-ms", Duration::from_secs(5))?;
+    let command = match action {
+        "view" => OverseerCommand::View {
+            root,
+            heartbeat_stale,
+        },
+        "heartbeat" => {
+            if remove_hold_option(&mut options, &["--heartbeat-ms"])?.is_some() {
+                bail!("--heartbeat-ms is only valid for overseer serve");
+            }
+            OverseerCommand::Heartbeat { root }
+        }
+        "serve" => {
+            let listen = remove_hold_option(&mut options, &["--listen", "--bind"])?
+                .unwrap_or_else(|| "127.0.0.1:0".to_owned())
+                .parse::<SocketAddr>()
+                .context("overseer listen address must be an IP socket address")?;
+            if !listen.ip().is_loopback() {
+                bail!("overseer listen address must be loopback, got `{listen}`");
+            }
+            let session_program = PathBuf::from(
+                remove_hold_option(&mut options, &["--session-program"])?
+                    .unwrap_or_else(|| "prime-agent".to_owned()),
+            );
+            let heartbeat_interval =
+                parse_duration_option(&mut options, "--heartbeat-ms", Duration::from_secs(1))?;
+            OverseerCommand::Serve(OverseerServeCommand {
+                root,
+                listen,
+                session_program,
+                heartbeat_interval,
+                heartbeat_stale,
+            })
+        }
+        _ => bail!("unsupported overseer action `{action}`\n{USAGE}"),
+    };
+    if let Some(flag) = options.keys().next() {
+        bail!("unexpected overseer option `{flag}`\n{USAGE}");
+    }
+    Ok(Command::Overseer(command))
+}
+
+fn parse_duration_option(
+    options: &mut BTreeMap<String, String>,
+    flag: &str,
+    default: Duration,
+) -> Result<Duration> {
+    let Some(raw) = options.remove(flag) else {
+        return Ok(default);
+    };
+    let milliseconds: u64 = raw
+        .parse()
+        .with_context(|| format!("{flag} must be an unsigned integer"))?;
+    if milliseconds == 0 {
+        bail!("{flag} must be positive");
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
+
+fn run_overseer(command: OverseerCommand) -> Result<()> {
+    match command {
+        OverseerCommand::View {
+            root,
+            heartbeat_stale,
+        } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            let journal = OverseerJournal::new(store.root());
+            let view = derive_queue_view(&store, &journal, chrono::Utc::now(), heartbeat_stale)
+                .context("failed to derive overseer queue view")?;
+            print!("{}", render_queue_html(&view));
+            Ok(())
+        }
+        OverseerCommand::Heartbeat { root } => {
+            let store_root = hold_store_root(root)?;
+            OverseerJournal::new(store_root)
+                .append(&OverseerEvent::Heartbeat {
+                    timestamp: EventTimestamp::new(chrono::Utc::now()),
+                })
+                .context("failed to record overseer heartbeat")
+        }
+        OverseerCommand::Serve(command) => run_overseer_server(command),
+    }
+}
+
+fn run_overseer_server(command: OverseerServeCommand) -> Result<()> {
+    let root = hold_store_root(command.root)?;
+    fs::create_dir_all(&root)
+        .with_context(|| format!("failed to create hold store `{}`", root.display()))?;
+    let listener = InetTcpListener::bind(command.listen)
+        .with_context(|| format!("failed to bind overseer server to `{}`", command.listen))?;
+    listener
+        .set_nonblocking(true)
+        .context("failed to make overseer listener nonblocking")?;
+    let address = listener
+        .local_addr()
+        .context("failed to read overseer listen address")?;
+    println!("http://{address}/");
+    std::io::stdout()
+        .flush()
+        .context("failed to flush overseer URL")?;
+
+    let store = HoldStore::new(root.clone());
+    let journal = OverseerJournal::new(&root);
+    let mut child = spawn_overseer_session(&command.session_program, &root, &journal)?;
+    let mut last_heartbeat = Instant::now() - command.heartbeat_interval;
+    loop {
+        if last_heartbeat.elapsed() >= command.heartbeat_interval {
+            journal
+                .append(&OverseerEvent::Heartbeat {
+                    timestamp: EventTimestamp::new(chrono::Utc::now()),
+                })
+                .context("failed to append overseer heartbeat")?;
+            last_heartbeat = Instant::now();
+        }
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to inspect overseer session")?
+        {
+            journal
+                .append(&OverseerEvent::SessionExited {
+                    timestamp: EventTimestamp::new(chrono::Utc::now()),
+                    code: status.code(),
+                })
+                .context("failed to record overseer session exit")?;
+            std::thread::sleep(Duration::from_millis(100));
+            child = spawn_overseer_session(&command.session_program, &root, &journal)?;
+        }
+        match listener.accept() {
+            Ok((mut stream, peer)) => {
+                if let Err(error) =
+                    serve_overseer_http(&mut stream, &store, &journal, command.heartbeat_stale)
+                {
+                    tracing::warn!(%peer, error = ?error, "rejected overseer HTTP request");
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error).context("failed to accept overseer connection"),
+        }
+    }
+}
+
+fn spawn_overseer_session(
+    program: &Path,
+    store_root: &Path,
+    journal: &OverseerJournal,
+) -> Result<std::process::Child> {
+    let child = std::process::Command::new(program)
+        .args([
+            "--model",
+            OVERSEER_MODEL,
+            "--thinking",
+            OVERSEER_REASONING_EFFORT,
+            "/overseer",
+        ])
+        .env("PCE_HOLD_STORE_ROOT", store_root)
+        .current_dir(store_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to spawn overseer session with `{}`",
+                program.display()
+            )
+        })?;
+    journal
+        .append(&OverseerEvent::SessionSpawned {
+            timestamp: EventTimestamp::new(chrono::Utc::now()),
+            model: OVERSEER_MODEL.to_owned(),
+            reasoning_effort: OVERSEER_REASONING_EFFORT.to_owned(),
+        })
+        .context("failed to record overseer session spawn")?;
+    Ok(child)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OverseerAnswerRequest {
+    by: String,
+    answer: String,
+}
+
+fn parse_overseer_answer_request(body: &[u8]) -> Result<OverseerAnswerRequest> {
+    if let Ok(request) = serde_json::from_slice(body) {
+        return Ok(request);
+    }
+    let raw = std::str::from_utf8(body).context("answer form is not UTF-8")?;
+    let mut values = BTreeMap::new();
+    for field in raw.split('&') {
+        let (name, value) = field.split_once('=').context("invalid answer form field")?;
+        values.insert(name, decode_form_component(value)?);
+    }
+    Ok(OverseerAnswerRequest {
+        by: values.remove("by").context("answer form is missing `by`")?,
+        answer: values
+            .remove("answer")
+            .context("answer form is missing `answer`")?,
+    })
+}
+
+fn decode_form_component(raw: &str) -> Result<String> {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let digits = std::str::from_utf8(&bytes[index + 1..index + 3])
+                    .context("invalid form escape")?;
+                decoded.push(u8::from_str_radix(digits, 16).context("invalid form escape")?);
+                index += 3;
+            }
+            b'%' => bail!("truncated form escape"),
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).context("decoded form field is not UTF-8")
+}
+
+fn serve_overseer_http(
+    stream: &mut InetTcpStream,
+    store: &HoldStore,
+    journal: &OverseerJournal,
+    heartbeat_stale: Duration,
+) -> Result<()> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .context("failed to set HTTP read timeout")?;
+    let (method, target, body) = {
+        let mut reader = BufReader::new(&mut *stream);
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .context("failed to read HTTP request line")?;
+        let mut fields = request_line.split_whitespace();
+        let method = fields.next().unwrap_or("").to_owned();
+        let target = fields.next().unwrap_or("").to_owned();
+        let mut content_length = 0_usize;
+        loop {
+            let mut header = String::new();
+            reader
+                .read_line(&mut header)
+                .context("failed to read HTTP header")?;
+            if header == "\r\n" || header.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = header.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value
+                    .trim()
+                    .parse()
+                    .context("invalid HTTP content length")?;
+            }
+        }
+        if content_length > 1024 * 1024 {
+            bail!("overseer HTTP body exceeds one MiB");
+        }
+        let mut body = vec![0; content_length];
+        reader
+            .read_exact(&mut body)
+            .context("failed to read HTTP body")?;
+        (method, target, body)
+    };
+    let response = match (method.as_str(), target.as_str()) {
+        ("GET", "/") => {
+            let view = derive_queue_view(store, journal, chrono::Utc::now(), heartbeat_stale)
+                .context("failed to derive HTTP queue view")?;
+            (
+                "200 OK",
+                "text/html; charset=utf-8",
+                render_queue_html(&view).into_bytes(),
+            )
+        }
+        ("GET", "/api/view") => {
+            let view = derive_queue_view(store, journal, chrono::Utc::now(), heartbeat_stale)
+                .context("failed to derive HTTP queue view")?;
+            (
+                "200 OK",
+                "application/json",
+                serde_json::to_vec(&view).context("failed to serialize queue view")?,
+            )
+        }
+        ("POST", target) if target.starts_with("/api/holds/") && target.ends_with("/answer") => {
+            let raw_key = target
+                .trim_start_matches("/api/holds/")
+                .trim_end_matches("/answer")
+                .trim_end_matches('/');
+            let result = (|| -> Result<Vec<u8>> {
+                let key = HoldKey::parse(raw_key.to_owned()).context("invalid answer hold key")?;
+                let request = parse_overseer_answer_request(&body)?;
+                let hold = store
+                    .answer(
+                        &key,
+                        request.by,
+                        request.answer,
+                        EventTimestamp::new(chrono::Utc::now()),
+                    )
+                    .context("failed to record answer")?;
+                serde_json::to_vec(&hold).context("failed to serialize answered hold")
+            })();
+            match result {
+                Ok(bytes) => ("200 OK", "application/json", bytes),
+                Err(error) => (
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    format!("{error:#}").into_bytes(),
+                ),
+            }
+        }
+        _ => (
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            b"not found".to_vec(),
+        ),
+    };
+    let header = format!(
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        response.0,
+        response.1,
+        response.2.len()
+    );
+    stream
+        .write_all(header.as_bytes())
+        .context("failed to write HTTP response header")?;
+    stream
+        .write_all(&response.2)
+        .context("failed to write HTTP response body")?;
+    stream.flush().context("failed to flush HTTP response")
 }
 
 fn parse_hold_command(action: &str, rest: &[String]) -> Result<Command> {
