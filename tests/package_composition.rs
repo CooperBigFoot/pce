@@ -39,7 +39,7 @@ fn journal_events(path: &Path) -> Vec<Value> {
 }
 
 #[test]
-fn relative_launch_composes_dependencies_without_dirtying_the_source() {
+fn relative_launch_allows_its_untracked_vision_directory_in_the_source() {
     let temp = tempdir().expect("tempdir");
     let repository = temp.path().join("repo");
     fs::create_dir(&repository).expect("repository");
@@ -49,8 +49,10 @@ fn relative_launch_composes_dependencies_without_dirtying_the_source() {
     fs::write(repository.join("seed"), "seed\n").expect("seed");
     git(&repository, &["add", "."]);
     git(&repository, &["commit", "-qm", "seed"]);
-    fs::write(temp.path().join("vision.md"), "# Vision: composition\n\n## Goal / Why\n\nCompose.\n\n## Acceptance criteria (vision-level \"done\")\n\n```json\n{\"criteria\":[{\"name\":\"whole\",\"input\":\"repo\",\"observation\":\"green\"}]}\n```\n").expect("vision");
-    let graph_path = temp.path().join("graph.json");
+    let vision = repository.join("planning/vision");
+    fs::create_dir_all(&vision).expect("vision directory");
+    fs::write(vision.join("vision.md"), "# Vision: composition\n\n## Goal / Why\n\nCompose.\n\n## Acceptance criteria (vision-level \"done\")\n\n```json\n{\"criteria\":[{\"name\":\"whole\",\"input\":\"repo\",\"observation\":\"green\"}]}\n```\n").expect("vision");
+    let graph_path = vision.join("graph.json");
     let graph = json!({"vision":format!("composition-{}", std::process::id()),"plan_version":1,"authored_at_ref":"HEAD","packages":[
         {"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"a","input":"repo","observation":"a","command":"test -f a.txt"}],"depends_on":[]},
         {"id":"B","title":"B","repositories":["repo"],"criteria":[{"name":"b","input":"repo","observation":"b","command":"test -f b.txt"}],"depends_on":[]},
@@ -101,7 +103,7 @@ else
 fi
 "#,
     );
-    let journal = temp.path().join("driver.jsonl");
+    let journal = vision.join("driver.jsonl");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
     let output = Command::new(env!("CARGO_BIN_EXE_pce"))
         .args(["package", "driver-run", "--graph", "graph.json"])
@@ -117,7 +119,7 @@ fi
         .env("PATH", path)
         .env("HOME", temp.path())
         .env("USER", "tester")
-        .current_dir(temp.path())
+        .current_dir(&vision)
         .output()
         .expect("driver");
     assert!(
@@ -135,7 +137,7 @@ fi
     assert!(!events.contains("join-criterion-executed"));
     assert_eq!(events.matches("assembly-criterion-executed").count(), 3);
     assert!(events.contains("assembly-completed"));
-    assert_eq!(git(&repository, &["status", "--short"]), "");
+    assert_eq!(git(&repository, &["status", "--short"]), "?? planning/");
     let worktrees = fs::read_to_string(temp.path().join("herdr-worktrees")).expect("herdr log");
     let c = worktrees
         .lines()
@@ -998,12 +1000,14 @@ fn driver_refuses_an_already_dirty_source_before_composition() {
     git(&repository, &["init", "-q"]);
     git(&repository, &["config", "user.email", "test@example.com"]);
     git(&repository, &["config", "user.name", "Test"]);
-    fs::write(repository.join("tracked"), "base\n").expect("tracked file");
+    let tracked = repository.join("planning/source-note");
+    fs::create_dir(repository.join("planning")).expect("planning directory");
+    fs::write(&tracked, "base\n").expect("tracked file");
     git(&repository, &["add", "."]);
     git(&repository, &["commit", "-qm", "base"]);
-    fs::write(repository.join("unrelated-local-change"), "dirty\n").expect("dirty file");
+    fs::write(&tracked, "dirty\n").expect("dirty tracked file");
 
-    let vision = temp.path().join("vision");
+    let vision = repository.join("planning/vision");
     fs::create_dir(&vision).expect("vision directory");
     fs::write(vision.join("graph.json"), b"{}").expect("graph fixture");
     let bin = temp.path().join("bin");
@@ -1024,11 +1028,13 @@ fn driver_refuses_an_already_dirty_source_before_composition() {
         .expect("driver");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains(
-        "source repository `repo` is dirty; commit, stash, or remove its changes before driver-run"
-    ));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("source repository `repo` is dirty"));
+    assert!(stderr.contains("planning/source-note"));
+    assert!(!stderr.contains("git clean"));
+    assert!(!stderr.contains("git stash -u"));
     assert_eq!(
         git(&repository, &["status", "--short"]),
-        "?? unrelated-local-change"
+        "M planning/source-note\n?? planning/vision/"
     );
 }

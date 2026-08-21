@@ -3675,11 +3675,48 @@ fn resolve_driver_startup_paths(mut command: DriverRunCommand) -> Result<DriverR
 }
 
 fn refuse_dirty_source_repositories(command: &DriverRunCommand) -> Result<()> {
+    let vision_dir = driver_vision_directory(command)?;
     for (name, source) in &command.repositories {
-        let output = std::process::Command::new("git")
+        let root_output = std::process::Command::new("git")
             .arg("-C")
             .arg(source)
-            .args(["status", "--porcelain", "--untracked-files=normal"])
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .with_context(|| format!("failed to locate source repository `{name}`"))?;
+        if !root_output.status.success() {
+            bail!(
+                "failed to locate source repository `{name}`: {}",
+                String::from_utf8_lossy(&root_output.stderr).trim()
+            );
+        }
+        let repository_root = PathBuf::from(
+            String::from_utf8(root_output.stdout)
+                .with_context(|| format!("source repository `{name}` has a non-UTF-8 root path"))?
+                .trim(),
+        );
+        let repository_root = fs::canonicalize(&repository_root).with_context(|| {
+            format!(
+                "failed to resolve source repository `{name}` root {}",
+                repository_root.display()
+            )
+        })?;
+
+        let mut status = std::process::Command::new("git");
+        status.arg("-C").arg(&repository_root).args([
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+        ]);
+        if let Ok(relative_vision_dir) = vision_dir.strip_prefix(&repository_root)
+            && !relative_vision_dir.as_os_str().is_empty()
+        {
+            let mut exclusion = OsString::from(":(top,exclude,literal)");
+            exclusion.push(relative_vision_dir);
+            status.arg(exclusion);
+        }
+        let output = status
             .output()
             .with_context(|| format!("failed to inspect source repository `{name}`"))?;
         if !output.status.success() {
@@ -3690,7 +3727,9 @@ fn refuse_dirty_source_repositories(command: &DriverRunCommand) -> Result<()> {
         }
         if !output.stdout.is_empty() {
             bail!(
-                "source repository `{name}` is dirty; commit, stash, or remove its changes before driver-run"
+                "source repository `{name}` is dirty outside the driver vision directory; driver-run requires these paths to be clean while preserving {}:\n{}",
+                vision_dir.display(),
+                String::from_utf8_lossy(&output.stdout).trim_end()
             );
         }
     }

@@ -329,3 +329,12 @@
 | Open an exhausted ladder with `driver-run --recovery-reset <HUMAN_RECORD_PATH>`. | The strict schema-v1 JSON record names one package, `reset_by`, and `rationale`. PCE journals those fields plus the source SHA-256 before dispatch. Replay accepts the reset only for a package currently parked with an exhausted ladder. |
 | Limit each reset record to one package. | Recovery exhaustion and its rationale are package-specific. One-package records minimize authority and keep each human ruling independently auditable. A later batch format is unnecessary while the existing flag can import one exact ruling per launch. |
 | Describe the reset boundary as a journal recovery epoch. | A plan advance does not reset spending. A valid attributed reset begins the next epoch for that package, clears stale rung evidence and repeated-worker-blocker history, and appears in `driver-status` under `recovery_spending_resets`. The exhaustion park message names `--recovery-reset` as the real door. |
+
+## 2026-08-21 dirty source guard decisions
+
+| Decision | Rationale and boundary |
+|---|---|
+| Keep the source cleanliness guard enabled by default. | A dirty source still makes the authored base hard to reproduce. The failure was an over-broad definition of dirtiness, not a reason to weaken the protection into an advisory check. |
+| Exclude only the active driver vision directory when it is inside a participating Git repository. | The driver owns and continuously writes that exact directory. Excluding all of `planning/` would also hide unrelated planning changes, so the narrower pathspec preserves the guard everywhere else. Untracked files are listed individually so the diagnostic identifies actionable paths. |
+| Report Git porcelain entries outside the vision directory without prescribing cleanup commands. | The supervisor can distinguish tracked and untracked changes by path. The message requires the listed paths to be clean while preserving the vision directory, and does not recommend `git clean`, `git stash -u`, or another operation that could delete the run proof. |
+| Leave vision-directory placement unchanged. | Moving run evidence outside participating repositories is a structural layout change beyond this defect brief. The narrow exclusion removes the guard's self-conflict without changing the established layout. |
