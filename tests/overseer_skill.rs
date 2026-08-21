@@ -85,3 +85,14 @@ fn the_skill_reconstructs_on_every_invocation() {
     let read = skill.find("pce hold read --root").unwrap();
     assert!(runs < list && list < read);
 }
+
+#[test]
+fn the_skill_uses_the_store_root_exported_by_the_server() {
+    let server = fs::read_to_string("src/main.rs").unwrap();
+    let skill = fs::read_to_string("skills/overseer/SKILL.md").unwrap();
+
+    assert!(server.contains(".env(\"PCE_HOLD_STORE_ROOT\", store_root)"));
+    assert!(skill.contains("`PCE_HOLD_STORE_ROOT` names the store root."));
+    assert!(skill.matches("$PCE_HOLD_STORE_ROOT").count() >= 5);
+    assert!(!skill.contains("$PCE_HOLD_STORE\""));
+}
