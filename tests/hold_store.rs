@@ -2,7 +2,7 @@ use std::fs;
 use std::process::Command;
 
 use chrono::{TimeZone, Utc};
-use pce_core::{EventTimestamp, HoldIdentity, HoldStore, OpenDisposition};
+use pce_core::{EventTimestamp, HoldIdentity, HoldStore, HoldStoreError, OpenDisposition};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -126,4 +126,33 @@ fn legacy_verb_surface_unchanged() {
             "an existing verb must not initialize or inspect the hold store"
         );
     }
+}
+
+#[test]
+fn incomplete_tail_is_not_authoritative() {
+    let directory = tempdir().expect("temporary hold root should create");
+    let store = HoldStore::new(directory.path());
+    let identity = HoldIdentity::parse("pce", "plan-v1", "OQ1", "torn-question")
+        .expect("hold identity should parse");
+    let timestamp = Utc
+        .with_ymd_and_hms(2026, 8, 21, 12, 0, 0)
+        .single()
+        .expect("fixture timestamp should exist");
+    let opened = store
+        .open(
+            identity,
+            json!({"question":"Was this record fully appended?"}),
+            EventTimestamp::new(timestamp),
+        )
+        .expect("hold should open");
+    let key = opened.hold().key();
+    let path = directory.path().join(format!("{}.jsonl", key.as_str()));
+    let mut bytes = fs::read(&path).expect("hold file should read");
+    assert_eq!(bytes.pop(), Some(b'\n'));
+    fs::write(&path, bytes).expect("torn fixture should write");
+
+    assert!(matches!(
+        store.read(key),
+        Err(HoldStoreError::IncompleteTail { .. })
+    ));
 }
