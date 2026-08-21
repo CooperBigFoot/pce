@@ -62,9 +62,9 @@ use pce_core::{
     RepositoryContractPayload, RepositoryDispatchInput, RepositoryFetchObservation, RepositoryName,
     RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
     RepositoryRelativePath, RepositoryRoot, RepositoryWorktree, RequiredArtifactPresence,
-    RetryLimit, RiskOrdering, RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest,
-    SignalNumber, SpawnDispatchOutcome, SpawnFailedDispatchCompletionPayload, SpawnFailureScope,
-    SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
+    RetryLimit, RiskOrdering, RunRegistration, RunSnapshot, Sandbox, SeatbeltCapability, Sequence,
+    Sha256Digest, SignalNumber, SpawnDispatchOutcome, SpawnFailedDispatchCompletionPayload,
+    SpawnFailureScope, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
     StructuredArtifactObservation, SurvivingProcesses, TagName, TagState, TagTarget,
     TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionGoal,
     VisionName, VisionSlug, WorkPackageClassification, WorkPackageGraph, WorkPackageId,
@@ -129,6 +129,8 @@ const USAGE: &str = concat!(
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce hold open [--root <HOLD_STORE>] --repository <REPOSITORY> --plan-version <VERSION> --package <PACKAGE> --question-kind <KIND> [--report <TEXT>|--report-json <JSON>]\n",
     "       pce hold list [--root <HOLD_STORE>]\n",
+    "       pce hold register [--root <HOLD_STORE>] --repository <REPOSITORY> --vision-dir <ABSOLUTE_VISION_DIR> --frozen-graph <ABSOLUTE_GRAPH_PATH> --journal <ABSOLUTE_JOURNAL_PATH> [--herdr-session <NAME>]\n",
+    "       pce hold runs [--root <HOLD_STORE>]\n",
     "       pce hold read [--root <HOLD_STORE>] --key <HOLD_KEY>\n",
     "       pce hold answer [--root <HOLD_STORE>] --key <HOLD_KEY> --by <ACTOR> --answer <TEXT>\n",
     "       pce hold route [--root <HOLD_STORE>] --key <HOLD_KEY> --to <human|overseer|reporting-run>\n",
@@ -379,6 +381,13 @@ enum HoldCommand {
         report: Option<Value>,
     },
     List {
+        root: Option<PathBuf>,
+    },
+    Register {
+        root: Option<PathBuf>,
+        registration: RunRegistration,
+    },
+    ListRuns {
         root: Option<PathBuf>,
     },
     Read {
@@ -1106,6 +1115,32 @@ fn parse_hold_command(action: &str, rest: &[String]) -> Result<Command> {
             }
         }
         "list" => HoldCommand::List { root },
+        "register" => {
+            let repository = require_hold_option(&mut options, &["--repository"])?;
+            let vision_directory = PathBuf::from(require_hold_option(
+                &mut options,
+                &["--vision-dir", "--vision-directory"],
+            )?);
+            let frozen_graph = PathBuf::from(require_hold_option(
+                &mut options,
+                &["--frozen-graph", "--graph"],
+            )?);
+            let journal = PathBuf::from(require_hold_option(&mut options, &["--journal"])?);
+            let herdr_session = remove_hold_option(&mut options, &["--herdr-session"])?
+                .map(parse_herdr_session_name)
+                .transpose()?
+                .map(|session| session.as_str().to_owned());
+            let registration = RunRegistration::parse(
+                repository,
+                vision_directory,
+                frozen_graph,
+                journal,
+                herdr_session,
+            )
+            .context("failed to parse run registration")?;
+            HoldCommand::Register { root, registration }
+        }
+        "runs" | "registrations" | "list-runs" => HoldCommand::ListRuns { root },
         "read" => HoldCommand::Read {
             root,
             key: parse_hold_key_option(&mut options)?,
@@ -1224,6 +1259,24 @@ fn run_hold(command: HoldCommand, input: &mut dyn Read) -> Result<()> {
         HoldCommand::List { root } => {
             let store = HoldStore::new(hold_store_root(root)?);
             write_json_line(&mut output, &store.list().context("failed to list holds")?)
+        }
+        HoldCommand::Register { root, registration } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            write_json_line(
+                &mut output,
+                &store
+                    .register_run(registration, EventTimestamp::new(chrono::Utc::now()))
+                    .context("failed to register run")?,
+            )
+        }
+        HoldCommand::ListRuns { root } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            write_json_line(
+                &mut output,
+                &store
+                    .run_registrations()
+                    .context("failed to list run registrations")?,
+            )
         }
         HoldCommand::Read { root, key } => {
             let store = HoldStore::new(hold_store_root(root)?);

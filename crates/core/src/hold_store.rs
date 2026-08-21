@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::event_log::EventTimestamp;
+use crate::overseer_registration::{RunRegistration, RunRegistrationError, RunRegistrationKey};
 
 /// The stable identity of one question within one work-graph run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,7 +247,40 @@ impl OpenHoldResult {
     }
 }
 
-/// Filesystem-backed append-only hold storage.
+/// Whether registration created, retained, or advanced the record for a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RegisterRunDisposition {
+    Created,
+    AlreadyCurrent,
+    Updated,
+}
+
+/// The result of idempotently registering a work-graph run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterRunResult {
+    disposition: RegisterRunDisposition,
+    registration: RunRegistration,
+}
+
+impl RegisterRunResult {
+    pub fn disposition(&self) -> RegisterRunDisposition {
+        self.disposition
+    }
+    pub fn registration(&self) -> &RunRegistration {
+        &self.registration
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunRegistrationRecord {
+    timestamp: EventTimestamp,
+    registration: RunRegistration,
+}
+
+/// Filesystem-backed append-only hold and run-registration storage.
 #[derive(Clone, Debug)]
 pub struct HoldStore {
     root: PathBuf,
@@ -258,6 +292,135 @@ impl HoldStore {
     }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Registers a work-graph run without duplicating an identical launch record.
+    ///
+    /// A changed frozen graph, journal, or Herdr session appends a new record for the same stable
+    /// run. Readers return only the latest complete record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registration directory cannot be created, locked, read, or
+    /// durably appended, or when retained records are malformed or internally inconsistent.
+    pub fn register_run(
+        &self,
+        registration: RunRegistration,
+        timestamp: EventTimestamp,
+    ) -> Result<RegisterRunResult, HoldStoreError> {
+        self.ensure_root()?;
+        let directory = self.registration_directory();
+        fs::create_dir_all(&directory).map_err(|source| HoldStoreError::CreateDirectory {
+            path: directory,
+            source,
+        })?;
+        let key = registration.key();
+        let path = self.registration_path(&key);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| HoldStoreError::OpenRegistration {
+                path: path.clone(),
+                source,
+            })?;
+        let lock = AdvisoryLock::acquire(file, path.clone(), advisory_lock::EXCLUSIVE)?;
+        let current = if lock.is_empty()? {
+            None
+        } else {
+            Some(read_registration_file(&path, &key)?)
+        };
+        if current
+            .as_ref()
+            .is_some_and(|(record, _)| record.registration == registration)
+        {
+            return Ok(RegisterRunResult {
+                disposition: RegisterRunDisposition::AlreadyCurrent,
+                registration,
+            });
+        }
+        if let Some((record, line_count)) = &current
+            && timestamp.as_datetime() < record.timestamp.as_datetime()
+        {
+            return Err(HoldStoreError::RegistrationTimestampWentBackwards {
+                path,
+                line: line_count + 1,
+            });
+        }
+        append_registration_record(
+            &path,
+            &RunRegistrationRecord {
+                timestamp,
+                registration: registration.clone(),
+            },
+        )?;
+        let (retained, _) = read_registration_file(&path, &key)?;
+        Ok(RegisterRunResult {
+            disposition: if current.is_some() {
+                RegisterRunDisposition::Updated
+            } else {
+                RegisterRunDisposition::Created
+            },
+            registration: retained.registration,
+        })
+    }
+
+    /// Lists the latest complete registration for every known run in stable key order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registration directory or any record cannot be read exactly.
+    pub fn run_registrations(&self) -> Result<Vec<RunRegistration>, HoldStoreError> {
+        let directory = self.registration_directory();
+        if !directory.exists() {
+            return Ok(Vec::new());
+        }
+        let mut keys = Vec::new();
+        for entry in fs::read_dir(&directory).map_err(|source| HoldStoreError::ReadDirectory {
+            path: directory.clone(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| HoldStoreError::ReadDirectory {
+                path: directory.clone(),
+                source,
+            })?;
+            if !entry
+                .file_type()
+                .map_err(|source| HoldStoreError::InspectPath {
+                    path: entry.path(),
+                    source,
+                })?
+                .is_file()
+            {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                return Err(HoldStoreError::InvalidRegistrationFileName { path });
+            };
+            keys.push(
+                RunRegistrationKey::parse(stem.to_owned())
+                    .map_err(|source| HoldStoreError::InvalidRegistrationKey { source })?,
+            );
+        }
+        keys.sort();
+        keys.into_iter()
+            .map(|key| {
+                let path = self.registration_path(&key);
+                let file =
+                    File::open(&path).map_err(|source| HoldStoreError::OpenRegistration {
+                        path: path.clone(),
+                        source,
+                    })?;
+                let _lock = AdvisoryLock::acquire(file, path.clone(), advisory_lock::SHARED)?;
+                read_registration_file(&path, &key).map(|(record, _)| record.registration)
+            })
+            .collect()
     }
 
     /// Opens a hold once for its derived identity.
@@ -428,6 +591,15 @@ impl HoldStore {
         })
     }
 
+    fn registration_directory(&self) -> PathBuf {
+        self.root.join("runs")
+    }
+
+    fn registration_path(&self, key: &RunRegistrationKey) -> PathBuf {
+        self.registration_directory()
+            .join(format!("{}.jsonl", key.as_str()))
+    }
+
     fn hold_path(&self, key: &HoldKey) -> PathBuf {
         self.root.join(format!("{}.jsonl", key.as_str()))
     }
@@ -544,6 +716,100 @@ impl HoldStore {
         }
         derive_hold(key.clone(), records, path)
     }
+}
+
+fn read_registration_file(
+    path: &Path,
+    key: &RunRegistrationKey,
+) -> Result<(RunRegistrationRecord, usize), HoldStoreError> {
+    let bytes = fs::read(path).map_err(|source| HoldStoreError::ReadRegistration {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(HoldStoreError::IncompleteRegistrationTail {
+            path: path.to_path_buf(),
+        });
+    }
+    let mut latest = None;
+    let mut previous_timestamp = None;
+    let mut line_count = 0;
+    for (index, line) in BufReader::new(bytes.as_slice()).lines().enumerate() {
+        line_count = index + 1;
+        let line = line.map_err(|source| HoldStoreError::ReadRegistration {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if line.is_empty() {
+            return Err(HoldStoreError::MalformedRegistrationRecord {
+                path: path.to_path_buf(),
+                line: index + 1,
+                detail: "empty JSONL line".to_owned(),
+            });
+        }
+        let record = serde_json::from_str::<RunRegistrationRecord>(&line).map_err(|source| {
+            HoldStoreError::MalformedRegistrationRecord {
+                path: path.to_path_buf(),
+                line: index + 1,
+                detail: source.to_string(),
+            }
+        })?;
+        if record.registration.key() != *key {
+            return Err(HoldStoreError::RegistrationKeyMismatch {
+                key: key.as_str().to_owned(),
+            });
+        }
+        if previous_timestamp.is_some_and(|previous: EventTimestamp| {
+            record.timestamp.as_datetime() < previous.as_datetime()
+        }) {
+            return Err(HoldStoreError::RegistrationTimestampWentBackwards {
+                path: path.to_path_buf(),
+                line: index + 1,
+            });
+        }
+        previous_timestamp = Some(record.timestamp);
+        latest = Some(record);
+    }
+    latest.map(|record| (record, line_count)).ok_or_else(|| {
+        HoldStoreError::MissingRegistrationRecord {
+            path: path.to_path_buf(),
+        }
+    })
+}
+
+fn append_registration_record(
+    path: &Path,
+    record: &RunRegistrationRecord,
+) -> Result<(), HoldStoreError> {
+    let bytes = fs::read(path).map_err(|source| HoldStoreError::ReadRegistration {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(HoldStoreError::IncompleteRegistrationTail {
+            path: path.to_path_buf(),
+        });
+    }
+    let mut line = serde_json::to_vec(record)
+        .map_err(|source| HoldStoreError::SerializeRegistrationRecord { source })?;
+    line.push(b'\n');
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(|source| HoldStoreError::OpenRegistration {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(&line)
+        .map_err(|source| HoldStoreError::AppendRegistration {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.sync_data()
+        .map_err(|source| HoldStoreError::SyncRegistration {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn derive_hold(
@@ -787,4 +1053,66 @@ pub enum HoldStoreError {
     /// A mutating verb targeted a closed hold.
     #[error("hold `{key}` is already closed")]
     HoldClosed { key: String },
+    /// A registration file name does not carry a valid run key.
+    #[error("run registration file name `{path}` is not a derived key")]
+    InvalidRegistrationFileName { path: PathBuf },
+    /// A registration file name contains an invalid run key.
+    #[error("invalid run registration key")]
+    InvalidRegistrationKey {
+        #[source]
+        source: RunRegistrationError,
+    },
+    /// A run-registration stream could not be opened.
+    #[error("failed to open run registration `{path}`")]
+    OpenRegistration {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A run-registration stream could not be read exactly.
+    #[error("failed to read run registration `{path}`")]
+    ReadRegistration {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A run-registration record could not be encoded.
+    #[error("failed to serialize run registration record")]
+    SerializeRegistrationRecord {
+        #[source]
+        source: serde_json::Error,
+    },
+    /// A complete run-registration record could not be appended.
+    #[error("failed to append run registration `{path}`")]
+    AppendRegistration {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// An appended run-registration record could not be synced.
+    #[error("failed to sync run registration `{path}`")]
+    SyncRegistration {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Existing registration bytes end in an incomplete JSONL record.
+    #[error("run registration `{path}` has an incomplete final record")]
+    IncompleteRegistrationTail { path: PathBuf },
+    /// One retained registration line is malformed.
+    #[error("malformed run registration at `{path}` line {line}: {detail}")]
+    MalformedRegistrationRecord {
+        path: PathBuf,
+        line: usize,
+        detail: String,
+    },
+    /// A registration file contains no record.
+    #[error("run registration `{path}` has no record")]
+    MissingRegistrationRecord { path: PathBuf },
+    /// A registration stream contains a record for a different run.
+    #[error("run registration file key `{key}` does not match its record")]
+    RegistrationKeyMismatch { key: String },
+    /// Retained registration time moved backwards.
+    #[error("run registration `{path}` timestamp moves backwards at line {line}")]
+    RegistrationTimestampWentBackwards { path: PathBuf, line: usize },
 }

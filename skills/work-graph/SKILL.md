@@ -1,6 +1,6 @@
 ---
 name: work-graph
-description: Supervise and mechanically promote one frozen work-package graph. Use `/work-graph <vision-dir>` to resolve the active graph, persist launch configuration, preserve failure evidence, apply only goal-preserving recovery, notify the human at ruling boundaries, and merge only an assembly-completed run.
+description: Supervise and mechanically promote one frozen work-package graph. Use `/work-graph <vision-dir>` to resolve the active graph, persist launch configuration, preserve failure evidence, apply only goal-preserving recovery, open durable holds at ruling boundaries, and merge only an assembly-completed run.
 ---
 
 # Work a frozen graph
@@ -120,7 +120,29 @@ pce package driver-run --graph <frozen-graph> \
   [--local-patch-limit N] [--environment-failure-limit N] [--wait-timeout-ms N]
 ```
 
-Before every launch with `herdr_session` configured, run
+Before every launch, register the run in the hold store. This is an automatic launch act, never a
+human registration step. Determine the owning repository name by matching the canonical repository
+that contains `<vision-dir>` to exactly one entry in `run.json.repositories`; refuse ambiguity rather
+than guessing. Convert the vision directory, frozen graph, and journal to absolute paths without
+requiring the journal to exist yet, then run an argv equivalent to:
+
+```bash
+pce hold register --repository <OWNING_REPOSITORY_NAME> \
+  --vision-dir <ABSOLUTE_VISION_DIR> \
+  --frozen-graph <ABSOLUTE_FROZEN_GRAPH> \
+  --journal <ABSOLUTE_DRIVER_JOURNAL> \
+  [--herdr-session <STORED_HERDR_SESSION>]
+```
+
+Use the default store selected by the binary unless the invocation was given an explicit hold-store
+root. Never derive the session from `HERDR_SESSION`. The register verb is idempotent for the owning
+repository and vision directory; invoke it again after a restart and after a frozen-plan advance so
+the latest graph is retained without creating another logical run. Append the exact registration
+command and its JSON result to `supervision.md`, and confirm through `pce hold runs` that the returned
+record names the repository, vision directory, frozen graph, journal, and optional Herdr session.
+Do not launch if registration or confirmation fails.
+
+After registration, and before every launch with `herdr_session` configured, run
 `herdr --session <name> workspace list`. If Herdr reports `server_not_running`, preserve that typed
 message and refuse the launch. Do not start or attach the session automatically. The operator owns
 that precondition. With no configured session, do not add a selector or a new preflight.
@@ -348,23 +370,42 @@ criteria, but repair commits from the forfeited attempt do not carry into the re
 fresh attempt must pass each carried amendment on its own merits. Mechanical freezes remain
 definition-preserving and can never carry a revision record.
 
-## 7. Notify or promote at the terminal boundary
+## 7. Hold or promote at the terminal boundary
 
 When the driver exits, run `driver-status` with the same `<frozen-graph>` and journal and the stored
 `--override-risk-ordering` when enabled, render once, and append the terminal interpretation before
-any notification or repository mutation.
+any hold or repository mutation.
 
 A blocked, parked, partially complete, `assembly-failed`, or otherwise non-finished status never
-pushes a ref, opens a pull request, or invokes a merge command. Notify and stop as before:
+pushes a ref, opens a pull request, or invokes a merge command. It opens a durable hold and waits; a
+bare Herdr notification is not a record and must not be the only trace of the stop. For each distinct
+unresolved package stop, invoke an argv equivalent to:
 
 ```bash
-herdr notification show "pce graph stopped" --body "<vision>: <package and reason>" --sound request
+pce hold open --repository <OWNING_REPOSITORY_NAME> \
+  --plan-version <ACTIVE_PLAN_VERSION> \
+  --package <PACKAGE_ID> \
+  --question-kind work-graph-terminal-stop \
+  --report-json '<EXACT_JSON_REPORT>'
 ```
 
-Also notify immediately when a criterion ruling or recurring repository-contract defect needs the
-human. Record the notification command and result. Do not silently relaunch a blocked driver. If
-notification delivery fails, retain the failure in `supervision.md` and report it in chat; do not
-claim that a push arrived.
+For a run-wide stop with no package, use the reserved package identity `work-graph`. The report must
+carry the vision directory, frozen graph, journal, stored Herdr session, exact terminal state and
+reason, evidence paths, and every available next option with its consequence. It must preserve
+hedges from the source status. Do not recommend an option. `hold open` starts with the overseer route;
+do not route it directly to the human. Append the command and returned hold key to `supervision.md`
+before reporting the stop in chat.
+
+The identity is stable across supervisor restarts, so reopening the same stop returns the existing
+hold and never asks the question twice. On later invocations, read that key from the store and its
+full record thread before acting. If it remains unanswered or remains routed to the overseer or
+human, wait: do not notify the human separately and do not relaunch the blocked driver. Resume only
+from a recorded answer or route that supplies a goal-preserving action allowed by section 6.
+
+A criterion ruling or recurring repository-contract defect that needs a party outside the run also
+opens a hold with its own stable `question-kind`, exact evidence, and named options. It does not use
+a notify-and-stop path. If hold creation fails, retain the failure in `supervision.md` and report the
+storage failure in chat; do not claim that the question reached another party.
 
 Only a journal whose active plan version ends in `assembly-completed`, and whose `driver-status` is
 `Finished`, enters sections 8 through 10. This is a mechanical consequence of completed proof, not
