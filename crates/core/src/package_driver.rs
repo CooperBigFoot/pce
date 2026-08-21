@@ -394,8 +394,9 @@ pub enum DriverEvent {
     DriverAborted { reason: String },
     /// A prior abort was acknowledged by a new driver process before it resumed the fold.
     DriverResumed,
-    /// A remembered repair does not belong to this package attempt's rebuilt lineage.
+    /// A package-owned repair credit can no longer prove hardening on the rebuilt lineage.
     RepairCreditStale {
+        /// The package that owns the stale repair credit.
         package: String,
         issuance: u64,
         repository: String,
@@ -404,6 +405,9 @@ pub enum DriverEvent {
         repair_ref: String,
         lineage_oid: String,
         reason: StaleRepairCreditReason,
+        /// Driver evidence explaining why the counterfactual could not be constructed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     /// A graph-specific human base-currency acceptance became visible at its plan boundary.
     BaseCurrencyRiskAccepted {
@@ -2620,7 +2624,7 @@ pub fn repeated_identical_worker_blocker<'a>(
     (latest.as_bytes() == previous.as_bytes()).then_some(latest)
 }
 
-/// Count only worker-reported or criterion-judgement failures attributed to package work.
+/// Count worker-reported failures, criterion judgements, and hardening invalidations attributed to package work.
 pub fn charged_failure_count(events: &[DriverEvent], package_id: &str) -> usize {
     events_for_recovery_epoch(events, package_id)
         .iter()
@@ -3818,6 +3822,99 @@ mod tests {
             failure(3),
         ];
         assert_eq!(repeated_identical_worker_blocker(&parked_breaks, "A"), None);
+    }
+
+    #[test]
+    fn charged_failure_count_matches_all_attributed_failure_kinds() {
+        let events = vec![
+            DriverEvent::WorkerFailed {
+                package: "A".to_owned(),
+                issuance: 1,
+                reason: "worker failure".to_owned(),
+            },
+            DriverEvent::PackageFailed {
+                package: "A".to_owned(),
+                reason: "criterion failure".to_owned(),
+            },
+            DriverEvent::PackageHardeningInvalidated {
+                package: "A".to_owned(),
+                hardened_package: "B".to_owned(),
+                repository: "r".to_owned(),
+                gate: "gate-b".to_owned(),
+                finding: 0,
+                repair_ref: "repair-b".to_owned(),
+                detail: "revert conflict".to_owned(),
+            },
+            DriverEvent::WorkerFailed {
+                package: "B".to_owned(),
+                issuance: 1,
+                reason: "other worker failure".to_owned(),
+            },
+        ];
+
+        assert_eq!(charged_failure_count(&events, "A"), 3);
+    }
+
+    #[test]
+    fn stale_credit_owned_by_another_package_keeps_completed_package_and_recovery_budget() {
+        let limits = RecoveryLimits::new(RetryLimit::new(1), LocalPatchLimit::new(1));
+        let mut events = vec![DriverEvent::RecoveryConfigured { limits }];
+        events.extend(completed_packages());
+        events.push(DriverEvent::RepairCreditStale {
+            package: "B".to_owned(),
+            issuance: 2,
+            repository: "r".to_owned(),
+            gate: "gate-b".to_owned(),
+            finding: 0,
+            repair_ref: "repair-b".to_owned(),
+            lineage_oid: "assembly-lineage".to_owned(),
+            reason: super::StaleRepairCreditReason::CounterfactualUnconstructable,
+            detail: Some("revert conflict".to_owned()),
+        });
+
+        let snapshot = derive_driver_snapshot(&graph(), &events, false).expect("snapshot");
+
+        assert!(matches!(
+            snapshot.packages()[0].1,
+            DriverPackageState::Complete
+        ));
+        assert!(matches!(
+            snapshot.packages()[1].1,
+            DriverPackageState::Complete
+        ));
+        assert_eq!(charged_failure_count(&events, "A"), 0);
+        assert_eq!(snapshot.recovery()[0].1.dispatches_remaining, 2);
+    }
+
+    #[test]
+    fn attributable_criterion_failures_still_exhaust_and_park_the_package() {
+        let limits = RecoveryLimits::new(RetryLimit::new(1), LocalPatchLimit::new(1));
+        let mut events = vec![DriverEvent::RecoveryConfigured { limits }];
+        for failure in 1..=3 {
+            events.push(DriverEvent::PackageFailed {
+                package: "A".to_owned(),
+                reason: format!("criterion failure {failure}"),
+            });
+        }
+        events.push(DriverEvent::RecoveryParked {
+            package: "A".to_owned(),
+            reason: "recovery spending exhausted".to_owned(),
+            blocked_by: None,
+            attempts: Vec::new(),
+            criterion_outcomes: Vec::new(),
+        });
+
+        let snapshot = derive_driver_snapshot(&graph(), &events, false).expect("snapshot");
+
+        assert_eq!(charged_failure_count(&events, "A"), 3);
+        assert!(matches!(
+            snapshot.packages()[0].1,
+            DriverPackageState::Parked { .. }
+        ));
+        assert_eq!(
+            snapshot.recovery()[0].1.next_rung,
+            super::RecoveryRung::Replan
+        );
     }
 
     #[test]
