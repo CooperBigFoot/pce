@@ -396,8 +396,9 @@ pce hold open --repository <OWNING_REPOSITORY_NAME> \
 
 For a run-wide stop with no package, use the reserved package identity `work-graph`. The report must
 carry the vision directory, frozen graph, journal, stored Herdr session, exact terminal state and
-reason, evidence paths, and every available next option with its consequence. It must preserve
-hedges from the source status. Do not recommend an option. `hold open` starts with the overseer route;
+reason, evidence paths, and every available next option with its consequence. Name the requested act
+clearly enough for the sifter to classify it separately from the stable terminal-stop identity. It
+must preserve hedges from the source status. Do not recommend an option. `hold open` starts with the overseer route;
 do not route it directly to the human. Append the command and returned hold key to `supervision.md`
 before reporting the stop in chat.
 

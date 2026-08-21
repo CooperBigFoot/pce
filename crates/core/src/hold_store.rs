@@ -195,7 +195,10 @@ pub enum HoldRecord {
         overseer_facts: Vec<String>,
         /// The reporting run's own options, in its own order. The sifter never authors one.
         options: Vec<SiftedOption>,
-        /// Exactly one sentence for a door kind, absent for every other kind.
+        /// The act requested by the reporting run, classified independently of hold identity.
+        #[serde(default)]
+        requested_act: RequestedAct,
+        /// Exactly one sentence when the requested act opens a door, absent otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         consequence: Option<String>,
     },
@@ -203,6 +206,30 @@ pub enum HoldRecord {
         timestamp: EventTimestamp,
         reason: String,
     },
+}
+
+/// The requested act declared by the sifter after reading the reporting run's options.
+///
+/// This classification is separate from [`HoldIdentity`], whose question kind exists only to keep
+/// one terminal stop stable across supervisor restarts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RequestedAct {
+    CriterionRevision,
+    WorkerEnvironmentExtension,
+    BaseCurrencyAcceptance,
+    ParkOverrule,
+    Publication,
+    Spend,
+    /// A reversible or otherwise delegable act which opens no human-only door.
+    #[default]
+    NonDoor,
+}
+
+impl RequestedAct {
+    pub const fn opens_door(self) -> bool {
+        !matches!(self, Self::NonDoor)
+    }
 }
 
 /// One headed passage of translated prose.
@@ -241,6 +268,9 @@ pub struct FeedbackEntry {
 pub struct SiftedCard {
     #[serde(default = "default_sifter")]
     pub by: String,
+    /// Required input classification. Unknown spellings fail deserialization instead of silently
+    /// turning a door into a non-door.
+    pub requested_act: RequestedAct,
     pub title: String,
     #[serde(default)]
     pub blocks: Vec<SiftedBlock>,
@@ -274,6 +304,27 @@ pub const DOOR_QUESTION_KINDS: [&str; 6] = [
     "publication",
     "spend",
 ];
+
+/// The only narrative headings shown on an operator card.
+const CARD_BLOCK_HEADINGS: [&str; 2] = ["What happened", "Why the run cannot settle it"];
+const CARD_WORD_LIMIT: usize = 200;
+
+fn word_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+fn option_contains_machine_syntax(text: &str) -> bool {
+    text.split_whitespace().any(|token| {
+        let bare =
+            token.trim_matches(|character| matches!(character, '\'' | '"' | '(' | '[' | '{' | '<'));
+        bare == "pce"
+            || bare.starts_with("--")
+            || bare.starts_with('/')
+            || token.contains('`')
+            || token.contains("$(")
+            || matches!(token, "&&" | "||")
+    })
+}
 
 /// Hedges whose force must survive translation.
 const MODAL_MARKERS: [&str; 12] = [
@@ -374,10 +425,12 @@ impl Hold {
                 blocks,
                 overseer_facts,
                 options,
+                requested_act,
                 consequence,
                 ..
             } => Some(SiftedCard {
                 by: by.clone(),
+                requested_act: *requested_act,
                 title: title.clone(),
                 blocks: blocks.clone(),
                 overseer_facts: overseer_facts.clone(),
@@ -878,8 +931,62 @@ impl HoldStore {
         if by.trim().is_empty() {
             return Err(HoldStoreError::EmptyRecordField { field: "by" });
         }
-        if card.title.trim().is_empty() {
+        let title = card.title.trim();
+        if title.is_empty() {
             return Err(HoldStoreError::EmptyRecordField { field: "title" });
+        }
+        let title_words = word_count(title);
+        if title_words > 12 {
+            return Err(HoldStoreError::CardWordLimitExceeded {
+                field: "title",
+                limit: 12,
+                observed: title_words,
+            });
+        }
+        if !title.ends_with('?')
+            || title[..title.len() - 1]
+                .chars()
+                .any(|character| matches!(character, '?' | '!' | '.'))
+        {
+            return Err(HoldStoreError::CardTitleIsNotOneQuestion);
+        }
+        if card.blocks.len() > 2 {
+            return Err(HoldStoreError::TooManyCardBlocks {
+                observed: card.blocks.len(),
+            });
+        }
+        for (index, block) in card.blocks.iter().enumerate() {
+            if !CARD_BLOCK_HEADINGS.contains(&block.heading.as_str()) {
+                return Err(HoldStoreError::InvalidCardBlockHeading {
+                    heading: block.heading.clone(),
+                });
+            }
+            if card.blocks[..index]
+                .iter()
+                .any(|prior| prior.heading == block.heading)
+            {
+                return Err(HoldStoreError::DuplicateCardBlockHeading {
+                    heading: block.heading.clone(),
+                });
+            }
+            if block.body.trim().is_empty() {
+                return Err(HoldStoreError::EmptyRecordField {
+                    field: "block body",
+                });
+            }
+            if block.body.contains(';') {
+                return Err(HoldStoreError::CardBlockContainsSemicolon {
+                    heading: block.heading.clone(),
+                });
+            }
+            let words = word_count(&block.body);
+            if words > 60 {
+                return Err(HoldStoreError::CardWordLimitExceeded {
+                    field: "block body",
+                    limit: 60,
+                    observed: words,
+                });
+            }
         }
         // A report that named no options must go back to its run for options, never to the human
         // with options the sifter invented.
@@ -890,11 +997,33 @@ impl HoldStore {
             if option.option.trim().is_empty() {
                 return Err(HoldStoreError::EmptyRecordField { field: "option" });
             }
+            let words = word_count(&option.option);
+            if words > 15 {
+                return Err(HoldStoreError::CardWordLimitExceeded {
+                    field: "option",
+                    limit: 15,
+                    observed: words,
+                });
+            }
+            if option_contains_machine_syntax(&option.option) {
+                return Err(HoldStoreError::CardOptionContainsMachineSyntax {
+                    option: option.option.clone(),
+                });
+            }
+            if let Some(note) = &option.note {
+                let words = word_count(note);
+                if words > 20 {
+                    return Err(HoldStoreError::CardWordLimitExceeded {
+                        field: "option note",
+                        limit: 20,
+                        observed: words,
+                    });
+                }
+            }
         }
 
         let hold = self.read(key)?;
-        let question_kind = hold.identity().question_kind().to_owned();
-        let is_door = DOOR_QUESTION_KINDS.contains(&question_kind.as_str());
+        let is_door = card.requested_act.opens_door();
         match (&card.consequence, is_door) {
             (Some(sentence), true) => {
                 if sentence.trim().is_empty() {
@@ -910,17 +1039,45 @@ impl HoldStore {
                     .count();
                 if terminators > 0 {
                     return Err(HoldStoreError::ConsequenceIsNotOneSentence {
-                        question_kind: question_kind.clone(),
+                        requested_act: card.requested_act,
                     });
                 }
             }
             (None, true) => {
-                return Err(HoldStoreError::DoorCardNeedsConsequence { question_kind });
+                return Err(HoldStoreError::DoorCardNeedsConsequence {
+                    requested_act: card.requested_act,
+                });
             }
             (Some(_), false) => {
-                return Err(HoldStoreError::NonDoorCardCarriesConsequence { question_kind });
+                return Err(HoldStoreError::NonDoorCardCarriesConsequence {
+                    requested_act: card.requested_act,
+                });
             }
             (None, false) => {}
+        }
+
+        let mut total_words = word_count(&card.title);
+        for block in &card.blocks {
+            total_words += word_count(&block.heading) + word_count(&block.body);
+        }
+        for fact in &card.overseer_facts {
+            total_words += word_count(fact);
+        }
+        for option in &card.options {
+            total_words += word_count(&option.option);
+            if let Some(note) = &option.note {
+                total_words += word_count(note);
+            }
+        }
+        if let Some(consequence) = &card.consequence {
+            total_words += word_count(consequence);
+        }
+        if total_words > CARD_WORD_LIMIT {
+            return Err(HoldStoreError::CardWordLimitExceeded {
+                field: "whole card",
+                limit: CARD_WORD_LIMIT,
+                observed: total_words,
+            });
         }
 
         // Modal force survives translation. If the report hedges or negates and the whole card
@@ -965,6 +1122,7 @@ impl HoldStore {
                 blocks: card.blocks,
                 overseer_facts: card.overseer_facts,
                 options: card.options,
+                requested_act: card.requested_act,
                 consequence: card.consequence,
             },
         )?;
@@ -1573,19 +1731,42 @@ pub enum HoldStoreError {
         "a sifted card must carry the reporting run's own options; a report naming none belongs back with its run"
     )]
     CardNamesNoOption,
-    /// A door kind arrived without its one consequence sentence.
+    /// The title is not exactly one operator-facing question.
+    #[error("a sifted card title must be one question ending in `?`")]
+    CardTitleIsNotOneQuestion,
+    /// A card or component exceeds its deterministic word budget.
+    #[error("sifted card {field} has {observed} words; limit is {limit}")]
+    CardWordLimitExceeded {
+        field: &'static str,
+        limit: usize,
+        observed: usize,
+    },
+    /// A card carries more than the two allowed narrative blocks.
+    #[error("a sifted card has {observed} blocks; limit is 2")]
+    TooManyCardBlocks { observed: usize },
+    /// A block heading is outside the fixed operator vocabulary.
+    #[error("invalid sifted card block heading `{heading}`")]
+    InvalidCardBlockHeading { heading: String },
+    /// A fixed block heading appears more than once.
+    #[error("duplicate sifted card block heading `{heading}`")]
+    DuplicateCardBlockHeading { heading: String },
+    /// A block joins clauses with punctuation forbidden by the card register.
+    #[error("sifted card block `{heading}` contains a semicolon")]
+    CardBlockContainsSemicolon { heading: String },
+    /// An option contains a command token, flag, path, or shell syntax.
+    #[error("sifted card option contains machine syntax: `{option}`")]
+    CardOptionContainsMachineSyntax { option: String },
+    /// A door act arrived without its one consequence sentence.
+    #[error("requested act `{requested_act:?}` opens a door and requires one consequence sentence")]
+    DoorCardNeedsConsequence { requested_act: RequestedAct },
+    /// A non-door act carried a consequence sentence.
     #[error(
-        "question kind `{question_kind}` opens an attributed door and requires one consequence sentence"
+        "requested act `{requested_act:?}` opens no door, so its card carries no consequence sentence"
     )]
-    DoorCardNeedsConsequence { question_kind: String },
-    /// A non-door kind carried a consequence sentence.
-    #[error(
-        "question kind `{question_kind}` opens no door, so its card carries no consequence sentence"
-    )]
-    NonDoorCardCarriesConsequence { question_kind: String },
+    NonDoorCardCarriesConsequence { requested_act: RequestedAct },
     /// The consequence was more than one sentence.
-    #[error("the consequence for `{question_kind}` must be exactly one sentence")]
-    ConsequenceIsNotOneSentence { question_kind: String },
+    #[error("the consequence for requested act `{requested_act:?}` must be exactly one sentence")]
+    ConsequenceIsNotOneSentence { requested_act: RequestedAct },
     /// The card asserted flatly what the report only hedged or denied.
     #[error("the card drops the report's {marker}; modal force must survive translation")]
     ModalForcePromoted { marker: &'static str },

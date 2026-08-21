@@ -84,6 +84,12 @@ fn view_lists_a_newly_registered_run() {
     let directory = tempfile::tempdir().expect("store root");
     let vision = directory.path().join("unseen-vision");
     fs::create_dir_all(&vision).expect("vision directory");
+    fs::write(
+        vision.join("graph.json"),
+        r#"{"vision":"unseen-vision","plan_version":7,"packages":[]}"#,
+    )
+    .expect("graph");
+    fs::write(vision.join("journal.jsonl"), "").expect("journal");
     let registration = RunRegistration::parse(
         "new-repository",
         &vision,
@@ -106,7 +112,21 @@ fn view_lists_a_newly_registered_run() {
     assert_eq!(view.runs[0].repository(), "new-repository");
     let html = render_queue_html(&view);
     assert!(html.contains("new-repository"));
-    assert!(html.contains(&vision.display().to_string()));
+    assert!(html.contains("unseen-vision"));
+    assert!(html.contains("plan 7"));
+    let roster = html.split("Registered runs").nth(1).expect("roster");
+    let dominant = roster
+        .split("Paths and session")
+        .next()
+        .expect("dominant row");
+    assert!(
+        !dominant.contains(&vision.display().to_string()),
+        "absolute paths must not dominate the roster"
+    );
+    assert!(
+        roster.contains(&vision.display().to_string()),
+        "paths remain available in the disclosure"
+    );
 }
 
 struct ServerFixture {
@@ -351,5 +371,49 @@ fn a_respawned_session_is_the_declared_model() {
             .iter()
             .all(|(model, effort)| model.as_str() == OVERSEER_MODEL
                 && effort.as_str() == OVERSEER_REASONING_EFFORT)
+    );
+}
+
+#[test]
+fn request_bytes_may_arrive_after_accept_without_rejection() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let server = ServerFixture::start("sleep 2", cwd.path());
+    let address = server
+        .address
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    let mut stream = TcpStream::connect(address).expect("connect server");
+    thread::sleep(Duration::from_millis(100));
+    stream
+        .write_all(b"GET /api/view HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .expect("delayed request");
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("finish request");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("response");
+    assert!(
+        response.starts_with(b"HTTP/1.1 200 OK"),
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
+}
+
+#[test]
+fn a_silent_peer_times_out_and_later_requests_are_served() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let server = ServerFixture::start("sleep 4", cwd.path());
+    let address = server
+        .address
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    let silent = TcpStream::connect(address).expect("silent peer");
+    thread::sleep(Duration::from_millis(2200));
+    drop(silent);
+    let response = server.request(b"GET /api/view HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(
+        response.starts_with(b"HTTP/1.1 200 OK"),
+        "{}",
+        String::from_utf8_lossy(&response)
     );
 }

@@ -1713,9 +1713,17 @@ fn serve_overseer_http(
     journal: &OverseerJournal,
     heartbeat_stale: Duration,
 ) -> Result<()> {
+    // BSD and macOS accepted sockets inherit the listener's O_NONBLOCK flag. A request may arrive
+    // after accept, so each peer gets blocking request service bounded by read and write deadlines.
+    stream
+        .set_nonblocking(false)
+        .context("failed to make accepted HTTP connection blocking")?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .context("failed to set HTTP read timeout")?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .context("failed to set HTTP write timeout")?;
     let (method, target, body) = {
         let mut reader = BufReader::new(&mut *stream);
         let mut request_line = String::new();

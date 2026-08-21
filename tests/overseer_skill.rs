@@ -96,3 +96,28 @@ fn the_skill_uses_the_store_root_exported_by_the_server() {
     assert!(skill.matches("$PCE_HOLD_STORE_ROOT").count() >= 5);
     assert!(!skill.contains("$PCE_HOLD_STORE\""));
 }
+
+#[test]
+fn the_skill_declares_the_operator_card_register() {
+    let skill = fs::read_to_string("skills/overseer/SKILL.md").unwrap();
+    for required in [
+        "Simplified Technical English",
+        "important and the operator is in a hurry",
+        "at most 12 words",
+        "What happened",
+        "Why the run cannot settle it",
+        "at most 60 words",
+        "at most 15 words",
+        "at most 20",
+        "at most 200 words",
+        "recommended_by_run",
+        "requested_act",
+        "criterion-revision",
+        "non-door",
+        "quote the source unchanged",
+    ] {
+        assert!(skill.contains(required), "missing card rule: {required}");
+    }
+    assert!(skill.contains("Never author an option and never advocate."));
+    assert!(skill.contains("never create a recommendation block"));
+}

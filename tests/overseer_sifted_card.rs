@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use pce_core::{
     EventTimestamp, HoldIdentity, HoldRoute, HoldStore, HoldStoreError, OverseerJournal,
-    SiftedBlock, SiftedCard, SiftedOption, derive_queue_view, render_queue_html,
+    RequestedAct, SiftedBlock, SiftedCard, SiftedOption, derive_queue_view, render_queue_html,
 };
 use serde_json::json;
 
@@ -37,6 +37,7 @@ fn store_with_hold(question_kind: &str, report: &str) -> (tempfile::TempDir, Hol
 fn card() -> SiftedCard {
     SiftedCard {
         by: "overseer".to_owned(),
+        requested_act: RequestedAct::CriterionRevision,
         title: "How strong must the read proof be?".to_owned(),
         blocks: vec![SiftedBlock {
             heading: "What happened".to_owned(),
@@ -121,7 +122,8 @@ fn a_hedged_report_cannot_be_promoted_into_a_flat_assertion() {
 
     let mut promoted = card();
     promoted.consequence = None;
-    promoted.title = "The environment failed during setup.".to_owned();
+    promoted.requested_act = RequestedAct::NonDoor;
+    promoted.title = "Did the environment fail during setup?".to_owned();
     promoted.blocks = vec![SiftedBlock {
         heading: "What happened".to_owned(),
         body: "Setup broke and the run stopped.".to_owned(),
@@ -139,7 +141,7 @@ fn a_hedged_report_cannot_be_promoted_into_a_flat_assertion() {
     );
 
     let mut preserved = promoted;
-    preserved.title = "The environment may have failed during setup.".to_owned();
+    preserved.title = "May the environment have failed during setup?".to_owned();
     store
         .sift(&hold_key, "overseer".to_owned(), preserved, at(2))
         .expect("a card that preserves the hedge is accepted");
@@ -160,6 +162,7 @@ fn a_report_naming_no_options_produces_no_human_card() {
 
     let mut optionless = card();
     optionless.consequence = None;
+    optionless.requested_act = RequestedAct::NonDoor;
     optionless.options.clear();
     let refused = store.sift(&hold_key, "overseer".to_owned(), optionless, at(1));
     assert!(
@@ -183,7 +186,9 @@ fn only_a_door_card_carries_one_consequence_sentence() {
     // Non-door kind with a consequence: refused.
     let (_a, non_door_store, non_door_key) = store_with_hold("which-way", "Pick one of two.");
     let non_door = pce_core::HoldKey::parse(non_door_key).expect("key");
-    let refused = non_door_store.sift(&non_door, "overseer".to_owned(), card(), at(1));
+    let mut non_door_card = card();
+    non_door_card.requested_act = RequestedAct::NonDoor;
+    let refused = non_door_store.sift(&non_door, "overseer".to_owned(), non_door_card, at(1));
     assert!(
         matches!(
             refused,
@@ -196,6 +201,7 @@ fn only_a_door_card_carries_one_consequence_sentence() {
     let (_b, door_store, door_key) = store_with_hold("park-overrule", "Two ways to go.");
     let door = pce_core::HoldKey::parse(door_key).expect("key");
     let mut missing = card();
+    missing.requested_act = RequestedAct::ParkOverrule;
     missing.consequence = None;
     let refused = door_store.sift(&door, "overseer".to_owned(), missing, at(1));
     assert!(
@@ -238,8 +244,10 @@ fn a_spend_card_carries_its_consequence() {
         store_with_hold("spend", "Authorise the host, or park the work.");
     let hold_key = pce_core::HoldKey::parse(key).expect("key");
 
+    let mut spend_card = card();
+    spend_card.requested_act = RequestedAct::Spend;
     store
-        .sift(&hold_key, "overseer".to_owned(), card(), at(1))
+        .sift(&hold_key, "overseer".to_owned(), spend_card, at(1))
         .expect("a spend card carries what the money buys");
 
     assert!(
@@ -443,4 +451,159 @@ fn feedback_is_filed_into_the_store_and_never_into_a_repository() {
             .is_file(),
         "feedback lands in the store, which is the only place the server may write"
     );
+}
+
+/// A terminal-stop identity remains stable while the declared act controls the door.
+#[test]
+fn a_terminal_stop_declares_the_requested_act_separately_from_its_identity() {
+    let terminal = "work-graph-terminal-stop:2ff4fff17e4bec61";
+    let (_directory, store, key) = store_with_hold(terminal, "Revise the criterion or stop.");
+    let key = pce_core::HoldKey::parse(key).expect("key");
+
+    let accepted = store
+        .sift(&key, "overseer".to_owned(), card(), at(1))
+        .expect("declared criterion revision opens the door");
+    assert_eq!(
+        accepted.card().expect("card").requested_act,
+        RequestedAct::CriterionRevision
+    );
+    assert!(html_for(&store).contains("class=\"consequence\""));
+
+    let (_directory, store, key) = store_with_hold(terminal, "Choose a reversible next step.");
+    let key = pce_core::HoldKey::parse(key).expect("key");
+    let mut non_door = card();
+    non_door.requested_act = RequestedAct::NonDoor;
+    let refused = store.sift(&key, "overseer".to_owned(), non_door, at(1));
+    assert!(matches!(
+        refused,
+        Err(HoldStoreError::NonDoorCardCarriesConsequence { .. })
+    ));
+}
+
+#[test]
+fn store_enforces_operator_card_shape_and_budget() {
+    let terminal = "work-graph-terminal-stop:card-shape";
+    type CardMutation = fn(&mut SiftedCard);
+    let cases: [(&str, CardMutation); 10] = [
+        ("long title", |card| {
+            card.title = "Should we now revise this frozen criterion after the same exact failure happened twice again?".to_owned();
+        }),
+        ("statement title", |card| {
+            card.title = "Revise the test now.".to_owned();
+        }),
+        ("unknown heading", |card| {
+            card.blocks[0].heading = "Independent promotion constraint".to_owned();
+        }),
+        ("too many blocks", |card| {
+            card.blocks.push(SiftedBlock {
+                heading: "Why the run cannot settle it".to_owned(),
+                body: "Only the operator can decide.".to_owned(),
+            });
+            card.blocks.push(SiftedBlock {
+                heading: "What happened".to_owned(),
+                body: "The run stopped.".to_owned(),
+            });
+        }),
+        ("semicolon", |card| {
+            card.blocks[0].body = "The test failed; the run stopped.".to_owned();
+        }),
+        ("long block", |card| {
+            card.blocks[0].body = std::iter::repeat_n("word", 61)
+                .collect::<Vec<_>>()
+                .join(" ");
+        }),
+        ("shell option", |card| {
+            card.options[0].option = "Run pce graph freeze --vision-dir /tmp/vision".to_owned();
+        }),
+        ("long option", |card| {
+            card.options[0].option = std::iter::repeat_n("word", 16)
+                .collect::<Vec<_>>()
+                .join(" ");
+        }),
+        ("long note", |card| {
+            card.options[0].note = Some(
+                std::iter::repeat_n("word", 21)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }),
+        ("whole card", |card| {
+            card.overseer_facts = vec![
+                std::iter::repeat_n("fact", 180)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ];
+        }),
+    ];
+    for (name, mutate) in cases {
+        let (_directory, store, key) = store_with_hold(terminal, "Choose one option.");
+        let key = pce_core::HoldKey::parse(key).expect("key");
+        let mut candidate = card();
+        mutate(&mut candidate);
+        assert!(
+            store
+                .sift(&key, "overseer".to_owned(), candidate, at(1))
+                .is_err(),
+            "{name} must be refused"
+        );
+    }
+}
+
+#[test]
+fn unsifted_rail_never_displays_report_payload() {
+    let (_directory, store, _key) = store_with_hold(
+        "work-graph-terminal-stop:raw",
+        r#"{"driver_status_outcome":"blocked","event":"package-parked"}"#,
+    );
+    let html = html_for(&store);
+    let rail = html
+        .split("<nav class=\"rail\"")
+        .nth(1)
+        .expect("rail")
+        .split("</nav>")
+        .next()
+        .expect("rail end");
+    assert!(!rail.contains('{'), "rail leaked raw report: {rail}");
+    assert!(rail.contains("GD10"));
+}
+
+#[test]
+fn refresh_waits_until_operator_fields_are_empty_and_unfocused() {
+    let directory = tempfile::tempdir().expect("root");
+    let store = HoldStore::new(directory.path().join("holds"));
+    let html = html_for(&store);
+    assert!(html.contains("setInterval"));
+    assert!(html.contains("document.activeElement"));
+    assert!(html.contains("field.value"));
+}
+
+#[test]
+fn persisted_pre_act_sifted_records_still_replay() {
+    let record = pce_core::HoldRecord::Sifted {
+        timestamp: at(0),
+        by: "overseer".to_owned(),
+        title: "Choose this option?".to_owned(),
+        blocks: Vec::new(),
+        overseer_facts: Vec::new(),
+        options: vec![SiftedOption {
+            option: "Continue.".to_owned(),
+            note: None,
+            recommended_by_run: false,
+        }],
+        requested_act: RequestedAct::CriterionRevision,
+        consequence: Some("The frozen test changes".to_owned()),
+    };
+    let mut value = serde_json::to_value(record).expect("serialize record");
+    value
+        .as_object_mut()
+        .expect("record object")
+        .remove("requested_act");
+    let replayed: pce_core::HoldRecord = serde_json::from_value(value).expect("legacy record");
+    assert!(matches!(
+        replayed,
+        pce_core::HoldRecord::Sifted {
+            requested_act: RequestedAct::NonDoor,
+            ..
+        }
+    ));
 }

@@ -176,3 +176,62 @@ Two findings, one of them severe.
   the driver's criteria materialization names checkouts by index (`00-repository`, `01-repository`)
   while worker worktrees name them by repository (`00-taqsim`, `01-incidence`), so no single
   committed relative path is correct in both layouts; any path-source direction must fix that first.
+
+---
+
+## Addendum 2026-08-21T21:07Z — the hold store lost every registration and open hold
+
+### Finding: an open hold and its run registration disappeared from the default store
+
+- Severity: `high`
+- Phase: `recovery` / hold-store durability
+- Observation: at `20:20Z` this run was registered and a terminal-stop hold was opened in the default
+  store, returning key `fec9050d174916fd09ef4f690fc645e2978d6592910fa170e0c49a372610ba23`, state
+  `open`, route `overseer`. At `21:02–21:07Z`, with no `--root` flag and from the same cwd,
+  `pce hold runs` → `[]`, `pce hold list` → `[]`, and
+  `pce hold read --key fec9050d...` → `Error: failed to read hold / hold ... does not exist`.
+- Evidence:
+  - `~/.pce` and `~/.pce/holds` both created/mtime `2026-08-21T21:02:22Z`.
+  - `~/.pce/holds/overseer/events.jsonl` starts at `21:02:22.400Z` with `heartbeat`, then
+    `{"kind":"wake-started","reason":"startup"}`, then `session-spawned`; its first
+    `session-exited` detail reads `Registered runs: 0 · Open holds: 0 · Routed to human: 0`.
+  - `pgrep -fl "overseer serve"` → `57005 pce overseer serve`, live and heartbeating.
+  - `env | grep -iE 'pce|hold'` → empty at both invocations, so no root was redirected by environment.
+  - After this run re-registered, `pce hold runs` returned **four** registrations (`taqsim`, `hfx`,
+    `palaestra`, `pourpoint`) — other supervisors were concurrently re-registering into the same fresh
+    store, so the emptiness was global, not a filter on this run.
+- Inference (stated as inference, not observation): `pce overseer serve` recreates or clears its store
+  root at startup, discarding registrations and holds written before it started. A competing reading —
+  that the `20:20Z` writes landed in a different root — is not excluded by these observations, but no
+  root-selecting flag or environment variable differed between the two invocations. This supervisor
+  did not read the binary's source and did not deliberately reproduce the wipe.
+- Impact: the durable record that section 7 exists to create is not durable. A supervisor that had not
+  re-checked the store would have reported a stop as recorded when it was not, and the overseer's
+  first pass reported a truthful-looking `Open holds: 0` for a fleet that had open holds. Every
+  affected run silently drops off the overseer's queue.
+
+### Recommendation: never destructively initialise the store root
+
+- Addresses: the finding above.
+- Change: make store-root initialisation strictly create-if-absent. If `overseer serve` needs a clean
+  session area, scope that to `holds/sessions/` and `holds/overseer/`, never to the registration and
+  hold records. If a schema migration genuinely requires a reset, refuse and print the incompatibility
+  rather than silently emptying the store.
+- Confidence: `high` for the invariant; `medium` for the located cause, which is inference.
+
+### Recommendation: make store emptiness distinguishable from store loss
+
+- Addresses: the same finding.
+- Change: persist a store creation stamp and a monotonic record counter, and have `hold runs` /
+  `hold list` report it. A supervisor could then observe "store created after my last write" and say
+  so, instead of inferring it from directory mtimes as this one did.
+- Confidence: `medium`
+
+### What worked: the stop identity was self-healing
+
+- Evidence: `<STOP_ID>` was recomputed from first principles (length-delimited SHA-256 over vision
+  directory, journal path, and establishing sequence `132`) and reproduced
+  `2ff4fff1...c6a5` byte-identically; re-opening returned the identical hold key `fec9050d...ba23`.
+- Effect: the store loss cost a re-derivation, not a duplicate question to the human. The section-7
+  rule that the identity must hash the immutable establishing event and never the report is what made
+  recovery mechanical. This is worth keeping exactly as specified.

@@ -45,6 +45,19 @@ Keep symptom and cause separate. Never merge reports because their symptoms matc
 a base-currency refusal is not a discriminating fact: record the exact cause and fleet state that
 made one answer correct.
 
+Translate the source into urgent Simplified Technical English. Explain the issue as if it is
+important and the operator is in a hurry. Lead with the fact that decides the answer. Use active
+voice, one instruction per sentence, no phrasal verbs, no semicolons, and no noun cluster longer than
+three words. Keep instructions near 20 words and descriptions near 25. Project glossary terms may
+remain. This discipline changes form, never substance. Do not add a fact, option, recommendation, or
+certainty. If shortening would lose attribution, negation, or modal force, quote the source unchanged.
+
+The store enforces the mechanical envelope. The title is one question of at most 12 words. Use at
+most two blocks, with only `What happened` and `Why the run cannot settle it` as headings. Each block
+has at most 60 words. Each option has at most 15 words, and each note has at most 20. The whole card,
+including overseer facts and the consequence, has at most 200 words. Put no command, flag, or absolute
+path in an option. Evidence and the reporting run's full report remain available behind the card.
+
 ## 3. Classify before routing
 
 Apply this order once to each open report:
@@ -74,38 +87,44 @@ Never turn one answer into a rule. Propose a learned rule only after multiple re
 the same discriminating fact and answer, and let replay admission reject ambiguity. Install requests
 remain pending until the install boundary observes a quiet fleet.
 
-## 4. Speak to the human once
+## 4. Present one operator card
 
-For a surviving ruling, send one sentence containing: the decision needed, the discriminating fact,
-and the complete named options with consequences. Preserve hedges and attribution. Do not include
-routing history, tool diagnostics, or a request the overseer can answer from the store.
-
-The card is what the operator reads, so write it into the store rather than into a message. Routing
-a hold to the human without one leaves the page showing the reporting run's raw report, which is the
-register this whole party exists to remove:
+For a surviving ruling, write one concise card into the store. Never route a human hold without its
+translated card. The stable question kind identifies the terminal stop across restarts. It does not
+classify the requested act. Read the reporting run's options and declare `requested_act` separately.
+Use one of `criterion-revision`, `worker-environment-extension`, `base-currency-acceptance`,
+`park-overrule`, `publication`, `spend`, or `non-door`. Unknown or omitted acts are refused.
 
 ```bash
 pce hold sift --root "$PCE_HOLD_STORE_ROOT" --key <key> --by overseer <<'CARD'
 {
   "by": "overseer",
-  "title": "<the decision needed, one sentence>",
-  "blocks": [{"heading": "What happened", "body": "<translated prose>"}],
+  "requested_act": "criterion-revision",
+  "title": "<one short question, at most 12 words>",
+  "blocks": [
+    {"heading": "What happened", "body": "<at most 60 words>"},
+    {"heading": "Why the run cannot settle it", "body": "<at most 60 words>"}
+  ],
   "overseer_facts": ["<a fact the reporting run could not see>"],
-  "options": [{"option": "<the run's own option>", "note": "<the run's own consequence>",
+  "options": [{"option": "<the run's option, at most 15 words>",
+               "note": "<what it costs or buys, at most 20 words>",
                "recommended_by_run": true}],
-  "consequence": "<one sentence, door kinds only>"
+  "consequence": "<one sentence when requested_act opens a door>"
 }
 CARD
 ```
 
-`sift` routes the hold to the human itself. The binary refuses a card that names no option, a door
-kind carrying no consequence sentence or more than one, a non-door kind carrying any, and a card
-that drops a hedge or a negation the report carried. Those refusals are the floor, not the standard:
-options are the reporting run's own and are never authored here, `overseer_facts` carries only what
-the overseer supplied, and `recommended_by_run` marks the run's recommendation, never the sifter's.
-A report that named no options goes back to its run with `pce hold route ... --route reporting-run`.
+`sift` routes the hold to the human. A door act requires exactly one consequence sentence. A
+`non-door` act forbids one. The binary also enforces the question, heading, block, option, note,
+machine-syntax, total-word, modal-force, and negation rules. These refusals are the floor, not the
+full translation standard.
 
-The opening report is never replaced. It stays on the hold and stays one disclosure away on the page.
+Carry the reporting run's options in its order. Never author an option and never advocate. Put the
+run's recommendation only in `recommended_by_run`; never create a recommendation block. Put only
+facts supplied by the overseer in `overseer_facts`. A report with no options goes back to its run
+with `pce hold route ... --to reporting-run`.
+
+The opening report is never replaced. It stays on the hold and one disclosure away on the page.
 
 Record the human's words unchanged with
 `pce hold answer --root "$PCE_HOLD_STORE_ROOT" --key <key> --by human --answer <exact-answer>`.

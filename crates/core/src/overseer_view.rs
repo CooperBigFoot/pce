@@ -1,4 +1,4 @@
-//! queue view = render(holds × registrations × latest overseer events × now)
+//! queue view = render(holds × registrations × registered graphs × latest overseer events × now)
 //!
 //! The view is derived from durable store records. It never treats a missing or stale heartbeat as
 //! an empty queue, and it carries no repository authority.
@@ -12,10 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
-    DOOR_QUESTION_KINDS, EventTimestamp, HoldRoute, HoldState, HoldStore, HoldStoreError,
-    RunRegistration, SiftedCard,
-};
+use crate::{EventTimestamp, HoldRoute, HoldState, HoldStore, HoldStoreError, SiftedCard};
 
 /// The provider used for every overseer session.
 ///
@@ -245,8 +242,27 @@ pub struct QueueHold {
     pub thread: Vec<(String, String)>,
     /// What this hold is waiting on while it sits with the overseer.
     pub pending: Option<String>,
-    /// Whether this question kind opens an attributed door.
+    /// Whether the sifted card's declared requested act opens an attributed door.
     pub is_door: bool,
+}
+
+/// One registered run rendered as a fleet roster entry rather than a path listing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct QueueRun {
+    pub repository: String,
+    pub vision_name: String,
+    pub plan_version: String,
+    pub state: String,
+    pub vision_directory: PathBuf,
+    pub frozen_graph: PathBuf,
+    pub journal: PathBuf,
+    pub herdr_session: Option<String>,
+}
+
+impl QueueRun {
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
 }
 
 /// A complete queue snapshot. Holds are never suppressed because the overseer is unavailable.
@@ -254,7 +270,7 @@ pub struct QueueHold {
 pub struct QueueView {
     pub overseer: OverseerLiveness,
     pub holds: Vec<QueueHold>,
-    pub runs: Vec<RunRegistration>,
+    pub runs: Vec<QueueRun>,
 }
 
 /// Derives a queue snapshot from the stores at a caller-supplied time.
@@ -305,7 +321,7 @@ pub fn derive_queue_view(
         }
     };
 
-    let holds = store
+    let holds: Vec<QueueHold> = store
         .list()
         .map_err(OverseerViewError::HoldStore)?
         .into_iter()
@@ -326,6 +342,10 @@ pub fn derive_queue_view(
                 .signed_duration_since(*hold.opened_at().as_datetime())
                 .num_seconds()
                 .max(0) as u64;
+            let card = hold.card();
+            let is_door = card
+                .as_ref()
+                .is_some_and(|sifted| sifted.requested_act.opens_door());
             QueueHold {
                 key: hold.key().as_str().to_owned(),
                 repository: hold.identity().repository().to_owned(),
@@ -335,16 +355,83 @@ pub fn derive_queue_view(
                 state,
                 age_seconds,
                 report: hold.report().clone(),
-                card: hold.card(),
+                card,
                 thread: hold.thread(),
                 pending: hold.pending_with_overseer(),
-                is_door: DOOR_QUESTION_KINDS.contains(&hold.identity().question_kind()),
+                is_door,
             }
         })
         .collect();
-    let runs = store
+    let registrations = store
         .run_registrations()
         .map_err(OverseerViewError::HoldStore)?;
+    let runs = registrations
+        .into_iter()
+        .map(|registration| {
+            let graph_path = registration.frozen_graph().to_path_buf();
+            let bytes =
+                fs::read(&graph_path).map_err(|source| OverseerViewError::ReadRunGraph {
+                    path: graph_path.clone(),
+                    source,
+                })?;
+            let graph: serde_json::Value = serde_json::from_slice(&bytes).map_err(|source| {
+                OverseerViewError::ParseRunGraph {
+                    path: graph_path.clone(),
+                    source,
+                }
+            })?;
+            let vision_name = graph
+                .get("vision")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| OverseerViewError::MissingRunGraphField {
+                    path: graph_path.clone(),
+                    field: "vision",
+                })?
+                .to_owned();
+            let plan_version = graph
+                .get("plan_version")
+                .and_then(|value| match value {
+                    serde_json::Value::Number(number) => Some(number.to_string()),
+                    serde_json::Value::String(text) if !text.trim().is_empty() => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| OverseerViewError::MissingRunGraphField {
+                    path: graph_path.clone(),
+                    field: "plan_version",
+                })?;
+            let state = [
+                (QueueHoldState::WaitingForHuman, "waiting for human"),
+                (QueueHoldState::WithOverseer, "with overseer"),
+                (QueueHoldState::WithReportingRun, "with reporting run"),
+            ]
+            .into_iter()
+            .find_map(|(state, label)| {
+                holds
+                    .iter()
+                    .any(|hold| {
+                        hold.repository == registration.repository()
+                            && hold.plan_version == plan_version
+                            && hold.state == state
+                    })
+                    .then_some(label)
+            })
+            .unwrap_or("no open holds")
+            .to_owned();
+            Ok(QueueRun {
+                repository: registration.repository().to_owned(),
+                vision_name,
+                plan_version,
+                state,
+                vision_directory: registration.vision_directory().to_path_buf(),
+                frozen_graph: graph_path,
+                journal: registration.journal().to_path_buf(),
+                herdr_session: registration.herdr_session().map(str::to_owned),
+            })
+        })
+        .collect::<Result<Vec<_>, OverseerViewError>>()?;
     Ok(QueueView {
         overseer,
         holds,
@@ -567,7 +654,7 @@ pub fn render_queue_html(view: &QueueView) -> String {
     for hold in &queue {
         let state = state_slug(hold.state);
         let line = hold.card.as_ref().map_or_else(
-            || summarize(&hold.report.to_string()),
+            || format!("Package {} · plan {}", hold.package, hold.plan_version),
             |card| card.title.clone(),
         );
         html.push_str(&format!(
@@ -620,9 +707,10 @@ pub fn render_queue_html(view: &QueueView) -> String {
                 &hold
                     .card
                     .as_ref()
-                    .map_or_else(|| summarize(&hold.report.to_string()), |card| card
-                        .title
-                        .clone())
+                    .map_or_else(
+                        || format!("Package {} · plan {}", hold.package, hold.plan_version),
+                        |card| card.title.clone(),
+                    )
             ),
         ));
     }
@@ -634,19 +722,34 @@ pub fn render_queue_html(view: &QueueView) -> String {
     ));
     for run in &view.runs {
         html.push_str(&format!(
-            "<li data-repository=\"{repo}\"><code>{repo}</code> &mdash; <code>{vision}</code><br>\
-<code>graph: {graph}</code><br><code>journal: {journal}</code><br><code>herdr session: {session}</code></li>",
+            r#"<li data-repository="{repo}"><code>{repo}</code> &mdash; {vision} &middot; plan {plan} &middot; {state}
+<details class="run-paths"><summary>Paths and session</summary><code>vision: {vision_path}</code><br>
+<code>graph: {graph}</code><br><code>journal: {journal}</code><br><code>herdr session: {session}</code></details></li>"#,
             repo = escape_html(run.repository()),
-            vision = escape_html(&run.vision_directory().display().to_string()),
-            graph = escape_html(&run.frozen_graph().display().to_string()),
-            journal = escape_html(&run.journal().display().to_string()),
-            session = escape_html(run.herdr_session().unwrap_or("none")),
+            vision = escape_html(&run.vision_name),
+            plan = escape_html(&run.plan_version),
+            state = escape_html(&run.state),
+            vision_path = escape_html(&run.vision_directory.display().to_string()),
+            graph = escape_html(&run.frozen_graph.display().to_string()),
+            journal = escape_html(&run.journal.display().to_string()),
+            session = escape_html(run.herdr_session.as_deref().unwrap_or("none")),
         ));
     }
     html.push_str("</ul><p class=\"drawer-note\">A run joins the fleet by existing. Nobody registers one by hand.</p></div></details>");
 
     html.push_str("<p class=\"foot\">One append-only file per question, keyed by repository, plan version, package and kind.</p>");
-    html.push_str("</div></body></html>");
+    html.push_str(
+        r#"</div><script>
+const refreshIntervalMs = 15000;
+setInterval(() => {
+  const fields = [...document.querySelectorAll('textarea, input:not([type="radio"]), select')];
+  const active = document.activeElement;
+  const fieldFocused = active && active.matches('input, textarea, select');
+  const allEmpty = fields.every(field => field.value.length === 0);
+  if (!fieldFocused && allEmpty) window.location.reload();
+}, refreshIntervalMs);
+</script></body></html>"#,
+    );
     html
 }
 
@@ -801,25 +904,6 @@ fn format_age(seconds: u64) -> String {
     }
 }
 
-/// A one-line stand-in for an unsifted hold, so the rail still reads as a worklist.
-fn summarize(report: &str) -> String {
-    let trimmed = report.trim().trim_matches('"');
-    let first = trimmed
-        .split_terminator(['.', '\n'])
-        .next()
-        .unwrap_or(trimmed)
-        .trim();
-    if first.chars().count() > 140 {
-        let cut = first
-            .char_indices()
-            .nth(140)
-            .map_or(first.len(), |(index, _)| index);
-        format!("{}…", &first[..cut])
-    } else {
-        first.to_owned()
-    }
-}
-
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -832,6 +916,21 @@ fn escape_html(value: &str) -> String {
 /// A queue view or supervisor journal operation failed.
 #[derive(Debug, Error)]
 pub enum OverseerViewError {
+    /// A registered run's frozen graph cannot be read.
+    #[error("failed to read registered run graph `{path}`: {source}")]
+    ReadRunGraph {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// A registered run's frozen graph is not JSON.
+    #[error("failed to parse registered run graph `{path}`: {source}")]
+    ParseRunGraph {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    /// A registered run's graph omits a roster field.
+    #[error("registered run graph `{path}` has no valid `{field}`")]
+    MissingRunGraphField { path: PathBuf, field: &'static str },
     /// The store reader rejected a durable record.
     #[error("hold store read failed: {0}")]
     HoldStore(#[source] HoldStoreError),
