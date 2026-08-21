@@ -39,7 +39,7 @@ fn journal_events(path: &Path) -> Vec<Value> {
 }
 
 #[test]
-fn relative_launch_allows_its_untracked_vision_directory_in_the_source() {
+fn dirty_source_outside_vision_warns_and_committed_inputs_complete() {
     let temp = tempdir().expect("tempdir");
     let repository = temp.path().join("repo");
     fs::create_dir(&repository).expect("repository");
@@ -47,8 +47,12 @@ fn relative_launch_allows_its_untracked_vision_directory_in_the_source() {
     git(&repository, &["config", "user.email", "test@example.com"]);
     git(&repository, &["config", "user.name", "Test"]);
     fs::write(repository.join("seed"), "seed\n").expect("seed");
+    fs::write(repository.join("source-state"), "committed\n").expect("source state");
     git(&repository, &["add", "."]);
     git(&repository, &["commit", "-qm", "seed"]);
+    fs::write(repository.join("source-state"), "dirty\n").expect("dirty tracked source");
+    fs::create_dir(repository.join("docs")).expect("docs directory");
+    fs::write(repository.join("docs/operator-note.md"), "local note\n").expect("dirty source note");
     let vision = repository.join("planning/vision");
     fs::create_dir_all(&vision).expect("vision directory");
     fs::write(vision.join("vision.md"), "# Vision: composition\n\n## Goal / Why\n\nCompose.\n\n## Acceptance criteria (vision-level \"done\")\n\n```json\n{\"criteria\":[{\"name\":\"whole\",\"input\":\"repo\",\"observation\":\"green\"}]}\n```\n").expect("vision");
@@ -56,7 +60,7 @@ fn relative_launch_allows_its_untracked_vision_directory_in_the_source() {
     let graph = json!({"vision":format!("composition-{}", std::process::id()),"plan_version":1,"authored_at_ref":"HEAD","packages":[
         {"id":"A","title":"A","repositories":["repo"],"criteria":[{"name":"a","input":"repo","observation":"a","command":"test -f a.txt"}],"depends_on":[]},
         {"id":"B","title":"B","repositories":["repo"],"criteria":[{"name":"b","input":"repo","observation":"b","command":"test -f b.txt"}],"depends_on":[]},
-        {"id":"C","title":"C","repositories":["repo"],"criteria":[{"name":"both","input":"repo","observation":"both","command":"test -f a.txt && test -f b.txt && test -f c.txt"}],"depends_on":[
+        {"id":"C","title":"C","repositories":["repo"],"criteria":[{"name":"both","input":"repo","observation":"both","command":"test -f a.txt && test -f b.txt && test -f c.txt && test \"$(cat source-state)\" = committed"}],"depends_on":[
             {"id":"A","kind":"buildability","reason":"needs A"},
             {"id":"B","kind":"safety","reason":"needs B"}
         ]}
@@ -128,6 +132,12 @@ fi
         String::from_utf8_lossy(&output.stderr),
         fs::read_to_string(&journal).unwrap_or_default()
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("source repository is dirty outside the driver vision directory"));
+    assert!(stderr.contains("repository=repo") || stderr.contains("repository=\"repo\""));
+    assert!(stderr.contains("source-state"));
+    assert!(stderr.contains("docs/operator-note.md"));
+    assert!(stderr.contains("proceeding because driver inputs use committed refs"));
     let status: Value = serde_json::from_slice(&output.stdout).expect("status");
     assert_eq!(status["outcome"], "finished");
     assert_eq!(status["assembly"]["state"], "complete");
@@ -137,7 +147,37 @@ fi
     assert!(!events.contains("join-criterion-executed"));
     assert_eq!(events.matches("assembly-criterion-executed").count(), 3);
     assert!(events.contains("assembly-completed"));
-    assert_eq!(git(&repository, &["status", "--short"]), "?? planning/");
+    let assembly = journal_events(&journal)
+        .into_iter()
+        .find(|event| event["event"] == "assembly-repository-composed")
+        .expect("assembly event");
+    let assembly_oid = assembly["base_oid"].as_str().expect("assembly oid");
+    assert_eq!(
+        git(
+            &repository,
+            &["show", &format!("{assembly_oid}:source-state")]
+        ),
+        "committed"
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                repository.to_str().expect("repository path"),
+                "cat-file",
+                "-e"
+            ])
+            .arg(format!("{assembly_oid}:docs/operator-note.md"))
+            .output()
+            .expect("git cat-file")
+            .status
+            .code()
+            .is_some_and(|code| code != 0)
+    );
+    assert_eq!(
+        git(&repository, &["status", "--short"]),
+        "M source-state\n?? docs/\n?? planning/"
+    );
     let worktrees = fs::read_to_string(temp.path().join("herdr-worktrees")).expect("herdr log");
     let c = worktrees
         .lines()
@@ -417,7 +457,13 @@ fi
         fs::read_to_string(&journal).unwrap_or_default()
     );
     let status: Value = serde_json::from_slice(&output.stdout).expect("status");
-    assert_eq!(status["outcome"], "finished");
+    assert_eq!(
+        status["outcome"],
+        "finished",
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&journal).unwrap_or_default()
+    );
     let repair = fs::read_to_string(temp.path().join("repair-oid")).expect("repair");
     let second_gate_head =
         fs::read_to_string(temp.path().join("second-gate-head")).expect("second gate head");
@@ -989,52 +1035,5 @@ fi
         !events
             .iter()
             .any(|event| event["event"] == "package-failed")
-    );
-}
-
-#[test]
-fn driver_refuses_an_already_dirty_source_before_composition() {
-    let temp = tempdir().expect("tempdir");
-    let repository = temp.path().join("repo");
-    fs::create_dir(&repository).expect("repository");
-    git(&repository, &["init", "-q"]);
-    git(&repository, &["config", "user.email", "test@example.com"]);
-    git(&repository, &["config", "user.name", "Test"]);
-    let tracked = repository.join("planning/source-note");
-    fs::create_dir(repository.join("planning")).expect("planning directory");
-    fs::write(&tracked, "base\n").expect("tracked file");
-    git(&repository, &["add", "."]);
-    git(&repository, &["commit", "-qm", "base"]);
-    fs::write(&tracked, "dirty\n").expect("dirty tracked file");
-
-    let vision = repository.join("planning/vision");
-    fs::create_dir(&vision).expect("vision directory");
-    fs::write(vision.join("graph.json"), b"{}").expect("graph fixture");
-    let bin = temp.path().join("bin");
-    fs::create_dir(&bin).expect("bin");
-    executable(
-        &bin.join("herdr"),
-        "#!/bin/sh\nif [ \"${1-}\" = --version ]; then echo 'herdr 0.8.2'; exit 0; fi\nexit 1\n",
-    );
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
-    let output = Command::new(env!("CARGO_BIN_EXE_pce"))
-        .args(["package", "driver-run", "--graph", "graph.json"])
-        .args(["--journal", "driver.jsonl"])
-        .args(["--repository"])
-        .arg(format!("repo={}", repository.display()))
-        .env("PATH", path)
-        .current_dir(&vision)
-        .output()
-        .expect("driver");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("source repository `repo` is dirty"));
-    assert!(stderr.contains("planning/source-note"));
-    assert!(!stderr.contains("git clean"));
-    assert!(!stderr.contains("git stash -u"));
-    assert_eq!(
-        git(&repository, &["status", "--short"]),
-        "M planning/source-note\n?? planning/vision/"
     );
 }

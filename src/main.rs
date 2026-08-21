@@ -3294,6 +3294,7 @@ fn harden_package_lineage_for_issuance(
                         repair_ref: repository_refs.repair_ref.clone(),
                         lineage_oid: previous_oid,
                         reason: pce_core::StaleRepairCreditReason::RepairUnavailable,
+                        detail: None,
                     },
                 )?;
                 continue;
@@ -3313,6 +3314,7 @@ fn harden_package_lineage_for_issuance(
                         repair_ref: repair_oid,
                         lineage_oid: previous_oid,
                         reason: pce_core::StaleRepairCreditReason::DivergentLineage,
+                        detail: None,
                     },
                 )?;
                 continue;
@@ -3674,7 +3676,7 @@ fn resolve_driver_startup_paths(mut command: DriverRunCommand) -> Result<DriverR
     Ok(command)
 }
 
-fn refuse_dirty_source_repositories(command: &DriverRunCommand) -> Result<()> {
+fn warn_about_dirty_source_repositories(command: &DriverRunCommand) -> Result<()> {
     let vision_dir = driver_vision_directory(command)?;
     for (name, source) in &command.repositories {
         let root_output = std::process::Command::new("git")
@@ -3726,10 +3728,11 @@ fn refuse_dirty_source_repositories(command: &DriverRunCommand) -> Result<()> {
             );
         }
         if !output.stdout.is_empty() {
-            bail!(
-                "source repository `{name}` is dirty outside the driver vision directory; driver-run requires these paths to be clean while preserving {}:\n{}",
-                vision_dir.display(),
-                String::from_utf8_lossy(&output.stdout).trim_end()
+            tracing::warn!(
+                repository = name,
+                vision_directory = %vision_dir.display(),
+                dirty_paths = %String::from_utf8_lossy(&output.stdout).trim_end(),
+                "source repository is dirty outside the driver vision directory; proceeding because driver inputs use committed refs"
             );
         }
     }
@@ -5427,7 +5430,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                         Some(AmendmentProof::Unconstructable {
                             repository,
                             repair_ref,
-                            ..
+                            detail,
                         }),
                     ..
                 } if execution.exit_status().is_success() => Some((
@@ -5436,11 +5439,12 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                     *finding,
                     repository.clone(),
                     repair_ref.clone(),
+                    detail.clone(),
                 )),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        for (package, gate, finding, repository, repair_ref) in stale_candidates {
+        for (package, gate, finding, repository, repair_ref, detail) in stale_candidates {
             if prior_assembly.iter().any(|event| {
                 matches!(
                     event,
@@ -5479,6 +5483,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                     repair_ref,
                     lineage_oid,
                     reason: pce_core::StaleRepairCreditReason::CounterfactualUnconstructable,
+                    detail: Some(detail),
                 },
             )?;
         }
@@ -5497,7 +5502,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
             _ => None,
         })
         .collect::<Vec<_>>();
-    let mut failed = active_assembly.iter().any(|event| match event {
+    let assembly_criterion_failed = |event: &DriverEvent| match event {
         DriverEvent::AssemblyCriterionExecuted {
             origin: pce_core::CriterionOrigin::Authored,
             execution,
@@ -5531,8 +5536,16 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                 })
         }
         _ => false,
-    });
+    };
+    let mut failed = active_assembly.iter().any(&assembly_criterion_failed);
     for package in graph.packages() {
+        let mut package_failed = active_assembly.iter().any(|event| {
+            matches!(
+                event,
+                DriverEvent::AssemblyCriterionExecuted { package: recorded, .. }
+                    if recorded == package.id().as_str()
+            ) && assembly_criterion_failed(event)
+        });
         let sources = package_repository_sources(package, &command.repositories)?;
         let refs = sources
             .iter()
@@ -5604,7 +5617,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                 )),
                 _ => None,
             };
-            if !failed
+            if !package_failed
                 && execution.exit_status().is_success()
                 && let Some((gate, finding, repository, repair_ref, _)) = unconstructable.clone()
             {
@@ -5626,6 +5639,9 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                         repair_ref,
                         lineage_oid,
                         reason: pce_core::StaleRepairCreditReason::CounterfactualUnconstructable,
+                        detail: unconstructable
+                            .as_ref()
+                            .map(|candidate| candidate.4.clone()),
                     },
                 )?;
                 amendment_proof = None;
@@ -5633,6 +5649,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                 unconstructable = None;
             }
             failed |= !passed;
+            package_failed |= !passed;
             append_driver_event(
                 &command.journal_path,
                 &DriverEvent::AssemblyCriterionExecuted {
@@ -6139,7 +6156,7 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
     let command = resolve_driver_startup_paths(command)?;
     let journal_path = command.journal_path.clone();
     let result = (|| {
-        refuse_dirty_source_repositories(&command)?;
+        warn_about_dirty_source_repositories(&command)?;
         run_driver_loop_inner(command)
     })();
     if let Err(error) = &result {
@@ -23996,6 +24013,171 @@ None.
             crate::anchor_assembly_resolution(&repository, "repo", &oid).expect("existing ref");
         assert_eq!(same_reference, reference);
         assert!(!created_again);
+    }
+
+    #[test]
+    fn unconstructable_credit_owned_by_another_package_does_not_reopen_completed_rewriter() {
+        let directory = tempdir().expect("temporary directory");
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).expect("repository directory");
+        initialize_git_repository(&repository);
+        fs::write(repository.join("value"), "base\n").expect("base source");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-m", "base"]);
+        let base = crate::git_oid(&repository, "HEAD").expect("base oid");
+        fs::write(repository.join("value"), "repair\n").expect("repair source");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-m", "credited repair"]);
+        let repair = crate::git_oid(&repository, "HEAD").expect("repair oid");
+        fs::write(repository.join("value"), "rewritten\n").expect("rewritten source");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-m", "later package rewrite"]);
+        let rewrite = crate::git_oid(&repository, "HEAD").expect("rewrite oid");
+        git(
+            &repository,
+            &["branch", "pce/cross-package-stale/B/attempt-1", &repair],
+        );
+        git(
+            &repository,
+            &["branch", "pce/cross-package-stale/A/attempt-2", &rewrite],
+        );
+
+        let graph_path = directory.path().join("graph.json");
+        fs::write(
+            &graph_path,
+            serde_json::to_vec(&json!({
+                "vision":"cross-package-stale", "plan_version":1,
+                "authored_at_refs":{"repo":base},
+                "packages":[
+                    {"id":"A", "title":"later rewriter", "repositories":["repo"],
+                     "criteria":[{"name":"unrelated assembly failure", "input":"repo", "observation":"fails", "command":"false"}],
+                     "depends_on":[]},
+                    {"id":"B", "title":"repair owner", "repositories":["repo"],
+                     "criteria":[{"name":"b remains valid", "input":"repo", "observation":"valid", "command":"true"}],
+                     "depends_on":[]}
+                ]
+            }))
+            .expect("graph JSON"),
+        )
+        .expect("graph write");
+        let journal_path = directory.path().join("events.jsonl");
+        let amendment_command = "grep -Eq '^(repair|rewritten)$' value";
+        let execution = |code| {
+            pce_core::CriterionExecution::new(
+                amendment_command.to_owned(),
+                "repo".to_owned(),
+                pce_core::CommandExitStatus::Exited { code },
+                String::new(),
+                String::new(),
+            )
+        };
+        for event in [
+            pce_core::DriverEvent::WorkerDispatched {
+                package: "B".to_owned(),
+                issuance: 1,
+            },
+            pce_core::DriverEvent::WorkerDone {
+                package: "B".to_owned(),
+                issuance: 1,
+            },
+            pce_core::DriverEvent::FindingReplayed {
+                package: "B".to_owned(),
+                gate: "gate-b".to_owned(),
+                finding: 0,
+                command: amendment_command.to_owned(),
+                repository_refs: vec![pce_core::AmendmentRepositoryRefs {
+                    repository: "repo".to_owned(),
+                    witness_ref: base.clone(),
+                    repair_ref: repair.clone(),
+                }],
+                witness: execution(1),
+                repair: execution(0),
+                decision: pce_core::FindingReplayDecision::Accepted,
+            },
+            pce_core::DriverEvent::GateFinished {
+                package: "B".to_owned(),
+                gate: "gate-b".to_owned(),
+            },
+            pce_core::DriverEvent::PackageRepairMerged {
+                package: "B".to_owned(),
+                repository: "repo".to_owned(),
+                gate: "gate-b".to_owned(),
+                finding: 0,
+                repair_ref: repair.clone(),
+                previous_oid: base,
+                hardened_oid: repair.clone(),
+            },
+            pce_core::DriverEvent::PackageCompleted {
+                package: "B".to_owned(),
+            },
+            pce_core::DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 2,
+            },
+            pce_core::DriverEvent::WorkerDone {
+                package: "A".to_owned(),
+                issuance: 2,
+            },
+            pce_core::DriverEvent::PackageCompleted {
+                package: "A".to_owned(),
+            },
+        ] {
+            crate::append_driver_event(&journal_path, &event).expect("journal event");
+        }
+        let command = crate::DriverRunCommand {
+            graph_path: graph_path.clone(),
+            journal_path: journal_path.clone(),
+            repositories: vec![("repo".to_owned(), repository)],
+            preparations: std::collections::BTreeMap::new(),
+            worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
+            override_risk_ordering: false,
+            recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
+            worker_override: None,
+            wait_timeout: None,
+        };
+        let graph = crate::read_driver_graph(&graph_path).expect("graph");
+
+        crate::run_driver_assembly(&graph, &command).expect("assembly evaluation");
+
+        let events = crate::read_driver_journal(&journal_path).expect("assembly journal");
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            pce_core::DriverEvent::PackageHardeningInvalidated { .. }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            pce_core::DriverEvent::RepairCreditStale {
+                package,
+                repair_ref,
+                reason: pce_core::StaleRepairCreditReason::CounterfactualUnconstructable,
+                detail: Some(detail),
+                ..
+            } if package == "B" && repair_ref == &repair && detail.contains("CONFLICT")
+        )));
+        assert_eq!(pce_core::charged_failure_count(&events, "A"), 0);
+        let snapshot = pce_core::derive_driver_snapshot(&graph, &events, false).expect("snapshot");
+        assert!(
+            snapshot
+                .packages()
+                .iter()
+                .all(|(_, state)| matches!(state, pce_core::DriverPackageState::Complete))
+        );
+        assert_eq!(
+            snapshot
+                .recovery()
+                .iter()
+                .find(|(package, _)| package == "A")
+                .expect("A recovery budget")
+                .1
+                .dispatches_remaining,
+            2
+        );
+        assert!(matches!(
+            snapshot.assembly(),
+            pce_core::DriverAssemblyState::Failed { .. }
+        ));
     }
 
     #[test]
