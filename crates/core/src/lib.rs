@@ -15,7 +15,12 @@ pub mod gate_execution;
 pub mod gate_replay;
 pub mod graph_authoring;
 pub mod herdr_dispatch;
+pub mod hold_store;
 pub mod landing_readiness;
+pub mod overseer_registration;
+pub mod overseer_routing;
+pub mod overseer_rulebook;
+pub mod overseer_view;
 pub mod package_completion;
 pub mod package_driver;
 pub mod package_gate;
@@ -170,9 +175,27 @@ pub use herdr_dispatch::{
     HerdrWorkspaceId, HerdrWorktreeSpec, RepositoryDispatchInput, WorkerArgumentVector,
     WorkerEnvironment, compose_herdr_work_package_dispatch, derive_herdr_agent_name,
 };
+pub use hold_store::{
+    Hold, HoldIdentity, HoldKey, HoldRecord, HoldRoute, HoldState, HoldStore, HoldStoreError,
+    OpenDisposition, OpenHoldResult, RegisterRunDisposition, RegisterRunResult,
+};
 pub use landing_readiness::{
     CompletionCriterionIndex, LandingCriterionEvidence, LandingReadinessDecision,
     LandingReadinessProblem, LandingReadinessResult, evaluate_landing_readiness,
+};
+pub use overseer_registration::{RunRegistration, RunRegistrationError, RunRegistrationKey};
+pub use overseer_routing::{
+    DoorKind, InstallDecision, InstallRequest, OverseerRecord, OverseerRoutingError,
+    ProposedRoutingRule, RouteDecision, RuleAdmission, RuleRefusal, admit_routing_rule,
+    overseer_records, request_install, route_hold,
+};
+pub use overseer_rulebook::{
+    RoutingRule, RoutingRuleAction, RoutingRuleClass, RoutingRuleOrigin, RoutingRuleParseError,
+    initial_routing_rules,
+};
+pub use overseer_view::{
+    OVERSEER_MODEL, OVERSEER_REASONING_EFFORT, OverseerEvent, OverseerJournal, OverseerLiveness,
+    OverseerViewError, QueueHold, QueueHoldState, QueueView, derive_queue_view, render_queue_html,
 };
 pub use run_state::{
     ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BlockingCriterion,
