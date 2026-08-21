@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 
-use pce_core::{HoldStore, RoutingRuleClass, RoutingRuleOrigin};
+use pce_core::{HoldStore, RoutingRuleClass, RoutingRuleOrigin, initial_routing_rules};
 use tempfile::tempdir;
 
 #[test]
@@ -76,5 +76,31 @@ fn rulebook_arrives_loaded() {
         fs::read(path).expect("retained rulebook should read"),
         first_bytes,
         "querying an initialized store must not rewrite or duplicate records"
+    );
+}
+
+#[test]
+fn interrupted_rulebook_install_recovers_incomplete_tail() {
+    let directory = tempdir().expect("temporary store should create");
+    let rulebook_directory = directory.path().join("rulebook");
+    fs::create_dir(&rulebook_directory).expect("rulebook directory should create");
+    let path = rulebook_directory.join("routing-rules.jsonl");
+    let expected = initial_routing_rules();
+    let mut interrupted = serde_json::to_vec(&expected[0]).expect("first rule should encode");
+    interrupted.push(b'\n');
+    let second = serde_json::to_vec(&expected[1]).expect("second rule should encode");
+    interrupted.extend_from_slice(&second[..second.len() / 2]);
+    fs::write(&path, interrupted).expect("interrupted install should seed");
+
+    let loaded = HoldStore::new(directory.path())
+        .routing_rules()
+        .expect("a valid prefix with an incomplete tail should resume installation");
+
+    assert_eq!(loaded, expected);
+    let installed = fs::read(path).expect("recovered rulebook should read");
+    assert!(installed.ends_with(b"\n"));
+    assert_eq!(
+        installed.iter().filter(|byte| **byte == b'\n').count(),
+        loaded.len()
     );
 }
