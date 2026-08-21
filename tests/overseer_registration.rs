@@ -135,3 +135,21 @@ fn registration_refuses_an_impossible_herdr_session() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn distinct_terminal_stops_have_distinct_hold_identities() {
+    let skill = fs::read_to_string("skills/work-graph/SKILL.md")
+        .expect("work-graph skill should be readable");
+    let terminal = skill
+        .split("## 7. Hold or promote at the terminal boundary")
+        .nth(1)
+        .expect("skill should define the terminal hold boundary");
+
+    assert!(
+        terminal.contains("--question-kind work-graph-terminal-stop:<STOP_ID>"),
+        "the hold identity must distinguish separate stops instead of reusing one stale thread"
+    );
+    assert!(terminal.contains("canonical vision directory"));
+    assert!(terminal.contains("terminal journal event"));
+    assert!(terminal.contains("must not hash the report"));
+}
