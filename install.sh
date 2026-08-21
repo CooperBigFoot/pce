@@ -241,7 +241,21 @@ esac
 SKILLS_DIR="$HOME/.claude/skills"
 mkdir -p "$SKILLS_DIR"
 
-for skill in pce to-vision domain-modeling grill-with-docs chart-program work-ticket land-ticket work-graph; do
+# Derived from the repository, never hardcoded: a fixed list ships every future skill invisible by
+# default, and reports success while doing it. Both this loop and the verification loop below read
+# this one list, because two lists that can disagree is the same defect twice.
+SKILL_NAMES=""
+for manifest in "$REPO_ROOT"/skills/*/SKILL.md; do
+    [ -f "$manifest" ] || continue
+    skill_dir=$(dirname "$manifest")
+    SKILL_NAMES="$SKILL_NAMES $(basename "$skill_dir")"
+done
+if [ -z "$SKILL_NAMES" ]; then
+    echo "ERROR: no skills found under $REPO_ROOT/skills (expected */SKILL.md)." >&2
+    exit 1
+fi
+
+for skill in $SKILL_NAMES; do
     src="$REPO_ROOT/skills/$skill"
     dst="$SKILLS_DIR/$skill"
     if [ -e "$dst" ] && [ ! -L "$dst" ]; then
@@ -283,7 +297,11 @@ else
 fi
 
 # --- Post-install verification ---------------------------------------------------
-for link in "$BIN_DIR/pce" "$HOOK_LINK" "$HOOK_PROTECTION_LINK" "$SKILLS_DIR/pce" "$SKILLS_DIR/to-vision" "$SKILLS_DIR/domain-modeling" "$SKILLS_DIR/grill-with-docs" "$SKILLS_DIR/chart-program" "$SKILLS_DIR/work-ticket" "$SKILLS_DIR/land-ticket" "$SKILLS_DIR/work-graph"; do
+verify_links="$BIN_DIR/pce $HOOK_LINK $HOOK_PROTECTION_LINK"
+for skill in $SKILL_NAMES; do
+    verify_links="$verify_links $SKILLS_DIR/$skill"
+done
+for link in $verify_links; do
     if [ -L "$link" ] && [ -e "$link" ]; then
         echo "OK: $link resolves"
     else

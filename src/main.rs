@@ -50,13 +50,13 @@ use pce_core::{
     HoldKey, HoldRoute, HoldStore, KnownPayload, LandingReadinessDecision,
     LegacyRepositoryContractPayload, LocalPatchLimit, MeasuredContractSnapshot, MergeStatus,
     MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
-    NonProductionHoldOpenPayload, NonProductionKey, OVERSEER_MODEL, OVERSEER_REASONING_EFFORT,
-    ObservedExitStatus, ObservedWorkflowName, OpenDisposition, OracleFailure, OracleStage,
-    OrderingEdge, OverseerEvent, OverseerJournal, PackageGateChallenge, PackageWorkerResult,
-    PackageWorkerStoppedAt, PairedCampaign, PairedExecutionProofError, PairedReplayClassification,
-    PaneCleanupOutcome, ParentCriterionFailure, PrimeSessionObservation,
-    ProcessIdentityObservation, ProcessNumber, ProcessStartIdentity,
-    PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
+    NonProductionHoldOpenPayload, NonProductionKey, OVERSEER_MODEL, OVERSEER_PROVIDER,
+    OVERSEER_REASONING_EFFORT, ObservedExitStatus, ObservedWorkflowName, OpenDisposition,
+    OracleFailure, OracleStage, OrderingEdge, OverseerEvent, OverseerJournal, OverseerWakeReason,
+    PackageGateChallenge, PackageWorkerResult, PackageWorkerStoppedAt, PairedCampaign,
+    PairedExecutionProofError, PairedReplayClassification, PaneCleanupOutcome,
+    ParentCriterionFailure, PrimeSessionObservation, ProcessIdentityObservation, ProcessNumber,
+    ProcessStartIdentity, PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
     RecoveryLimits, RecoveryLogPath, RecoveryRung, ReferenceValidation, ReplayArtifactObservation,
     ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
@@ -64,14 +64,14 @@ use pce_core::{
     RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
     RepositoryRelativePath, RepositoryRoot, RepositoryWorktree, RequiredArtifactPresence,
     RetryLimit, RiskOrdering, RunRegistration, RunSnapshot, Sandbox, SeatbeltCapability, Sequence,
-    Sha256Digest, SignalNumber, SpawnDispatchOutcome, SpawnFailedDispatchCompletionPayload,
-    SpawnFailureScope, SquashCommitOid, StdinBinding, StepAuthorityObservation, StepNode,
-    StructuredArtifactObservation, SurvivingProcesses, TagName, TagState, TagTarget,
-    TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason, VersionPolicy, VisionGoal,
-    VisionName, VisionSlug, WorkPackageClassification, WorkPackageGraph, WorkPackageId,
-    WorkPackageMergeObservation, WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment,
-    WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding, append_event,
-    charged_failure_count, classify_claude_result, classify_codex_terminal_usage,
+    Sha256Digest, SiftedCard, SignalNumber, SpawnDispatchOutcome,
+    SpawnFailedDispatchCompletionPayload, SpawnFailureScope, SquashCommitOid, StdinBinding,
+    StepAuthorityObservation, StepNode, StructuredArtifactObservation, SurvivingProcesses, TagName,
+    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason,
+    VersionPolicy, VisionGoal, VisionName, VisionSlug, WorkPackageClassification, WorkPackageGraph,
+    WorkPackageId, WorkPackageMergeObservation, WorkPackageMergeSubject, WorkerArgumentVector,
+    WorkerEnvironment, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
+    append_event, charged_failure_count, classify_claude_result, classify_codex_terminal_usage,
     classify_dispatch_admission, classify_dispatch_check_in, classify_replay_pair,
     classify_seatbelt_capability, compose_gate_arguments, compose_herdr_work_package_dispatch,
     compose_local_patch_brief, compose_package_gate_brief, compose_package_worker_argv,
@@ -130,6 +130,9 @@ const USAGE: &str = concat!(
     "       pce package criteria-run --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce package replay-finding --graph <GRAPH_PATH> --journal <DRIVER_JOURNAL> --package <PACKAGE_ID> --gate <GATE_ID> --finding <INDEX> --outcome <GATE_OUTCOME> --repository <NAME=SOURCE_WORKTREE>... [--prepare <NAME=COMMAND>]...\n",
     "       pce hold open [--root <HOLD_STORE>] --repository <REPOSITORY> --plan-version <VERSION> --package <PACKAGE> --question-kind <KIND> [--report <TEXT>|--report-json <JSON>]\n",
+    "       pce hold sift [--root <HOLD_STORE>] --key <HOLD_KEY> [--by <NAME>] < CARD_JSON\n",
+    "       pce hold feedback [--root <HOLD_STORE>] --by <NAME> --text <TEXT>\n",
+    "       pce hold feedback-list [--root <HOLD_STORE>]\n",
     "       pce hold list [--root <HOLD_STORE>]\n",
     "       pce hold register [--root <HOLD_STORE>] --repository <REPOSITORY> --vision-dir <ABSOLUTE_VISION_DIR> --frozen-graph <ABSOLUTE_GRAPH_PATH> --journal <ABSOLUTE_JOURNAL_PATH> [--herdr-session <NAME>]\n",
     "       pce hold runs [--root <HOLD_STORE>]\n",
@@ -139,7 +142,8 @@ const USAGE: &str = concat!(
     "       pce hold close [--root <HOLD_STORE>] --key <HOLD_KEY> --reason <TEXT>\n",
     "       pce overseer view [--root <HOLD_STORE>] [--heartbeat-stale-ms <MILLISECONDS>]\n",
     "       pce overseer heartbeat [--root <HOLD_STORE>]\n",
-    "       pce overseer serve [--root <HOLD_STORE>] [--listen <LOOPBACK_ADDRESS>] [--session-program <PROGRAM>] [--heartbeat-ms <MILLISECONDS>] [--heartbeat-stale-ms <MILLISECONDS>]\n",
+    "       pce overseer serve [--root <HOLD_STORE>] [--listen <LOOPBACK_ADDRESS>] [--session-program <PROGRAM>] [--session-provider <NAME>] [--session-model <ID>] [--session-thinking <LEVEL>] [--session-skill <PATH>] [--session-cwd <DIR>] [--wake-ms <MILLISECONDS>] [--heartbeat-ms <MILLISECONDS>] [--heartbeat-stale-ms <MILLISECONDS>]\n",
+    "       pce overseer pass-complete [--root <HOLD_STORE>]\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
     "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
@@ -387,6 +391,9 @@ enum OverseerCommand {
     Heartbeat {
         root: Option<PathBuf>,
     },
+    PassComplete {
+        root: Option<PathBuf>,
+    },
     Serve(OverseerServeCommand),
 }
 
@@ -395,12 +402,31 @@ struct OverseerServeCommand {
     root: Option<PathBuf>,
     listen: SocketAddr,
     session_program: PathBuf,
+    session_provider: String,
+    session_model: String,
+    session_thinking: String,
+    session_skill: Option<PathBuf>,
+    session_cwd: Option<PathBuf>,
+    wake_interval: Duration,
     heartbeat_interval: Duration,
     heartbeat_stale: Duration,
 }
 
 #[derive(Debug)]
 enum HoldCommand {
+    Sift {
+        root: Option<PathBuf>,
+        key: HoldKey,
+        by: String,
+    },
+    Feedback {
+        root: Option<PathBuf>,
+        by: String,
+        text: String,
+    },
+    FeedbackList {
+        root: Option<PathBuf>,
+    },
     Open {
         root: Option<PathBuf>,
         identity: HoldIdentity,
@@ -1130,6 +1156,12 @@ fn parse_overseer_command(action: &str, rest: &[String]) -> Result<Command> {
             }
             OverseerCommand::Heartbeat { root }
         }
+        "pass-complete" => {
+            if remove_hold_option(&mut options, &["--heartbeat-ms"])?.is_some() {
+                bail!("--heartbeat-ms is only valid for overseer serve");
+            }
+            OverseerCommand::PassComplete { root }
+        }
         "serve" => {
             let listen = remove_hold_option(&mut options, &["--listen", "--bind"])?
                 .unwrap_or_else(|| "127.0.0.1:0".to_owned())
@@ -1142,12 +1174,34 @@ fn parse_overseer_command(action: &str, rest: &[String]) -> Result<Command> {
                 remove_hold_option(&mut options, &["--session-program"])?
                     .unwrap_or_else(|| "prime-agent".to_owned()),
             );
+            let session_provider = remove_hold_option(&mut options, &["--session-provider"])?
+                .unwrap_or_else(|| OVERSEER_PROVIDER.to_owned());
+            let session_model = remove_hold_option(&mut options, &["--session-model"])?
+                .unwrap_or_else(|| OVERSEER_MODEL.to_owned());
+            let session_thinking = remove_hold_option(&mut options, &["--session-thinking"])?
+                .unwrap_or_else(|| OVERSEER_REASONING_EFFORT.to_owned());
+            let session_skill =
+                remove_hold_option(&mut options, &["--session-skill"])?.map(PathBuf::from);
+            let session_cwd =
+                remove_hold_option(&mut options, &["--session-cwd"])?.map(PathBuf::from);
             let heartbeat_interval =
                 parse_duration_option(&mut options, "--heartbeat-ms", Duration::from_secs(1))?;
+            // The slow wake exists only for work no store change announces; an install waiting for
+            // a quiet fleet is the known case. Five minutes is shorter than any dispatch this
+            // corpus has measured, so a fleet cannot go quiet and stay unnoticed for a whole
+            // dispatch, and long enough that idling costs nothing.
+            let wake_interval =
+                parse_duration_option(&mut options, "--wake-ms", Duration::from_secs(300))?;
             OverseerCommand::Serve(OverseerServeCommand {
                 root,
                 listen,
                 session_program,
+                session_provider,
+                session_model,
+                session_thinking,
+                session_skill,
+                session_cwd,
+                wake_interval,
                 heartbeat_interval,
                 heartbeat_stale,
             })
@@ -1198,12 +1252,20 @@ fn run_overseer(command: OverseerCommand) -> Result<()> {
                 })
                 .context("failed to record overseer heartbeat")
         }
+        OverseerCommand::PassComplete { root } => {
+            let store_root = hold_store_root(root)?;
+            OverseerJournal::new(store_root)
+                .append(&OverseerEvent::PassCompleted {
+                    timestamp: EventTimestamp::new(chrono::Utc::now()),
+                })
+                .context("failed to record overseer pass completion")
+        }
         OverseerCommand::Serve(command) => run_overseer_server(command),
     }
 }
 
 fn run_overseer_server(command: OverseerServeCommand) -> Result<()> {
-    let root = hold_store_root(command.root)?;
+    let root = hold_store_root(command.root.clone())?;
     fs::create_dir_all(&root)
         .with_context(|| format!("failed to create hold store `{}`", root.display()))?;
     let listener = InetTcpListener::bind(command.listen)
@@ -1221,8 +1283,38 @@ fn run_overseer_server(command: OverseerServeCommand) -> Result<()> {
 
     let store = HoldStore::new(root.clone());
     let journal = OverseerJournal::new(&root);
-    let mut child = spawn_overseer_session(&command.session_program, &root, &journal)?;
+    let session_directory = root.join("sessions");
+    fs::create_dir_all(&session_directory)
+        .with_context(|| format!("failed to create `{}`", session_directory.display()))?;
+    // The session's duties include dispatching briefs and running the fix pipeline, which are work
+    // in this repository. The store root is state, not a working directory.
+    let session_cwd = match command.session_cwd.clone() {
+        Some(directory) => directory,
+        None => std::env::current_dir().context("failed to read the overseer working directory")?,
+    };
+    // The spawn must not depend on the installer having linked the skill into the agent's own
+    // skill directory: that omission is what made `/overseer` uninvokable while the install
+    // reported success. Default to the skill this repository ships, by path.
+    let mut command = command;
+    if command.session_skill.is_none() {
+        let shipped = session_cwd.join("skills").join("overseer");
+        if shipped.join("SKILL.md").is_file() {
+            command.session_skill = Some(shipped);
+        }
+    }
+    let command = command;
+
     let mut last_heartbeat = Instant::now() - command.heartbeat_interval;
+    let mut last_periodic_wake = Instant::now();
+    let mut store_fingerprint = observe_store_fingerprint(&root);
+    let mut last_store_scan = Instant::now();
+    let mut session: Option<OverseerSession> = None;
+    let mut consecutive_failures: usize = 0;
+    let mut retry_at: Option<Instant> = None;
+    // The first wake is unconditional: the store may already hold work from before the server
+    // started.
+    let mut pending_wake = Some(OverseerWakeReason::Startup);
+
     loop {
         if last_heartbeat.elapsed() >= command.heartbeat_interval {
             journal
@@ -1232,19 +1324,107 @@ fn run_overseer_server(command: OverseerServeCommand) -> Result<()> {
                 .context("failed to append overseer heartbeat")?;
             last_heartbeat = Instant::now();
         }
-        if let Some(status) = child
-            .try_wait()
-            .context("failed to inspect overseer session")?
+
+        if let Some(active) = session.as_mut()
+            && let Some(status) = active
+                .child
+                .try_wait()
+                .context("failed to inspect overseer session")?
         {
-            journal
-                .append(&OverseerEvent::SessionExited {
-                    timestamp: EventTimestamp::new(chrono::Utc::now()),
-                    code: status.code(),
-                })
-                .context("failed to record overseer session exit")?;
-            std::thread::sleep(Duration::from_millis(100));
-            child = spawn_overseer_session(&command.session_program, &root, &journal)?;
+            {
+                let completed = pass_completed_since(&journal, active.wake_index)?;
+                let detail = read_session_detail(&active.log);
+                journal
+                    .append(&OverseerEvent::SessionExited {
+                        timestamp: EventTimestamp::new(chrono::Utc::now()),
+                        code: status.code(),
+                        detail: detail.clone(),
+                    })
+                    .context("failed to record overseer session exit")?;
+                if completed && status.success() {
+                    consecutive_failures = 0;
+                    retry_at = None;
+                } else {
+                    // A session that exits without completing its pass is replaced, but the
+                    // replacement is bounded and backed off. An unbounded hot loop would spawn a
+                    // fresh high-effort session several times a second.
+                    consecutive_failures += 1;
+                    tracing::warn!(
+                        code = ?status.code(),
+                        failures = consecutive_failures,
+                        detail = ?detail,
+                        "overseer session ended without completing a pass"
+                    );
+                    if consecutive_failures < OVERSEER_MAX_CONSECUTIVE_FAILURES {
+                        retry_at = Some(
+                            Instant::now()
+                                + OVERSEER_RETRY_BACKOFF
+                                    * 4_u32
+                                        .pow(u32::try_from(consecutive_failures - 1).unwrap_or(0)),
+                        );
+                    } else {
+                        // Stop retrying until something new happens. The view reports
+                        // `cannot-start` from the wake that never completed.
+                        retry_at = None;
+                    }
+                }
+                session = None;
+            }
         }
+
+        // The accept loop spins every 10ms; walking the store that often would be the server's
+        // dominant cost for no gain, since a wake it defers by a fraction of a second is a wake
+        // that still happens.
+        let store_changed = if last_store_scan.elapsed() >= OVERSEER_STORE_SCAN_INTERVAL {
+            last_store_scan = Instant::now();
+            let fingerprint = observe_store_fingerprint(&root);
+            let changed = fingerprint != store_fingerprint;
+            store_fingerprint = fingerprint;
+            changed
+        } else {
+            false
+        };
+        if store_changed {
+            // New work, but not evidence that the session can start. A store change must never
+            // clear the failure budget: on an active fleet the store changes continuously, so a
+            // permanently broken session would reset its own counter and respawn forever. Only a
+            // completed pass proves the session can run.
+            pending_wake = Some(OverseerWakeReason::StoreChanged);
+        } else if last_periodic_wake.elapsed() >= command.wake_interval {
+            last_periodic_wake = Instant::now();
+            // The slow wake is the only retry cadence available to an exhausted budget, so a
+            // transient failure still recovers without a human, at a bounded cost.
+            consecutive_failures = 0;
+            retry_at = None;
+            pending_wake = Some(OverseerWakeReason::Periodic);
+        } else if retry_at.is_some_and(|at| Instant::now() >= at) {
+            retry_at = None;
+            pending_wake = Some(OverseerWakeReason::Retry);
+        }
+
+        // An exhausted budget suppresses every wake but the slow periodic one. The suppressed wake
+        // is dropped rather than queued: the store it referred to is still there to be read
+        // whenever a session next starts.
+        if consecutive_failures >= OVERSEER_MAX_CONSECUTIVE_FAILURES
+            && pending_wake.is_some_and(|reason| reason != OverseerWakeReason::Periodic)
+        {
+            pending_wake = None;
+        }
+
+        // Never two passes at once: a wake arriving mid-pass waits for the running one to end.
+        if session.is_none()
+            && let Some(reason) = pending_wake.take()
+        {
+            session = Some(spawn_overseer_session(
+                &command,
+                &session_cwd,
+                &root,
+                &journal,
+                reason,
+            )?);
+            last_periodic_wake = Instant::now();
+        }
+
         match listener.accept() {
             Ok((mut stream, peer)) => {
                 if let Err(error) =
@@ -1261,39 +1441,160 @@ fn run_overseer_server(command: OverseerServeCommand) -> Result<()> {
     }
 }
 
+/// How many consecutive wakes may end without a completed pass before the server stops retrying
+/// and lets the view report `cannot-start`.
+const OVERSEER_MAX_CONSECUTIVE_FAILURES: usize = 3;
+/// The first retry delay. Each further consecutive failure multiplies it by four.
+const OVERSEER_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+/// How often the durable store is walked for changes the overseer has not seen.
+const OVERSEER_STORE_SCAN_INTERVAL: Duration = Duration::from_millis(250);
+/// How much of a failed session's own output is retained in the journal.
+const OVERSEER_DETAIL_BYTES: usize = 2000;
+
+/// One in-flight overseer pass.
+struct OverseerSession {
+    child: std::process::Child,
+    /// Journal position of this pass's `WakeStarted`, so its completion can be told from an
+    /// earlier pass's.
+    wake_index: usize,
+    log: PathBuf,
+}
+
+/// Reports whether the session recorded a completed pass after the given wake.
+fn pass_completed_since(journal: &OverseerJournal, wake_index: usize) -> Result<bool> {
+    let events = journal.read().context("failed to read overseer journal")?;
+    Ok(events
+        .iter()
+        .skip(wake_index)
+        .any(|event| matches!(event, OverseerEvent::PassCompleted { .. })))
+}
+
+/// Reads the tail of a session's own output, so a session that died on an unknown model or flag
+/// leaves a reason rather than silence.
+fn read_session_detail(log: &Path) -> Option<String> {
+    let text = fs::read_to_string(log).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let start = trimmed.len().saturating_sub(OVERSEER_DETAIL_BYTES);
+    Some(
+        trimmed[trimmed
+            .char_indices()
+            .find(|(index, _)| *index >= start)
+            .map_or(0, |(index, _)| index)..]
+            .to_owned(),
+    )
+}
+
+/// A cheap fingerprint of the durable store, excluding the server's own journal and session logs.
+/// A change to it is work the overseer has not seen.
+fn observe_store_fingerprint(root: &Path) -> Vec<(PathBuf, u64, u64)> {
+    let mut observations = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            // `overseer/` is what this loop writes and `sessions/` is session output, so neither
+            // is work. `feedback/` is deliberately excluded too: filed feedback accumulates for a
+            // session the operator runs on purpose, and must not wake the overseer or become a
+            // brief on its own.
+            if path.is_dir() {
+                if name != "overseer" && name != "sessions" && name != "feedback" {
+                    directories.push(path);
+                }
+                continue;
+            }
+            if let Ok(metadata) = entry.metadata() {
+                let modified = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |elapsed| elapsed.as_millis() as u64);
+                observations.push((path, metadata.len(), modified));
+            }
+        }
+    }
+    observations.sort();
+    observations
+}
+
 fn spawn_overseer_session(
-    program: &Path,
+    command: &OverseerServeCommand,
+    session_cwd: &Path,
     store_root: &Path,
     journal: &OverseerJournal,
-) -> Result<std::process::Child> {
-    let child = std::process::Command::new(program)
-        .args([
-            "--model",
-            OVERSEER_MODEL,
-            "--thinking",
-            OVERSEER_REASONING_EFFORT,
-            "/overseer",
-        ])
+    reason: OverseerWakeReason,
+) -> Result<OverseerSession> {
+    // Written before the spawn, so a session that never starts still leaves a record that one was
+    // asked for. This is what makes a failed start visible rather than silent.
+    journal
+        .append(&OverseerEvent::WakeStarted {
+            timestamp: EventTimestamp::new(chrono::Utc::now()),
+            reason,
+        })
+        .context("failed to record overseer wake")?;
+    let wake_index = journal
+        .read()
+        .context("failed to read overseer journal")?
+        .len();
+
+    let log = store_root.join("sessions").join(format!(
+        "{}.log",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.6f")
+    ));
+    let output = fs::File::create(&log)
+        .with_context(|| format!("failed to create session log `{}`", log.display()))?;
+    let errors = output
+        .try_clone()
+        .context("failed to share the session log handle")?;
+
+    let mut process = std::process::Command::new(&command.session_program);
+    process.args([
+        "--provider",
+        &command.session_provider,
+        "--model",
+        &command.session_model,
+        "--thinking",
+        &command.session_thinking,
+    ]);
+    // The spawn must not depend on the installer having linked the skill into `~/.claude/skills`.
+    if let Some(skill) = command.session_skill.as_ref() {
+        process.arg("--skill").arg(skill);
+    }
+    // One pass, then exit. The overseer holds no durable state in context and reconstructs from
+    // the store every turn, so a one-pass session cannot drift.
+    process.arg("--print").arg("/overseer");
+
+    let child = process
         .env("PCE_HOLD_STORE_ROOT", store_root)
-        .current_dir(store_root)
+        .current_dir(session_cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::from(errors))
         .spawn()
         .with_context(|| {
             format!(
                 "failed to spawn overseer session with `{}`",
-                program.display()
+                command.session_program.display()
             )
         })?;
     journal
         .append(&OverseerEvent::SessionSpawned {
             timestamp: EventTimestamp::new(chrono::Utc::now()),
-            model: OVERSEER_MODEL.to_owned(),
-            reasoning_effort: OVERSEER_REASONING_EFFORT.to_owned(),
+            model: command.session_model.clone(),
+            reasoning_effort: command.session_thinking.clone(),
         })
         .context("failed to record overseer session spawn")?;
-    Ok(child)
+    Ok(OverseerSession {
+        child,
+        wake_index,
+        log,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1301,6 +1602,65 @@ fn spawn_overseer_session(
 struct OverseerAnswerRequest {
     by: String,
     answer: String,
+}
+
+/// Sends the operator back to the queue after a form post.
+fn redirect_to(stream: &mut InetTcpStream, location: &str) -> Result<()> {
+    let header = format!(
+        "HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(header.as_bytes())
+        .context("failed to write HTTP redirect")?;
+    stream.flush().context("failed to flush HTTP redirect")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OverseerFeedbackRequest {
+    #[serde(default = "default_feedback_author")]
+    by: String,
+    text: String,
+}
+
+fn default_feedback_author() -> String {
+    "operator".to_owned()
+}
+
+fn parse_overseer_feedback_request(body: &[u8]) -> Result<OverseerFeedbackRequest> {
+    if let Ok(request) = serde_json::from_slice(body) {
+        return Ok(request);
+    }
+    let raw = std::str::from_utf8(body).context("feedback form is not UTF-8")?;
+    let mut values = BTreeMap::new();
+    for field in raw.split('&') {
+        let (name, value) = field
+            .split_once('=')
+            .context("invalid feedback form field")?;
+        values.insert(name, decode_form_component(value)?);
+    }
+    Ok(OverseerFeedbackRequest {
+        by: values.remove("by").unwrap_or_else(default_feedback_author),
+        text: values
+            .remove("text")
+            .context("feedback form is missing `text`")?,
+    })
+}
+
+/// Reads just the answer text from the queue page's form. The page supplies no identity.
+fn parse_overseer_browser_answer(body: &[u8]) -> Result<String> {
+    let raw = std::str::from_utf8(body).context("answer form is not UTF-8")?;
+    for field in raw.split('&') {
+        let (name, value) = field.split_once('=').context("invalid answer form field")?;
+        if name == "answer" {
+            let decoded = decode_form_component(value)?;
+            if decoded.trim().is_empty() {
+                bail!("answer must not be empty");
+            }
+            return Ok(decoded);
+        }
+    }
+    bail!("answer form is missing `answer`")
 }
 
 fn parse_overseer_answer_request(body: &[u8]) -> Result<OverseerAnswerRequest> {
@@ -1438,6 +1798,68 @@ fn serve_overseer_http(
                 ),
             }
         }
+        // Browser form targets. They do the same work as the API paths and send the operator back
+        // to the queue instead of showing him a JSON body.
+        ("POST", target) if target.starts_with("/holds/") && target.ends_with("/answer") => {
+            let raw_key = target
+                .trim_start_matches("/holds/")
+                .trim_end_matches("/answer")
+                .trim_end_matches('/');
+            let result = (|| -> Result<String> {
+                let key = HoldKey::parse(raw_key.to_owned()).context("invalid answer hold key")?;
+                // The page is loopback and single-operator, so it never asks the human who he is.
+                // Attribution is still exact: only the human reaches this form, and the overseer
+                // posts through the API path with its own `by`.
+                let answer = parse_overseer_browser_answer(&body)?;
+                store
+                    .answer(
+                        &key,
+                        "human".to_owned(),
+                        answer,
+                        EventTimestamp::new(chrono::Utc::now()),
+                    )
+                    .context("failed to record answer")?;
+                // Answering never closes a hold; it moves to the overseer, which writes the
+                // closing record itself.
+                store
+                    .route(
+                        &key,
+                        HoldRoute::Overseer,
+                        EventTimestamp::new(chrono::Utc::now()),
+                    )
+                    .context("failed to route the answered hold to the overseer")?;
+                Ok(format!("/#hold-{}", key.as_str()))
+            })();
+            match result {
+                Ok(location) => return redirect_to(stream, &location),
+                Err(error) => (
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    format!("{error:#}").into_bytes(),
+                ),
+            }
+        }
+        ("POST", "/feedback" | "/api/feedback") => {
+            let result = (|| -> Result<()> {
+                let request = parse_overseer_feedback_request(&body)?;
+                store
+                    .file_feedback(
+                        request.by,
+                        request.text,
+                        EventTimestamp::new(chrono::Utc::now()),
+                    )
+                    .context("failed to file feedback")
+            })();
+            match result {
+                Ok(()) if target == "/feedback" => return redirect_to(stream, "/"),
+                Ok(()) => ("200 OK", "application/json", b"{\"filed\":true}".to_vec()),
+                Err(error) => (
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    format!("{error:#}").into_bytes(),
+                ),
+            }
+        }
         _ => (
             "404 Not Found",
             "text/plain; charset=utf-8",
@@ -1489,6 +1911,19 @@ fn parse_hold_command(action: &str, rest: &[String]) -> Result<Command> {
                 report,
             }
         }
+        "sift" => {
+            let key = HoldKey::parse(require_hold_option(&mut options, &["--key"])?)
+                .context("failed to parse --key")?;
+            let by = remove_hold_option(&mut options, &["--by"])?
+                .unwrap_or_else(|| "overseer".to_owned());
+            HoldCommand::Sift { root, key, by }
+        }
+        "feedback" => HoldCommand::Feedback {
+            root,
+            by: require_hold_option(&mut options, &["--by"])?,
+            text: require_hold_option(&mut options, &["--text"])?,
+        },
+        "feedback-list" => HoldCommand::FeedbackList { root },
         "list" => HoldCommand::List { root },
         "register" => {
             let repository = require_hold_option(&mut options, &["--repository"])?;
@@ -1606,6 +2041,33 @@ fn run_hold(command: HoldCommand, input: &mut dyn Read) -> Result<()> {
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
     match command {
+        HoldCommand::Sift { root, key, by } => {
+            let mut raw = String::new();
+            input
+                .read_to_string(&mut raw)
+                .context("failed to read the sifted card from stdin")?;
+            let card: SiftedCard =
+                serde_json::from_str(&raw).context("failed to parse the sifted card")?;
+            let store = HoldStore::new(hold_store_root(root)?);
+            let hold = store
+                .sift(&key, by, card, EventTimestamp::new(chrono::Utc::now()))
+                .context("failed to record the sifted card")?;
+            serde_json::to_writer(&mut output, &hold).context("failed to write hold")?;
+            writeln!(output).context("failed to terminate hold output")
+        }
+        HoldCommand::Feedback { root, by, text } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            store
+                .file_feedback(by, text, EventTimestamp::new(chrono::Utc::now()))
+                .context("failed to file feedback")?;
+            writeln!(output, "{{\"filed\":true}}").context("failed to write feedback result")
+        }
+        HoldCommand::FeedbackList { root } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            let entries = store.feedback().context("failed to read feedback")?;
+            serde_json::to_writer(&mut output, &entries).context("failed to write feedback")?;
+            writeln!(output).context("failed to terminate feedback output")
+        }
         HoldCommand::Open {
             root,
             identity,

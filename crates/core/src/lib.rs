@@ -176,8 +176,9 @@ pub use herdr_dispatch::{
     WorkerEnvironment, compose_herdr_work_package_dispatch, derive_herdr_agent_name,
 };
 pub use hold_store::{
-    Hold, HoldIdentity, HoldKey, HoldRecord, HoldRoute, HoldState, HoldStore, HoldStoreError,
-    OpenDisposition, OpenHoldResult, RegisterRunDisposition, RegisterRunResult,
+    DOOR_QUESTION_KINDS, FeedbackEntry, Hold, HoldIdentity, HoldKey, HoldRecord, HoldRoute,
+    HoldState, HoldStore, HoldStoreError, OpenDisposition, OpenHoldResult, RegisterRunDisposition,
+    RegisterRunResult, SiftedBlock, SiftedCard, SiftedOption,
 };
 pub use landing_readiness::{
     CompletionCriterionIndex, LandingCriterionEvidence, LandingReadinessDecision,
@@ -194,8 +195,9 @@ pub use overseer_rulebook::{
     initial_routing_rules,
 };
 pub use overseer_view::{
-    OVERSEER_MODEL, OVERSEER_REASONING_EFFORT, OverseerEvent, OverseerJournal, OverseerLiveness,
-    OverseerViewError, QueueHold, QueueHoldState, QueueView, derive_queue_view, render_queue_html,
+    OVERSEER_MODEL, OVERSEER_PROVIDER, OVERSEER_REASONING_EFFORT, OverseerEvent, OverseerJournal,
+    OverseerLiveness, OverseerViewError, OverseerWakeReason, QueueHold, QueueHoldState, QueueView,
+    derive_queue_view, render_queue_html,
 };
 pub use run_state::{
     ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BlockingCriterion,

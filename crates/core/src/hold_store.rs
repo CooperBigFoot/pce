@@ -178,10 +178,141 @@ pub enum HoldRecord {
         timestamp: EventTimestamp,
         request: String,
     },
+    /// The operator-facing translation of the opening report, written by the overseer when it
+    /// routes a hold to the human. It is an additional record, never a replacement: the `Opened`
+    /// report remains the authoritative text and stays reachable.
+    Sifted {
+        timestamp: EventTimestamp,
+        /// Who performed the translation. Never the reporting run.
+        by: String,
+        /// The decision needed, as one sentence.
+        title: String,
+        /// The translated narrative, in the operator's register.
+        blocks: Vec<SiftedBlock>,
+        /// Facts the overseer supplied that the reporting run could not see. Kept separate from
+        /// the run's own claims so the operator can tell whose claim he is reading.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overseer_facts: Vec<String>,
+        /// The reporting run's own options, in its own order. The sifter never authors one.
+        options: Vec<SiftedOption>,
+        /// Exactly one sentence for a door kind, absent for every other kind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        consequence: Option<String>,
+    },
     Closed {
         timestamp: EventTimestamp,
         reason: String,
     },
+}
+
+/// One headed passage of translated prose.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SiftedBlock {
+    pub heading: String,
+    pub body: String,
+}
+
+/// One option the reporting run named, carried through in the run's own words.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SiftedOption {
+    pub option: String,
+    /// The run's own consequence for this option, when it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// True only when the reporting run itself recommended this option.
+    #[serde(default)]
+    pub recommended_by_run: bool,
+}
+
+/// One piece of raw operator feedback, awaiting the overseer's judgement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackEntry {
+    pub timestamp: EventTimestamp,
+    pub by: String,
+    pub text: String,
+}
+
+/// The card a hold routed to the human carries, if it has been sifted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SiftedCard {
+    #[serde(default = "default_sifter")]
+    pub by: String,
+    pub title: String,
+    #[serde(default)]
+    pub blocks: Vec<SiftedBlock>,
+    #[serde(default)]
+    pub overseer_facts: Vec<String>,
+    #[serde(default)]
+    pub options: Vec<SiftedOption>,
+    #[serde(default)]
+    pub consequence: Option<String>,
+}
+
+fn default_sifter() -> String {
+    "overseer".to_owned()
+}
+
+/// The question kinds whose answer commits an act the human alone may authorise. Only these carry a
+/// consequence sentence.
+///
+/// Two different things sit in this list and both belong here. The first four are PCE's attributed
+/// doors: mechanisms that open only to a record carrying the human's name. The last two are
+/// irreversible acts with no such mechanism — the ticket's own classification names spend,
+/// publication, and what the run is for. `spend` was omitted when this list was first authored,
+/// which forbade a consequence sentence on exactly the card that most needs one: ruling 12 of the
+/// #186 record was a spend authorisation, and what the money buys is the part only the human can
+/// weigh.
+pub const DOOR_QUESTION_KINDS: [&str; 6] = [
+    "criterion-revision",
+    "worker-environment-extension",
+    "base-currency-acceptance",
+    "park-overrule",
+    "publication",
+    "spend",
+];
+
+/// Hedges whose force must survive translation.
+const MODAL_MARKERS: [&str; 12] = [
+    "may",
+    "might",
+    "could",
+    "appears",
+    "appear",
+    "likely",
+    "reported",
+    "according to",
+    "seems",
+    "possibly",
+    "perhaps",
+    "unclear",
+];
+
+/// Markers of explicit negation, which is modal force of the opposite sign.
+///
+/// This is a presence test: it catches a card that strips a report's negation wholesale, never one
+/// that flips which clause is negated. Clause-level fidelity is not decidable here and stays the
+/// sifter's discipline.
+const NEGATION_MARKERS: [&str; 14] = [
+    "not", "no", "never", "cannot", "n't", "without", "nothing", "none", "neither", "nor",
+    "nobody", "nowhere", "unable", "fails to",
+];
+
+fn contains_marker(haystack: &str, markers: &[&str]) -> bool {
+    let lowered = haystack.to_lowercase();
+    markers.iter().any(|marker| {
+        // A marker carrying a space or an apostrophe is a phrase, matched as a substring.
+        if marker.contains(' ') || marker.contains('\'') {
+            return lowered.contains(marker);
+        }
+        // Whole-word otherwise, so `may` does not fire inside `dismay` nor `no` inside `north`.
+        lowered
+            .split(|character: char| !character.is_alphanumeric())
+            .any(|word| word == *marker)
+    })
 }
 
 impl HoldRecord {
@@ -192,6 +323,7 @@ impl HoldRecord {
             | Self::Routed { timestamp, .. }
             | Self::RouteRefused { timestamp, .. }
             | Self::ReportingRunRequest { timestamp, .. }
+            | Self::Sifted { timestamp, .. }
             | Self::Closed { timestamp, .. } => *timestamp,
         }
     }
@@ -231,6 +363,52 @@ impl Hold {
     }
     pub fn records(&self) -> &[HoldRecord] {
         &self.records
+    }
+    /// The latest operator-facing card, when this hold has been sifted. The opening report stays
+    /// available through [`Hold::report`] whether or not a card exists.
+    pub fn card(&self) -> Option<SiftedCard> {
+        self.records.iter().rev().find_map(|record| match record {
+            HoldRecord::Sifted {
+                by,
+                title,
+                blocks,
+                overseer_facts,
+                options,
+                consequence,
+                ..
+            } => Some(SiftedCard {
+                by: by.clone(),
+                title: title.clone(),
+                blocks: blocks.clone(),
+                overseer_facts: overseer_facts.clone(),
+                options: options.clone(),
+                consequence: consequence.clone(),
+            }),
+            _ => None,
+        })
+    }
+    /// The conversation between the human and the overseer on this hold, oldest first.
+    pub fn thread(&self) -> Vec<(String, String)> {
+        self.records
+            .iter()
+            .filter_map(|record| match record {
+                HoldRecord::Answered { by, answer, .. } => Some((by.clone(), answer.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+    /// What this hold is waiting on while it sits with the overseer.
+    pub fn pending_with_overseer(&self) -> Option<String> {
+        match self.state {
+            HoldState::Open {
+                route: HoldRoute::Overseer,
+            } => self.records.iter().rev().find_map(|record| match record {
+                HoldRecord::Answered { answer, .. } => Some(answer.clone()),
+                HoldRecord::ReportingRunRequest { request, .. } => Some(request.clone()),
+                _ => None,
+            }),
+            _ => None,
+        }
     }
     pub fn is_open(&self) -> bool {
         matches!(self.state, HoldState::Open { .. })
@@ -679,6 +857,205 @@ impl HoldStore {
         self.append_to_open(key, HoldRecord::ReportingRunRequest { timestamp, request })
     }
 
+    /// Records the operator-facing card for a hold, and routes it to the human.
+    ///
+    /// The card is an additional record: the opening report is untouched and stays reachable. The
+    /// constraints below are enforced here rather than asked of the sifter, because a sifter that
+    /// can invent an option or drop a hedge is the failure this card exists to prevent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the card names no option, when a door kind carries no consequence or
+    /// a non-door kind carries one, when the card strips modal force the report carried, or for
+    /// closed holds and filesystem failures.
+    pub fn sift(
+        &self,
+        key: &HoldKey,
+        by: String,
+        card: SiftedCard,
+        timestamp: EventTimestamp,
+    ) -> Result<Hold, HoldStoreError> {
+        if by.trim().is_empty() {
+            return Err(HoldStoreError::EmptyRecordField { field: "by" });
+        }
+        if card.title.trim().is_empty() {
+            return Err(HoldStoreError::EmptyRecordField { field: "title" });
+        }
+        // A report that named no options must go back to its run for options, never to the human
+        // with options the sifter invented.
+        if card.options.is_empty() {
+            return Err(HoldStoreError::CardNamesNoOption);
+        }
+        for option in &card.options {
+            if option.option.trim().is_empty() {
+                return Err(HoldStoreError::EmptyRecordField { field: "option" });
+            }
+        }
+
+        let hold = self.read(key)?;
+        let question_kind = hold.identity().question_kind().to_owned();
+        let is_door = DOOR_QUESTION_KINDS.contains(&question_kind.as_str());
+        match (&card.consequence, is_door) {
+            (Some(sentence), true) => {
+                if sentence.trim().is_empty() {
+                    return Err(HoldStoreError::EmptyRecordField {
+                        field: "consequence",
+                    });
+                }
+                // Exactly one sentence: what is true in the world after the option lands.
+                let terminators = sentence
+                    .trim_end()
+                    .trim_end_matches(['.', '!', '?'])
+                    .matches(['.', '!', '?'])
+                    .count();
+                if terminators > 0 {
+                    return Err(HoldStoreError::ConsequenceIsNotOneSentence {
+                        question_kind: question_kind.clone(),
+                    });
+                }
+            }
+            (None, true) => {
+                return Err(HoldStoreError::DoorCardNeedsConsequence { question_kind });
+            }
+            (Some(_), false) => {
+                return Err(HoldStoreError::NonDoorCardCarriesConsequence { question_kind });
+            }
+            (None, false) => {}
+        }
+
+        // Modal force survives translation. If the report hedges or negates and the whole card
+        // asserts flatly, the sifter promoted a hedge into a fact.
+        let report = hold.report().to_string();
+        let report_hedges = contains_marker(&report, &MODAL_MARKERS);
+        let report_negates = contains_marker(&report, &NEGATION_MARKERS);
+        if report_hedges || report_negates {
+            let mut card_text = format!(
+                "{} {}",
+                card.title,
+                card.consequence.clone().unwrap_or_default()
+            );
+            for block in &card.blocks {
+                card_text.push(' ');
+                card_text.push_str(&block.body);
+            }
+            for option in &card.options {
+                card_text.push(' ');
+                card_text.push_str(&option.option);
+                if let Some(note) = &option.note {
+                    card_text.push(' ');
+                    card_text.push_str(note);
+                }
+            }
+            let card_hedges = contains_marker(&card_text, &MODAL_MARKERS);
+            let card_negates = contains_marker(&card_text, &NEGATION_MARKERS);
+            if report_hedges && !card_hedges {
+                return Err(HoldStoreError::ModalForcePromoted { marker: "hedge" });
+            }
+            if report_negates && !(card_negates || card_hedges) {
+                return Err(HoldStoreError::ModalForcePromoted { marker: "negation" });
+            }
+        }
+
+        self.append_to_open(
+            key,
+            HoldRecord::Sifted {
+                timestamp,
+                by,
+                title: card.title,
+                blocks: card.blocks,
+                overseer_facts: card.overseer_facts,
+                options: card.options,
+                consequence: card.consequence,
+            },
+        )?;
+        self.route(key, HoldRoute::Human, timestamp)
+    }
+
+    /// Files raw operator feedback for the overseer to turn into a brief.
+    ///
+    /// It lands in the store, never in a repository: the server holds no repository authority, and
+    /// writing the brief is the overseer's act, performed with its own judgement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for empty fields or filesystem failures.
+    pub fn file_feedback(
+        &self,
+        by: String,
+        text: String,
+        timestamp: EventTimestamp,
+    ) -> Result<(), HoldStoreError> {
+        if by.trim().is_empty() {
+            return Err(HoldStoreError::EmptyRecordField { field: "by" });
+        }
+        if text.trim().is_empty() {
+            return Err(HoldStoreError::EmptyRecordField { field: "text" });
+        }
+        self.ensure_root()?;
+        let directory = self.root.join("feedback");
+        fs::create_dir_all(&directory).map_err(|source| HoldStoreError::CreateDirectory {
+            path: directory.clone(),
+            source,
+        })?;
+        // Not at the store root: every `*.jsonl` there is a hold file, so a feedback file beside
+        // them makes `list` reject the whole store.
+        let path = directory.join("entries.jsonl");
+        let entry = FeedbackEntry {
+            timestamp,
+            by,
+            text,
+        };
+        let mut bytes = serde_json::to_vec(&entry)
+            .map_err(|source| HoldStoreError::SerializeRecord { source })?;
+        bytes.push(b'\n');
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| HoldStoreError::OpenFile {
+                path: path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .map_err(|source| HoldStoreError::AppendFile {
+                path: path.clone(),
+                source,
+            })?;
+        file.sync_all()
+            .map_err(|source| HoldStoreError::SyncFile { path, source })
+    }
+
+    /// Reads every filed feedback entry in append order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read or holds an incomplete or malformed line.
+    pub fn feedback(&self) -> Result<Vec<FeedbackEntry>, HoldStoreError> {
+        let path = self.root.join("feedback").join("entries.jsonl");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = fs::read(&path).map_err(|source| HoldStoreError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            return Err(HoldStoreError::IncompleteTail { path });
+        }
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .enumerate()
+            .map(|(index, line)| {
+                serde_json::from_slice(line).map_err(|source| HoldStoreError::MalformedRecord {
+                    path: path.clone(),
+                    line: index + 1,
+                    detail: source.to_string(),
+                })
+            })
+            .collect()
+    }
+
     /// Closes an open hold with a retained reason.
     ///
     /// # Errors
@@ -1084,7 +1461,8 @@ fn derive_hold(
             });
         }
         match record {
-            HoldRecord::Opened { .. } | HoldRecord::Answered { .. } => {}
+            HoldRecord::Opened { .. } | HoldRecord::Answered { .. } | HoldRecord::Sifted { .. } => {
+            }
             HoldRecord::Routed { route, .. } => state = HoldState::Open { route: *route },
             HoldRecord::RouteRefused { enforced, .. } => {
                 state = HoldState::Open { route: *enforced };
@@ -1190,6 +1568,27 @@ pub enum HoldStoreError {
     /// A record's required string field is empty.
     #[error("hold record field `{field}` must not be empty")]
     EmptyRecordField { field: &'static str },
+    /// The card named no option, so there is nothing for the human to choose between.
+    #[error(
+        "a sifted card must carry the reporting run's own options; a report naming none belongs back with its run"
+    )]
+    CardNamesNoOption,
+    /// A door kind arrived without its one consequence sentence.
+    #[error(
+        "question kind `{question_kind}` opens an attributed door and requires one consequence sentence"
+    )]
+    DoorCardNeedsConsequence { question_kind: String },
+    /// A non-door kind carried a consequence sentence.
+    #[error(
+        "question kind `{question_kind}` opens no door, so its card carries no consequence sentence"
+    )]
+    NonDoorCardCarriesConsequence { question_kind: String },
+    /// The consequence was more than one sentence.
+    #[error("the consequence for `{question_kind}` must be exactly one sentence")]
+    ConsequenceIsNotOneSentence { question_kind: String },
+    /// The card asserted flatly what the report only hedged or denied.
+    #[error("the card drops the report's {marker}; modal force must survive translation")]
+    ModalForcePromoted { marker: &'static str },
     /// A supplied key is not a lowercase SHA-256 digest.
     #[error("invalid hold key `{value}`; expected 64 lowercase hexadecimal digits")]
     InvalidKey { value: String },

@@ -80,6 +80,33 @@ For a surviving ruling, send one sentence containing: the decision needed, the d
 and the complete named options with consequences. Preserve hedges and attribution. Do not include
 routing history, tool diagnostics, or a request the overseer can answer from the store.
 
+The card is what the operator reads, so write it into the store rather than into a message. Routing
+a hold to the human without one leaves the page showing the reporting run's raw report, which is the
+register this whole party exists to remove:
+
+```bash
+pce hold sift --root "$PCE_HOLD_STORE_ROOT" --key <key> --by overseer <<'CARD'
+{
+  "by": "overseer",
+  "title": "<the decision needed, one sentence>",
+  "blocks": [{"heading": "What happened", "body": "<translated prose>"}],
+  "overseer_facts": ["<a fact the reporting run could not see>"],
+  "options": [{"option": "<the run's own option>", "note": "<the run's own consequence>",
+               "recommended_by_run": true}],
+  "consequence": "<one sentence, door kinds only>"
+}
+CARD
+```
+
+`sift` routes the hold to the human itself. The binary refuses a card that names no option, a door
+kind carrying no consequence sentence or more than one, a non-door kind carrying any, and a card
+that drops a hedge or a negation the report carried. Those refusals are the floor, not the standard:
+options are the reporting run's own and are never authored here, `overseer_facts` carries only what
+the overseer supplied, and `recommended_by_run` marks the run's recommendation, never the sifter's.
+A report that named no options goes back to its run with `pce hold route ... --route reporting-run`.
+
+The opening report is never replaced. It stays on the hold and stays one disclosure away on the page.
+
 Record the human's words unchanged with
 `pce hold answer --root "$PCE_HOLD_STORE_ROOT" --key <key> --by human --answer <exact-answer>`.
 Attribution belongs only to the actor who supplied the words. Then re-read the hold and perform the
@@ -90,3 +117,19 @@ resulting route or close operation.
 Re-list holds after mutations. Report counts by route and state, any dispatched defect brief, and
 any pending install. A dead or missing heartbeat is a liveness fact, not evidence that the queue is
 empty.
+
+One invocation is one pass. The session wakes, performs that pass, and exits; it is never
+long-lived, because it holds nothing in context that the store does not already hold. Finding
+nothing to do is a complete pass, not a reason to stay resident or to poll.
+
+Record the completed pass as the last act of every invocation, including a pass that changed
+nothing:
+
+```bash
+pce overseer pass-complete --root "$PCE_HOLD_STORE_ROOT"
+```
+
+This is the only record that attests to the session rather than to the server that spawned it. The
+heartbeat proves a server loop is running and nothing more. A wake with no completion is read as a
+session that could not start or died mid-pass, and the queue reports it as such, so omitting this
+call reports the overseer broken while it is working.
