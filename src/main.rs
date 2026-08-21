@@ -282,6 +282,7 @@ struct PackageDispatchCommand {
     repositories: Vec<(String, PathBuf)>,
     base_refs: BTreeMap<String, String>,
     conflicted_joins: BTreeMap<String, (CompositionInput, Vec<String>)>,
+    worker_brief_path: Option<PathBuf>,
     herdr_session: Option<HerdrSessionName>,
     environment: BTreeMap<String, String>,
     worker_arguments: Vec<String>,
@@ -1807,6 +1808,7 @@ fn parse_package_dispatch(rest: &[String]) -> Result<Command> {
         repositories,
         base_refs: BTreeMap::new(),
         conflicted_joins: BTreeMap::new(),
+        worker_brief_path: None,
         herdr_session,
         environment,
         worker_arguments,
@@ -2749,6 +2751,7 @@ fn run_composed_driver_gate(
             .collect(),
         base_refs: gate_base_refs,
         conflicted_joins: BTreeMap::new(),
+        worker_brief_path: None,
         herdr_session: command.herdr_session.clone(),
         environment: route_environment(command)?,
         worker_arguments,
@@ -3294,6 +3297,7 @@ fn harden_package_lineage_for_issuance(
                         repair_ref: repository_refs.repair_ref.clone(),
                         lineage_oid: previous_oid,
                         reason: pce_core::StaleRepairCreditReason::RepairUnavailable,
+                        detail: None,
                     },
                 )?;
                 continue;
@@ -3313,6 +3317,7 @@ fn harden_package_lineage_for_issuance(
                         repair_ref: repair_oid,
                         lineage_oid: previous_oid,
                         reason: pce_core::StaleRepairCreditReason::DivergentLineage,
+                        detail: None,
                     },
                 )?;
                 continue;
@@ -3558,6 +3563,12 @@ fn driver_package_base_refs(
                 repository,
                 base_oid,
                 ..
+            }
+            | DriverEvent::PackageJoinRecomposedClean {
+                package,
+                repository,
+                base_oid,
+                ..
             } if package == package_id => Some((repository.clone(), base_oid.clone())),
             _ => None,
         })
@@ -3674,7 +3685,7 @@ fn resolve_driver_startup_paths(mut command: DriverRunCommand) -> Result<DriverR
     Ok(command)
 }
 
-fn refuse_dirty_source_repositories(command: &DriverRunCommand) -> Result<()> {
+fn warn_about_dirty_source_repositories(command: &DriverRunCommand) -> Result<()> {
     let vision_dir = driver_vision_directory(command)?;
     for (name, source) in &command.repositories {
         let root_output = std::process::Command::new("git")
@@ -3726,10 +3737,11 @@ fn refuse_dirty_source_repositories(command: &DriverRunCommand) -> Result<()> {
             );
         }
         if !output.stdout.is_empty() {
-            bail!(
-                "source repository `{name}` is dirty outside the driver vision directory; driver-run requires these paths to be clean while preserving {}:\n{}",
-                vision_dir.display(),
-                String::from_utf8_lossy(&output.stdout).trim_end()
+            tracing::warn!(
+                repository = name,
+                vision_directory = %vision_dir.display(),
+                dirty_paths = %String::from_utf8_lossy(&output.stdout).trim_end(),
+                "source repository is dirty outside the driver vision directory; proceeding because driver inputs use committed refs"
             );
         }
     }
@@ -4125,7 +4137,8 @@ Binding dependency outputs are local and proven. Treat these worktrees as read-o
     let events = read_driver_journal(&command.journal_path)?;
     let conflicts = events
         .iter()
-        .filter_map(|event| match event {
+        .enumerate()
+        .filter_map(|(index, event)| match event {
             DriverEvent::PackageJoinConflicted {
                 package,
                 repository,
@@ -4135,56 +4148,77 @@ Binding dependency outputs are local and proven. Treat these worktrees as read-o
                 conflicted_paths,
                 reason,
                 ..
-            } if package == package_id => Some(json!({
-                "repository": repository,
-                "dependencies": dependencies,
-                "conflicting_input": conflicting_input,
-                "remaining_inputs": remaining_inputs,
-                "conflicted_paths": conflicted_paths,
-                "reason": reason,
-            })),
+            } if package == package_id
+                && !events[index.saturating_add(1)..].iter().any(|later| {
+                    matches!(
+                        later,
+                        DriverEvent::PackageJoinRecomposedClean {
+                            package: resolved_package,
+                            repository: resolved_repository,
+                            ..
+                        } if resolved_package == package_id && resolved_repository == repository
+                    )
+                }) =>
+            {
+                Some(json!({
+                    "repository": repository,
+                    "dependencies": dependencies,
+                    "conflicting_input": conflicting_input,
+                    "remaining_inputs": remaining_inputs,
+                    "conflicted_paths": conflicted_paths,
+                    "reason": reason,
+                }))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
-    if !conflicts.is_empty() {
-        brief.push_str("
+    for conflict in conflicts {
+        let repository = conflict["repository"]
+            .as_str()
+            .context("conflicted join omitted repository")?;
+        brief.push_str(&format!(
+            "
+<!-- pce-conflicted-join-start:{repository} -->
 
 ## Conflicted join: resolve before dependent work
 
 This worktree intentionally starts with an unresolved dependency merge. Resolve it first, preserve every parent's changes without assuming that its current criteria are green, commit the merge, then perform this package's authored work. After completion, the driver will re-run every parent criterion on the joined tree. If one fails, the driver will compare it with the parent's own ref before attributing the failure to this join.
-");
-        for conflict in conflicts {
-            brief.push_str(
-                "
+"
+        ));
+        brief.push_str(
+            "
 <!-- pce-conflicted-join:",
-            );
-            brief.push_str(&serde_json::to_string(&conflict)?);
-            brief.push_str(
-                " -->
+        );
+        brief.push_str(&serde_json::to_string(&conflict)?);
+        brief.push_str(
+            " -->
 ",
-            );
-            brief.push_str(&format!(
-                "
+        );
+        brief.push_str(&format!(
+            "
 Git conflict evidence:
 ```text
 {}
 ```
 ",
-                conflict["reason"]
-                    .as_str()
-                    .unwrap_or("conflict details unavailable")
-            ));
-            brief.push_str(&format!(
-                "Conflicted paths: `{}`. Parent refs: `{}`.
+            conflict["reason"]
+                .as_str()
+                .unwrap_or("conflict details unavailable")
+        ));
+        brief.push_str(&format!(
+            "Conflicted paths: `{}`. Parent refs: `{}`.
 ",
-                conflict["conflicted_paths"], conflict["dependencies"]
-            ));
-            let remaining = conflict["remaining_inputs"].as_array().map_or(0, Vec::len);
-            if remaining > 0 {
-                brief.push_str("After committing this resolution, merge each remaining parent ref listed in the machine record above, resolving any further conflict before dependent work.
+            conflict["conflicted_paths"], conflict["dependencies"]
+        ));
+        let remaining = conflict["remaining_inputs"].as_array().map_or(0, Vec::len);
+        if remaining > 0 {
+            brief.push_str("After committing this resolution, merge each remaining parent ref listed in the machine record above, resolving any further conflict before dependent work.
 ");
-            }
         }
+        brief.push_str(&format!(
+            "<!-- pce-conflicted-join-end:{repository} -->
+"
+        ));
     }
     let follows_environment_closure = events.iter().any(|event| {
         matches!(
@@ -4379,6 +4413,73 @@ fn record_driver_dispatch_identity(
     )
 }
 
+fn resolving_completion_for_clean_package_join(
+    command: &DriverRunCommand,
+    graph: &WorkPackageGraph,
+    repository: &str,
+    conflicting_input: &CompositionInput,
+    clean_base_oid: &str,
+) -> Result<String> {
+    let source = command
+        .repositories
+        .iter()
+        .find(|(name, _)| name == repository)
+        .map(|(_, source)| source)
+        .with_context(|| format!("missing repository mapping for `{repository}`"))?;
+    let events = read_driver_journal(&command.journal_path)?;
+    for event in events.iter().rev() {
+        let DriverEvent::PackageCompleted { package } = event else {
+            continue;
+        };
+        let Some(completed) = graph
+            .packages()
+            .iter()
+            .find(|candidate| candidate.id().as_str() == package)
+        else {
+            continue;
+        };
+        if !completed
+            .repositories()
+            .iter()
+            .any(|name| name == repository)
+        {
+            continue;
+        }
+        let issuance = completed_package_issuance(&events, package)?;
+        let oid = git_oid(source, &package_branch(graph, package, issuance))?;
+        if git_is_ancestor(source, &conflicting_input.oid, &oid)?
+            && git_is_ancestor(source, &oid, clean_base_oid)?
+        {
+            return Ok(package.clone());
+        }
+    }
+    bail!(
+        "clean join for repository {repository} could not be attributed to a completion containing package {} commit {}",
+        conflicting_input.package,
+        conflicting_input.oid
+    )
+}
+
+fn resolving_assembly_completion(
+    source: &Path,
+    packages: &[CompositionInput],
+    conflicting_input: &CompositionInput,
+    clean_base_oid: &str,
+) -> Result<String> {
+    for candidate in packages.iter().rev() {
+        if git_is_ancestor(source, &conflicting_input.oid, &candidate.oid)?
+            && git_is_ancestor(source, &candidate.oid, clean_base_oid)?
+        {
+            return Ok(candidate.package.clone());
+        }
+    }
+    bail!(
+        "clean assembly join could not be attributed to a completion containing package {} commit {}",
+        conflicting_input.package,
+        conflicting_input.oid
+    )
+}
+
 fn issue_driver_package_dispatch(
     command: &DriverRunCommand,
     graph: &WorkPackageGraph,
@@ -4444,23 +4545,67 @@ fn issue_driver_package_dispatch(
         base_refs: driver_package_base_refs(command, package_id)?,
         conflicted_joins: read_driver_journal(&command.journal_path)?
             .into_iter()
-            .filter_map(|event| match event {
-                DriverEvent::PackageJoinConflicted {
-                    package,
-                    repository,
-                    conflicting_input,
-                    conflicted_paths,
-                    ..
-                } if package == package_id => {
-                    Some((repository, (conflicting_input, conflicted_paths)))
+            .fold(BTreeMap::new(), |mut joins, event| {
+                match event {
+                    DriverEvent::PackageJoinConflicted {
+                        package,
+                        repository,
+                        conflicting_input,
+                        conflicted_paths,
+                        ..
+                    } if package == package_id => {
+                        joins.insert(repository, (conflicting_input, conflicted_paths));
+                    }
+                    DriverEvent::PackageJoinRecomposedClean {
+                        package,
+                        repository,
+                        ..
+                    } if package == package_id => {
+                        joins.remove(&repository);
+                    }
+                    _ => {}
                 }
-                _ => None,
-            })
-            .collect(),
+                joins
+            }),
+        worker_brief_path: Some(brief_path),
         herdr_session: command.herdr_session.clone(),
         environment: route_environment(command)?,
         worker_arguments,
     })?;
+    for clean_join in response["recomposed_clean_joins"]
+        .as_array()
+        .context("package dispatch omitted recomposed_clean_joins")?
+    {
+        let repository = clean_join["repository"]
+            .as_str()
+            .context("clean join omitted repository")?;
+        let base_oid = clean_join["base_oid"]
+            .as_str()
+            .context("clean join omitted base oid")?;
+        let conflicting_input: CompositionInput =
+            serde_json::from_value(clean_join["conflicting_input"].clone())
+                .context("clean join omitted conflicting input")?;
+        let resolving_completion = resolving_completion_for_clean_package_join(
+            command,
+            graph,
+            repository,
+            &conflicting_input,
+            base_oid,
+        )?;
+        append_driver_event(
+            &command.journal_path,
+            &DriverEvent::PackageJoinRecomposedClean {
+                package: package_id.to_owned(),
+                repository: repository.to_owned(),
+                formerly_conflicted_paths: serde_json::from_value(
+                    clean_join["formerly_conflicted_paths"].clone(),
+                )
+                .context("clean join omitted formerly conflicted paths")?,
+                resolving_completion,
+                base_oid: base_oid.to_owned(),
+            },
+        )?;
+    }
     record_driver_dispatch_identity(&command.journal_path, package_id, issuance, &response)?;
     record_driver_dispatch_worktrees(command, package_id, issuance, &response)?;
     record_driver_dispatch_panes(&command.journal_path, package_id, issuance, &response)?;
@@ -5064,6 +5209,56 @@ Retain every package guarantee, resolve all unmerged entries, and commit the mer
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConflictReproduction {
+    Reproduced,
+    RecomposedClean,
+    DifferentNonemptySet,
+    InconsistentMergeResult,
+}
+
+fn classify_conflict_reproduction(
+    merge_status: &ExitStatus,
+    actual_paths: &[String],
+    expected_paths: &[String],
+) -> ConflictReproduction {
+    if merge_status.success() && actual_paths.is_empty() {
+        ConflictReproduction::RecomposedClean
+    } else if !merge_status.success() && !actual_paths.is_empty() && actual_paths == expected_paths
+    {
+        ConflictReproduction::Reproduced
+    } else if !actual_paths.is_empty() {
+        ConflictReproduction::DifferentNonemptySet
+    } else {
+        ConflictReproduction::InconsistentMergeResult
+    }
+}
+
+fn rewrite_worker_brief_for_clean_join(brief_path: &Path, repository: &str) -> Result<()> {
+    let mut brief = fs::read_to_string(brief_path)
+        .with_context(|| format!("failed to read worker brief {}", brief_path.display()))?;
+    let start_marker = format!("<!-- pce-conflicted-join-start:{repository} -->");
+    let end_marker = format!("<!-- pce-conflicted-join-end:{repository} -->");
+    let start = brief.find(&start_marker).with_context(|| {
+        format!("worker brief omitted remembered conflict for repository {repository}")
+    })?;
+    let end = brief[start..]
+        .find(&end_marker)
+        .map(|offset| start + offset + end_marker.len())
+        .with_context(|| {
+            format!("worker brief conflict record for repository {repository} was unterminated")
+        })?;
+    let clean_note = format!(
+        "## Recorded join conflict no longer occurs
+
+The recorded conflict for repository `{repository}` no longer occurs. An intervening completion made this join clean, so begin the package's authored work from the recomposed tree.
+"
+    );
+    brief.replace_range(start..end, &clean_note);
+    fs::write(brief_path, brief)
+        .with_context(|| format!("failed to update worker brief {}", brief_path.display()))
+}
+
 fn resolve_assembly_conflict(
     command: &DriverRunCommand,
     repository: &str,
@@ -5092,12 +5287,40 @@ fn resolve_assembly_conflict(
         .map(str::to_owned)
         .filter(|path| !path.is_empty())
         .collect::<Vec<_>>();
-    if merge.status.success() || actual_paths != conflicted_paths {
-        bail!(
-            "assembly conflict for repository {repository} did not reproduce: expected {:?}, observed {:?}",
-            conflicted_paths,
-            actual_paths
-        );
+    match classify_conflict_reproduction(&merge.status, &actual_paths, conflicted_paths) {
+        ConflictReproduction::Reproduced => {}
+        ConflictReproduction::RecomposedClean => {
+            let base_oid = git_oid(checkout, "HEAD")?;
+            append_driver_event(
+                &command.journal_path,
+                &DriverEvent::AssemblyJoinRecomposedClean {
+                    repository: repository.to_owned(),
+                    formerly_conflicted_paths: conflicted_paths.to_vec(),
+                    resolving_completion: resolving_assembly_completion(
+                        source,
+                        packages,
+                        conflicting_input,
+                        &base_oid,
+                    )?,
+                    base_oid: base_oid.clone(),
+                },
+            )?;
+            return Ok(base_oid);
+        }
+        ConflictReproduction::DifferentNonemptySet => {
+            bail!(
+                "assembly conflict for repository {repository} changed paths: expected {:?}, observed {:?}",
+                conflicted_paths,
+                actual_paths
+            );
+        }
+        ConflictReproduction::InconsistentMergeResult => {
+            bail!(
+                "assembly merge for repository {repository} failed without a textual conflict: stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&merge.stdout).trim(),
+                String::from_utf8_lossy(&merge.stderr).trim()
+            );
+        }
     }
     append_driver_event(
         &command.journal_path,
@@ -5427,7 +5650,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                         Some(AmendmentProof::Unconstructable {
                             repository,
                             repair_ref,
-                            ..
+                            detail,
                         }),
                     ..
                 } if execution.exit_status().is_success() => Some((
@@ -5436,11 +5659,12 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                     *finding,
                     repository.clone(),
                     repair_ref.clone(),
+                    detail.clone(),
                 )),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        for (package, gate, finding, repository, repair_ref) in stale_candidates {
+        for (package, gate, finding, repository, repair_ref, detail) in stale_candidates {
             if prior_assembly.iter().any(|event| {
                 matches!(
                     event,
@@ -5479,6 +5703,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                     repair_ref,
                     lineage_oid,
                     reason: pce_core::StaleRepairCreditReason::CounterfactualUnconstructable,
+                    detail: Some(detail),
                 },
             )?;
         }
@@ -5604,8 +5829,7 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                 )),
                 _ => None,
             };
-            if !failed
-                && execution.exit_status().is_success()
+            if execution.exit_status().is_success()
                 && let Some((gate, finding, repository, repair_ref, _)) = unconstructable.clone()
             {
                 let lineage_oid = refs
@@ -5626,6 +5850,9 @@ fn run_driver_assembly(graph: &WorkPackageGraph, command: &DriverRunCommand) -> 
                         repair_ref,
                         lineage_oid,
                         reason: pce_core::StaleRepairCreditReason::CounterfactualUnconstructable,
+                        detail: unconstructable
+                            .as_ref()
+                            .map(|candidate| candidate.4.clone()),
                     },
                 )?;
                 amendment_proof = None;
@@ -6139,7 +6366,7 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
     let command = resolve_driver_startup_paths(command)?;
     let journal_path = command.journal_path.clone();
     let result = (|| {
-        refuse_dirty_source_repositories(&command)?;
+        warn_about_dirty_source_repositories(&command)?;
         run_driver_loop_inner(command)
     })();
     if let Err(error) = &result {
@@ -8849,6 +9076,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             }
         }
     }
+    let mut recomposed_clean_joins = Vec::new();
     for worktree in plan.worktrees() {
         let Some((input, expected_paths)) = command.conflicted_joins.get(worktree.repository())
         else {
@@ -8876,22 +9104,53 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
             .map(str::to_owned)
             .filter(|path| !path.is_empty())
             .collect::<Vec<_>>();
-        if merge.status.success() || actual_paths != *expected_paths {
-            record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
-            reclaim_failed_package_dispatch(
-                &created,
-                plan.worktrees(),
-                &command.repositories,
-                plan.session(),
-            )?;
-            bail!(
-                "conflicted join for repository {} did not reproduce: expected {:?}, observed {:?}; stdout: {}; stderr: {}",
-                worktree.repository(),
-                expected_paths,
-                actual_paths,
-                String::from_utf8_lossy(&merge.stdout).trim(),
-                String::from_utf8_lossy(&merge.stderr).trim()
-            );
+        match classify_conflict_reproduction(&merge.status, &actual_paths, expected_paths) {
+            ConflictReproduction::Reproduced => {}
+            ConflictReproduction::RecomposedClean => {
+                let brief_path = command
+                    .worker_brief_path
+                    .as_deref()
+                    .context("conflicted package dispatch omitted its worker brief path")?;
+                rewrite_worker_brief_for_clean_join(brief_path, worktree.repository())?;
+                recomposed_clean_joins.push(json!({
+                    "repository": worktree.repository(),
+                    "formerly_conflicted_paths": expected_paths,
+                    "conflicting_input": input,
+                    "base_oid": git_oid(worktree.path(), "HEAD")?,
+                }));
+            }
+            ConflictReproduction::DifferentNonemptySet => {
+                record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+                reclaim_failed_package_dispatch(
+                    &created,
+                    plan.worktrees(),
+                    &command.repositories,
+                    plan.session(),
+                )?;
+                bail!(
+                    "conflicted join for repository {} changed paths: expected {:?}, observed {:?}; stdout: {}; stderr: {}",
+                    worktree.repository(),
+                    expected_paths,
+                    actual_paths,
+                    String::from_utf8_lossy(&merge.stdout).trim(),
+                    String::from_utf8_lossy(&merge.stderr).trim()
+                );
+            }
+            ConflictReproduction::InconsistentMergeResult => {
+                record_dispatch_spawn_failure(&command.log_path, &node, issuance.sequence())?;
+                reclaim_failed_package_dispatch(
+                    &created,
+                    plan.worktrees(),
+                    &command.repositories,
+                    plan.session(),
+                )?;
+                bail!(
+                    "merge for conflicted join in repository {} failed without a textual conflict; stdout: {}; stderr: {}",
+                    worktree.repository(),
+                    String::from_utf8_lossy(&merge.stdout).trim(),
+                    String::from_utf8_lossy(&merge.stderr).trim()
+                );
+            }
         }
     }
     let location = match first_location.context("package dispatch composed no worktree") {
@@ -9005,6 +9264,7 @@ fn issue_package_dispatch(command: PackageDispatchCommand) -> Result<Value> {
         "agent_name": plan.agent_name().as_str(),
         "issuance_sequence": issuance.sequence().get(),
         "result_path": result_path.as_str(),
+        "recomposed_clean_joins": recomposed_clean_joins,
         "dispatch_identity": {
             "agent_name": plan.agent_name().as_str(),
             "pane_id": worker_pane_id,
@@ -18811,15 +19071,16 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        BranchFetch, Command, DispatchGraphNode, DispatchLoggingMode, DispatchNode,
-        FORMAT_BOOTSTRAP_CANDIDATES, FetchResult, RepositoryContract, RepositoryRuntime,
-        StatusFormat, USAGE, already_dispatched, execute_effective_criterion,
-        github_pull_request_list_args, lexically_normalized_repository_root,
-        measure_tracked_contract_at_root, observe_git, observe_terminal_line, parse_command,
-        parse_dispatch_graph, parse_tracked_contract, read_at_default_branch_head, read_event_log,
-        read_ratified_acceptance_criteria, readiness_version_policies, render_seatbelt_profile,
-        repository_contracts, run, run_log_read, seatbelt_execution_capability,
-        select_bootstrap_candidate, validated_snapshot_value,
+        BranchFetch, Command, ConflictReproduction, DispatchGraphNode, DispatchLoggingMode,
+        DispatchNode, FORMAT_BOOTSTRAP_CANDIDATES, FetchResult, RepositoryContract,
+        RepositoryRuntime, StatusFormat, USAGE, already_dispatched, classify_conflict_reproduction,
+        execute_effective_criterion, github_pull_request_list_args,
+        lexically_normalized_repository_root, measure_tracked_contract_at_root, observe_git,
+        observe_terminal_line, parse_command, parse_dispatch_graph, parse_tracked_contract,
+        read_at_default_branch_head, read_event_log, read_ratified_acceptance_criteria,
+        readiness_version_policies, render_seatbelt_profile, repository_contracts, run,
+        run_log_read, seatbelt_execution_capability, select_bootstrap_candidate,
+        validated_snapshot_value,
     };
 
     fn ratified_floor() -> AcceptanceCriteria {
@@ -18838,6 +19099,34 @@ None.
 "#,
         )
         .expect("ratified floor fixture")
+    }
+
+    #[test]
+    fn remembered_conflict_classification_distinguishes_clean_exact_and_changed_paths() {
+        let successful = std::process::Command::new("true")
+            .status()
+            .expect("successful status");
+        let failed = std::process::Command::new("false")
+            .status()
+            .expect("failed status");
+        let expected = vec!["shared.txt".to_owned()];
+
+        assert_eq!(
+            classify_conflict_reproduction(&successful, &[], &expected),
+            ConflictReproduction::RecomposedClean
+        );
+        assert_eq!(
+            classify_conflict_reproduction(&failed, &expected, &expected),
+            ConflictReproduction::Reproduced
+        );
+        assert_eq!(
+            classify_conflict_reproduction(&failed, &["other.txt".to_owned()], &expected),
+            ConflictReproduction::DifferentNonemptySet
+        );
+        assert_eq!(
+            classify_conflict_reproduction(&failed, &[], &expected),
+            ConflictReproduction::InconsistentMergeResult
+        );
     }
 
     #[test]
@@ -23996,6 +24285,159 @@ None.
             crate::anchor_assembly_resolution(&repository, "repo", &oid).expect("existing ref");
         assert_eq!(same_reference, reference);
         assert!(!created_again);
+    }
+
+    #[test]
+    fn unconstructable_credit_owned_by_another_package_does_not_reopen_completed_rewriter() {
+        let directory = tempdir().expect("temporary directory");
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).expect("repository directory");
+        initialize_git_repository(&repository);
+        fs::write(repository.join("value"), "base\n").expect("base source");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-m", "base"]);
+        let base = crate::git_oid(&repository, "HEAD").expect("base oid");
+        fs::write(repository.join("value"), "repair\n").expect("repair source");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-m", "credited repair"]);
+        let repair = crate::git_oid(&repository, "HEAD").expect("repair oid");
+        fs::write(repository.join("value"), "rewritten\n").expect("rewritten source");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-m", "later package rewrite"]);
+        let rewrite = crate::git_oid(&repository, "HEAD").expect("rewrite oid");
+        git(
+            &repository,
+            &["branch", "pce/cross-package-stale/B/attempt-1", &repair],
+        );
+        git(
+            &repository,
+            &["branch", "pce/cross-package-stale/A/attempt-2", &rewrite],
+        );
+
+        let graph_path = directory.path().join("graph.json");
+        fs::write(
+            &graph_path,
+            serde_json::to_vec(&json!({
+                "vision":"cross-package-stale", "plan_version":1,
+                "authored_at_refs":{"repo":base},
+                "packages":[
+                    {"id":"A", "title":"later rewriter", "repositories":["repo"],
+                     "criteria":[{"name":"unrelated assembly failure", "input":"repo", "observation":"fails", "command":"false"}],
+                     "depends_on":[]},
+                    {"id":"B", "title":"repair owner", "repositories":["repo"],
+                     "criteria":[{"name":"b remains valid", "input":"repo", "observation":"valid", "command":"true"}],
+                     "depends_on":[]}
+                ]
+            }))
+            .expect("graph JSON"),
+        )
+        .expect("graph write");
+        let journal_path = directory.path().join("events.jsonl");
+        let amendment_command = "grep -Eq '^(repair|rewritten)$' value";
+        let execution = |code| {
+            pce_core::CriterionExecution::new(
+                amendment_command.to_owned(),
+                "repo".to_owned(),
+                pce_core::CommandExitStatus::Exited { code },
+                String::new(),
+                String::new(),
+            )
+        };
+        for event in [
+            pce_core::DriverEvent::WorkerDispatched {
+                package: "B".to_owned(),
+                issuance: 1,
+            },
+            pce_core::DriverEvent::WorkerDone {
+                package: "B".to_owned(),
+                issuance: 1,
+            },
+            pce_core::DriverEvent::FindingReplayed {
+                package: "B".to_owned(),
+                gate: "gate-b".to_owned(),
+                finding: 0,
+                command: amendment_command.to_owned(),
+                repository_refs: vec![pce_core::AmendmentRepositoryRefs {
+                    repository: "repo".to_owned(),
+                    witness_ref: base.clone(),
+                    repair_ref: repair.clone(),
+                }],
+                witness: execution(1),
+                repair: execution(0),
+                decision: pce_core::FindingReplayDecision::Accepted,
+            },
+            pce_core::DriverEvent::GateFinished {
+                package: "B".to_owned(),
+                gate: "gate-b".to_owned(),
+            },
+            pce_core::DriverEvent::PackageRepairMerged {
+                package: "B".to_owned(),
+                repository: "repo".to_owned(),
+                gate: "gate-b".to_owned(),
+                finding: 0,
+                repair_ref: repair.clone(),
+                previous_oid: base,
+                hardened_oid: repair.clone(),
+            },
+            pce_core::DriverEvent::PackageCompleted {
+                package: "B".to_owned(),
+            },
+            pce_core::DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 2,
+            },
+            pce_core::DriverEvent::WorkerDone {
+                package: "A".to_owned(),
+                issuance: 2,
+            },
+            pce_core::DriverEvent::PackageCompleted {
+                package: "A".to_owned(),
+            },
+        ] {
+            crate::append_driver_event(&journal_path, &event).expect("journal event");
+        }
+        let command = crate::DriverRunCommand {
+            graph_path: graph_path.clone(),
+            journal_path: journal_path.clone(),
+            repositories: vec![("repo".to_owned(), repository)],
+            preparations: std::collections::BTreeMap::new(),
+            worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
+            override_risk_ordering: false,
+            recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
+            worker_override: None,
+            wait_timeout: None,
+        };
+        let graph = crate::read_driver_graph(&graph_path).expect("graph");
+
+        crate::run_driver_assembly(&graph, &command).expect("assembly evaluation");
+
+        let events = crate::read_driver_journal(&journal_path).expect("assembly journal");
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            pce_core::DriverEvent::PackageHardeningInvalidated { .. }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            pce_core::DriverEvent::RepairCreditStale {
+                package, repair_ref,
+                reason: pce_core::StaleRepairCreditReason::CounterfactualUnconstructable,
+                ..
+            } if package == "B" && repair_ref == &repair
+        )));
+        assert_eq!(pce_core::charged_failure_count(&events, "A"), 0);
+        let snapshot = pce_core::derive_driver_snapshot(&graph, &events, false).expect("snapshot");
+        assert!(
+            snapshot
+                .packages()
+                .iter()
+                .all(|(_, state)| matches!(state, pce_core::DriverPackageState::Complete))
+        );
+        assert!(matches!(
+            snapshot.assembly(),
+            pce_core::DriverAssemblyState::Failed { .. }
+        ));
     }
 
     #[test]
