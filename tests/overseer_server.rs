@@ -210,6 +210,22 @@ impl Drop for ServerFixture {
 }
 
 #[test]
+fn malformed_http_request_does_not_stop_the_server() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let server = ServerFixture::start("sleep 2", cwd.path());
+
+    let malformed = server.request(b"GET / HTTP/1.1\r\nContent-Length: nope\r\n\r\n");
+    assert!(malformed.is_empty());
+
+    let response = server.request(b"GET /api/view HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(
+        response.starts_with(b"HTTP/1.1 200 OK"),
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
+}
+
+#[test]
 fn session_exit_is_respawned() {
     let cwd = tempfile::tempdir().expect("cwd");
     let server = ServerFixture::start("exit 17", cwd.path());
