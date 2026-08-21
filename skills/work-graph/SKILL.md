@@ -408,6 +408,24 @@ full record thread before acting. If it remains unanswered or remains routed to 
 human, wait: do not notify the human separately and do not relaunch the blocked driver. Resume only
 from a recorded answer or route that supplies a goal-preserving action allowed by section 6.
 
+`pce overseer serve` watches for the durable `reporting-run` route and starts a fresh, one-pass
+supervisor in the owning repository. This is a cold reconstruction, not evidence that the previous
+agent session survived. At the start of such a pass, read `.pce/run-wake.jsonl`, the complete hold
+thread, `run.json`, and the driver journal. Treat the route as permission to inspect the new record,
+not as permission to mutate a repository or relaunch the driver. Name the exact section 6 action and
+the record that authorizes it before acting. If the answer is ambiguous, asks only for more options,
+or otherwise settles no allowed action, append that reason to `supervision.md`, leave the driver
+stopped, and end the pass successfully. A later hold record is a new wake generation.
+
+Immediately before every driver launch or `tmux respawn-pane`, observe the one configured tmux pane
+again. Refuse a live, missing, multiple, or unparseable pane and record the observation in
+`supervision.md`; never use `respawn-pane -k` as a way to make an uncertain pane safe. The binary also
+holds an advisory lease for the resolved journal for the complete `driver-run` process. Lease
+contention is proof that another driver owns that journal now: do not retry around it in the same
+pass. The overseer records every automatic wake, refusal, spawn, and exit in
+`<vision-dir>/.pce/run-wake.jsonl` and appends a summary to `supervision.md`; use those records rather
+than claiming that a wake occurred from a route or session label alone.
+
 A criterion ruling or recurring repository-contract defect that needs a party outside the run also
 opens a hold with its own stable `question-kind`, exact evidence, and named options. It does not use
 a notify-and-stop path. If hold creation fails, retain the failure in `supervision.md` and report the
