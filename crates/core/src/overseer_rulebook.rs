@@ -4,6 +4,7 @@
 //! part of every rule so a shared symptom cannot make two different causes equivalent.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Where a starting routing rule came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub enum RoutingRuleOrigin {
     RecordedRuling,
     NamedDefectClass,
+    Learned,
 }
 
 /// The authority that can settle a report matching a rule.
@@ -46,6 +48,39 @@ pub struct RoutingRule {
 }
 
 impl RoutingRule {
+    /// Parses a proposed routing rule after raw input has crossed the composition boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RoutingRuleParseError::EmptyField`] when a required field is blank.
+    pub fn parse(
+        id: impl Into<String>,
+        origin: RoutingRuleOrigin,
+        classification: RoutingRuleClass,
+        action: RoutingRuleAction,
+        discriminating_fact: impl Into<String>,
+        instruction: impl Into<String>,
+    ) -> Result<Self, RoutingRuleParseError> {
+        let rule = Self {
+            id: id.into(),
+            origin,
+            classification,
+            action,
+            discriminating_fact: discriminating_fact.into(),
+            instruction: instruction.into(),
+        };
+        for (field, value) in [
+            ("id", rule.id.as_str()),
+            ("discriminating_fact", rule.discriminating_fact.as_str()),
+            ("instruction", rule.instruction.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(RoutingRuleParseError::EmptyField { field });
+            }
+        }
+        Ok(rule)
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -288,6 +323,14 @@ const NAMED_DEFECT_CLASSES: &[SeedRule] = &[
         instruction: "Brief a documentation repair tied to the authoritative evidence.",
     },
 ];
+
+/// A proposed rule could not be converted into a domain rule.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum RoutingRuleParseError {
+    /// A required rule field is blank.
+    #[error("routing rule field `{field}` must not be empty")]
+    EmptyField { field: &'static str },
+}
 
 /// Returns the immutable corpus-derived rules in stable installation order.
 pub fn initial_routing_rules() -> Vec<RoutingRule> {

@@ -1248,12 +1248,10 @@ fn run_hold(command: HoldCommand, input: &mut dyn Read) -> Result<()> {
         }
         HoldCommand::Route { root, key, route } => {
             let store = HoldStore::new(hold_store_root(root)?);
-            write_json_line(
-                &mut output,
-                &store
-                    .route(&key, route, EventTimestamp::new(chrono::Utc::now()))
-                    .context("failed to route hold")?,
-            )
+            let decision =
+                pce_core::route_hold(&store, &key, route, EventTimestamp::new(chrono::Utc::now()))
+                    .context("failed to route hold")?;
+            write_json_line(&mut output, decision.hold())
         }
         HoldCommand::Close { root, key, reason } => {
             let store = HoldStore::new(hold_store_root(root)?);
