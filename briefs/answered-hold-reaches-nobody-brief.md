@@ -3,8 +3,7 @@
 Status: READY TO DISPATCH — no grill. The decisions below are evidence-resolvable; examine the
 evidence, decide, implement, and record what you decided and why in your completion report and
 `CONTEXT.md`. Boundary: if a decision would change ratified doctrine (an ADR, a frozen criterion),
-stop and report. Written 2026-08-21 from the second live overseer run, against `main` at `3b0b777`
-plus the uncommitted first-run fixes.
+stop and report. Written 2026-08-21 from the second live overseer run, against `main` at `862f1c8`.
 
 **This is the missing half of the loop, and it makes the built half inert.** Four conforming cards are
 waiting for the operator right now. If he answered all four, nothing would happen.
@@ -105,7 +104,7 @@ thing you are proving.
 ## Falsifiers worth pairing
 
 - A registered run whose hold is answered with a goal-preserving action resumes, with no human action
-  beyond answering in the queue. On `3b0b777` nothing happens; this is the pairing.
+  beyond answering in the queue. On `862f1c8` nothing happens; this is the pairing.
 - A hold answered with something that settles nothing leaves the run waiting and records why.
 - A wake attempted while a driver is already running for that journal is refused and recorded, and no
   second driver starts.

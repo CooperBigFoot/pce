@@ -3,8 +3,7 @@
 Status: READY TO DISPATCH — no grill. The decisions below are evidence-resolvable; examine the
 evidence, decide, implement, and record what you decided and why in your completion report and
 `CONTEXT.md`. Boundary: if a decision would change ratified doctrine (an ADR, a frozen criterion),
-stop and report. Written 2026-08-21 from the second live overseer run, against `main` at `3b0b777`
-plus the uncommitted first-run fixes.
+stop and report. Written 2026-08-21 from the second live overseer run, against `main` at `862f1c8`.
 
 **What the last brief achieved, so it is not disturbed.** Four cards were written under the new
 limits: 178–186 words against a 200-word budget, titles of 7–9 words, two blocks each, correct

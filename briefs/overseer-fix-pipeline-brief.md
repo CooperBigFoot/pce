@@ -3,7 +3,7 @@
 Status: READY TO DISPATCH — no grill. The decisions below are evidence-resolvable; examine the
 evidence, decide, implement, and record what you decided and why in your completion report and
 `CONTEXT.md`. Boundary: if a decision would change ratified doctrine (an ADR, a frozen criterion),
-stop and report. Written 2026-08-21 against `main` at `3b0b777` plus the uncommitted first-run fixes.
+stop and report. Written 2026-08-21 against `main` at `862f1c8`.
 
 ## The defect
 
