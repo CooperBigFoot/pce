@@ -121,3 +121,26 @@ fn the_skill_declares_the_operator_card_register() {
     assert!(skill.contains("Never author an option and never advocate."));
     assert!(skill.contains("never create a recommendation block"));
 }
+
+#[test]
+fn the_skill_bounds_glossary_reads_and_records_fact_search_results() {
+    let skill = fs::read_to_string("skills/overseer/SKILL.md").unwrap();
+    for required in [
+        "vision.md",
+        "named criterion text",
+        "labelled overseer fact",
+        "Do not read the journal",
+        "overseer facts supplied: 0",
+        "Replies use the same register",
+        "what stops being true",
+        "what becomes possible",
+        "latest conversational record is `answered` by `human`",
+        "even when that answer reclaimed the",
+    ] {
+        assert!(
+            skill.contains(required),
+            "missing overseer rule: {required}"
+        );
+    }
+    assert!(!skill.contains("frozen graphs, journals, daemon records"));
+}

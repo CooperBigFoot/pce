@@ -295,7 +295,7 @@ fn answering_does_not_close_a_hold_and_the_page_says_so() {
 /// The three open states are visible as text, not only as attributes, and a hold with the overseer
 /// offers no answer box.
 #[test]
-fn the_states_are_visible_and_only_the_human_queue_can_be_answered() {
+fn every_open_state_is_visible_and_answerable() {
     let (_directory, store, key) = store_with_hold("park-overrule", "Two ways to go.");
     let hold_key = pce_core::HoldKey::parse(key).expect("key");
     store
@@ -324,8 +324,8 @@ fn the_states_are_visible_and_only_the_human_queue_can_be_answered() {
     let with_overseer = html_for(&store);
     assert!(with_overseer.contains("with the overseer"));
     assert!(
-        !with_overseer.contains("Your answer"),
-        "a hold sitting with the overseer must not offer an answer box"
+        with_overseer.contains("Your answer"),
+        "routing assigns the next action but must not silence the human"
     );
     assert!(
         with_overseer.contains("What does it cost?"),
@@ -369,6 +369,13 @@ fn the_four_liveness_states_are_distinguishable() {
             reason: OverseerWakeReason::Startup,
         })
         .expect("wake");
+    journal
+        .append(&OverseerEvent::SessionSpawned {
+            timestamp: recent,
+            model: "model".to_owned(),
+            reasoning_effort: "high".to_owned(),
+        })
+        .expect("spawn");
     assert!(render(&journal).contains("overseer is working"));
 
     journal
@@ -606,4 +613,213 @@ fn persisted_pre_act_sifted_records_still_replay() {
             ..
         }
     ));
+}
+
+#[test]
+fn overseer_replies_obey_the_human_register_and_preserve_hedges() {
+    let (_directory, store, key) = store_with_hold(
+        "explanation",
+        "The repair may have become stale after later work.",
+    );
+    let key = pce_core::HoldKey::parse(key).expect("key");
+    let long = std::iter::repeat_n("technical", 94)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let refused = store.answer(&key, "overseer".to_owned(), long, at(1));
+    assert!(
+        matches!(refused, Err(HoldStoreError::ReplyWordLimitExceeded { .. })),
+        "a 94-word overseer reply must not cross to the human: {refused:?}"
+    );
+
+    let promoted = store.answer(
+        &key,
+        "overseer".to_owned(),
+        "The repair became stale after later work.".to_owned(),
+        at(2),
+    );
+    assert!(
+        matches!(promoted, Err(HoldStoreError::ModalForcePromoted { .. })),
+        "a reply must not promote the report's hedge: {promoted:?}"
+    );
+
+    store
+        .answer(
+            &key,
+            "overseer".to_owned(),
+            "The repair may have become stale after later work.".to_owned(),
+            at(3),
+        )
+        .expect("plain reply preserving the hedge");
+    store
+        .answer(
+            &key,
+            "human".to_owned(),
+            "What did option B cost?".to_owned(),
+            at(4),
+        )
+        .expect("unrelated human question");
+    store
+        .answer(
+            &key,
+            "overseer".to_owned(),
+            "It cost five dollars.".to_owned(),
+            at(5),
+        )
+        .expect("the opening hedge does not contaminate an unrelated reply");
+
+    let (_directory, store, key) = store_with_hold("explanation", "The run stopped.");
+    let key = pce_core::HoldKey::parse(key).expect("key");
+    store
+        .answer(
+            &key,
+            "human".to_owned(),
+            "Could this lose data?".to_owned(),
+            at(1),
+        )
+        .expect("human question");
+    assert!(matches!(
+        store.answer(
+            &key,
+            "overseer".to_owned(),
+            "This loses data.".to_owned(),
+            at(2),
+        ),
+        Err(HoldStoreError::ModalForcePromoted { .. })
+    ));
+
+    let disguised = std::iter::repeat_n("technical", 94)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(matches!(
+        store.answer(&key, "Human".to_owned(), disguised, at(3)),
+        Err(HoldStoreError::ReplyWordLimitExceeded { .. })
+    ));
+}
+
+#[test]
+fn human_can_write_into_any_open_hold_and_reclaims_its_route() {
+    for (index, route) in [HoldRoute::Overseer, HoldRoute::ReportingRun]
+        .into_iter()
+        .enumerate()
+    {
+        let (_directory, store, key) = store_with_hold("question", "Choose one.");
+        let key = pce_core::HoldKey::parse(key).expect("key");
+        store.route(&key, route, at(1)).expect("route away");
+        let html = html_for(&store);
+        assert!(
+            html.contains("Your answer"),
+            "open route {route:?} silenced the human"
+        );
+        let answered = store
+            .answer(
+                &key,
+                "human".to_owned(),
+                format!("Stop and explain {index}."),
+                at(2),
+            )
+            .expect("human interjection");
+        assert_eq!(
+            answered.state(),
+            pce_core::HoldState::Open {
+                route: HoldRoute::Human
+            },
+            "a human interjection must reclaim the route"
+        );
+    }
+
+    let (_directory, store, key) = store_with_hold("question", "Choose one.");
+    let key = pce_core::HoldKey::parse(key).expect("key");
+    store
+        .close(&key, "settled".to_owned(), at(1))
+        .expect("close");
+    assert!(matches!(
+        store.answer(&key, "human".to_owned(), "Wait.".to_owned(), at(2)),
+        Err(HoldStoreError::HoldClosed { .. })
+    ));
+}
+
+#[test]
+fn rail_shows_requested_act_not_stable_question_hash() {
+    let question_kind = "work-graph-terminal-stop:d3376e0deadbeef";
+    let (_directory, store, key) = store_with_hold(question_kind, "Revise or stop.");
+    let key = pce_core::HoldKey::parse(key).expect("key");
+    store
+        .sift(&key, "overseer".to_owned(), card(), at(1))
+        .expect("sift");
+    let html = html_for(&store);
+    let rail = html
+        .split("<nav class=\"rail\"")
+        .nth(1)
+        .expect("rail")
+        .split("</nav>")
+        .next()
+        .expect("rail end");
+    assert!(
+        !rail.contains(question_kind),
+        "rail leaked stable identity: {rail}"
+    );
+    assert!(
+        rail.contains("criterion revision"),
+        "rail omitted requested act: {rail}"
+    );
+}
+
+#[test]
+fn markdown_is_rendered_in_cards_and_replies() {
+    let (_directory, store, key) = store_with_hold("question", "Choose one.");
+    let key = pce_core::HoldKey::parse(key).expect("key");
+    let mut markdown = card();
+    markdown.blocks[0].body =
+        "Use **the safe path** with `src/main.rs`.\n\n- Keep proof\n- Keep scope".to_owned();
+    store
+        .sift(&key, "overseer".to_owned(), markdown, at(1))
+        .expect("sift");
+    store
+        .answer(
+            &key,
+            "overseer".to_owned(),
+            "Run:\n\n```text\ngit status\n```".to_owned(),
+            at(2),
+        )
+        .expect("reply");
+    let html = html_for(&store);
+    assert!(html.contains("<strong>the safe path</strong>"));
+    assert!(html.contains("<code>src/main.rs</code>"));
+    assert!(html.contains("<ul><li>Keep proof</li><li>Keep scope</li></ul>"));
+    assert!(html.contains("<pre><code class=\"language-text\">git status"));
+}
+
+#[test]
+fn liveness_stays_working_until_the_spawned_process_exits() {
+    use pce_core::{OverseerEvent, OverseerWakeReason};
+    let directory = tempfile::tempdir().expect("root");
+    let store = HoldStore::new(directory.path().join("holds"));
+    let journal = OverseerJournal::new(store.root());
+    for event in [
+        OverseerEvent::Heartbeat { timestamp: at(0) },
+        OverseerEvent::WakeStarted {
+            timestamp: at(1),
+            reason: OverseerWakeReason::Startup,
+        },
+        OverseerEvent::SessionSpawned {
+            timestamp: at(2),
+            model: "m".to_owned(),
+            reasoning_effort: "high".to_owned(),
+        },
+        OverseerEvent::PassCompleted { timestamp: at(3) },
+    ] {
+        journal.append(&event).expect("event");
+    }
+    let now = at(4).as_datetime().to_owned();
+    let view = derive_queue_view(&store, &journal, now, Duration::from_secs(60)).expect("view");
+    assert_eq!(view.overseer, pce_core::OverseerLiveness::Working);
+    journal
+        .append(&OverseerEvent::SessionExited {
+            timestamp: at(4),
+            code: Some(0),
+            detail: None,
+        })
+        .expect("exit");
+    let view = derive_queue_view(&store, &journal, now, Duration::from_secs(60)).expect("view");
+    assert_eq!(view.overseer, pce_core::OverseerLiveness::Idle);
 }

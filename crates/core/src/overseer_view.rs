@@ -200,7 +200,7 @@ impl OverseerJournal {
 ///
 /// Nothing to do and cannot start are different facts and must be distinguishable at a glance. The
 /// heartbeat attests to the server process only; `Working`, `Idle` and `CannotStart` are derived
-/// from the session's own wake and completion records.
+/// from the server's child-process records and the session's completion record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OverseerLiveness {
@@ -293,24 +293,22 @@ pub fn derive_queue_view(
         let elapsed = now.signed_duration_since(*timestamp).num_milliseconds();
         elapsed >= 0 && elapsed <= i64::try_from(stale_after.as_millis()).unwrap_or(i64::MAX)
     });
-    // The heartbeat proves only that the server loop is running. Session state is a separate
-    // question, answered by the session's own wake and completion records.
+    // The heartbeat proves only that the server loop is running. Process state comes from the
+    // server's spawn and reap records. A session's completion claim cannot make a live child idle.
     let last = |predicate: fn(&OverseerEvent) -> bool| events.iter().rposition(predicate);
     let last_wake = last(|event| matches!(event, OverseerEvent::WakeStarted { .. }));
+    let last_spawned = last(|event| matches!(event, OverseerEvent::SessionSpawned { .. }));
     let last_completed = last(|event| matches!(event, OverseerEvent::PassCompleted { .. }));
     let last_exited = last(|event| matches!(event, OverseerEvent::SessionExited { .. }));
+    let child_is_alive =
+        last_spawned.is_some_and(|spawned| last_exited.is_none_or(|exited| exited < spawned));
     let overseer = if !heartbeat_fresh {
         OverseerLiveness::NotRunning
+    } else if child_is_alive {
+        OverseerLiveness::Working
     } else {
         match last_wake {
-            // A wake that has neither completed nor ended is a pass in flight.
-            Some(wake)
-                if last_completed.is_none_or(|completed| completed < wake)
-                    && last_exited.is_none_or(|exited| exited < wake) =>
-            {
-                OverseerLiveness::Working
-            }
-            // A wake that ended without ever completing its pass is a session that could not run.
+            // A wake that ended without a completed pass is a child that could not run its pass.
             Some(wake)
                 if last_completed.is_none_or(|completed| completed < wake)
                     && last_exited.is_some_and(|exited| exited > wake) =>
@@ -496,10 +494,10 @@ display:flex;flex-direction:column;gap:6px;text-decoration:none;color:inherit;cu
 .item:hover{background:var(--surface-2)}
 .item.is-selected{background:var(--surface-2);border-left-color:var(--accent)}
 .item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
-.item-top{display:flex;align-items:center;gap:8px}
-.repo{font-family:var(--mono);font-weight:600;font-size:13.5px;color:var(--ink)}
+.item-top{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%}
+.repo{font-family:var(--mono);font-weight:600;font-size:13.5px;color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .age{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--ink-3);font-variant-numeric:tabular-nums}
-.item-line{font-family:var(--serif);font-size:14px;line-height:1.4;color:var(--ink-2);text-wrap:pretty}
+.item-line{font-family:var(--serif);font-size:14px;line-height:1.4;color:var(--ink-2);text-wrap:pretty;overflow-wrap:anywhere;max-width:100%}
 .state{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;color:var(--ink-3);display:flex;align-items:center;gap:5px}
 .state::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
 .state-waiting-for-human{color:var(--accent)}
@@ -507,7 +505,7 @@ display:flex;flex-direction:column;gap:6px;text-decoration:none;color:inherit;cu
 .state-with-reporting-run{color:var(--ink-3)}
 .state-closed{color:var(--ink-3)}
 .tag{font-family:var(--mono);font-size:10.5px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;
-padding:2px 6px;border-radius:2px;white-space:nowrap;background:var(--surface-2);color:var(--ink-2)}
+padding:2px 6px;border-radius:2px;white-space:nowrap;background:var(--surface-2);color:var(--ink-2);max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .tag-door{background:var(--accent-soft);color:var(--accent)}
 .deck{min-width:0}
 .card{background:var(--surface);border:1px solid var(--rule);border-radius:3px;box-shadow:var(--shadow);
@@ -517,7 +515,12 @@ padding:26px 30px 24px;display:none;flex-direction:column;gap:20px}
 .card h1{margin:0;font-family:var(--sans);font-size:21px;font-weight:600;line-height:1.25;letter-spacing:-.01em;text-wrap:balance}
 .block{display:flex;flex-direction:column;gap:7px}
 .block h3{margin:0;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
-.block p{margin:0;font-family:var(--serif);font-size:16.5px;line-height:1.55;max-width:66ch;text-wrap:pretty}
+.markdown{font-family:var(--serif);font-size:16.5px;line-height:1.55;max-width:66ch;text-wrap:pretty;min-width:0}
+.markdown p{margin:0 0 .65em}.markdown p:last-child{margin-bottom:0}
+.markdown ul{margin:.35em 0;padding-left:1.35em}.markdown li{margin:.15em 0}
+.markdown code{font-family:var(--mono);font-size:.86em;background:var(--surface-2);border:1px solid var(--rule-soft);border-radius:2px;padding:.08em .3em;overflow-wrap:anywhere}
+.markdown pre{margin:.5em 0;padding:11px 13px;background:var(--surface-2);border:1px solid var(--rule-soft);border-radius:3px;overflow:auto;max-width:100%}
+.markdown pre code{padding:0;border:0;background:none;white-space:pre}
 .options{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px;counter-reset:opt}
 .options li{display:grid;grid-template-columns:26px minmax(0,1fr);gap:4px;padding:9px 10px;border-radius:3px;
 font-family:var(--serif);font-size:16px;line-height:1.5;max-width:68ch}
@@ -537,7 +540,7 @@ padding:12px 16px;font-size:14px;color:var(--ink-2);display:flex;gap:10px;align-
 .turn{display:flex;gap:10px;align-items:flex-start}
 .who{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);
 padding-top:4px;width:70px;flex:none;text-align:right;overflow-wrap:anywhere}
-.turn p{margin:0;font-family:var(--serif);font-size:15.5px;line-height:1.5;max-width:62ch;color:var(--ink-2)}
+.turn .markdown{font-size:15.5px;line-height:1.5;max-width:62ch;color:var(--ink-2)}
 .answer{border-top:1px solid var(--rule);padding-top:18px;display:flex;flex-direction:column;gap:10px}
 .answer label{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
 .answer input,.answer textarea,.feedback textarea{width:100%;padding:11px 13px;border:1px solid var(--rule);border-radius:3px;
@@ -657,22 +660,28 @@ pub fn render_queue_html(view: &QueueView) -> String {
             || format!("Package {} · plan {}", hold.package, hold.plan_version),
             |card| card.title.clone(),
         );
+        let requested_act = hold
+            .card
+            .as_ref()
+            .and_then(|card| requested_act_label(card.requested_act));
+        let act_tag = requested_act.map_or_else(String::new, |act| {
+            format!("<span class=\"tag tag-door\">{}</span>", escape_html(act))
+        });
         html.push_str(&format!(
             "<label class=\"item\" for=\"pick-{key}\" data-hold-key=\"{key}\" data-state=\"{state}\">\
-<span class=\"item-top\"><span class=\"repo\">{repo}</span>\
-<span class=\"tag{door}\">{kind}</span><span class=\"age\">{age}</span></span>\
+<span class=\"item-top\"><span class=\"repo\">{repo}</span>{act_tag}<span class=\"item-update\"></span><span class=\"age\">{age}</span></span>\
 <span class=\"item-line\">{line}</span>\
 <span class=\"state state-{state}\">{state_label}</span></label>",
             key = escape_html(&hold.key),
             state = state,
             repo = escape_html(&hold.repository),
-            door = if hold.is_door { " tag-door" } else { "" },
-            kind = escape_html(&hold.question_kind),
+            act_tag = act_tag,
             age = escape_html(&format_age(hold.age_seconds)),
             line = escape_html(&line),
             state_label = state_label(hold.state),
         ));
     }
+
     html.push_str("</div></nav><main class=\"deck\">");
 
     if queue.is_empty() {
@@ -775,9 +784,9 @@ fn render_card(hold: &QueueHold) -> String {
             card.push_str(&format!("<h1>{}</h1></div>", escape_html(&sifted.title)));
             for block in &sifted.blocks {
                 card.push_str(&format!(
-                    "<section class=\"block\"><h3>{}</h3><p>{}</p></section>",
+                    "<section class=\"block\"><h3>{}</h3><div class=\"markdown\">{}</div></section>",
                     escape_html(&block.heading),
-                    escape_html(&block.body)
+                    render_markdown(&block.body)
                 ));
             }
             for fact in &sifted.overseer_facts {
@@ -835,37 +844,34 @@ unchanged.</p></section>",
         card.push_str("<section class=\"thread\">");
         for (who, what) in &hold.thread {
             card.push_str(&format!(
-                "<div class=\"turn\"><span class=\"who\">{}</span><p>{}</p></div>",
+                "<div class=\"turn\"><span class=\"who\">{}</span><div class=\"markdown\">{}</div></div>",
                 escape_html(who),
-                escape_html(what)
+                render_markdown(what)
             ));
         }
         card.push_str("</section>");
     }
 
-    match hold.state {
-        QueueHoldState::WaitingForHuman => {
-            card.push_str(&format!(
-                "<form class=\"answer\" method=\"post\" action=\"/holds/{key}/answer\">\
+    if hold.state == QueueHoldState::WithOverseer {
+        card.push_str(&format!(
+            "<p class=\"pending\"><span class=\"label\">With the overseer</span><span>{}</span></p>",
+            escape_html(
+                hold.pending
+                    .as_deref()
+                    .unwrap_or("It is working on this and will come back to you here.")
+            )
+        ));
+    }
+    if hold.state != QueueHoldState::Closed {
+        card.push_str(&format!(
+            "<form class=\"answer\" method=\"post\" action=\"/holds/{key}/answer\">\
 <label for=\"answer-{key}\">Your answer</label>\
 <textarea id=\"answer-{key}\" name=\"answer\" required placeholder=\"One sentence is enough. A question back is also an answer.\"></textarea>\
 <div class=\"answer-row\"><button class=\"btn btn-primary\" type=\"submit\">Record it</button>\
-<span class=\"hint\">This does not close the hold. Your words are recorded as yours, the hold moves to the overseer, \
-and only the overseer writes the closing record.</span></div></form>",
-                key = escape_html(&hold.key)
-            ));
-        }
-        QueueHoldState::WithOverseer => {
-            card.push_str(&format!(
-                "<p class=\"pending\"><span class=\"label\">With the overseer</span><span>{}</span></p>",
-                escape_html(
-                    hold.pending
-                        .as_deref()
-                        .unwrap_or("It is working on this and will come back to you here.")
-                )
-            ));
-        }
-        QueueHoldState::WithReportingRun | QueueHoldState::Closed => {}
+<span class=\"hint\">This does not close the hold. Your words are recorded as yours and reclaim the route. \
+Only the overseer writes the closing record.</span></div></form>",
+            key = escape_html(&hold.key)
+        ));
     }
 
     // The card never replaces the report. The original text stays one click away.
@@ -875,6 +881,18 @@ and only the overseer writes the closing record.</span></div></form>",
     ));
     card.push_str("</article>");
     card
+}
+
+const fn requested_act_label(act: crate::RequestedAct) -> Option<&'static str> {
+    match act {
+        crate::RequestedAct::CriterionRevision => Some("criterion revision"),
+        crate::RequestedAct::WorkerEnvironmentExtension => Some("environment extension"),
+        crate::RequestedAct::BaseCurrencyAcceptance => Some("risk acceptance"),
+        crate::RequestedAct::ParkOverrule => Some("park overrule"),
+        crate::RequestedAct::Publication => Some("publication"),
+        crate::RequestedAct::Spend => Some("spend"),
+        crate::RequestedAct::NonDoor => None,
+    }
 }
 
 const fn state_slug(state: QueueHoldState) -> &'static str {
@@ -902,6 +920,104 @@ fn format_age(seconds: u64) -> String {
         3600..=86_399 => format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60),
         _ => format!("{}d", seconds / 86_400),
     }
+}
+
+fn render_markdown(value: &str) -> String {
+    let lines: Vec<&str> = value.lines().collect();
+    let mut html = String::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.trim().is_empty() {
+            index += 1;
+        } else if let Some(language) = line.trim().strip_prefix("```") {
+            index += 1;
+            let mut code = Vec::new();
+            while index < lines.len() && !lines[index].trim().starts_with("```") {
+                code.push(lines[index]);
+                index += 1;
+            }
+            if index < lines.len() {
+                index += 1;
+            }
+            let language: String = language
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+                .collect();
+            let class = if language.is_empty() {
+                String::new()
+            } else {
+                format!(" class=\"language-{}\"", escape_html(&language))
+            };
+            html.push_str(&format!(
+                "<pre><code{class}>{}</code></pre>",
+                escape_html(&code.join("\n"))
+            ));
+        } else if line.trim_start().starts_with("- ") {
+            html.push_str("<ul>");
+            while index < lines.len() {
+                let Some(item) = lines[index].trim_start().strip_prefix("- ") else {
+                    break;
+                };
+                html.push_str(&format!("<li>{}</li>", render_inline_markdown(item)));
+                index += 1;
+            }
+            html.push_str("</ul>");
+        } else {
+            let mut paragraph = vec![line.trim()];
+            index += 1;
+            while index < lines.len()
+                && !lines[index].trim().is_empty()
+                && !lines[index].trim().starts_with("```")
+                && !lines[index].trim_start().starts_with("- ")
+            {
+                paragraph.push(lines[index].trim());
+                index += 1;
+            }
+            html.push_str(&format!(
+                "<p>{}</p>",
+                render_inline_markdown(&paragraph.join(" "))
+            ));
+        }
+    }
+    html
+}
+
+fn render_inline_markdown(value: &str) -> String {
+    let mut html = String::new();
+    let mut rest = value;
+    while !rest.is_empty() {
+        if let Some(code) = rest.strip_prefix('`')
+            && let Some(end) = code.find('`')
+        {
+            html.push_str(&format!("<code>{}</code>", escape_html(&code[..end])));
+            rest = &code[end + 1..];
+        } else if let Some(strong) = rest.strip_prefix("**")
+            && let Some(end) = strong.find("**")
+        {
+            html.push_str(&format!(
+                "<strong>{}</strong>",
+                render_inline_markdown(&strong[..end])
+            ));
+            rest = &strong[end + 2..];
+        } else {
+            let next = rest
+                .find('`')
+                .unwrap_or(rest.len())
+                .min(rest.find("**").unwrap_or(rest.len()));
+            if next == 0 {
+                let mut characters = rest.chars();
+                if let Some(character) = characters.next() {
+                    html.push_str(&escape_html(&character.to_string()));
+                    rest = characters.as_str();
+                }
+            } else {
+                html.push_str(&escape_html(&rest[..next]));
+                rest = &rest[next..];
+            }
+        }
+    }
+    html
 }
 
 fn escape_html(value: &str) -> String {

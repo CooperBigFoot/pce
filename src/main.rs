@@ -1430,7 +1430,11 @@ fn run_overseer_server(command: OverseerServeCommand) -> Result<()> {
                 if let Err(error) =
                     serve_overseer_http(&mut stream, &store, &journal, command.heartbeat_stale)
                 {
-                    tracing::warn!(%peer, error = ?error, "rejected overseer HTTP request");
+                    if error.to_string() == "idle overseer HTTP peer" {
+                        tracing::debug!(%peer, "closed idle overseer HTTP peer");
+                    } else {
+                        tracing::warn!(%peer, error = ?error, "rejected overseer HTTP request");
+                    }
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1727,9 +1731,17 @@ fn serve_overseer_http(
     let (method, target, body) = {
         let mut reader = BufReader::new(&mut *stream);
         let mut request_line = String::new();
-        reader
-            .read_line(&mut request_line)
-            .context("failed to read HTTP request line")?;
+        if let Err(source) = reader.read_line(&mut request_line) {
+            if request_line.is_empty()
+                && matches!(
+                    source.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                )
+            {
+                return Err(source).context("idle overseer HTTP peer");
+            }
+            return Err(source).context("failed to read HTTP request line");
+        }
         let mut fields = request_line.split_whitespace();
         let method = fields.next().unwrap_or("").to_owned();
         let target = fields.next().unwrap_or("").to_owned();
@@ -1827,15 +1839,8 @@ fn serve_overseer_http(
                         EventTimestamp::new(chrono::Utc::now()),
                     )
                     .context("failed to record answer")?;
-                // Answering never closes a hold; it moves to the overseer, which writes the
-                // closing record itself.
-                store
-                    .route(
-                        &key,
-                        HoldRoute::Overseer,
-                        EventTimestamp::new(chrono::Utc::now()),
-                    )
-                    .context("failed to route the answered hold to the overseer")?;
+                // The answer itself reclaims the human route. A later explicit route assigns the
+                // next action, and only the overseer can close the hold.
                 Ok(format!("/#hold-{}", key.as_str()))
             })();
             match result {

@@ -133,6 +133,7 @@ struct ServerFixture {
     _directory: TempDir,
     root: PathBuf,
     capture: PathBuf,
+    stderr: PathBuf,
     child: Child,
     address: String,
 }
@@ -142,6 +143,8 @@ impl ServerFixture {
         let directory = tempfile::tempdir().expect("server directory");
         let root = directory.path().join("holds");
         let capture = directory.path().join("spawn-arguments");
+        let stderr = directory.path().join("server-stderr");
+        let stderr_file = fs::File::create(&stderr).expect("server stderr");
         let script = directory.path().join("session");
         fs::write(
             &script,
@@ -171,7 +174,7 @@ impl ServerFixture {
             .env("CAPTURE", &capture)
             .current_dir(cwd)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::from(stderr_file))
             .spawn()
             .expect("start server");
         let mut address = String::new();
@@ -186,6 +189,7 @@ impl ServerFixture {
             _directory: directory,
             root,
             capture,
+            stderr,
             child,
             address: address.trim().to_owned(),
         }
@@ -415,5 +419,69 @@ fn a_silent_peer_times_out_and_later_requests_are_served() {
         response.starts_with(b"HTTP/1.1 200 OK"),
         "{}",
         String::from_utf8_lossy(&response)
+    );
+}
+
+#[test]
+fn idle_peer_is_quiet_but_partial_request_warns() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let server = ServerFixture::start("sleep 10", cwd.path());
+    let address = server
+        .address
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+
+    let idle = TcpStream::connect(address).expect("idle connect");
+    thread::sleep(Duration::from_millis(2200));
+    drop(idle);
+    let idle_log = fs::read_to_string(&server.stderr).expect("idle log");
+    assert!(
+        !idle_log.contains("rejected overseer HTTP request"),
+        "idle browser peer cried wolf: {idle_log}"
+    );
+
+    let mut partial = TcpStream::connect(address).expect("partial connect");
+    partial.write_all(b"GET / HTTP/1.1").expect("partial bytes");
+    thread::sleep(Duration::from_millis(2200));
+    drop(partial);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let log = fs::read_to_string(&server.stderr).expect("partial log");
+        if log.contains("rejected overseer HTTP request") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "partial request produced no warning: {log}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn browser_human_message_reclaims_any_open_route() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let server = ServerFixture::start("sleep 10", cwd.path());
+    let store = HoldStore::new(&server.root);
+    let key = seed_human_hold(&store, "route-reclaim", 0);
+    let key_value = pce_core::HoldKey::parse(key.clone()).expect("key");
+    store
+        .route(&key_value, HoldRoute::ReportingRun, at(2))
+        .expect("route to run");
+    let body = b"answer=Stop+and+explain.";
+    let request = format!(
+        "POST /holds/{key}/answer HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let mut bytes = request.into_bytes();
+    bytes.extend_from_slice(body);
+    let response = server.request(&bytes);
+    assert!(response.starts_with(b"HTTP/1.1 303 See Other"));
+    let hold = store.read(&key_value).expect("answered hold");
+    assert_eq!(
+        hold.state(),
+        pce_core::HoldState::Open {
+            route: HoldRoute::Human
+        }
     );
 }

@@ -22,9 +22,11 @@ On every invocation, including the first turn after a respawn:
    channel or from a dead overseer heartbeat.
 3. For every open hold, run `pce hold read --root "$PCE_HOLD_STORE_ROOT" --key <key>`. Read the complete
    `records` array in order, not only the opening report or latest answer.
-4. Resume any hold routed to `overseer` from its full stored thread. A human answer that ends in a
-   question is a pending question for the overseer. Answer it from the store and available facts.
-   Never ask the human to repeat text already present in the records.
+4. Resume any hold routed to `overseer` from its full stored thread. Also inspect every open hold whose
+   latest conversational record is `answered` by `human`, even when that answer reclaimed the
+   `human` route. That record is pending overseer work, not a request for the human to speak again.
+   A human answer that ends in a question is a pending question for the overseer. Answer it from the
+   store and available facts, then route explicitly. Never ask the human to repeat retained text.
 5. Re-read the target hold immediately before each mutation. Another session may have answered or
    closed it since reconstruction.
 
@@ -39,7 +41,10 @@ report. Do not strengthen them.
 These words retain their force in every card and human message: `may`, `might`, `could`, `appears`,
 `likely`, `reported`, `according to`, and explicit negation. For example, `the environment may have
 failed` must not become `the environment failed`. If shorter wording cannot preserve attribution,
-negation, and modal force, quote the source sentence unchanged.
+negation, and modal force, quote the source sentence unchanged. Replies use the same register and
+refusals as cards. An overseer reply is one passage of at most 60 words with no semicolon. It must
+not promote a hedge or add an unlabelled fact. Put context absent from the report after the Markdown
+label `**Overseer fact:**`, never inside the translated reply.
 
 Keep symptom and cause separate. Never merge reports because their symptoms match. In particular,
 a base-currency refusal is not a discriminating fact: record the exact cause and fleet state that
@@ -78,9 +83,12 @@ Apply this order once to each open report:
 4. **A stored routing rule matches on its discriminating fact.** Replay the rule against retained
    answered holds through the rule-proposal boundary before use. A symptom-only match is not a
    match. Route or answer only when the boundary admits the rule.
-5. **A fact is outside one run by construction.** Read the registered runs, frozen graphs, journals,
-   daemon records, and installed binary surface available to the overseer. Record the supplied fact
-   and return the hold to the reporting run when it resolves the stop.
+5. **A fact is outside one run by construction.** Use the run registration to read
+   `<vision_directory>/vision.md`, then read only the named criterion text when the hold names one.
+   These are bounded glossary reads. Do not read the journal, follow `evidence_paths`, or sweep other
+   run files. A term or purpose learned from `vision.md` is a labelled overseer fact. Never blend it
+   into a translated block or reply. Record the supplied fact and return the hold to the reporting
+   run when it resolves the stop.
 6. **Only an irreducible ruling survives.** Route it to the human.
 
 Never turn one answer into a rule. Propose a learned rule only after multiple retained examples have
@@ -114,10 +122,13 @@ pce hold sift --root "$PCE_HOLD_STORE_ROOT" --key <key> --by overseer <<'CARD'
 CARD
 ```
 
-`sift` routes the hold to the human. A door act requires exactly one consequence sentence. A
-`non-door` act forbids one. The binary also enforces the question, heading, block, option, note,
-machine-syntax, total-word, modal-force, and negation rules. These refusals are the floor, not the
-full translation standard.
+`sift` routes the hold to the human. A door act requires exactly one consequence sentence. It
+names what stops being true or what becomes possible after the chosen act lands. It does not restate
+the available acts. If options have different costs, name the loss the operator is most likely to
+overlook. A `non-door` act forbids a consequence. The binary also enforces the question, heading,
+block, option, note, machine-syntax, total-word, modal-force, and negation rules. Consequence
+substance is a linguistic refusal the overseer applies before `sift`; it is not reduced to a word
+check. These refusals are the floor, not the full translation standard.
 
 Carry the reporting run's options in its order. Never author an option and never advocate. Put the
 run's recommendation only in `recommended_by_run`; never create a recommendation block. Put only
@@ -128,14 +139,21 @@ The opening report is never replaced. It stays on the hold and one disclosure aw
 
 Record the human's words unchanged with
 `pce hold answer --root "$PCE_HOLD_STORE_ROOT" --key <key> --by human --answer <exact-answer>`.
-Attribution belongs only to the actor who supplied the words. Then re-read the hold and perform the
-resulting route or close operation.
+Attribution belongs only to the actor who supplied the words. A human message is accepted on every
+open route and reclaims the human route. A closed hold is the only hold that refuses it. Then re-read
+the hold and perform the resulting route or close operation.
+
+Record an overseer reply with the same command and `--by overseer`. Apply the reply register before
+writing it. Markdown inline code, fenced code, bold, and lists are reading aids. Commands, flags, and
+paths remain evidence and never become options.
 
 ## 5. Finish one pass
 
-Re-list holds after mutations. Report counts by route and state, any dispatched defect brief, and
-any pending install. A dead or missing heartbeat is a liveness fact, not evidence that the queue is
-empty.
+Re-list holds after mutations. Report counts by route and state, any dispatched defect brief, any
+pending install, the number of run registrations inspected, and the number of labelled overseer
+facts supplied. If the fleet pass supplies none, include the exact line `overseer facts supplied: 0`.
+That line records the result of the search instead of leaving it unclear whether the search happened.
+A dead or missing heartbeat is a liveness fact, not evidence that the queue is empty.
 
 One invocation is one pass. The session wakes, performs that pass, and exits; it is never
 long-lived, because it holds nothing in context that the store does not already hold. Finding

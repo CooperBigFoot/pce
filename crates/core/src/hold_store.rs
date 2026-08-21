@@ -308,6 +308,7 @@ pub const DOOR_QUESTION_KINDS: [&str; 6] = [
 /// The only narrative headings shown on an operator card.
 const CARD_BLOCK_HEADINGS: [&str; 2] = ["What happened", "Why the run cannot settle it"];
 const CARD_WORD_LIMIT: usize = 200;
+const REPLY_WORD_LIMIT: usize = 60;
 
 fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
@@ -851,6 +852,35 @@ impl HoldStore {
         }
         if answer.trim().is_empty() {
             return Err(HoldStoreError::EmptyRecordField { field: "answer" });
+        }
+        if by != "human" {
+            let words = word_count(&answer);
+            if words > REPLY_WORD_LIMIT {
+                return Err(HoldStoreError::ReplyWordLimitExceeded {
+                    limit: REPLY_WORD_LIMIT,
+                    observed: words,
+                });
+            }
+            if answer.contains(';') {
+                return Err(HoldStoreError::ReplyContainsSemicolon);
+            }
+            let hold = self.read(key)?;
+            let source = hold
+                .thread()
+                .into_iter()
+                .rev()
+                .find_map(|(actor, message)| (actor == "human").then_some(message))
+                .unwrap_or_else(|| hold.report().to_string());
+            let source_hedges = contains_marker(&source, &MODAL_MARKERS);
+            let source_negates = contains_marker(&source, &NEGATION_MARKERS);
+            let reply_hedges = contains_marker(&answer, &MODAL_MARKERS);
+            let reply_negates = contains_marker(&answer, &NEGATION_MARKERS);
+            if source_hedges && !reply_hedges {
+                return Err(HoldStoreError::ModalForcePromoted { marker: "hedge" });
+            }
+            if source_negates && !(reply_negates || reply_hedges) {
+                return Err(HoldStoreError::ModalForcePromoted { marker: "negation" });
+            }
         }
         self.append_to_open(
             key,
@@ -1619,6 +1649,11 @@ fn derive_hold(
             });
         }
         match record {
+            HoldRecord::Answered { by, .. } if by == "human" => {
+                state = HoldState::Open {
+                    route: HoldRoute::Human,
+                };
+            }
             HoldRecord::Opened { .. } | HoldRecord::Answered { .. } | HoldRecord::Sifted { .. } => {
             }
             HoldRecord::Routed { route, .. } => state = HoldState::Open { route: *route },
@@ -1741,6 +1776,12 @@ pub enum HoldStoreError {
         limit: usize,
         observed: usize,
     },
+    /// An overseer reply exceeds the single-passage operator register.
+    #[error("overseer reply has {observed} words; limit is {limit}")]
+    ReplyWordLimitExceeded { limit: usize, observed: usize },
+    /// An overseer reply joins clauses with punctuation forbidden by the operator register.
+    #[error("overseer reply contains a semicolon")]
+    ReplyContainsSemicolon,
     /// A card carries more than the two allowed narrative blocks.
     #[error("a sifted card has {observed} blocks; limit is 2")]
     TooManyCardBlocks { observed: usize },
