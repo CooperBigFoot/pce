@@ -18,7 +18,7 @@ pub mod herdr_dispatch;
 pub mod hold_store;
 pub mod landing_readiness;
 pub mod overseer_registration;
-pub mod overseer_rulebook;
+pub mod overseer_routing;pub mod overseer_rulebook;
 pub mod overseer_view;
 pub mod package_completion;
 pub mod package_driver;
@@ -183,8 +183,13 @@ pub use landing_readiness::{
     LandingReadinessProblem, LandingReadinessResult, evaluate_landing_readiness,
 };
 pub use overseer_registration::{RunRegistration, RunRegistrationError, RunRegistrationKey};
-pub use overseer_rulebook::{
-    RoutingRule, RoutingRuleAction, RoutingRuleClass, RoutingRuleOrigin, initial_routing_rules,
+pub use overseer_routing::{
+    DoorKind, InstallDecision, InstallRequest, OverseerRecord, OverseerRoutingError,
+    ProposedRoutingRule, RouteDecision, RuleAdmission, RuleRefusal, admit_routing_rule,
+    overseer_records, request_install, route_hold,
+};pub use overseer_rulebook::{
+    RoutingRule, RoutingRuleAction, RoutingRuleClass, RoutingRuleOrigin, RoutingRuleParseError,
+    initial_routing_rules,
 };
 pub use overseer_view::{
     OVERSEER_MODEL, OVERSEER_REASONING_EFFORT, OverseerEvent, OverseerJournal, OverseerLiveness,

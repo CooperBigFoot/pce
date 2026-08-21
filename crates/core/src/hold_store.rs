@@ -168,6 +168,16 @@ pub enum HoldRecord {
         timestamp: EventTimestamp,
         route: HoldRoute,
     },
+    RouteRefused {
+        timestamp: EventTimestamp,
+        requested: HoldRoute,
+        enforced: HoldRoute,
+        reason: String,
+    },
+    ReportingRunRequest {
+        timestamp: EventTimestamp,
+        request: String,
+    },
     Closed {
         timestamp: EventTimestamp,
         reason: String,
@@ -180,6 +190,8 @@ impl HoldRecord {
             Self::Opened { timestamp, .. }
             | Self::Answered { timestamp, .. }
             | Self::Routed { timestamp, .. }
+            | Self::RouteRefused { timestamp, .. }
+            | Self::ReportingRunRequest { timestamp, .. }
             | Self::Closed { timestamp, .. } => *timestamp,
         }
     }
@@ -471,7 +483,31 @@ impl HoldStore {
                 read_registration_file(&path, &key).map(|(record, _)| record.registration)
             })
             .collect()
-    }
+    /// Appends one admitted routing rule without replacing the installed rulebook.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rulebook cannot be initialized, locked, read, or appended, or
+    /// when another rule already carries the proposed identifier.
+    pub(crate) fn append_routing_rule(&self, rule: &RoutingRule) -> Result<(), HoldStoreError> {
+        let _ = self.routing_rules()?;
+        let path = self.root.join("rulebook/routing-rules.jsonl");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| HoldStoreError::OpenRulebook {
+                path: path.clone(),
+                source,
+            })?;
+        let _lock = AdvisoryLock::acquire(file, path.clone(), advisory_lock::EXCLUSIVE)?;
+        let retained = read_rulebook(&path)?;
+        if retained.iter().any(|existing| existing.id() == rule.id()) {
+            return Err(HoldStoreError::DuplicateRoutingRule {
+                id: rule.id().to_owned(),
+            });
+        }
+        append_rulebook_record(&path, rule)    }
 
     /// Opens a hold once for its derived identity.
     ///
@@ -604,6 +640,40 @@ impl HoldStore {
         timestamp: EventTimestamp,
     ) -> Result<Hold, HoldStoreError> {
         self.append_to_open(key, HoldRecord::Routed { timestamp, route })
+    }
+
+    pub(crate) fn refuse_route(
+        &self,
+        key: &HoldKey,
+        requested: HoldRoute,
+        enforced: HoldRoute,
+        reason: String,
+        timestamp: EventTimestamp,
+    ) -> Result<Hold, HoldStoreError> {
+        if reason.trim().is_empty() {
+            return Err(HoldStoreError::EmptyRecordField { field: "reason" });
+        }
+        self.append_to_open(
+            key,
+            HoldRecord::RouteRefused {
+                timestamp,
+                requested,
+                enforced,
+                reason,
+            },
+        )
+    }
+
+    pub(crate) fn return_for_options(
+        &self,
+        key: &HoldKey,
+        request: String,
+        timestamp: EventTimestamp,
+    ) -> Result<Hold, HoldStoreError> {
+        if request.trim().is_empty() {
+            return Err(HoldStoreError::EmptyRecordField { field: "request" });
+        }
+        self.append_to_open(key, HoldRecord::ReportingRunRequest { timestamp, request })
     }
 
     /// Closes an open hold with a retained reason.
@@ -1013,6 +1083,14 @@ fn derive_hold(
         match record {
             HoldRecord::Opened { .. } | HoldRecord::Answered { .. } => {}
             HoldRecord::Routed { route, .. } => state = HoldState::Open { route: *route },
+            HoldRecord::RouteRefused { enforced, .. } => {
+                state = HoldState::Open { route: *enforced };
+            }
+            HoldRecord::ReportingRunRequest { .. } => {
+                state = HoldState::Open {
+                    route: HoldRoute::ReportingRun,
+                };
+            }
             HoldRecord::Closed { .. } => state = HoldState::Closed,
         }
         if record.timestamp().as_datetime() < updated_at.as_datetime() {
@@ -1344,4 +1422,6 @@ pub enum HoldStoreError {
     /// Retained registration time moved backwards.
     #[error("run registration `{path}` timestamp moves backwards at line {line}")]
     RegistrationTimestampWentBackwards { path: PathBuf, line: usize },
-}
+    /// An admitted rule attempted to reuse an existing stable identifier.
+    #[error("routing rule `{id}` already exists")]
+    DuplicateRoutingRule { id: String },}
