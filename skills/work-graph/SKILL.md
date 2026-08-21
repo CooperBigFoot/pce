@@ -379,13 +379,18 @@ any hold or repository mutation.
 A blocked, parked, partially complete, `assembly-failed`, or otherwise non-finished status never
 pushes a ref, opens a pull request, or invokes a merge command. It opens a durable hold and waits; a
 bare Herdr notification is not a record and must not be the only trace of the stop. For each distinct
-unresolved package stop, invoke an argv equivalent to:
+unresolved package stop, derive `<STOP_ID>` as the lowercase SHA-256 of the length-delimited
+canonical vision directory, canonical journal path, and sequence number of the immutable terminal journal event
+that first established this stop. A restart uses that same event and therefore the same identity; a
+later independent stop uses its later establishing event and therefore a different identity. The ID
+must not hash the report, whose rendering and evidence can change without creating a new question.
+Then invoke an argv equivalent to:
 
 ```bash
 pce hold open --repository <OWNING_REPOSITORY_NAME> \
   --plan-version <ACTIVE_PLAN_VERSION> \
   --package <PACKAGE_ID> \
-  --question-kind work-graph-terminal-stop \
+  --question-kind work-graph-terminal-stop:<STOP_ID> \
   --report-json '<EXACT_JSON_REPORT>'
 ```
 
