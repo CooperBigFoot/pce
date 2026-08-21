@@ -2932,6 +2932,7 @@ fn run_join_parent_criteria(
         )?;
         if !prepare_driver_materialization(
             &command.journal_path,
+            graph,
             package_id,
             &materialization_label,
             &materialization,
@@ -2987,6 +2988,7 @@ fn run_join_parent_criteria(
         )?;
         if !prepare_driver_materialization(
             &command.journal_path,
+            graph,
             package_id,
             &parent_label,
             &parent_materialization,
@@ -7830,8 +7832,77 @@ fn shell_execution_at(command: &str, cwd: &Path, paths: &[PathBuf]) -> Result<Cr
     ))
 }
 
+#[cfg(test)]
+#[test]
+fn validated_driver_append_refuses_inadmissible_environment_preparation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let journal = directory.path().join("driver-journal.jsonl");
+    let graph = parse_work_package_graph(
+        br#"{"vision":"v","plan_version":1,"authored_at_ref":"HEAD","packages":[{"id":"A","title":"A","repositories":["r"],"criteria":[{"name":"a","input":"i","observation":"o","command":"true"}],"depends_on":[]}]}"#,
+    )
+    .expect("valid graph");
+    for event in [
+        DriverEvent::WorkerDispatched {
+            package: "A".to_owned(),
+            issuance: 1,
+        },
+        DriverEvent::WorkerDone {
+            package: "A".to_owned(),
+            issuance: 1,
+        },
+        DriverEvent::PackageCompleted {
+            package: "A".to_owned(),
+        },
+    ] {
+        append_driver_event(&journal, &event).expect("fixture append");
+    }
+    let candidate = DriverEvent::EnvironmentPreparationExecuted {
+        package: "A".to_owned(),
+        materialization: "criteria".to_owned(),
+        repository: "r".to_owned(),
+        command: "true".to_owned(),
+        outcome: EnvironmentPreparationOutcome::Succeeded,
+        execution: CriterionExecution::new(
+            "true".to_owned(),
+            "/clone".to_owned(),
+            CommandExitStatus::Exited { code: 0 },
+            String::new(),
+            String::new(),
+        ),
+    };
+
+    let error = append_validated_driver_event(&journal, &graph, &candidate)
+        .expect_err("terminal package must reject preparation before append");
+    let message = format!("{error:#}");
+    assert!(message.contains("record 4"), "{message}");
+    assert!(message.contains("Complete"), "{message}");
+    assert_eq!(
+        read_driver_journal(&journal)
+            .expect("journal remains readable")
+            .len(),
+        3
+    );
+}
+
+fn append_validated_driver_event(
+    journal: &Path,
+    graph: &WorkPackageGraph,
+    event: &DriverEvent,
+) -> Result<()> {
+    let mut events = read_driver_journal(journal)?;
+    events.push(event.clone());
+    derive_driver_snapshot(graph, &events, false).with_context(|| {
+        format!(
+            "refused inadmissible driver record {} before append",
+            events.len()
+        )
+    })?;
+    append_driver_event(journal, event)
+}
+
 fn prepare_driver_materialization(
     journal: &Path,
+    graph: &WorkPackageGraph,
     package: &str,
     materialization_label: &str,
     materialization: &DriverMaterialization,
@@ -7845,8 +7916,9 @@ fn prepare_driver_materialization(
         };
         let execution = shell_execution_at(command, &checkout, &paths)?;
         let succeeded = execution.exit_status().is_success();
-        append_driver_event(
+        append_validated_driver_event(
             journal,
+            graph,
             &DriverEvent::EnvironmentPreparationExecuted {
                 package: package.to_owned(),
                 materialization: materialization_label.to_owned(),
@@ -7878,6 +7950,7 @@ fn execute_driver_criteria(command: DriverCriteriaCommand) -> Result<DriverStatu
         materialize_driver_state(&command.journal_path, "criteria", &sources, &references)?;
     if !prepare_driver_materialization(
         &command.journal_path,
+        &graph,
         &command.package_id,
         "criteria",
         &materialization,
@@ -8022,6 +8095,7 @@ fn replay_driver_finding(
         materialize_driver_state(&command.journal_path, "repair", &sources, &repair_refs)?;
     let witness_prepared = prepare_driver_materialization(
         &command.journal_path,
+        &graph,
         &command.package_id,
         "witness",
         &witness_state,
@@ -8038,6 +8112,7 @@ fn replay_driver_finding(
     }
     let repair_prepared = prepare_driver_materialization(
         &command.journal_path,
+        &graph,
         &command.package_id,
         "repair",
         &repair_state,

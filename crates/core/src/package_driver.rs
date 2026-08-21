@@ -842,6 +842,7 @@ pub enum DriverPackageState {
     EnvironmentPreparationFailed {
         repository: String,
         command: String,
+        issuance: u64,
     },
     EnvironmentBlocked {
         reason: String,
@@ -1027,6 +1028,15 @@ pub enum PackageDriverError {
     /// A terminal package was subsequently mutated by an impossible lifecycle event.
     #[error("driver event occurs after package `{package}` reached a terminal state")]
     EventAfterTerminal { package: String },
+    /// An environment preparation record is not admissible from the package's current state.
+    #[error(
+        "driver record {record} environment preparation for package `{package}` is inadmissible from state {state:?}"
+    )]
+    InvalidEnvironmentPreparationTransition {
+        record: usize,
+        package: String,
+        state: DriverPackageState,
+    },
     /// A preparation record's outcome disagrees with its shell status.
     #[error(
         "environment preparation outcome for package `{package}` repository `{repository}` disagrees with evidence"
@@ -1335,7 +1345,9 @@ pub fn derive_driver_snapshot(
     let mut disputed_parks = HashSet::new();
     let mut consumed_overrules = HashSet::new();
     let mut driver_aborted = false;
-    let terminal = |state: &DriverPackageState| {
+    // Environment preparation failure blocks general lifecycle progress but has one explicit
+    // recovery edge in the EnvironmentPreparationExecuted arm below.
+    let blocks_general_progress = |state: &DriverPackageState| {
         matches!(
             state,
             DriverPackageState::Complete
@@ -1639,7 +1651,7 @@ pub fn derive_driver_snapshot(
                 }
             }
             DriverEvent::PackageJoinRecomposedClean { .. } => {
-                if terminal(state) {
+                if blocks_general_progress(state) {
                     return Err(PackageDriverError::EventAfterTerminal {
                         package: package.clone(),
                     });
@@ -1753,7 +1765,7 @@ pub fn derive_driver_snapshot(
                         package: package.clone(),
                     });
                 }
-                if terminal(state) {
+                if blocks_general_progress(state) {
                     return Err(PackageDriverError::EventAfterTerminal {
                         package: package.clone(),
                     });
@@ -1857,11 +1869,6 @@ pub fn derive_driver_snapshot(
                 execution,
                 ..
             } => {
-                if !matches!(state, DriverPackageState::Judging { .. }) {
-                    return Err(PackageDriverError::EventAfterTerminal {
-                        package: package.clone(),
-                    });
-                }
                 let succeeded = execution.exit_status().is_success();
                 if succeeded != matches!(outcome, EnvironmentPreparationOutcome::Succeeded) {
                     return Err(
@@ -1871,11 +1878,43 @@ pub fn derive_driver_snapshot(
                         },
                     );
                 }
-                if !succeeded {
-                    *state = DriverPackageState::EnvironmentPreparationFailed {
-                        repository: repository.clone(),
-                        command: command.clone(),
-                    };
+                let predecessor = state.clone();
+                match predecessor {
+                    DriverPackageState::Judging { issuance } => {
+                        if !succeeded {
+                            *state = DriverPackageState::EnvironmentPreparationFailed {
+                                repository: repository.clone(),
+                                command: command.clone(),
+                                issuance,
+                            };
+                        }
+                    }
+                    DriverPackageState::EnvironmentPreparationFailed {
+                        repository: failed_repository,
+                        command: failed_command,
+                        issuance,
+                    } => {
+                        if succeeded {
+                            if repository == &failed_repository && command == &failed_command {
+                                *state = DriverPackageState::Judging { issuance };
+                            }
+                        } else {
+                            *state = DriverPackageState::EnvironmentPreparationFailed {
+                                repository: repository.clone(),
+                                command: command.clone(),
+                                issuance,
+                            };
+                        }
+                    }
+                    rejecting_state => {
+                        return Err(
+                            PackageDriverError::InvalidEnvironmentPreparationTransition {
+                                record: active_start.saturating_add(event_index).saturating_add(1),
+                                package: package.clone(),
+                                state: rejecting_state,
+                            },
+                        );
+                    }
                 }
             }
             DriverEvent::ParentCriteriaAlreadyFailing {
@@ -2049,7 +2088,7 @@ pub fn derive_driver_snapshot(
                 *state = DriverPackageState::Complete;
             }
             DriverEvent::PackageFailed { reason, .. } => {
-                if terminal(state) {
+                if blocks_general_progress(state) {
                     return Err(PackageDriverError::EventAfterTerminal {
                         package: package.clone(),
                     });
@@ -3307,7 +3346,7 @@ mod tests {
             .expect("preparation failure fold");
         assert!(matches!(
             snapshot.packages()[0].1,
-            DriverPackageState::EnvironmentPreparationFailed { .. }
+            DriverPackageState::EnvironmentPreparationFailed { issuance: 1, .. }
         ));
         assert!(matches!(
             snapshot.packages()[1].1,
@@ -3315,6 +3354,129 @@ mod tests {
         ));
         assert_eq!(snapshot.outcome(), DriverLoopOutcome::Blocked);
     }
+    #[test]
+    fn successful_environment_preparation_retry_restores_judging() {
+        let graph = graph();
+        let events = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::WorkerDone {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            environment_preparation("A", "r", "uv sync", 9),
+            environment_preparation("A", "r", "uv sync", 0),
+        ];
+
+        let snapshot = derive_driver_snapshot(&graph, &events, false)
+            .expect("successful retry must repair the replay state");
+        assert!(matches!(
+            snapshot.packages()[0].1,
+            DriverPackageState::Judging { issuance: 1 }
+        ));
+    }
+
+    #[test]
+    fn environment_preparation_recovery_derives_after_unrelated_completion() {
+        let graph = graph();
+        let events = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::WorkerDone {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            environment_preparation("A", "r", "uv sync", 9),
+            DriverEvent::WorkerDispatched {
+                package: "B".to_owned(),
+                issuance: 2,
+            },
+            DriverEvent::WorkerDone {
+                package: "B".to_owned(),
+                issuance: 2,
+            },
+            environment_preparation("B", "r", "true", 0),
+            DriverEvent::PackageCompleted {
+                package: "B".to_owned(),
+            },
+            environment_preparation("A", "r", "uv sync", 0),
+            DriverEvent::PackageCompleted {
+                package: "A".to_owned(),
+            },
+        ];
+
+        let snapshot = derive_driver_snapshot(&graph, &events, false)
+            .expect("the complete interleaved journal must derive from record one");
+        assert!(
+            snapshot
+                .packages()
+                .iter()
+                .all(|(_, state)| matches!(state, DriverPackageState::Complete))
+        );
+    }
+
+    #[test]
+    fn successful_preparation_for_another_repository_does_not_clear_the_blocker() {
+        let graph = graph();
+        let mut events = vec![
+            DriverEvent::WorkerDispatched {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            DriverEvent::WorkerDone {
+                package: "A".to_owned(),
+                issuance: 1,
+            },
+            environment_preparation("A", "second", "sync", 9),
+            environment_preparation("A", "first", "fetch", 0),
+        ];
+        let blocked = derive_driver_snapshot(&graph, &events, false)
+            .expect("an earlier repository may prepare during a retry");
+        assert!(matches!(
+            &blocked.packages()[0].1,
+            DriverPackageState::EnvironmentPreparationFailed { repository, command, issuance: 1 }
+                if repository == "second" && command == "sync"
+        ));
+
+        events.push(environment_preparation("A", "second", "sync", 0));
+        let recovered = derive_driver_snapshot(&graph, &events, false)
+            .expect("the failed preparation itself succeeded");
+        assert!(matches!(
+            recovered.packages()[0].1,
+            DriverPackageState::Judging { issuance: 1 }
+        ));
+    }
+
+    fn environment_preparation(
+        package: &str,
+        repository: &str,
+        command: &str,
+        code: i32,
+    ) -> DriverEvent {
+        DriverEvent::EnvironmentPreparationExecuted {
+            package: package.to_owned(),
+            materialization: "criteria".to_owned(),
+            repository: repository.to_owned(),
+            command: command.to_owned(),
+            outcome: if code == 0 {
+                super::EnvironmentPreparationOutcome::Succeeded
+            } else {
+                super::EnvironmentPreparationOutcome::Failed
+            },
+            execution: CriterionExecution::new(
+                command.to_owned(),
+                "/clone".to_owned(),
+                CommandExitStatus::Exited { code },
+                String::new(),
+                String::new(),
+            ),
+        }
+    }
+
     #[test]
     fn observed_spawn_failure_returns_package_to_restart_ready_state() {
         let graph = graph();
