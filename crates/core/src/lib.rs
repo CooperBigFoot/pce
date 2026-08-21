@@ -17,6 +17,7 @@ pub mod graph_authoring;
 pub mod herdr_dispatch;
 pub mod hold_store;
 pub mod landing_readiness;
+pub mod overseer_registration;
 pub mod overseer_rulebook;
 pub mod package_completion;
 pub mod package_driver;
@@ -174,12 +175,13 @@ pub use herdr_dispatch::{
 };
 pub use hold_store::{
     Hold, HoldIdentity, HoldKey, HoldRecord, HoldRoute, HoldState, HoldStore, HoldStoreError,
-    OpenDisposition, OpenHoldResult,
+    OpenDisposition, OpenHoldResult, RegisterRunDisposition, RegisterRunResult,
 };
 pub use landing_readiness::{
     CompletionCriterionIndex, LandingCriterionEvidence, LandingReadinessDecision,
     LandingReadinessProblem, LandingReadinessResult, evaluate_landing_readiness,
 };
+pub use overseer_registration::{RunRegistration, RunRegistrationError, RunRegistrationKey};
 pub use overseer_rulebook::{
     RoutingRule, RoutingRuleAction, RoutingRuleClass, RoutingRuleOrigin, initial_routing_rules,
 };
