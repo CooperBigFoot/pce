@@ -483,6 +483,8 @@ impl HoldStore {
                 read_registration_file(&path, &key).map(|(record, _)| record.registration)
             })
             .collect()
+    }
+
     /// Appends one admitted routing rule without replacing the installed rulebook.
     ///
     /// # Errors
@@ -507,7 +509,8 @@ impl HoldStore {
                 id: rule.id().to_owned(),
             });
         }
-        append_rulebook_record(&path, rule)    }
+        append_rulebook_record(&path, rule)
+    }
 
     /// Opens a hold once for its derived identity.
     ///
@@ -1424,4 +1427,5 @@ pub enum HoldStoreError {
     RegistrationTimestampWentBackwards { path: PathBuf, line: usize },
     /// An admitted rule attempted to reuse an existing stable identifier.
     #[error("routing rule `{id}` already exists")]
-    DuplicateRoutingRule { id: String },}
+    DuplicateRoutingRule { id: String },
+}

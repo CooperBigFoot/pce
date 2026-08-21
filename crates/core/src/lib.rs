@@ -18,7 +18,8 @@ pub mod herdr_dispatch;
 pub mod hold_store;
 pub mod landing_readiness;
 pub mod overseer_registration;
-pub mod overseer_routing;pub mod overseer_rulebook;
+pub mod overseer_routing;
+pub mod overseer_rulebook;
 pub mod overseer_view;
 pub mod package_completion;
 pub mod package_driver;
@@ -187,7 +188,8 @@ pub use overseer_routing::{
     DoorKind, InstallDecision, InstallRequest, OverseerRecord, OverseerRoutingError,
     ProposedRoutingRule, RouteDecision, RuleAdmission, RuleRefusal, admit_routing_rule,
     overseer_records, request_install, route_hold,
-};pub use overseer_rulebook::{
+};
+pub use overseer_rulebook::{
     RoutingRule, RoutingRuleAction, RoutingRuleClass, RoutingRuleOrigin, RoutingRuleParseError,
     initial_routing_rules,
 };
