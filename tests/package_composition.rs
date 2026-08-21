@@ -531,6 +531,7 @@ fn run_conflicting_dependency_composition(
     fail_join_preparation: bool,
     attribution_case: Option<&str>,
     sabotage_composition_inspection: bool,
+    conflict_mutation: Option<&str>,
 ) -> (tempfile::TempDir, std::path::PathBuf, std::process::Output) {
     let temp = tempdir().expect("tempdir");
     let repository = temp.path().join("repo");
@@ -584,6 +585,22 @@ if [ "$1 $2" = "worktree create" ]; then
   shift 2; cwd= path= branch= base=
   while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2; shift 2;; --path) path=$2; shift 2;; --branch) branch=$2; shift 2;; --base) base=$2; shift 2;; *) shift;; esac; done
   git -C "$cwd" worktree add -b "$branch" "$path" "$base" >/dev/null
+  mutation=$(cat "$HOME/conflict-mutation" 2>/dev/null || true)
+  case "$branch:$mutation" in
+    *-gate-*:*) ;;
+    */C/*:vanished)
+      completed=$(git -C "$cwd" for-each-ref --format='%(refname)' 'refs/heads/pce/*/B/attempt-*' | tail -n 1)
+      git -C "$path" merge --no-edit --no-ff "$completed" >/dev/null 2>&1 || true
+      printf 'A\nB\n' > "$path/shared.txt"
+      git -C "$path" add shared.txt
+      git -C "$path" commit -qm 'intervening completion resolved conflict'
+      ;;
+    */C/*:different)
+      printf 'B\n' > "$path/shared.txt"
+      git -C "$path" add shared.txt
+      git -C "$path" commit -qm 'intervening completion changed conflict set'
+      ;;
+  esac
   printf '%s\t%s\t%s\n' "$branch" "$base" "$path" >> "$HOME/herdr-worktrees"
   printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"root-pane","workspace_id":"w1"}}}'
 elif [ "$1 $2" = "pane run" ]; then
@@ -602,16 +619,28 @@ cat > "$HOME/last-brief"
 if [ -n "${PCE_PACKAGE_OUTCOME-}" ]; then
   branch=$(git branch --show-current)
   case "$branch" in
-    */A/*) printf 'A\n' > shared.txt;;
-    */B/*) printf 'B\n' > shared.txt;;
+    */A/*)
+      printf 'A\n' > shared.txt
+      if [ "$(cat "$HOME/conflict-mutation" 2>/dev/null || true)" = different ]; then printf 'A\n' > alternate.txt; fi
+      ;;
+    */B/*)
+      printf 'B\n' > shared.txt
+      if [ "$(cat "$HOME/conflict-mutation" 2>/dev/null || true)" = different ]; then printf 'B\n' > alternate.txt; fi
+      ;;
     */C/*)
-      git diff --name-only --diff-filter=U | grep -qx shared.txt
-      grep -q 'shared.txt' "$HOME/last-brief"
-      grep -q "compare it with the parent's own ref before attributing" "$HOME/last-brief"
-      if grep -q "retain every parent's guarantee" "$HOME/last-brief"; then exit 81; fi
-      printf 'A\nB\n' > shared.txt
-      if grep -q 'parent-red' "$HOME/last-brief"; then touch "$HOME/parent-red"; fi
-      git add shared.txt
+      if [ "$(cat "$HOME/conflict-mutation" 2>/dev/null || true)" = vanished ]; then
+        cp "$HOME/last-brief" "$HOME/c-brief"
+        printf 'C\n' > c.txt
+        git add c.txt
+      else
+        git diff --name-only --diff-filter=U | grep -qx shared.txt
+        grep -q 'shared.txt' "$HOME/last-brief"
+        grep -q "compare it with the parent's own ref before attributing" "$HOME/last-brief"
+        if grep -q "retain every parent's guarantee" "$HOME/last-brief"; then exit 81; fi
+        printf 'A\nB\n' > shared.txt
+        if grep -q 'parent-red' "$HOME/last-brief"; then touch "$HOME/parent-red"; fi
+        git add shared.txt
+      fi
       ;;
     *) exit 80;;
   esac
@@ -641,6 +670,9 @@ exec /usr/bin/git "$@"
 "#,
         );
     }
+    if let Some(mutation) = conflict_mutation {
+        fs::write(temp.path().join("conflict-mutation"), mutation).expect("mutation marker");
+    }
     let journal = temp.path().join("driver.jsonl");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
     let output = Command::new(env!("CARGO_BIN_EXE_pce"))
@@ -668,14 +700,91 @@ exec /usr/bin/git "$@"
             "PCE_FAIL_JOIN_PREPARATION",
             if fail_join_preparation { "1" } else { "" },
         )
+        .env("PCE_CONFLICT_MUTATION", conflict_mutation.unwrap_or_default())
         .output()
         .expect("driver");
     (temp, journal, output)
 }
 
 #[test]
+fn recorded_conflict_resolved_by_intervening_completion_dispatches_clean_tree() {
+    let (temp, journal, output) =
+        run_conflicting_dependency_composition(false, None, false, Some("vanished"));
+    assert!(
+        output.status.success(),
+        "{}
+{}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&journal).unwrap_or_default()
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status");
+    assert_eq!(
+        status["outcome"],
+        "finished",
+        "{}",
+        fs::read_to_string(&journal).expect("journal")
+    );
+    let events = journal_events(&journal);
+    assert!(events.iter().any(|event| {
+        event["event"] == "package-join-recomposed-clean"
+            && event["package"] == "C"
+            && event["repository"] == "repo"
+            && event["resolving_completion"] == "B"
+            && event["formerly_conflicted_paths"] == json!(["shared.txt"])
+    }));
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["event"] == "worker-dispatched" && event["package"] == "C" })
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| { event["event"] == "worker-spawn-failed" && event["package"] == "C" })
+    );
+    let brief = fs::read_to_string(temp.path().join("c-brief")).expect("worker brief");
+    assert!(!brief.contains("intentionally starts with an unresolved dependency merge"));
+    assert!(!brief.contains("## Conflicted join"));
+    assert!(!brief.contains("pce-conflicted-join"));
+}
+
+#[test]
+fn different_nonempty_conflict_set_still_refuses_dispatch() {
+    let (_temp, journal, output) =
+        run_conflicting_dependency_composition(false, None, false, Some("different"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status");
+    assert!(
+        matches!(status["outcome"].as_str(), Some("running" | "blocked")),
+        "{}",
+        fs::read_to_string(&journal).expect("journal")
+    );
+    let events = journal_events(&journal);
+    let failure = events
+        .iter()
+        .find(|event| event["event"] == "worker-spawn-failed" && event["package"] == "C")
+        .unwrap_or_else(|| {
+            panic!(
+                "spawn refusal; journal: {}",
+                fs::read_to_string(&journal).expect("journal")
+            )
+        });
+    assert_eq!(failure["scope"], "dispatch-environment");
+    let reason = failure["reason"].as_str().expect("failure reason");
+    assert!(reason.contains("shared.txt"), "{reason}");
+    assert!(reason.contains("alternate.txt"), "{reason}");
+    assert!(!events.iter().any(|event| {
+        event["event"] == "package-join-recomposed-clean" && event["package"] == "C"
+    }));
+}
+
+#[test]
 fn repeated_composition_infrastructure_failure_blocks_before_a_worker_runs() {
-    let (_temp, journal, output) = run_conflicting_dependency_composition(false, None, true);
+    let (_temp, journal, output) = run_conflicting_dependency_composition(false, None, true, None);
     assert!(
         output.status.success(),
         "{}",
@@ -724,7 +833,7 @@ fn repeated_composition_infrastructure_failure_blocks_before_a_worker_runs() {
 
 #[test]
 fn conflicting_dependency_composition_dispatches_owner_and_reproves_parents() {
-    let (temp, journal, output) = run_conflicting_dependency_composition(false, None, false);
+    let (temp, journal, output) = run_conflicting_dependency_composition(false, None, false, None);
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -832,7 +941,7 @@ fn conflicting_dependency_composition_dispatches_owner_and_reproves_parents() {
 #[test]
 fn parent_criterion_already_failing_parks_without_charging_joining_package() {
     let (temp, journal, output) =
-        run_conflicting_dependency_composition(false, Some("already-red"), false);
+        run_conflicting_dependency_composition(false, Some("already-red"), false, None);
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -882,7 +991,7 @@ fn parent_criterion_already_failing_parks_without_charging_joining_package() {
 #[test]
 fn parent_criterion_broken_only_by_join_remains_attributed_to_joining_package() {
     let (_temp, journal, output) =
-        run_conflicting_dependency_composition(false, Some("join-broke"), false);
+        run_conflicting_dependency_composition(false, Some("join-broke"), false, None);
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -915,7 +1024,7 @@ fn parent_criterion_broken_only_by_join_remains_attributed_to_joining_package() 
 
 #[test]
 fn failed_join_preparation_is_environmental_and_does_not_charge_the_package() {
-    let (_temp, journal, output) = run_conflicting_dependency_composition(true, None, false);
+    let (_temp, journal, output) = run_conflicting_dependency_composition(true, None, false, None);
     assert!(
         output.status.success(),
         "{}\n{}",

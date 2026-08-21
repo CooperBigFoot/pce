@@ -535,6 +535,14 @@ pub enum DriverEvent {
         conflicted_paths: Vec<String>,
         reason: String,
     },
+    /// A remembered package join conflict was superseded by a clean merge.
+    PackageJoinRecomposedClean {
+        package: String,
+        repository: String,
+        formerly_conflicted_paths: Vec<String>,
+        resolving_completion: String,
+        base_oid: String,
+    },
     /// An infrastructure fault prevented dependency composition from producing a worker base.
     PackageCompositionFailed {
         package: String,
@@ -769,6 +777,13 @@ pub enum DriverEvent {
         remaining_inputs: Vec<CompositionInput>,
         conflicted_paths: Vec<String>,
         reason: String,
+    },
+    /// A remembered assembly join conflict was superseded by a clean merge.
+    AssemblyJoinRecomposedClean {
+        repository: String,
+        formerly_conflicted_paths: Vec<String>,
+        resolving_completion: String,
+        base_oid: String,
     },
     /// The assembly conflict worker was started without synthesizing a graph package.
     AssemblyResolutionDispatched { repository: String },
@@ -1508,6 +1523,7 @@ pub fn derive_driver_snapshot(
             | DriverEvent::RecoveryRungAttempted { package, .. }
             | DriverEvent::PackageBaseComposed { package, .. }
             | DriverEvent::PackageJoinConflicted { package, .. }
+            | DriverEvent::PackageJoinRecomposedClean { package, .. }
             | DriverEvent::PackageCompositionFailed { package, .. }
             | DriverEvent::GateFailed { package, .. }
             | DriverEvent::GateDispatched { package, .. }
@@ -1547,6 +1563,7 @@ pub fn derive_driver_snapshot(
             | DriverEvent::PackageFailed { package, .. } => package,
             DriverEvent::AssemblyRepositoryComposed { .. }
             | DriverEvent::AssemblyJoinConflicted { .. }
+            | DriverEvent::AssemblyJoinRecomposedClean { .. }
             | DriverEvent::AssemblyResolutionDispatched { .. }
             | DriverEvent::AssemblyResolutionDone { .. }
             | DriverEvent::AssemblyCompositionFailed { .. }
@@ -1616,6 +1633,13 @@ pub fn derive_driver_snapshot(
             }
             DriverEvent::PackageBaseComposed { .. } | DriverEvent::PackageJoinConflicted { .. } => {
                 if !matches!(state, DriverPackageState::Pending) {
+                    return Err(PackageDriverError::EventAfterTerminal {
+                        package: package.clone(),
+                    });
+                }
+            }
+            DriverEvent::PackageJoinRecomposedClean { .. } => {
+                if terminal(state) {
                     return Err(PackageDriverError::EventAfterTerminal {
                         package: package.clone(),
                     });
@@ -2046,6 +2070,7 @@ pub fn derive_driver_snapshot(
             }
             DriverEvent::AssemblyRepositoryComposed { .. }
             | DriverEvent::AssemblyJoinConflicted { .. }
+            | DriverEvent::AssemblyJoinRecomposedClean { .. }
             | DriverEvent::AssemblyResolutionDispatched { .. }
             | DriverEvent::AssemblyResolutionDone { .. }
             | DriverEvent::AssemblyCompositionFailed { .. }
