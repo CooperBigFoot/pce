@@ -2459,11 +2459,45 @@ pub fn pending_gate_challenges(
         .unwrap_or_default()
 }
 
+fn normalized_environment_reason(reason: &str) -> String {
+    const COMPOSITION_FAILURE_PREFIX: &str = "package composition infrastructure failed in ";
+    if !reason.starts_with(COMPOSITION_FAILURE_PREFIX) {
+        return reason.to_owned();
+    }
+    let mut normalized = reason.to_owned();
+    for component in reason.split(|character: char| {
+        character == '/' || character == '\'' || character == '"' || character.is_whitespace()
+    }) {
+        let mut fields = component.split('-');
+        let Some(process_id) = fields.next() else {
+            continue;
+        };
+        let Some(label) = fields.next() else {
+            continue;
+        };
+        let Some(timestamp) = fields.next() else {
+            continue;
+        };
+        if fields.next().is_none()
+            && !process_id.is_empty()
+            && process_id.bytes().all(|byte| byte.is_ascii_digit())
+            && label.len() == 16
+            && label.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && !timestamp.is_empty()
+            && timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            normalized = normalized.replace(component, "<composition-worktree>");
+        }
+    }
+    normalized
+}
+
 /// Construct the zero-charge outcome for one worker-environment report from durable history.
 ///
-/// Exact equality of the package and reason identifies recurrence. The report that reaches the
-/// configured threshold becomes the distinct terminal event, so every observed cause remains in
-/// the journal without a second, non-atomic state transition.
+/// Exact equality of the package and stable reason identifies recurrence. Composition worktree
+/// owner and timestamp components are volatile infrastructure identities, so they are removed from
+/// that comparison. The second identical failure or the configured per-package, per-plan total
+/// failure limit stops dispatch. The terminal report remains one atomic event in the journal.
 pub fn worker_environment_outcome(
     events: &[DriverEvent],
     limits: RecoveryLimits,
@@ -2471,14 +2505,30 @@ pub fn worker_environment_outcome(
     issuance: u64,
     reason: String,
 ) -> DriverEvent {
+    let stable_reason = normalized_environment_reason(&reason);
+    let active_events = events_for_active_plan(events);
+    let prior_environment_failures = active_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                DriverEvent::WorkerEnvironmentFailed {
+                    package: observed_package,
+                    ..
+                } if observed_package == &package
+            )
+        })
+        .count();
     let mut prior_identical = 0_usize;
-    for event in events_for_active_plan(events).iter().rev() {
+    for event in active_events.iter().rev() {
         match event {
             DriverEvent::WorkerEnvironmentFailed {
                 package: observed_package,
                 reason: observed_reason,
                 ..
-            } if observed_package == &package && observed_reason == &reason => {
+            } if observed_package == &package
+                && normalized_environment_reason(observed_reason) == stable_reason =>
+            {
                 prior_identical = prior_identical.saturating_add(1);
             }
             DriverEvent::WorkerEnvironmentFailed {
@@ -2503,7 +2553,10 @@ pub fn worker_environment_outcome(
     let identical_failures = u32::try_from(prior_identical)
         .unwrap_or(u32::MAX)
         .saturating_add(1);
-    if identical_failures >= limits.environment_failures() {
+    let environment_failures = u32::try_from(prior_environment_failures)
+        .unwrap_or(u32::MAX)
+        .saturating_add(1);
+    if identical_failures >= 2 || environment_failures >= limits.environment_failures() {
         DriverEvent::PackageEnvironmentBlocked {
             package,
             issuance,
@@ -3054,9 +3107,34 @@ mod tests {
     }
 
     #[test]
+    fn composition_infrastructure_paths_do_not_evade_the_second_failure_stop() {
+        let limits = RecoveryLimits::new(RetryLimit::new(1), LocalPatchLimit::new(1))
+            .with_environment_failure_limit(EnvironmentFailureLimit::new(6));
+        let events = vec![DriverEvent::WorkerEnvironmentFailed {
+            package: "A".to_owned(),
+            issuance: 1,
+            reason: "package composition infrastructure failed in repo: failed to inspect unsuccessful merge: fatal: cannot change to '/tmp/pce-compositions/owner/26983-0123456789abcdef-1787215112839268000': No such file or directory".to_owned(),
+        }];
+        let outcome = worker_environment_outcome(
+            &events,
+            limits,
+            "A".to_owned(),
+            2,
+            "package composition infrastructure failed in repo: failed to inspect unsuccessful merge: fatal: cannot change to '/tmp/pce-compositions/owner/40117-0123456789abcdef-1787215153631607000': No such file or directory".to_owned(),
+        );
+        assert!(matches!(
+            outcome,
+            DriverEvent::PackageEnvironmentBlocked {
+                identical_failures: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn a_different_environment_reason_resets_the_identical_streak() {
         let limits = RecoveryLimits::new(RetryLimit::new(1), LocalPatchLimit::new(1))
-            .with_environment_failure_limit(EnvironmentFailureLimit::new(2));
+            .with_environment_failure_limit(EnvironmentFailureLimit::new(3));
         let events = vec![DriverEvent::WorkerEnvironmentFailed {
             package: "A".to_owned(),
             issuance: 1,
@@ -3071,6 +3149,37 @@ mod tests {
                 "second cause".to_owned(),
             ),
             DriverEvent::WorkerEnvironmentFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn configured_environment_budget_counts_distinct_failures_in_the_active_plan() {
+        let limits = RecoveryLimits::new(RetryLimit::new(1), LocalPatchLimit::new(1))
+            .with_environment_failure_limit(EnvironmentFailureLimit::new(3));
+        let events = vec![
+            DriverEvent::WorkerEnvironmentFailed {
+                package: "A".to_owned(),
+                issuance: 1,
+                reason: "first cause".to_owned(),
+            },
+            DriverEvent::WorkerEnvironmentFailed {
+                package: "A".to_owned(),
+                issuance: 2,
+                reason: "second cause".to_owned(),
+            },
+        ];
+        assert!(matches!(
+            worker_environment_outcome(
+                &events,
+                limits,
+                "A".to_owned(),
+                3,
+                "third cause".to_owned(),
+            ),
+            DriverEvent::PackageEnvironmentBlocked {
+                identical_failures: 1,
+                ..
+            }
         ));
     }
 

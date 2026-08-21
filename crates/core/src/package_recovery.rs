@@ -33,7 +33,7 @@ impl LocalPatchLimit {
     }
 }
 
-/// Number of identical worker-environment reports at which the environment is deemed persistent.
+/// Total worker-environment reports per package and plan at which the environment is deemed persistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EnvironmentFailureLimit(u32);
@@ -90,7 +90,7 @@ impl RecoveryLimits {
             gate_failures: GateFailureLimit::new(3),
         }
     }
-    /// Select the identical-environment-failure threshold without changing recovery spending.
+    /// Select the per-package, per-plan environment-failure ceiling without changing recovery spending.
     pub const fn with_environment_failure_limit(mut self, limit: EnvironmentFailureLimit) -> Self {
         self.environment_failures = limit;
         self

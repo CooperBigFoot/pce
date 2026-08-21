@@ -338,3 +338,13 @@
 | Exclude only the active driver vision directory when it is inside a participating Git repository. | The driver owns and continuously writes that exact directory. Excluding all of `planning/` would also hide unrelated planning changes, so the narrower pathspec preserves the guard everywhere else. Untracked files are listed individually so the diagnostic identifies actionable paths. |
 | Report Git porcelain entries outside the vision directory without prescribing cleanup commands. | The supervisor can distinguish tracked and untracked changes by path. The message requires the listed paths to be clean while preserving the vision directory, and does not recommend `git clean`, `git stash -u`, or another operation that could delete the run proof. |
 | Leave vision-directory placement unchanged. | Moving run evidence outside participating repositories is a structural layout change beyond this defect brief. The narrow exclusion removes the guard's self-conflict without changing the established layout. |
+
+
+## 2026-08-21 composition retry storm decisions
+
+| Decision | Rationale and boundary |
+|---|---|
+| Count worker-environment failures per package within the active plan version, regardless of whether their reasons differ. | The configured environment-failure limit is a machine-spending ceiling. The live composition storm reached 53 failures because volatile worktree paths made every reason string distinct. A plan-version advance remains the reset boundary, matching the existing recovery configuration scope. |
+| Stop on the second identical environment failure before the configured total ceiling. | Repeating an unchanged cause cannot create new evidence. The terminal `package-environment-blocked` event preserves the exact latest reason and does not charge the package recovery ladder. |
+| Normalize only generated composition worktree identity components for recurrence comparison. | PID and nanosecond fields identify an attempt, not a cause. Other paths and reason text remain exact so unrelated environment faults are not conflated. |
+| Keep `package-composition-failed` as the typed infrastructure record and re-run composition after a nonterminal first failure. | The journal evidence shows that composition was performed on every issuance with a distinct timestamp; it was not replayed from durable state. The relative-path defect that removed the conflicted-path inspection target was already fixed by absolute composition roots in `9c0951f`. A forced missing-worktree regression now proves the second failure parks without starting the dependent worker. |

@@ -161,7 +161,7 @@ fn identical_failure_sequence_changes_actual_dispatches_when_ladder_is_removed()
 }
 
 #[test]
-fn repeated_environment_failures_do_not_spend_recovery_budget() {
+fn second_identical_environment_failure_stops_without_spending_recovery_budget() {
     let temp = TempDir::new().expect("tempdir");
     let repo = temp.path().join("repo");
     fs::create_dir(&repo).expect("repo");
@@ -217,12 +217,13 @@ printf '%s' '{{"outcome":"done"}}' > "$PCE_PACKAGE_OUTCOME"
         String::from_utf8_lossy(&output.stderr)
     );
     let status: Value = serde_json::from_slice(&output.stdout).expect("status");
-    assert_eq!(status["packages"][0][1]["state"], "complete");
+    assert_eq!(status["packages"][0][1]["state"], "environment-blocked");
     assert_eq!(status["recovery"][0][1]["retry_remaining"], 1);
     assert_eq!(status["recovery"][0][1]["local_patch_remaining"], 1);
-    assert_eq!(fs::read_to_string(&attempts).expect("attempts").len(), 6);
+    assert_eq!(fs::read_to_string(&attempts).expect("attempts").len(), 2);
     let log = fs::read_to_string(journal).expect("journal");
-    assert_eq!(log.matches("worker-environment-failed").count(), 5);
+    assert_eq!(log.matches("worker-environment-failed").count(), 1);
+    assert_eq!(log.matches("package-environment-blocked").count(), 1);
     assert!(!log.contains("recovery-rung-attempted"));
 }
 

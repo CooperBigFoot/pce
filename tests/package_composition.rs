@@ -484,6 +484,7 @@ fi
 fn run_conflicting_dependency_composition(
     fail_join_preparation: bool,
     attribution_case: Option<&str>,
+    sabotage_composition_inspection: bool,
 ) -> (tempfile::TempDir, std::path::PathBuf, std::process::Output) {
     let temp = tempdir().expect("tempdir");
     let repository = temp.path().join("repo");
@@ -575,6 +576,25 @@ else
 fi
 "#,
     );
+    if sabotage_composition_inspection {
+        executable(
+            &bin.join("git"),
+            r#"#!/bin/sh
+set -eu
+if [ "${1-}" = "-C" ]; then
+  case "${2-}:$*" in
+    "$PCE_COMPOSITION_ROOT"/*:*" diff --name-only --diff-filter=U"*)
+      worktree=$2
+      rm -rf "$worktree"
+      printf "fatal: cannot change to '%s': No such file or directory\n" "$worktree" >&2
+      exit 128
+      ;;
+  esac
+fi
+exec /usr/bin/git "$@"
+"#,
+        );
+    }
     let journal = temp.path().join("driver.jsonl");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
     let output = Command::new(env!("CARGO_BIN_EXE_pce"))
@@ -594,6 +614,7 @@ fi
             "PCE_WORK_PACKAGE_WORKTREE_ROOT",
             temp.path().join("worktrees"),
         )
+        .env("PCE_COMPOSITION_ROOT", temp.path().join("compositions"))
         .env("PATH", path)
         .env("HOME", temp.path())
         .env("USER", "tester")
@@ -607,8 +628,57 @@ fi
 }
 
 #[test]
+fn repeated_composition_infrastructure_failure_blocks_before_a_worker_runs() {
+    let (_temp, journal, output) = run_conflicting_dependency_composition(false, None, true);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status");
+    let dependent = status["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|entry| entry[0] == "C")
+        .expect("dependent package");
+    assert_eq!(dependent[1]["state"], "environment-blocked");
+    let events = journal_events(&journal);
+    let dependent_events = events
+        .iter()
+        .filter(|event| event["package"] == "C")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dependent_events
+            .iter()
+            .filter(|event| event["event"] == "package-composition-failed")
+            .count(),
+        2
+    );
+    assert_eq!(
+        dependent_events
+            .iter()
+            .filter(|event| event["event"] == "worker-environment-failed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        dependent_events
+            .iter()
+            .filter(|event| event["event"] == "package-environment-blocked")
+            .count(),
+        1
+    );
+    assert!(
+        !dependent_events
+            .iter()
+            .any(|event| event["event"] == "dispatch-worker-identified")
+    );
+}
+
+#[test]
 fn conflicting_dependency_composition_dispatches_owner_and_reproves_parents() {
-    let (temp, journal, output) = run_conflicting_dependency_composition(false, None);
+    let (temp, journal, output) = run_conflicting_dependency_composition(false, None, false);
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -716,7 +786,7 @@ fn conflicting_dependency_composition_dispatches_owner_and_reproves_parents() {
 #[test]
 fn parent_criterion_already_failing_parks_without_charging_joining_package() {
     let (temp, journal, output) =
-        run_conflicting_dependency_composition(false, Some("already-red"));
+        run_conflicting_dependency_composition(false, Some("already-red"), false);
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -766,7 +836,7 @@ fn parent_criterion_already_failing_parks_without_charging_joining_package() {
 #[test]
 fn parent_criterion_broken_only_by_join_remains_attributed_to_joining_package() {
     let (_temp, journal, output) =
-        run_conflicting_dependency_composition(false, Some("join-broke"));
+        run_conflicting_dependency_composition(false, Some("join-broke"), false);
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -799,7 +869,7 @@ fn parent_criterion_broken_only_by_join_remains_attributed_to_joining_package() 
 
 #[test]
 fn failed_join_preparation_is_environmental_and_does_not_charge_the_package() {
-    let (_temp, journal, output) = run_conflicting_dependency_composition(true, None);
+    let (_temp, journal, output) = run_conflicting_dependency_composition(true, None, false);
     assert!(
         output.status.success(),
         "{}\n{}",
