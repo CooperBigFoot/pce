@@ -5,7 +5,7 @@
 
 use std::ffi::c_int;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -501,7 +501,7 @@ impl HoldStore {
 
     fn read_unlocked(&self, key: &HoldKey) -> Result<Hold, HoldStoreError> {
         let path = self.hold_path(key);
-        let file = File::open(&path).map_err(|source| {
+        let mut file = File::open(&path).map_err(|source| {
             if source.kind() == std::io::ErrorKind::NotFound {
                 HoldStoreError::HoldNotFound { key: key.0.clone() }
             } else {
@@ -511,8 +511,17 @@ impl HoldStore {
                 }
             }
         })?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|source| HoldStoreError::ReadFile {
+                path: path.clone(),
+                source,
+            })?;
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            return Err(HoldStoreError::IncompleteTail { path });
+        }
         let mut records = Vec::new();
-        for (index, line) in BufReader::new(file).lines().enumerate() {
+        for (index, line) in BufReader::new(bytes.as_slice()).lines().enumerate() {
             let line = line.map_err(|source| HoldStoreError::ReadFile {
                 path: path.clone(),
                 source,
