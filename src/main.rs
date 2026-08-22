@@ -3,6 +3,7 @@ use std::ffi::{CString, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener as InetTcpListener, TcpStream as InetTcpStream};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -47,7 +48,7 @@ use pce_core::{
     GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
     HerdrPaneId, HerdrSessionName, HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, HoldIdentity,
-    HoldKey, HoldRoute, HoldStore, KnownPayload, LandingReadinessDecision,
+    HoldKey, HoldRoute, HoldState, HoldStore, KnownPayload, LandingReadinessDecision,
     LegacyRepositoryContractPayload, LocalPatchLimit, MeasuredContractSnapshot, MergeStatus,
     MergeSubject, MilestoneMergeSubject, MilestoneNode, NamedReplayRef, NodeId,
     NonProductionHoldOpenPayload, NonProductionKey, OVERSEER_MODEL, OVERSEER_PROVIDER,
@@ -394,7 +395,7 @@ enum OverseerCommand {
     PassComplete {
         root: Option<PathBuf>,
     },
-    Serve(OverseerServeCommand),
+    Serve(Box<OverseerServeCommand>),
 }
 
 #[derive(Debug)]
@@ -1192,7 +1193,7 @@ fn parse_overseer_command(action: &str, rest: &[String]) -> Result<Command> {
             // dispatch, and long enough that idling costs nothing.
             let wake_interval =
                 parse_duration_option(&mut options, "--wake-ms", Duration::from_secs(300))?;
-            OverseerCommand::Serve(OverseerServeCommand {
+            OverseerCommand::Serve(Box::new(OverseerServeCommand {
                 root,
                 listen,
                 session_program,
@@ -1204,7 +1205,7 @@ fn parse_overseer_command(action: &str, rest: &[String]) -> Result<Command> {
                 wake_interval,
                 heartbeat_interval,
                 heartbeat_stale,
-            })
+            }))
         }
         _ => bail!("unsupported overseer action `{action}`\n{USAGE}"),
     };
@@ -1260,7 +1261,7 @@ fn run_overseer(command: OverseerCommand) -> Result<()> {
                 })
                 .context("failed to record overseer pass completion")
         }
-        OverseerCommand::Serve(command) => run_overseer_server(command),
+        OverseerCommand::Serve(command) => run_overseer_server(*command),
     }
 }
 
@@ -1309,6 +1310,7 @@ fn run_overseer_server(command: OverseerServeCommand) -> Result<()> {
     let mut store_fingerprint = observe_store_fingerprint(&root);
     let mut last_store_scan = Instant::now();
     let mut session: Option<OverseerSession> = None;
+    let mut run_wakes = ReportingRunWakeController::default();
     let mut consecutive_failures: usize = 0;
     let mut retry_at: Option<Instant> = None;
     // The first wake is unconditional: the store may already hold work from before the server
@@ -1375,15 +1377,20 @@ fn run_overseer_server(command: OverseerServeCommand) -> Result<()> {
         // The accept loop spins every 10ms; walking the store that often would be the server's
         // dominant cost for no gain, since a wake it defers by a fraction of a second is a wake
         // that still happens.
-        let store_changed = if last_store_scan.elapsed() >= OVERSEER_STORE_SCAN_INTERVAL {
-            last_store_scan = Instant::now();
-            let fingerprint = observe_store_fingerprint(&root);
-            let changed = fingerprint != store_fingerprint;
-            store_fingerprint = fingerprint;
-            changed
-        } else {
-            false
-        };
+        let (store_changed, scanned_store) =
+            if last_store_scan.elapsed() >= OVERSEER_STORE_SCAN_INTERVAL {
+                last_store_scan = Instant::now();
+                let fingerprint = observe_store_fingerprint(&root);
+                let changed = fingerprint != store_fingerprint;
+                store_fingerprint = fingerprint;
+                (changed, true)
+            } else {
+                (false, false)
+            };
+        if scanned_store {
+            tick_reporting_run_wakes(&command, &session_cwd, &store, &mut run_wakes)
+                .context("failed to supervise reporting-run wakes")?;
+        }
         if store_changed {
             // New work, but not evidence that the session can start. A store change must never
             // clear the failure budget: on an active fleet the store changes continuously, so a
@@ -1525,6 +1532,940 @@ fn observe_store_fingerprint(root: &Path) -> Vec<(PathBuf, u64, u64)> {
     }
     observations.sort();
     observations
+}
+
+#[derive(Clone, Debug)]
+struct ReportingRunWakeCandidate {
+    hold_key: HoldKey,
+    hold_generation: usize,
+    registration: RunRegistration,
+}
+
+/// Selects holds whose durable route has returned to the run and resolves each one to the exact
+/// registered journal named by its opening report.
+fn reporting_run_wake_candidates(store: &HoldStore) -> Result<Vec<ReportingRunWakeCandidate>> {
+    let registrations = store
+        .run_registrations()
+        .context("failed to read run registrations for automatic wake")?;
+    let mut candidates = Vec::new();
+    for hold in store
+        .list()
+        .context("failed to read holds for automatic wake")?
+    {
+        if hold.state()
+            != (HoldState::Open {
+                route: HoldRoute::ReportingRun,
+            })
+        {
+            continue;
+        }
+        let repository = hold.identity().repository();
+        let report_journal = hold.report().get("journal").and_then(Value::as_str);
+        let report_vision = hold
+            .report()
+            .get("vision_directory")
+            .or_else(|| hold.report().get("vision_dir"))
+            .and_then(Value::as_str);
+        let matching = registrations
+            .iter()
+            .filter(|registration| registration.repository() == repository)
+            .filter(|registration| {
+                let journal_matches = report_journal
+                    .is_none_or(|journal| registration.journal() == Path::new(journal));
+                let vision_matches = report_vision
+                    .is_none_or(|vision| registration.vision_directory() == Path::new(vision));
+                journal_matches && vision_matches
+            })
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            record_unresolved_run_wake(
+                store.root(),
+                hold.key(),
+                hold.records().len(),
+                format!(
+                    "automatic wake resolved {} registrations for repository `{repository}`; the hold report must name its journal or vision directory",
+                    matching.len()
+                ),
+            )?;
+            continue;
+        }
+        candidates.push(ReportingRunWakeCandidate {
+            hold_key: hold.key().clone(),
+            hold_generation: hold.records().len(),
+            registration: matching[0].clone(),
+        });
+    }
+    Ok(candidates)
+}
+
+#[derive(Debug, Deserialize)]
+struct RunWakeLaunchConfiguration {
+    repositories: BTreeMap<String, PathBuf>,
+    tmux_session: String,
+    #[serde(default)]
+    herdr_session: Option<String>,
+}
+
+#[derive(Debug)]
+enum RunDriverLiveness {
+    Stopped {
+        repository_worktree: PathBuf,
+        detail: String,
+    },
+    Running {
+        detail: String,
+    },
+    Unavailable {
+        detail: String,
+    },
+}
+
+fn observe_registered_run_liveness(
+    candidate: &ReportingRunWakeCandidate,
+    tmux_program: &Path,
+    herdr_program: &Path,
+) -> Result<RunDriverLiveness> {
+    let registration = &candidate.registration;
+    let run_path = registration.vision_directory().join("run.json");
+    let bytes = fs::read(&run_path).with_context(|| {
+        format!(
+            "failed to read run launch authority `{}`",
+            run_path.display()
+        )
+    })?;
+    let launch: RunWakeLaunchConfiguration = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "failed to parse run launch authority `{}`",
+            run_path.display()
+        )
+    })?;
+    let Some(repository_worktree) = launch.repositories.get(registration.repository()) else {
+        return Ok(RunDriverLiveness::Unavailable {
+            detail: format!(
+                "run.json has no source worktree for owning repository `{}`",
+                registration.repository()
+            ),
+        });
+    };
+    if !repository_worktree.is_absolute() || !repository_worktree.is_dir() {
+        return Ok(RunDriverLiveness::Unavailable {
+            detail: format!(
+                "owning repository worktree is unavailable: `{}`",
+                repository_worktree.display()
+            ),
+        });
+    }
+    if launch.tmux_session.trim().is_empty() {
+        return Ok(RunDriverLiveness::Unavailable {
+            detail: "run.json contains an empty tmux_session".to_owned(),
+        });
+    }
+    let driver_lease_path = driver_journal_lease_path(registration.journal())?;
+    let observed_lease = try_acquire_process_lease(&driver_lease_path)?;
+    if observed_lease.is_none() {
+        return Ok(RunDriverLiveness::Running {
+            detail: format!(
+                "driver lease `{}` is currently held for journal `{}`",
+                driver_lease_path.display(),
+                registration.journal().display()
+            ),
+        });
+    }
+    drop(observed_lease);
+
+    let output = std::process::Command::new(tmux_program)
+        .args(["list-panes", "-t", &launch.tmux_session, "-F"])
+        .arg("#{pane_dead}\t#{pane_pid}\t#{pane_current_command}")
+        .output()
+        .with_context(|| format!("failed to execute `{}`", tmux_program.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !output.status.success() {
+        return Ok(RunDriverLiveness::Unavailable {
+            detail: format!(
+                "tmux session `{}` could not be observed (status {:?}): {}",
+                launch.tmux_session,
+                output.status.code(),
+                stderr
+            ),
+        });
+    }
+    let panes = stdout.lines().collect::<Vec<_>>();
+    if panes.len() != 1 {
+        return Ok(RunDriverLiveness::Unavailable {
+            detail: format!(
+                "tmux session `{}` reported {} panes; exactly one driver pane is required: {}",
+                launch.tmux_session,
+                panes.len(),
+                stdout
+            ),
+        });
+    }
+    let fields = panes[0].splitn(3, '\t').collect::<Vec<_>>();
+    if fields.len() != 3 {
+        return Ok(RunDriverLiveness::Unavailable {
+            detail: format!(
+                "tmux session `{}` returned an unparseable pane observation: {}",
+                launch.tmux_session, stdout
+            ),
+        });
+    }
+    match fields[0] {
+        "0" => {
+            return Ok(RunDriverLiveness::Running {
+                detail: format!(
+                    "tmux observed live driver pane pid={} command={} in session `{}`",
+                    fields[1], fields[2], launch.tmux_session
+                ),
+            });
+        }
+        "1" => {}
+        value => {
+            return Ok(RunDriverLiveness::Unavailable {
+                detail: format!(
+                    "tmux returned unknown pane_dead value `{value}` for session `{}`",
+                    launch.tmux_session
+                ),
+            });
+        }
+    }
+
+    if launch.herdr_session.as_deref() != registration.herdr_session() {
+        return Ok(RunDriverLiveness::Unavailable {
+            detail: format!(
+                "run.json Herdr session {:?} differs from registered session {:?}",
+                launch.herdr_session,
+                registration.herdr_session()
+            ),
+        });
+    }
+    if let Some(session) = registration.herdr_session() {
+        let output = std::process::Command::new(herdr_program)
+            .args(["--session", session, "workspace", "list"])
+            .output()
+            .with_context(|| format!("failed to execute `{}`", herdr_program.display()))?;
+        if !output.status.success() {
+            return Ok(RunDriverLiveness::Unavailable {
+                detail: format!(
+                    "Herdr session `{session}` is unavailable (status {:?}): {}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+    }
+
+    Ok(RunDriverLiveness::Stopped {
+        repository_worktree: repository_worktree.clone(),
+        detail: format!(
+            "tmux observed exited driver pane pid={} command={} in session `{}`",
+            fields[1], fields[2], launch.tmux_session
+        ),
+    })
+}
+
+#[derive(Debug)]
+struct ProcessLease {
+    _file: File,
+    _path: PathBuf,
+}
+
+fn try_acquire_process_lease(path: &Path) -> Result<Option<ProcessLease>> {
+    let parent = path.parent().context("process lease has no parent")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create lease directory `{}`", parent.display()))?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("failed to open process lease `{}`", path.display()))?;
+    // SAFETY: `file` owns a valid descriptor for the duration of this call and remains owned by
+    // `ProcessLease` until the guarded process ends. `flock` does not retain the pointer.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(Some(ProcessLease {
+            _file: file,
+            _path: path.to_path_buf(),
+        }));
+    }
+    let error = std::io::Error::last_os_error();
+    if error
+        .raw_os_error()
+        .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+    {
+        return Ok(None);
+    }
+    Err(error).with_context(|| format!("failed to lock process lease `{}`", path.display()))
+}
+
+fn set_process_lease_close_on_exec(lease: &ProcessLease, enabled: bool) -> Result<()> {
+    let descriptor = lease._file.as_raw_fd();
+    // SAFETY: the lease owns a valid descriptor, and fcntl only reads or changes its descriptor
+    // flags. The open-file-description lock itself remains unchanged.
+    let current = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if current < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to read process lease descriptor flags");
+    }
+    let flags = if enabled {
+        current | libc::FD_CLOEXEC
+    } else {
+        current & !libc::FD_CLOEXEC
+    };
+    // SAFETY: the descriptor remains owned by the lease for this operation.
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags) } < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to change process lease descriptor flags");
+    }
+    Ok(())
+}
+
+fn driver_journal_lease_path(journal: &Path) -> Result<PathBuf> {
+    let file_name = journal
+        .file_name()
+        .context("driver journal has no file name")?;
+    let mut lease_name = OsString::from(".");
+    lease_name.push(file_name);
+    lease_name.push(".pce-driver.lock");
+    Ok(journal.with_file_name(lease_name))
+}
+
+#[derive(Debug)]
+struct ReportingRunWakeSession {
+    child: std::process::Child,
+    candidate: ReportingRunWakeCandidate,
+    log: PathBuf,
+    _lease: ProcessLease,
+}
+
+#[derive(Debug, Default)]
+struct ReportingRunWakeController {
+    sessions: BTreeMap<PathBuf, ReportingRunWakeSession>,
+    completed: BTreeSet<(String, usize)>,
+    attempts: BTreeMap<(String, usize), usize>,
+    retry_at: BTreeMap<(String, usize), Instant>,
+}
+
+fn run_wake_identity(candidate: &ReportingRunWakeCandidate) -> (String, usize) {
+    (
+        candidate.hold_key.as_str().to_owned(),
+        candidate.hold_generation,
+    )
+}
+
+fn record_unresolved_run_wake(
+    store_root: &Path,
+    hold_key: &HoldKey,
+    hold_generation: usize,
+    detail: String,
+) -> Result<()> {
+    let path = store_root.join("overseer/run-wakes.jsonl");
+    if path.is_file() {
+        let prior = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read `{}`", path.display()))?;
+        for line in prior.lines() {
+            let Ok(record) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if record.get("kind").and_then(Value::as_str) == Some("wake-target-unresolved")
+                && record.get("hold_key").and_then(Value::as_str) == Some(hold_key.as_str())
+                && record.get("hold_generation").and_then(Value::as_u64)
+                    == u64::try_from(hold_generation).ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+    append_run_wake_json(
+        &path,
+        &json!({
+            "kind": "wake-target-unresolved",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "hold_key": hold_key,
+            "hold_generation": hold_generation,
+            "detail": detail,
+        }),
+    )
+}
+
+fn record_run_wake(
+    candidate: &ReportingRunWakeCandidate,
+    record: Value,
+    summary: &str,
+) -> Result<()> {
+    let directory = candidate.registration.vision_directory().join(".pce");
+    fs::create_dir_all(&directory).with_context(|| {
+        format!(
+            "failed to create run wake directory `{}`",
+            directory.display()
+        )
+    })?;
+    append_run_wake_json(&directory.join("run-wake.jsonl"), &record)?;
+    let supervision = candidate
+        .registration
+        .vision_directory()
+        .join("supervision.md");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&supervision)
+        .with_context(|| format!("failed to open `{}`", supervision.display()))?;
+    writeln!(
+        file,
+        "\n- {} automatic wake for hold `{}` generation {}: {}",
+        chrono::Utc::now().to_rfc3339(),
+        candidate.hold_key.as_str(),
+        candidate.hold_generation,
+        summary
+    )
+    .context("failed to append automatic wake summary")?;
+    file.sync_all()
+        .context("failed to sync automatic wake summary")
+}
+
+fn append_run_wake_json(path: &Path, value: &Value) -> Result<()> {
+    let parent = path.parent().context("run wake record has no parent")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create `{}`", parent.display()))?;
+    let mut bytes = serde_json::to_vec(value).context("failed to serialize run wake record")?;
+    bytes.push(b'\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open run wake record `{}`", path.display()))?;
+    // SAFETY: `file` owns a valid descriptor for the full append and sync operation.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to lock run wake record `{}`", path.display()));
+    }
+    file.write_all(&bytes)
+        .context("failed to append run wake record")?;
+    file.sync_all().context("failed to sync run wake record")
+}
+
+fn schedule_run_wake_retry(
+    controller: &mut ReportingRunWakeController,
+    identity: &(String, usize),
+    slow_interval: Duration,
+) -> usize {
+    let failures = controller.attempts.entry(identity.clone()).or_default();
+    *failures += 1;
+    let delay = if *failures < OVERSEER_MAX_CONSECUTIVE_FAILURES {
+        OVERSEER_RETRY_BACKOFF * 4_u32.pow(u32::try_from(*failures - 1).unwrap_or(0))
+    } else {
+        slow_interval
+    };
+    controller
+        .retry_at
+        .insert(identity.clone(), Instant::now() + delay);
+    *failures
+}
+
+fn inspect_reporting_run_sessions(
+    controller: &mut ReportingRunWakeController,
+    wake_interval: Duration,
+) -> Result<()> {
+    let journals = controller.sessions.keys().cloned().collect::<Vec<_>>();
+    for journal in journals {
+        let Some(active) = controller.sessions.get_mut(&journal) else {
+            continue;
+        };
+        let Some(status) = active
+            .child
+            .try_wait()
+            .context("failed to inspect reporting-run wake session")?
+        else {
+            continue;
+        };
+        let identity = run_wake_identity(&active.candidate);
+        let detail = read_session_detail(&active.log);
+        record_run_wake(
+            &active.candidate,
+            json!({
+                "kind": "wake-session-exited",
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "hold_key": active.candidate.hold_key,
+                "hold_generation": active.candidate.hold_generation,
+                "code": status.code(),
+                "detail": detail,
+            }),
+            &format!("supervising session exited with code {:?}", status.code()),
+        )?;
+        if status.success() {
+            controller.completed.insert(identity.clone());
+            controller.attempts.remove(&identity);
+            controller.retry_at.remove(&identity);
+        } else {
+            schedule_run_wake_retry(controller, &identity, wake_interval);
+        }
+        controller.sessions.remove(&journal);
+    }
+    Ok(())
+}
+
+fn work_graph_skill_path(command: &OverseerServeCommand, session_cwd: &Path) -> Option<PathBuf> {
+    let beside_overseer = command.session_skill.as_ref().and_then(|skill| {
+        skill
+            .parent()
+            .and_then(Path::parent)
+            .map(|skills| skills.join("work-graph"))
+    });
+    beside_overseer
+        .filter(|path| path.join("SKILL.md").is_file())
+        .or_else(|| {
+            let shipped = session_cwd.join("skills/work-graph");
+            shipped.join("SKILL.md").is_file().then_some(shipped)
+        })
+}
+
+fn spawn_reporting_run_session(
+    command: &OverseerServeCommand,
+    session_cwd: &Path,
+    store_root: &Path,
+    candidate: ReportingRunWakeCandidate,
+    repository_worktree: &Path,
+    liveness_detail: &str,
+) -> Result<ReportingRunWakeSession> {
+    let skill = work_graph_skill_path(command, session_cwd)
+        .context("the work-graph skill is unavailable; pass an overseer skill from the shipped skills tree or run overseer serve from the pce repository")?;
+    let wake_lease_path = candidate
+        .registration
+        .vision_directory()
+        .join(".pce/run-wake.lock");
+    let wake_lease = try_acquire_process_lease(&wake_lease_path)?.with_context(|| {
+        format!(
+            "another reporting-run supervisor holds `{}`",
+            wake_lease_path.display()
+        )
+    })?;
+    let session_directory = candidate
+        .registration
+        .vision_directory()
+        .join(".pce/run-wake-sessions");
+    fs::create_dir_all(&session_directory).with_context(|| {
+        format!(
+            "failed to create run wake session directory `{}`",
+            session_directory.display()
+        )
+    })?;
+    let log = session_directory.join(format!(
+        "{}-{}.log",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.6f"),
+        candidate.hold_key.as_str()
+    ));
+    let output = File::create(&log)
+        .with_context(|| format!("failed to create run wake log `{}`", log.display()))?;
+    let errors = output
+        .try_clone()
+        .context("failed to share run wake log handle")?;
+    let invocation = format!(
+        "/work-graph {}",
+        candidate.registration.vision_directory().display()
+    );
+    record_run_wake(
+        &candidate,
+        json!({
+            "kind": "wake-started",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "hold_key": candidate.hold_key,
+            "hold_generation": candidate.hold_generation,
+            "journal": candidate.registration.journal(),
+            "observed_liveness": liveness_detail,
+            "invocation": invocation,
+            "log": log,
+        }),
+        &format!("driver was observed stopped; spawning `{invocation}`"),
+    )?;
+    let mut process = std::process::Command::new(&command.session_program);
+    process
+        .args([
+            "--provider",
+            &command.session_provider,
+            "--model",
+            &command.session_model,
+            "--thinking",
+            &command.session_thinking,
+            "--skill",
+        ])
+        .arg(&skill)
+        .args(["--print", &invocation])
+        .env("PCE_HOLD_STORE_ROOT", store_root)
+        .current_dir(repository_worktree)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::from(errors));
+    // The child retains this lease across exec. A replacement overseer therefore cannot wake the
+    // same run while this one-pass supervisor is still alive. Restore close-on-exec in the parent
+    // immediately after spawn so unrelated later children do not inherit it.
+    set_process_lease_close_on_exec(&wake_lease, false)?;
+    let spawn_result = process.spawn();
+    set_process_lease_close_on_exec(&wake_lease, true)?;
+    let child = spawn_result.with_context(|| {
+        format!(
+            "failed to spawn reporting-run supervisor with `{}`",
+            command.session_program.display()
+        )
+    })?;
+    record_run_wake(
+        &candidate,
+        json!({
+            "kind": "wake-session-spawned",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "hold_key": candidate.hold_key,
+            "hold_generation": candidate.hold_generation,
+            "pid": child.id(),
+            "log": log,
+        }),
+        &format!("supervising session spawned with pid {}", child.id()),
+    )?;
+    Ok(ReportingRunWakeSession {
+        child,
+        candidate,
+        log,
+        _lease: wake_lease,
+    })
+}
+
+fn recorded_run_wake_completed(candidate: &ReportingRunWakeCandidate) -> Result<bool> {
+    let path = candidate
+        .registration
+        .vision_directory()
+        .join(".pce/run-wake.jsonl");
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let records = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read run wake record `{}`", path.display()))?;
+    for (index, line) in records.lines().enumerate() {
+        let record: Value = serde_json::from_str(line).with_context(|| {
+            format!(
+                "invalid run wake record {} in `{}`",
+                index + 1,
+                path.display()
+            )
+        })?;
+        if record.get("kind").and_then(Value::as_str) == Some("wake-session-exited")
+            && record.get("hold_key").and_then(Value::as_str) == Some(candidate.hold_key.as_str())
+            && record.get("hold_generation").and_then(Value::as_u64)
+                == u64::try_from(candidate.hold_generation).ok()
+            && record.get("code").and_then(Value::as_i64) == Some(0)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn tick_reporting_run_wakes(
+    command: &OverseerServeCommand,
+    session_cwd: &Path,
+    store: &HoldStore,
+    controller: &mut ReportingRunWakeController,
+) -> Result<()> {
+    tick_reporting_run_wakes_with_programs(
+        command,
+        session_cwd,
+        store,
+        controller,
+        Path::new("tmux"),
+        Path::new("herdr"),
+    )
+}
+
+fn tick_reporting_run_wakes_with_programs(
+    command: &OverseerServeCommand,
+    session_cwd: &Path,
+    store: &HoldStore,
+    controller: &mut ReportingRunWakeController,
+    tmux_program: &Path,
+    herdr_program: &Path,
+) -> Result<()> {
+    inspect_reporting_run_sessions(controller, command.wake_interval)?;
+    for candidate in reporting_run_wake_candidates(store)? {
+        let identity = run_wake_identity(&candidate);
+        if recorded_run_wake_completed(&candidate)? {
+            controller.completed.insert(identity.clone());
+        }
+        if controller.completed.contains(&identity)
+            || controller
+                .sessions
+                .contains_key(candidate.registration.journal())
+            || controller
+                .retry_at
+                .get(&identity)
+                .is_some_and(|retry_at| Instant::now() < *retry_at)
+        {
+            continue;
+        }
+        match observe_registered_run_liveness(&candidate, tmux_program, herdr_program) {
+            Ok(RunDriverLiveness::Stopped {
+                repository_worktree,
+                detail,
+            }) => match spawn_reporting_run_session(
+                command,
+                session_cwd,
+                store.root(),
+                candidate.clone(),
+                &repository_worktree,
+                &detail,
+            ) {
+                Ok(session) => {
+                    controller
+                        .sessions
+                        .insert(candidate.registration.journal().to_path_buf(), session);
+                    controller.retry_at.remove(&identity);
+                }
+                Err(error) => {
+                    let failures =
+                        schedule_run_wake_retry(controller, &identity, command.wake_interval);
+                    record_run_wake(
+                        &candidate,
+                        json!({
+                            "kind": "wake-refused",
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "hold_key": candidate.hold_key,
+                            "hold_generation": candidate.hold_generation,
+                            "failures": failures,
+                            "reason": format!("{error:#}"),
+                        }),
+                        &format!("spawn refused: {error:#}"),
+                    )?;
+                }
+            },
+            Ok(RunDriverLiveness::Running { detail })
+            | Ok(RunDriverLiveness::Unavailable { detail }) => {
+                let failures =
+                    schedule_run_wake_retry(controller, &identity, command.wake_interval);
+                record_run_wake(
+                    &candidate,
+                    json!({
+                        "kind": "wake-refused",
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                        "hold_key": candidate.hold_key,
+                        "hold_generation": candidate.hold_generation,
+                        "failures": failures,
+                        "reason": detail,
+                    }),
+                    &format!("wake refused after observed liveness: {detail}"),
+                )?;
+            }
+            Err(error) => {
+                let failures =
+                    schedule_run_wake_retry(controller, &identity, command.wake_interval);
+                record_run_wake(
+                    &candidate,
+                    json!({
+                        "kind": "wake-refused",
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                        "hold_key": candidate.hold_key,
+                        "hold_generation": candidate.hold_generation,
+                        "failures": failures,
+                        "reason": format!("{error:#}"),
+                    }),
+                    &format!("liveness observation failed: {error:#}"),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn answered_reporting_run_hold_is_selected_for_automatic_wake() {
+    let directory = tempfile::tempdir().expect("temporary store");
+    let vision = directory.path().join("repository/vision");
+    fs::create_dir_all(&vision).expect("vision directory");
+    let graph = vision.join("graph.v1.json");
+    let driver_journal = vision.join("driver-journal.jsonl");
+    fs::write(&graph, "{}").expect("graph fixture");
+    fs::write(&driver_journal, "").expect("journal fixture");
+    let store = HoldStore::new(directory.path().join("holds"));
+    let registration = RunRegistration::parse("repository", &vision, &graph, &driver_journal, None)
+        .expect("registration");
+    store
+        .register_run(registration, EventTimestamp::new(chrono::Utc::now()))
+        .expect("register run");
+    let identity =
+        HoldIdentity::parse("repository", "1", "package", "terminal-stop").expect("hold identity");
+    let key = identity.key();
+    store
+        .open(
+            identity,
+            json!({"options": [{"name": "retry", "consequence": "continue"}]}),
+            EventTimestamp::new(chrono::Utc::now()),
+        )
+        .expect("open hold");
+    store
+        .answer(
+            &key,
+            "operator".to_owned(),
+            "retry".to_owned(),
+            EventTimestamp::new(chrono::Utc::now()),
+        )
+        .expect("answer hold");
+    pce_core::route_hold(
+        &store,
+        &key,
+        HoldRoute::ReportingRun,
+        EventTimestamp::new(chrono::Utc::now()),
+    )
+    .expect("route hold");
+
+    let candidates = reporting_run_wake_candidates(&store).expect("wake candidates");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].hold_key, key);
+    assert_eq!(candidates[0].registration.repository(), "repository");
+
+    fs::write(
+        vision.join("run.json"),
+        serde_json::to_vec(&json!({
+            "repositories": {"repository": directory.path().join("repository")},
+            "tmux_session": "driver-session",
+            "herdr_session": null,
+        }))
+        .expect("run configuration JSON"),
+    )
+    .expect("run configuration");
+    let fake_tmux = directory.path().join("fake-tmux");
+    fs::write(&fake_tmux, "#!/bin/sh\nprintf '1\\t123\\tpce\\n'\n").expect("fake tmux");
+    let marker = directory.path().join("session-invocation");
+    let fake_session = directory.path().join("fake-session");
+    fs::write(
+        &fake_session,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            marker.display()
+        ),
+    )
+    .expect("fake session");
+    for executable in [&fake_tmux, &fake_session] {
+        let mut permissions = fs::metadata(executable)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(executable, permissions).expect("script permissions");
+    }
+    let session_cwd = directory.path().join("pce");
+    fs::create_dir_all(session_cwd.join("skills/work-graph")).expect("work-graph skill directory");
+    fs::write(
+        session_cwd.join("skills/work-graph/SKILL.md"),
+        "fixture skill",
+    )
+    .expect("work-graph skill");
+    let command = OverseerServeCommand {
+        root: Some(store.root().to_path_buf()),
+        listen: "127.0.0.1:0".parse().expect("listen address"),
+        session_program: fake_session,
+        session_provider: "provider".to_owned(),
+        session_model: "model".to_owned(),
+        session_thinking: "thinking".to_owned(),
+        session_skill: None,
+        session_cwd: Some(session_cwd.clone()),
+        wake_interval: Duration::from_secs(60),
+        heartbeat_interval: Duration::from_secs(1),
+        heartbeat_stale: Duration::from_secs(5),
+    };
+    let mut controller = ReportingRunWakeController::default();
+
+    tick_reporting_run_wakes_with_programs(
+        &command,
+        &session_cwd,
+        &store,
+        &mut controller,
+        &fake_tmux,
+        Path::new("unused-herdr"),
+    )
+    .expect("automatic wake tick");
+    let active = controller
+        .sessions
+        .get_mut(&driver_journal)
+        .expect("spawned supervising session");
+    assert!(active.child.wait().expect("fake session exit").success());
+    let invocation = fs::read_to_string(marker).expect("recorded session invocation");
+    assert!(invocation.contains("--print"));
+    assert!(invocation.contains(&format!("/work-graph {}", vision.display())));
+    let wake_log = vision.join(".pce/run-wake.jsonl");
+    assert!(wake_log.is_file());
+    drop(controller);
+
+    store
+        .answer(
+            &key,
+            "operator".to_owned(),
+            "retry with the same action".to_owned(),
+            EventTimestamp::new(chrono::Utc::now()),
+        )
+        .expect("second answer");
+    pce_core::route_hold(
+        &store,
+        &key,
+        HoldRoute::ReportingRun,
+        EventTimestamp::new(chrono::Utc::now()),
+    )
+    .expect("second route");
+    let driver_lease_path = driver_journal_lease_path(&driver_journal).expect("driver lease path");
+    let live_driver = try_acquire_process_lease(&driver_lease_path)
+        .expect("driver lease observation")
+        .expect("live driver fixture lease");
+    let mut blocked_controller = ReportingRunWakeController::default();
+
+    tick_reporting_run_wakes_with_programs(
+        &command,
+        &session_cwd,
+        &store,
+        &mut blocked_controller,
+        &fake_tmux,
+        Path::new("unused-herdr"),
+    )
+    .expect("live-driver wake tick");
+
+    assert!(blocked_controller.sessions.is_empty());
+    assert!(
+        fs::read_to_string(&wake_log)
+            .expect("wake refusal record")
+            .contains("driver lease")
+    );
+    drop(live_driver);
+
+    store
+        .answer(
+            &key,
+            "operator".to_owned(),
+            "retry after session loss".to_owned(),
+            EventTimestamp::new(chrono::Utc::now()),
+        )
+        .expect("third answer");
+    pce_core::route_hold(
+        &store,
+        &key,
+        HoldRoute::ReportingRun,
+        EventTimestamp::new(chrono::Utc::now()),
+    )
+    .expect("third route");
+    fs::remove_file(vision.join("run.json")).expect("remove dead run launch authority");
+    let mut dead_controller = ReportingRunWakeController::default();
+
+    tick_reporting_run_wakes_with_programs(
+        &command,
+        &session_cwd,
+        &store,
+        &mut dead_controller,
+        &fake_tmux,
+        Path::new("unused-herdr"),
+    )
+    .expect("dead-run wake tick");
+
+    assert!(dead_controller.sessions.is_empty());
+    assert!(
+        fs::read_to_string(&wake_log)
+            .expect("dead-run failure record")
+            .contains("failed to read run launch authority")
+    );
 }
 
 fn spawn_overseer_session(
@@ -7522,6 +8463,14 @@ fn run_driver_loop(command: DriverRunCommand) -> Result<()> {
     require_herdr_session_running(command.herdr_session.as_ref())?;
     let command = resolve_driver_startup_paths(command)?;
     let journal_path = command.journal_path.clone();
+    let lease_path = driver_journal_lease_path(&journal_path)?;
+    let _driver_lease = try_acquire_process_lease(&lease_path)?.with_context(|| {
+        format!(
+            "refused a second driver for journal `{}` because lease `{}` is held",
+            journal_path.display(),
+            lease_path.display()
+        )
+    })?;
     let result = (|| {
         warn_about_dirty_source_repositories(&command)?;
         run_driver_loop_inner(command)
@@ -24942,6 +25891,40 @@ None.
         let event: serde_json::Value = serde_json::from_str(line.trim()).expect("event JSON");
         assert_eq!(event["event"], "worker-environment-declared");
         assert_eq!(event["names"], json!(["FIRST_DECLARATION"]));
+    }
+
+    #[test]
+    fn driver_lease_refuses_a_second_driver_before_touching_the_journal() {
+        let directory = tempdir().expect("temporary directory");
+        let graph_path = directory.path().join("graph.json");
+        let journal_path = directory.path().join("events.jsonl");
+        fs::write(&graph_path, b"{}").expect("graph fixture");
+        fs::write(&journal_path, b"sentinel\n").expect("journal sentinel");
+        let lease_path = crate::driver_journal_lease_path(&journal_path).expect("lease path");
+        let _first_driver = crate::try_acquire_process_lease(&lease_path)
+            .expect("lease observation")
+            .expect("first driver lease");
+        let command = crate::DriverRunCommand {
+            graph_path,
+            journal_path: journal_path.clone(),
+            repositories: Vec::new(),
+            preparations: std::collections::BTreeMap::new(),
+            worker_environment: std::collections::BTreeMap::new(),
+            herdr_session: None,
+            override_risk_ordering: false,
+            recovery_limits: pce_core::RecoveryLimits::default(),
+            recovery_reset: None,
+            worker_override: None,
+            wait_timeout: None,
+        };
+
+        let error = crate::run_driver_loop(command).expect_err("second driver must be refused");
+
+        assert!(format!("{error:#}").contains("refused a second driver"));
+        assert_eq!(
+            fs::read(&journal_path).expect("journal after refusal"),
+            b"sentinel\n"
+        );
     }
 
     #[test]
