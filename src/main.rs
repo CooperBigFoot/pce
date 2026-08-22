@@ -26,26 +26,27 @@ use pce_core::{
     AbsoluteWorktreeRoot, AcceptanceCriteria, ActReversibility, AmendmentProof,
     AmendmentRepositoryRefs, AppendError, AppendableCategory, AppendableFinding, ArgumentVector,
     ArtifactOutcome, ArtifactPath, ArtifactProduction, AuthorityFailure, BaseCurrencyRiskEntry,
-    BaseCurrencyRiskMode, BranchState, BuiltArtifactRef, CanonicalNode as DispatchNode,
-    CheckoutFailure, CheckoutStage, ChildEnvironment, CodexTerminalObservation, CodexTerminalUsage,
-    CommandExitStatus, CompletionCriterionStatus, CompletionDecision, CompositionInput,
-    CreationDate, CriterionChangeDecision, CriterionExecution, CurrentArtifactObservation,
-    CurrentArtifactState, DispatchAdmission, DispatchAttempt, DispatchCandidate,
-    DispatchCompletionPayload, DispatchDuration, DispatchEnvelope, DispatchEnvironmentObservation,
-    DispatchExitStatus, DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion,
-    DispatchLogging, DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput,
-    DispatchRef, DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass,
-    DispatchRootCause, DispatchTarget, DispatchTokenUsage, DispatchVisionSource,
-    DispatchWorkerProcessObservation, DispatchabilityResult, DriverAssemblyState, DriverEvent,
-    DriverRefProduct, EnvironmentFailureLimit, EnvironmentPreparationOutcome, EventBodyRef,
-    EventKindName, EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp,
-    Evidence, ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
+    BaseCurrencyRiskMode, BranchState, BuiltArtifactRef, BuiltRepair,
+    CanonicalNode as DispatchNode, CheckoutFailure, CheckoutStage, ChildEnvironment,
+    CodexTerminalObservation, CodexTerminalUsage, CommandExitStatus, CompletionCriterionStatus,
+    CompletionDecision, CompositionInput, CreationDate, CriterionChangeDecision,
+    CriterionExecution, CurrentArtifactObservation, CurrentArtifactState, DispatchAdmission,
+    DispatchAttempt, DispatchCandidate, DispatchCompletionPayload, DispatchDuration,
+    DispatchEnvelope, DispatchEnvironmentObservation, DispatchExitStatus,
+    DispatchIdentityObservation, DispatchLedger, DispatchLedgerCompletion, DispatchLogging,
+    DispatchPayload, DispatchProcessIdentity, DispatchProjectionInput, DispatchRef,
+    DispatchRequiredArtifactObservation, DispatchRole, DispatchRoleClass, DispatchRootCause,
+    DispatchTarget, DispatchTokenUsage, DispatchVisionSource, DispatchWorkerProcessObservation,
+    DispatchabilityResult, DriverAssemblyState, DriverEvent, DriverPackageState, DriverRefProduct,
+    EnvironmentFailureLimit, EnvironmentPreparationOutcome, EventBodyRef, EventKindName,
+    EventLogTail, EventLogTailLine, EventRecord, EventRecordFilter, EventTimestamp, Evidence,
+    ExactPullRequestIdentity, ExactPullRequestState, ExceptionalMergeChain,
     ExceptionalMergeChainObservation, Executable, ExitCode, ExpectedVerdictOutcome,
     FileObservation, FindingAdmission, FindingRejectionReason, FindingReplayDecision,
-    FinishedResult, GateExecutionEvidence, GateExecutionRecord, GateExecutionRecorderConfig,
-    GateExecutionRef, GateExecutionRejection, GateExecutionResponse, GateFailureLimit,
-    GateObservedResult, GateProcessObservation, GateProcessStimulus, GateStimulus,
-    GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
+    FinishedResult, FleetRunObservation, GateExecutionEvidence, GateExecutionRecord,
+    GateExecutionRecorderConfig, GateExecutionRef, GateExecutionRejection, GateExecutionResponse,
+    GateFailureLimit, GateObservedResult, GateProcessObservation, GateProcessStimulus,
+    GateStimulus, GateTerminalStatus, GitAuthorityObservation, GitHubAuthorityObservation,
     GitHubPullRequestObservation, GitMergeObservation, HerdrAgentLocation, HerdrInvocation,
     HerdrPaneId, HerdrSessionName, HerdrTabId, HerdrWorkspaceId, HerdrWorktreeSpec, HoldIdentity,
     HoldKey, HoldRoute, HoldState, HoldStore, KnownPayload, LandingReadinessDecision,
@@ -59,20 +60,21 @@ use pce_core::{
     ParentCriterionFailure, PrimeSessionObservation, ProcessIdentityObservation, ProcessNumber,
     ProcessStartIdentity, PullRequestAuthorityObservation, PullRequestNumber, PullRequestSelector,
     ReconciledDeadDispatchCompletionPayload, ReconciledDispatchOutcome, RecordedProcessIdentity,
-    RecoveryLimits, RecoveryLogPath, RecoveryRung, ReferenceValidation, ReplayArtifactObservation,
-    ReplayClassifications, ReplayObservation, ReplayRefResult, RepositoryBranchName,
-    RepositoryContractPayload, RepositoryDispatchInput, RepositoryFetchObservation, RepositoryName,
-    RepositoryObservation, RepositoryObservationFailure, RepositoryObservationRef,
-    RepositoryRelativePath, RepositoryRoot, RepositoryWorktree, RequiredArtifactPresence,
-    RetryLimit, RiskOrdering, RunRegistration, RunSnapshot, Sandbox, SeatbeltCapability, Sequence,
-    Sha256Digest, SiftedCard, SignalNumber, SpawnDispatchOutcome,
-    SpawnFailedDispatchCompletionPayload, SpawnFailureScope, SquashCommitOid, StdinBinding,
-    StepAuthorityObservation, StepNode, StructuredArtifactObservation, SurvivingProcesses, TagName,
-    TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload, UsageAbsenceReason,
-    VersionPolicy, VisionGoal, VisionName, VisionSlug, WorkPackageClassification, WorkPackageGraph,
-    WorkPackageId, WorkPackageMergeObservation, WorkPackageMergeSubject, WorkerArgumentVector,
-    WorkerEnvironment, WorktreeIdentity, WorktreeState, WriteKind, admit_recurrent_finding,
-    append_event, charged_failure_count, classify_claude_result, classify_codex_terminal_usage,
+    RecoveryLimits, RecoveryLogPath, RecoveryRung, ReferenceValidation, RepairDispatcherIdentity,
+    RepairInstall, ReplayArtifactObservation, ReplayClassifications, ReplayObservation,
+    ReplayRefResult, RepositoryBranchName, RepositoryContractPayload, RepositoryDispatchInput,
+    RepositoryFetchObservation, RepositoryName, RepositoryObservation,
+    RepositoryObservationFailure, RepositoryObservationRef, RepositoryRelativePath, RepositoryRoot,
+    RepositoryWorktree, RequiredArtifactPresence, RetryLimit, RiskOrdering, RunRegistration,
+    RunSnapshot, Sandbox, SeatbeltCapability, Sequence, Sha256Digest, SiftedCard, SignalNumber,
+    SpawnDispatchOutcome, SpawnFailedDispatchCompletionPayload, SpawnFailureScope, SquashCommitOid,
+    StdinBinding, StepAuthorityObservation, StepNode, StructuredArtifactObservation,
+    SurvivingProcesses, TagName, TagState, TagTarget, TrackedRepositoryContract, UnparsedPayload,
+    UsageAbsenceReason, VerifiedDefect, VersionPolicy, VisionGoal, VisionName, VisionSlug,
+    WorkPackageClassification, WorkPackageGraph, WorkPackageId, WorkPackageMergeObservation,
+    WorkPackageMergeSubject, WorkerArgumentVector, WorkerEnvironment, WorktreeIdentity,
+    WorktreeState, WriteKind, accept_repair, admit_recurrent_finding, append_event,
+    charged_failure_count, classify_claude_result, classify_codex_terminal_usage,
     classify_dispatch_admission, classify_dispatch_check_in, classify_replay_pair,
     classify_seatbelt_capability, compose_gate_arguments, compose_herdr_work_package_dispatch,
     compose_local_patch_brief, compose_package_gate_brief, compose_package_worker_argv,
@@ -82,21 +84,22 @@ use pce_core::{
     derive_milestone_merge_status, derive_package_result_path, derive_queue_view, derive_run_state,
     derive_run_state_with_dispatch_artifacts, derive_run_state_with_exceptional_merge_chains,
     derive_work_package_merge_status, dispatch_completion_payload, dispatch_invocation,
-    dispatch_payload, effective_criteria, evaluate_completion, evaluate_landing_readiness,
-    event_record_matches, extract_conservative_artifact_references, fold_dispatch_ledger,
-    fold_paired_execution_proof, fold_replay_runs, gate_failure_outcome, judge_finding_replay,
-    latest_criterion_failure_evidence, measure_contract_snapshot, meter_dispatches,
-    next_gate_attempt, normalize_replay_observation, paired_stimulus_identity,
-    parse_acceptance_criteria, parse_claude_result, parse_criterion_revision_manifest,
-    parse_dispatch_process_identity, parse_event_line, parse_gate_execution_evidence,
-    parse_gate_stimulus, parse_package_gate_outcome, parse_package_worker_result,
-    parse_paired_falsification_verdict, parse_replay_output_path, parse_replay_schema_path,
-    parse_tracked_repository_contract, parse_work_package_graph, pending_gate_challenges,
-    pending_terminal_pane_cleanups_with_legacy_deadline, pending_terminal_worktree_cleanups,
-    ready_work_packages, rebase_gate_stimulus, recovery_attempt_records, recovery_base_brief,
-    recovery_budget, render_dispatch_projection, render_human_snapshot, render_package_run,
-    render_queue_html, repeated_identical_worker_blocker, seatbelt_capability_probe,
-    serialize_dispatch_check_in, serialize_dispatch_process_identity,
+    dispatch_payload, dispatch_repair_with_identity, effective_criteria, evaluate_completion,
+    evaluate_landing_readiness, event_record_matches, extract_conservative_artifact_references,
+    fold_dispatch_ledger, fold_paired_execution_proof, fold_replay_runs, gate_failure_outcome,
+    install_repair, judge_finding_replay, latest_criterion_failure_evidence,
+    measure_contract_snapshot, meter_dispatches, next_gate_attempt, normalize_replay_observation,
+    paired_stimulus_identity, parse_acceptance_criteria, parse_claude_result,
+    parse_criterion_revision_manifest, parse_dispatch_process_identity, parse_event_line,
+    parse_gate_execution_evidence, parse_gate_stimulus, parse_package_gate_outcome,
+    parse_package_worker_result, parse_paired_falsification_verdict, parse_replay_output_path,
+    parse_replay_schema_path, parse_tracked_repository_contract, parse_work_package_graph,
+    pending_gate_challenges, pending_terminal_pane_cleanups_with_legacy_deadline,
+    pending_terminal_worktree_cleanups, ready_work_packages, rebase_gate_stimulus,
+    record_pending_install_failure, recover_dead_repair_dispatch, recovery_attempt_records,
+    recovery_base_brief, recovery_budget, render_dispatch_projection, render_human_snapshot,
+    render_package_run, render_queue_html, repeated_identical_worker_blocker,
+    seatbelt_capability_probe, serialize_dispatch_check_in, serialize_dispatch_process_identity,
     serialize_package_worker_result, serialize_tracked_repository_contract,
     titles_conservatively_overlap, unchanged_package_ids, validate_artifact,
     validate_criterion_revisions, validate_package_gate_finding_repositories,
@@ -145,6 +148,10 @@ const USAGE: &str = concat!(
     "       pce overseer heartbeat [--root <HOLD_STORE>]\n",
     "       pce overseer serve [--root <HOLD_STORE>] [--listen <LOOPBACK_ADDRESS>] [--session-program <PROGRAM>] [--session-provider <NAME>] [--session-model <ID>] [--session-thinking <LEVEL>] [--session-skill <PATH>] [--session-cwd <DIR>] [--wake-ms <MILLISECONDS>] [--heartbeat-ms <MILLISECONDS>] [--heartbeat-stale-ms <MILLISECONDS>]\n",
     "       pce overseer pass-complete [--root <HOLD_STORE>]\n",
+    "       pce overseer defect-dispatch [--root <HOLD_STORE>] --source-hold <HOLD_KEY> --code-fact <PATH:LINE FACT> --reproduction <COMMAND> --summary <TEXT> --repository-root <ABSOLUTE_REPOSITORY> [--installed-binary <ABSOLUTE_PATH>] [--worker-program <PROGRAM>]\n",
+    "       pce overseer repair-accept [--root <HOLD_STORE>] --id <REPAIR_ID> --by <HUMAN>\n",
+    "       pce overseer repair-install [--root <HOLD_STORE>]\n",
+    "       pce overseer repair-list [--root <HOLD_STORE>]\n",
     "       pce criteria check --file <LOG_PATH> --vision-dir <VISION_DIR>\n",
     "       pce completion check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
     "       pce landing check --file <LOG_PATH> --vision-dir <VISION_DIR> --finished-result <FINISHED_RESULT>\n",
@@ -395,7 +402,31 @@ enum OverseerCommand {
     PassComplete {
         root: Option<PathBuf>,
     },
+    DefectDispatch(DefectDispatchCommand),
+    RepairAccept {
+        root: Option<PathBuf>,
+        repair_id: String,
+        by: String,
+    },
+    RepairInstall {
+        root: Option<PathBuf>,
+    },
+    RepairList {
+        root: Option<PathBuf>,
+    },
     Serve(Box<OverseerServeCommand>),
+}
+
+#[derive(Debug)]
+struct DefectDispatchCommand {
+    root: Option<PathBuf>,
+    source_hold: HoldKey,
+    code_fact: String,
+    reproduction: String,
+    summary: String,
+    repository_root: PathBuf,
+    installed_binary: Option<PathBuf>,
+    worker_program: PathBuf,
 }
 
 #[derive(Debug)]
@@ -1163,6 +1194,31 @@ fn parse_overseer_command(action: &str, rest: &[String]) -> Result<Command> {
             }
             OverseerCommand::PassComplete { root }
         }
+        "defect-dispatch" => OverseerCommand::DefectDispatch(DefectDispatchCommand {
+            root,
+            source_hold: HoldKey::parse(require_hold_option(&mut options, &["--source-hold"])?)
+                .context("invalid source hold key")?,
+            code_fact: require_hold_option(&mut options, &["--code-fact"])?,
+            reproduction: require_hold_option(&mut options, &["--reproduction"])?,
+            summary: require_hold_option(&mut options, &["--summary"])?,
+            repository_root: PathBuf::from(require_hold_option(
+                &mut options,
+                &["--repository-root"],
+            )?),
+            installed_binary: remove_hold_option(&mut options, &["--installed-binary"])?
+                .map(PathBuf::from),
+            worker_program: PathBuf::from(
+                remove_hold_option(&mut options, &["--worker-program"])?
+                    .unwrap_or_else(|| "prime-agent".to_owned()),
+            ),
+        }),
+        "repair-accept" => OverseerCommand::RepairAccept {
+            root,
+            repair_id: require_hold_option(&mut options, &["--id"])?,
+            by: require_hold_option(&mut options, &["--by"])?,
+        },
+        "repair-install" => OverseerCommand::RepairInstall { root },
+        "repair-list" => OverseerCommand::RepairList { root },
         "serve" => {
             let listen = remove_hold_option(&mut options, &["--listen", "--bind"])?
                 .unwrap_or_else(|| "127.0.0.1:0".to_owned())
@@ -1261,8 +1317,714 @@ fn run_overseer(command: OverseerCommand) -> Result<()> {
                 })
                 .context("failed to record overseer pass completion")
         }
+        OverseerCommand::DefectDispatch(command) => run_defect_dispatch(command),
+        OverseerCommand::RepairAccept {
+            root,
+            repair_id,
+            by,
+        } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            accept_repair(
+                &store,
+                &repair_id,
+                &by,
+                EventTimestamp::new(chrono::Utc::now()),
+            )
+            .context("failed to accept repair")
+        }
+        OverseerCommand::RepairInstall { root } => run_repair_install(root),
+        OverseerCommand::RepairList { root } => {
+            let store = HoldStore::new(hold_store_root(root)?);
+            serde_json::to_writer(
+                std::io::stdout(),
+                &store.repair_records().context("failed to read repairs")?,
+            )
+            .context("failed to write repairs")?;
+            writeln!(std::io::stdout()).context("failed to terminate repairs output")
+        }
         OverseerCommand::Serve(command) => run_overseer_server(*command),
     }
+}
+
+fn run_defect_dispatch(command: DefectDispatchCommand) -> Result<()> {
+    let store_root = hold_store_root(command.root)?;
+    let store = HoldStore::new(&store_root);
+    let _ = store
+        .read(&command.source_hold)
+        .context("verified defect must name an existing source hold")?;
+    let repository_root = command.repository_root.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve repository `{}`",
+            command.repository_root.display()
+        )
+    })?;
+    if !repository_root.is_absolute() {
+        bail!("repair repository must be absolute");
+    }
+    let base_commit =
+        git_text(&repository_root, &["rev-parse", "HEAD"]).map_err(anyhow::Error::msg)?;
+    verify_code_fact(&repository_root, &base_commit, &command.code_fact)?;
+    verify_reproduction(
+        &repository_root,
+        &store_root.join("repairs/verification-target"),
+        &command.reproduction,
+    )?;
+    let installed_binary = match command.installed_binary {
+        Some(path) => path,
+        None => {
+            let home = std::env::var_os("HOME")
+                .context("HOME is required to locate the installed binary")?;
+            PathBuf::from(home).join(".local/bin/pce")
+        }
+    };
+    let provisional = VerifiedDefect::parse(
+        command.source_hold.as_str(),
+        &command.code_fact,
+        &command.reproduction,
+        &command.summary,
+        &repository_root,
+        &base_commit,
+        store_root.join("repairs/provisional/worktree"),
+        store_root.join("repairs/provisional/target"),
+        &installed_binary,
+    )
+    .context("invalid verified defect")?;
+    let repair_id = provisional.id();
+    let repair_root = store_root.join("repairs").join(&repair_id);
+    let defect = VerifiedDefect::parse(
+        command.source_hold.as_str(),
+        command.code_fact,
+        command.reproduction,
+        command.summary,
+        &repository_root,
+        &base_commit,
+        repair_root.join("worktree"),
+        repair_root.join("target"),
+        installed_binary,
+    )
+    .context("invalid repair workspace")?;
+    let process_number = ProcessNumber::new(std::process::id())
+        .context("failed to represent repair dispatcher process number")?;
+    let started = match observe_darwin_process_number(process_number)
+        .context("failed to observe repair dispatcher identity")?
+    {
+        ProcessIdentityObservation::Present(identity) => identity,
+        ProcessIdentityObservation::Absent => bail!("repair dispatcher process is absent"),
+        ProcessIdentityObservation::ForeignPresent => {
+            bail!("repair dispatcher process identity is unreadable")
+        }
+    };
+    let dispatcher = RepairDispatcherIdentity {
+        process_number: process_number.get(),
+        started_seconds: started.seconds_since_unix_epoch(),
+        started_microseconds: started.microseconds(),
+    };
+    let _ = recover_dead_repair_dispatch(
+        &store,
+        EventTimestamp::new(chrono::Utc::now()),
+        |recorded| {
+            let number =
+                ProcessNumber::new(recorded.process_number).map_err(|error| error.to_string())?;
+            match observe_darwin_process_number(number).map_err(|error| error.to_string())? {
+                ProcessIdentityObservation::Absent => Ok(false),
+                ProcessIdentityObservation::Present(observed) => Ok(observed
+                    .seconds_since_unix_epoch()
+                    == recorded.started_seconds
+                    && observed.microseconds() == recorded.started_microseconds),
+                ProcessIdentityObservation::ForeignPresent => Err(
+                    "recorded dispatcher exists but its start identity is unreadable".to_owned(),
+                ),
+            }
+        },
+    )
+    .context("failed to recover dead repair dispatcher")?;
+    let worker_program = command.worker_program;
+    let decision = dispatch_repair_with_identity(
+        &store,
+        &defect,
+        Some(dispatcher),
+        EventTimestamp::new(chrono::Utc::now()),
+        |dispatch| execute_repair_worker(dispatch, &worker_program),
+    )
+    .context("failed to dispatch repair")?;
+    serde_json::to_writer(
+        std::io::stdout(),
+        &serde_json::json!({"decision": format!("{decision:?}")}),
+    )
+    .context("failed to write repair dispatch result")?;
+    writeln!(std::io::stdout()).context("failed to terminate repair dispatch result")
+}
+
+fn verify_code_fact(repository: &Path, commit: &str, code_fact: &str) -> Result<()> {
+    let location = code_fact
+        .split_whitespace()
+        .next()
+        .context("code fact must begin with PATH:LINE")?;
+    let (path, raw_line) = location
+        .rsplit_once(':')
+        .context("code fact must begin with PATH:LINE")?;
+    let line: usize = raw_line
+        .parse()
+        .context("code fact line must be a positive integer")?;
+    if line == 0 {
+        bail!("code fact line must be positive");
+    }
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!("code fact path must be repository-relative without `..`");
+    }
+    let object = format!("{commit}:{path}");
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["show", &object])
+        .output()
+        .context("failed to inspect verified code fact")?;
+    if !output.status.success() {
+        bail!(
+            "failed to inspect `{object}`: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let source = String::from_utf8(output.stdout).context("verified source file is not UTF-8")?;
+    let observed = source
+        .lines()
+        .nth(line - 1)
+        .with_context(|| format!("code fact line {line} does not exist in `{path}` at {commit}"))?;
+    let claimed = code_fact[location.len()..].trim();
+    if claimed.is_empty() || claimed != observed.trim() {
+        bail!(
+            "verified code fact must quote the exact trimmed source line; observed `{}`",
+            observed.trim()
+        );
+    }
+    Ok(())
+}
+
+fn verify_reproduction(repository: &Path, target: &Path, reproduction: &str) -> Result<()> {
+    fs::create_dir_all(target).with_context(|| {
+        format!(
+            "failed to create verification target `{}`",
+            target.display()
+        )
+    })?;
+    let output = std::process::Command::new("sh")
+        .args(["-c", reproduction])
+        .current_dir(repository)
+        .env("CARGO_TARGET_DIR", target)
+        .output()
+        .context("failed to execute defect reproduction")?;
+    if output.status.success() {
+        bail!(
+            "defect reproduction passed; a verified finding must fail before dispatch: `{reproduction}`"
+        );
+    }
+    if matches!(output.status.code(), Some(126 | 127)) {
+        bail!(
+            "defect reproduction was not executable: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn prove_isolated_repair_target(dispatch: &pce_core::RepairDispatch) -> Result<(), String> {
+    let target = dispatch
+        .target_directory()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let repository_target = dispatch.repository_root().join("target");
+    if let Ok(primary) = repository_target.canonicalize()
+        && (target.starts_with(&primary) || primary.starts_with(&target))
+    {
+        return Err(format!(
+            "repair target `{}` aliases primary target `{}`",
+            target.display(),
+            primary.display()
+        ));
+    }
+    let installed = resolve_path_through_existing_ancestor(dispatch.installed_binary())?;
+    if target.starts_with(&installed) || installed.starts_with(&target) {
+        return Err(format!(
+            "repair target `{}` can reach installed binary `{}`",
+            target.display(),
+            installed.display()
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_path_through_existing_ancestor(path: &Path) -> Result<PathBuf, String> {
+    let mut cursor = path.to_path_buf();
+    let mut suffix = Vec::new();
+    loop {
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let link = fs::read_link(&cursor).map_err(|error| error.to_string())?;
+                let target = if link.is_absolute() {
+                    link
+                } else {
+                    cursor
+                        .parent()
+                        .ok_or_else(|| "installed symlink has no parent".to_owned())?
+                        .join(link)
+                };
+                let mut resolved = resolve_path_through_existing_ancestor(&target)?;
+                for component in suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(normalize_absolute_path(&resolved));
+            }
+            Ok(_) => {
+                let mut resolved = cursor.canonicalize().map_err(|error| error.to_string())?;
+                for component in suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(normalize_absolute_path(&resolved));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = cursor
+                    .file_name()
+                    .ok_or_else(|| format!("no existing ancestor for `{}`", path.display()))?
+                    .to_os_string();
+                suffix.push(name);
+                cursor = cursor
+                    .parent()
+                    .ok_or_else(|| format!("no existing ancestor for `{}`", path.display()))?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+fn normalize_absolute_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                let _ = normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn execute_repair_worker(
+    dispatch: &pce_core::RepairDispatch,
+    worker_program: &Path,
+) -> Result<BuiltRepair, String> {
+    let repair_parent = dispatch
+        .worktree()
+        .parent()
+        .ok_or_else(|| "repair worktree has no parent".to_owned())?;
+    fs::create_dir_all(repair_parent).map_err(|error| error.to_string())?;
+    let branch = format!("pce/repair/{}", &dispatch.id()[..12]);
+    if dispatch.worktree().exists() {
+        run_checked(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dispatch.repository_root())
+                .args(["worktree", "remove", "--force"])
+                .arg(dispatch.worktree()),
+            "remove failed repair worktree",
+        )?;
+    }
+    let branch_ref = format!("refs/heads/{branch}");
+    let branch_exists = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dispatch.repository_root())
+        .args(["show-ref", "--verify", "--quiet", &branch_ref])
+        .status()
+        .map_err(|error| error.to_string())?
+        .success();
+    if branch_exists {
+        run_checked(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dispatch.repository_root())
+                .args(["branch", "-D", &branch]),
+            "remove failed repair branch",
+        )?;
+    }
+    if dispatch.target_directory().exists() {
+        fs::remove_dir_all(dispatch.target_directory()).map_err(|error| error.to_string())?;
+    }
+    fs::create_dir_all(dispatch.target_directory()).map_err(|error| error.to_string())?;
+    prove_isolated_repair_target(dispatch)?;
+    run_checked(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dispatch.repository_root())
+            .args(["worktree", "add", "-b"])
+            .arg(&branch)
+            .arg(dispatch.worktree())
+            .arg(dispatch.base_commit()),
+        "create isolated repair worktree",
+    )?;
+    let brief_path = repair_parent.join("brief.md");
+    let brief = format!(
+        "# Binary defect repair\n\nSource hold: `{}`\n\nVerified code fact: {}\n\nReproduction: `{}`\n\nRequired result: {}\n\nWork only in `{}`. Use `CARGO_TARGET_DIR={}` for every cargo command. Add a regression test before the fix. Do not install the binary.\n",
+        dispatch.source_hold(),
+        dispatch.code_fact(),
+        dispatch.reproduction(),
+        dispatch.summary(),
+        dispatch.worktree().display(),
+        dispatch.target_directory().display(),
+    );
+    fs::write(&brief_path, brief).map_err(|error| error.to_string())?;
+    let is_prime_agent =
+        worker_program.file_name().and_then(|name| name.to_str()) == Some("prime-agent");
+    let mut worker = std::process::Command::new(worker_program);
+    if is_prime_agent {
+        worker.args([
+            "--provider",
+            OVERSEER_PROVIDER,
+            "--model",
+            OVERSEER_MODEL,
+            "--thinking",
+            OVERSEER_REASONING_EFFORT,
+            "--print",
+        ]);
+        worker.arg(format!(
+            "Implement the verified repair brief at {}",
+            brief_path.display()
+        ));
+    } else {
+        worker.arg(&brief_path);
+    }
+    worker
+        .current_dir(dispatch.worktree())
+        .env("CARGO_TARGET_DIR", dispatch.target_directory());
+    run_checked(&mut worker, "repair worker")?;
+
+    let dirty = git_text(dispatch.worktree(), &["status", "--porcelain"])?;
+    if !dirty.trim().is_empty() {
+        run_checked(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dispatch.worktree())
+                .args(["add", "--all"]),
+            "stage repair changes",
+        )?;
+        run_checked(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dispatch.worktree())
+                .args([
+                    "-c",
+                    "user.name=pce-overseer",
+                    "-c",
+                    "user.email=pce-overseer@local.invalid",
+                    "commit",
+                    "-m",
+                ])
+                .arg(format!("Repair: {}", dispatch.summary())),
+            "commit repair changes",
+        )?;
+    }
+    for (label, arguments) in [
+        ("cargo fmt", vec!["fmt", "--check"]),
+        (
+            "cargo clippy",
+            vec!["clippy", "--workspace", "--all-targets"],
+        ),
+        ("cargo test", vec!["test", "--workspace"]),
+        ("cargo release build", vec!["build", "--release"]),
+    ] {
+        let mut cargo = std::process::Command::new("cargo");
+        cargo
+            .args(arguments)
+            .current_dir(dispatch.worktree())
+            .env("CARGO_TARGET_DIR", dispatch.target_directory());
+        run_checked(&mut cargo, label)?;
+    }
+    let commit = git_text(dispatch.worktree(), &["rev-parse", "HEAD"])?;
+    if commit == dispatch.base_commit() {
+        return Err("repair worker produced no commit".to_owned());
+    }
+    let range = format!("{}..{}", dispatch.base_commit(), commit);
+    let touched_paths = git_text(dispatch.worktree(), &["diff", "--name-only", &range])?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(PathBuf::from)
+        .collect();
+    let artifact = dispatch.target_directory().join("release/pce");
+    let digest = hash_file(&artifact)?;
+    BuiltRepair::parse(commit, artifact, digest, touched_paths).map_err(|error| error.to_string())
+}
+
+fn run_checked(command: &mut std::process::Command, label: &str) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("{label}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let mut detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if detail.is_empty() {
+        detail = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    }
+    Err(format!("{label} failed with {}: {detail}", output.status))
+}
+
+fn git_text(repository: &Path, arguments: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn hash_file(path: &Path) -> Result<String, String> {
+    let bytes =
+        fs::read(path).map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn run_repair_install(root: Option<PathBuf>) -> Result<()> {
+    let store = HoldStore::new(hold_store_root(root)?);
+    let _fleet_membership = store
+        .lease_run_registrations()
+        .context("failed to lease fleet membership")?;
+    let registrations = store
+        .run_registrations()
+        .context("failed to list fleet registrations")?;
+    let (fleet, _leases) = match observe_fleet_for_install(&registrations) {
+        Ok(observation) => observation,
+        Err(error) => {
+            let detail = format!("fleet observation failed: {error:#}");
+            record_pending_install_failure(
+                &store,
+                EventTimestamp::new(chrono::Utc::now()),
+                detail.clone(),
+            )
+            .context("failed to retain fleet observation failure")?;
+            bail!(detail);
+        }
+    };
+    let decision = install_repair(
+        &store,
+        &fleet,
+        EventTimestamp::new(chrono::Utc::now()),
+        install_staged_repair,
+    )
+    .context("failed to run repair install boundary")?;
+    serde_json::to_writer(
+        std::io::stdout(),
+        &serde_json::json!({"decision": format!("{decision:?}")}),
+    )
+    .context("failed to write repair install result")?;
+    writeln!(std::io::stdout()).context("failed to terminate repair install result")
+}
+
+struct FleetJournalLeases {
+    files: Vec<(File, PathBuf)>,
+}
+
+impl Drop for FleetJournalLeases {
+    fn drop(&mut self) {
+        for (file, path) in &self.files {
+            if let Err(error) = unlock_file(file) {
+                tracing::error!(path = %path.display(), ?error, "failed to release fleet journal lease");
+            }
+        }
+    }
+}
+
+fn observe_fleet_for_install(
+    registrations: &[RunRegistration],
+) -> Result<(Vec<FleetRunObservation>, FleetJournalLeases)> {
+    let mut ordered: Vec<&RunRegistration> = registrations.iter().collect();
+    ordered.sort_by_key(|registration| registration.journal());
+    let mut leases = FleetJournalLeases { files: Vec::new() };
+    for registration in &ordered {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(registration.journal())
+            .with_context(|| {
+                format!(
+                    "failed to open fleet journal `{}`",
+                    registration.journal().display()
+                )
+            })?;
+        lock_file_exclusive(&file).with_context(|| {
+            format!(
+                "failed to lease fleet journal `{}`",
+                registration.journal().display()
+            )
+        })?;
+        leases
+            .files
+            .push((file, registration.journal().to_path_buf()));
+    }
+    let mut observations = Vec::new();
+    for registration in ordered {
+        let bytes = fs::read(registration.journal()).with_context(|| {
+            format!(
+                "failed to read fleet journal `{}`",
+                registration.journal().display()
+            )
+        })?;
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            bail!(
+                "fleet journal `{}` has an incomplete final record",
+                registration.journal().display()
+            );
+        }
+        let events = read_driver_journal(registration.journal())?;
+        let graph = read_driver_graph(registration.frozen_graph())?;
+        let snapshot = derive_driver_snapshot(&graph, &events, false).with_context(|| {
+            format!(
+                "failed to derive fleet run `{}`",
+                registration.key().as_str()
+            )
+        })?;
+        let active = snapshot
+            .packages()
+            .iter()
+            .find_map(|(package, state)| match state {
+                DriverPackageState::Running { issuance }
+                | DriverPackageState::Judging { issuance } => Some((package.clone(), *issuance)),
+                _ => None,
+            });
+        observations.push(match active {
+            Some((package, issuance)) => FleetRunObservation::mid_dispatch(
+                registration.key().as_str(),
+                registration.journal().to_path_buf(),
+                package,
+                issuance,
+            ),
+            None => FleetRunObservation::quiet(
+                registration.key().as_str(),
+                registration.journal().to_path_buf(),
+            ),
+        });
+    }
+    Ok((observations, leases))
+}
+
+fn install_staged_repair(request: &RepairInstall) -> Result<(), String> {
+    let staged_digest = hash_file(request.artifact())?;
+    if staged_digest != request.digest() {
+        return Err(format!(
+            "staged artifact digest changed: accepted {}, observed {staged_digest}",
+            request.digest(),
+        ));
+    }
+    let range = format!("{}..{}", request.base_commit(), request.commit());
+    let mut observed_paths: Vec<PathBuf> =
+        git_text(request.repository_root(), &["diff", "--name-only", &range])?
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(PathBuf::from)
+            .collect();
+    let mut recorded_paths = request.touched_paths().to_vec();
+    observed_paths.sort();
+    recorded_paths.sort();
+    if observed_paths != recorded_paths {
+        return Err(format!(
+            "repair diff paths changed: recorded {recorded_paths:?}, observed {observed_paths:?}"
+        ));
+    }
+    let ancestry = std::process::Command::new("git")
+        .arg("-C")
+        .arg(request.repository_root())
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            request.base_commit(),
+            request.commit(),
+        ])
+        .status()
+        .map_err(|error| error.to_string())?;
+    if !ancestry.success() {
+        return Err(format!(
+            "repair commit {} is not descended from base {}",
+            request.commit(),
+            request.base_commit(),
+        ));
+    }
+    let current = git_text(request.repository_root(), &["rev-parse", "HEAD"])?;
+    if current != request.base_commit() && current != request.commit() {
+        return Err(format!(
+            "primary checkout moved from repair base {} to {current}; rebuild and reprove before install",
+            request.base_commit(),
+        ));
+    }
+    if current != request.commit() {
+        run_checked(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(request.repository_root())
+                .args(["merge", "--ff-only"])
+                .arg(request.commit()),
+            "fast-forward repaired checkout",
+        )?;
+    }
+    atomic_install_binary(
+        request.artifact(),
+        request.installed_binary(),
+        request.digest(),
+    )?;
+    let installed_digest = hash_file(request.installed_binary())?;
+    if installed_digest != request.digest() {
+        return Err(format!(
+            "installed digest mismatch: expected {}, observed {installed_digest}",
+            request.digest(),
+        ));
+    }
+    Ok(())
+}
+
+fn atomic_install_binary(artifact: &Path, installed: &Path, digest: &str) -> Result<(), String> {
+    let parent = installed
+        .parent()
+        .ok_or_else(|| "installed binary has no parent".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    if fs::symlink_metadata(installed).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        let versioned = parent.join(format!(".pce-{digest}"));
+        let temporary = parent.join(format!(".pce-{digest}.tmp"));
+        fs::copy(artifact, &temporary).map_err(|error| error.to_string())?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        File::open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| error.to_string())?;
+        fs::rename(&temporary, &versioned).map_err(|error| error.to_string())?;
+        let link = parent.join(format!(".pce-link-{}", std::process::id()));
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&versioned, &link).map_err(|error| error.to_string())?;
+        fs::rename(&link, installed).map_err(|error| error.to_string())?;
+    } else {
+        let temporary = parent.join(format!(".pce-install-{}.tmp", std::process::id()));
+        fs::copy(artifact, &temporary).map_err(|error| error.to_string())?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        File::open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| error.to_string())?;
+        fs::rename(&temporary, installed).map_err(|error| error.to_string())?;
+    }
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| error.to_string())
 }
 
 fn run_overseer_server(command: OverseerServeCommand) -> Result<()> {
@@ -1515,7 +2277,15 @@ fn observe_store_fingerprint(root: &Path) -> Vec<(PathBuf, u64, u64)> {
             // session the operator runs on purpose, and must not wake the overseer or become a
             // brief on its own.
             if path.is_dir() {
-                if name != "overseer" && name != "sessions" && name != "feedback" {
+                let repair_workspace = directory == root.join("repairs")
+                    && name.to_str().is_some_and(|value| {
+                        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    });
+                if name != "overseer"
+                    && name != "sessions"
+                    && name != "feedback"
+                    && !repair_workspace
+                {
                     directories.push(path);
                 }
                 continue;
@@ -2786,6 +3556,27 @@ fn serve_overseer_http(
             })();
             match result {
                 Ok(location) => return redirect_to(stream, &location),
+                Err(error) => (
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    format!("{error:#}").into_bytes(),
+                ),
+            }
+        }
+        ("POST", target) if target.starts_with("/repairs/") && target.ends_with("/accept") => {
+            let repair_id = target
+                .trim_start_matches("/repairs/")
+                .trim_end_matches("/accept")
+                .trim_end_matches('/');
+            let result = accept_repair(
+                store,
+                repair_id,
+                "human",
+                EventTimestamp::new(chrono::Utc::now()),
+            )
+            .context("failed to accept binary repair");
+            match result {
+                Ok(()) => return redirect_to(stream, "/"),
                 Err(error) => (
                     "400 Bad Request",
                     "text/plain; charset=utf-8",
@@ -9179,7 +9970,78 @@ fn read_driver_journal(path: &Path) -> Result<Vec<DriverEvent>> {
     Ok(events)
 }
 
+#[cfg(unix)]
+unsafe extern "C" {
+    fn flock(file_descriptor: std::ffi::c_int, operation: std::ffi::c_int) -> std::ffi::c_int;
+}
+
+fn lock_file_exclusive(file: &File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { flock(file.as_raw_fd(), 2) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "fleet journal locking is unsupported",
+        ))
+    }
+}
+
+fn unlock_file(file: &File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { flock(file.as_raw_fd(), 8) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Ok(())
+    }
+}
+
+fn report_run_binary_updates(journal: &Path) -> Result<()> {
+    let Some(root) = std::env::var_os("PCE_HOLD_STORE_ROOT") else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    if !root.is_absolute() {
+        bail!("PCE_HOLD_STORE_ROOT must be absolute");
+    }
+    let store = HoldStore::new(root);
+    let registration = store
+        .run_registrations()
+        .context("failed to read run registrations while checking binary updates")?
+        .into_iter()
+        .find(|registration| registration.journal() == journal);
+    let Some(registration) = registration else {
+        return Ok(());
+    };
+    for update in store
+        .run_binary_updates(&registration.key())
+        .context("failed to read binary update inbox")?
+    {
+        tracing::warn!(
+            repair_id = %update.repair_id,
+            digest = %update.digest,
+            "installed pce binary moved"
+        );
+    }
+    Ok(())
+}
+
 fn append_driver_event(path: &Path, event: &DriverEvent) -> Result<()> {
+    report_run_binary_updates(path)?;
     let parent = path.parent().context("driver journal path has no parent")?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let mut bytes = serde_json::to_vec(event).context("failed to serialize driver event")?;
@@ -9190,6 +10052,8 @@ fn append_driver_event(path: &Path, event: &DriverEvent) -> Result<()> {
         .mode(0o600)
         .open(path)
         .with_context(|| format!("failed to open driver journal {}", path.display()))?;
+    lock_file_exclusive(&file)
+        .with_context(|| format!("failed to lease driver journal {}", path.display()))?;
     file.write_all(&bytes)
         .context("failed to append driver event")?;
     file.sync_all().context("failed to sync driver journal")

@@ -262,6 +262,105 @@ pub struct FeedbackEntry {
     pub text: String,
 }
 
+/// The pipeline step that failed while repairing the installed binary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepairFailureStage {
+    Dispatch,
+    Build,
+    Install,
+    Notify,
+}
+
+/// Operating-system identity of the process responsible for closing a dispatch claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepairDispatcherIdentity {
+    pub process_number: u32,
+    pub started_seconds: u64,
+    pub started_microseconds: u32,
+}
+
+/// One durable fact in the binary-repair pipeline.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum RepairRecord {
+    DefectBriefDispatched {
+        timestamp: EventTimestamp,
+        repair_id: String,
+        source_hold: String,
+        code_fact: String,
+        reproduction: String,
+        summary: String,
+        repository_root: PathBuf,
+        base_commit: String,
+        worktree: PathBuf,
+        target_directory: PathBuf,
+        installed_binary: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatcher: Option<RepairDispatcherIdentity>,
+    },
+    Built {
+        timestamp: EventTimestamp,
+        repair_id: String,
+        commit: String,
+        artifact: PathBuf,
+        digest: String,
+        touched_paths: Vec<PathBuf>,
+    },
+    InstallAccepted {
+        timestamp: EventTimestamp,
+        repair_id: String,
+        by: String,
+        digest: String,
+    },
+    InstallDeferred {
+        timestamp: EventTimestamp,
+        repair_id: String,
+        blocking_runs: Vec<String>,
+        touched_paths: Vec<PathBuf>,
+    },
+    Installed {
+        timestamp: EventTimestamp,
+        repair_id: String,
+        digest: String,
+        installed_binary: PathBuf,
+    },
+    RunNotified {
+        timestamp: EventTimestamp,
+        repair_id: String,
+        run_id: String,
+        journal: PathBuf,
+        digest: String,
+    },
+    NotificationsCompleted {
+        timestamp: EventTimestamp,
+        repair_id: String,
+        digest: String,
+    },
+    Failed {
+        timestamp: EventTimestamp,
+        repair_id: String,
+        stage: RepairFailureStage,
+        detail: String,
+    },
+}
+
+impl RepairRecord {
+    pub const fn timestamp(&self) -> EventTimestamp {
+        match self {
+            Self::DefectBriefDispatched { timestamp, .. }
+            | Self::Built { timestamp, .. }
+            | Self::InstallAccepted { timestamp, .. }
+            | Self::InstallDeferred { timestamp, .. }
+            | Self::Installed { timestamp, .. }
+            | Self::RunNotified { timestamp, .. }
+            | Self::NotificationsCompleted { timestamp, .. }
+            | Self::Failed { timestamp, .. } => *timestamp,
+        }
+    }
+}
+
 /// The card a hold routed to the human carries, if it has been sifted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -501,6 +600,15 @@ pub enum RegisterRunDisposition {
     Updated,
 }
 
+/// One binary digest addressed durably to a registered run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunBinaryUpdate {
+    pub timestamp: EventTimestamp,
+    pub repair_id: String,
+    pub digest: String,
+}
+
 /// The result of idempotently registering a work-graph run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -531,12 +639,45 @@ pub struct HoldStore {
     root: PathBuf,
 }
 
+/// Exclusive membership lease held while an install snapshots and observes the registered fleet.
+pub struct FleetRegistrationLease {
+    _lock: AdvisoryLock,
+}
+
 impl HoldStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Excludes registration changes while an installer observes every current run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the fleet membership lease cannot be created or acquired.
+    pub fn lease_run_registrations(&self) -> Result<FleetRegistrationLease, HoldStoreError> {
+        self.ensure_root()?;
+        let directory = self.registration_directory();
+        fs::create_dir_all(&directory).map_err(|source| HoldStoreError::CreateDirectory {
+            path: directory.clone(),
+            source,
+        })?;
+        let path = self.root.join("fleet.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| HoldStoreError::OpenFile {
+                path: path.clone(),
+                source,
+            })?;
+        Ok(FleetRegistrationLease {
+            _lock: AdvisoryLock::acquire(file, path, advisory_lock::EXCLUSIVE)?,
+        })
     }
 
     /// Loads all routing rules, installing the corpus-derived starting rulebook when needed.
@@ -605,9 +746,21 @@ impl HoldStore {
         self.ensure_root()?;
         let directory = self.registration_directory();
         fs::create_dir_all(&directory).map_err(|source| HoldStoreError::CreateDirectory {
-            path: directory,
+            path: directory.clone(),
             source,
         })?;
+        let fleet_path = self.root.join("fleet.lock");
+        let fleet_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&fleet_path)
+            .map_err(|source| HoldStoreError::OpenFile {
+                path: fleet_path.clone(),
+                source,
+            })?;
+        let _fleet = AdvisoryLock::acquire(fleet_file, fleet_path, advisory_lock::SHARED)?;
         let key = registration.key();
         let path = self.registration_path(&key);
         let file = OpenOptions::new()
@@ -713,6 +866,97 @@ impl HoldStore {
                     })?;
                 let _lock = AdvisoryLock::acquire(file, path.clone(), advisory_lock::SHARED)?;
                 read_registration_file(&path, &key).map(|(record, _)| record.registration)
+            })
+            .collect()
+    }
+
+    /// Addresses one installed binary digest to a registered run exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registration is unknown or its update inbox cannot be retained.
+    pub fn notify_run_binary_update(
+        &self,
+        key: &RunRegistrationKey,
+        update: RunBinaryUpdate,
+    ) -> Result<(), HoldStoreError> {
+        let directory = self.registration_directory().join("updates");
+        fs::create_dir_all(&directory).map_err(|source| HoldStoreError::CreateDirectory {
+            path: directory.clone(),
+            source,
+        })?;
+        let path = directory.join(format!("{}.jsonl", key.as_str()));
+        let lock_path = directory.join(format!("{}.lock", key.as_str()));
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|source| HoldStoreError::OpenFile {
+                path: lock_path.clone(),
+                source,
+            })?;
+        let _lock = AdvisoryLock::acquire(lock_file, lock_path, advisory_lock::EXCLUSIVE)?;
+        let retained = self.run_binary_updates(key)?;
+        if retained.iter().any(|existing| {
+            existing.repair_id == update.repair_id && existing.digest == update.digest
+        }) {
+            return Ok(());
+        }
+        let mut bytes = serde_json::to_vec(&update)
+            .map_err(|source| HoldStoreError::SerializeRecord { source })?;
+        bytes.push(b'\n');
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| HoldStoreError::OpenFile {
+                path: path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .map_err(|source| HoldStoreError::AppendFile {
+                path: path.clone(),
+                source,
+            })?;
+        file.sync_all()
+            .map_err(|source| HoldStoreError::SyncFile { path, source })
+    }
+
+    /// Reads every binary digest addressed to one registered run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the inbox has an incomplete or malformed record.
+    pub fn run_binary_updates(
+        &self,
+        key: &RunRegistrationKey,
+    ) -> Result<Vec<RunBinaryUpdate>, HoldStoreError> {
+        let path = self
+            .registration_directory()
+            .join("updates")
+            .join(format!("{}.jsonl", key.as_str()));
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = fs::read(&path).map_err(|source| HoldStoreError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            return Err(HoldStoreError::IncompleteTail { path });
+        }
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .enumerate()
+            .map(|(index, line)| {
+                serde_json::from_slice(line).map_err(|source| HoldStoreError::MalformedRecord {
+                    path: path.clone(),
+                    line: index + 1,
+                    detail: source.to_string(),
+                })
             })
             .collect()
     }
@@ -1242,6 +1486,99 @@ impl HoldStore {
                 })
             })
             .collect()
+    }
+
+    /// Reads every retained binary-repair fact in append order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the repair journal cannot be read exactly.
+    pub fn repair_records(&self) -> Result<Vec<RepairRecord>, HoldStoreError> {
+        let path = self.root.join("repairs").join("events.jsonl");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = fs::read(&path).map_err(|source| HoldStoreError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            return Err(HoldStoreError::IncompleteTail { path });
+        }
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .enumerate()
+            .map(|(index, line)| {
+                let record: RepairRecord = serde_json::from_slice(line).map_err(|source| {
+                    HoldStoreError::MalformedRecord {
+                        path: path.clone(),
+                        line: index + 1,
+                        detail: source.to_string(),
+                    }
+                })?;
+                Ok(record)
+            })
+            .collect()
+    }
+
+    /// Appends one synchronized binary-repair fact under the repair journal lock.
+    pub(crate) fn append_repair_record(&self, record: &RepairRecord) -> Result<(), HoldStoreError> {
+        let _ = self.append_repair_record_if(record, |_| true)?;
+        Ok(())
+    }
+
+    /// Atomically appends a repair fact only when the retained prefix admits it.
+    pub(crate) fn append_repair_record_if<F>(
+        &self,
+        record: &RepairRecord,
+        admit: F,
+    ) -> Result<bool, HoldStoreError>
+    where
+        F: FnOnce(&[RepairRecord]) -> bool,
+    {
+        self.ensure_root()?;
+        let directory = self.root.join("repairs");
+        fs::create_dir_all(&directory).map_err(|source| HoldStoreError::CreateDirectory {
+            path: directory.clone(),
+            source,
+        })?;
+        let lock_path = directory.join("events.lock");
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|source| HoldStoreError::OpenFile {
+                path: lock_path.clone(),
+                source,
+            })?;
+        let _lock = AdvisoryLock::acquire(lock_file, lock_path, advisory_lock::EXCLUSIVE)?;
+        let existing = self.repair_records()?;
+        if !admit(&existing) {
+            return Ok(false);
+        }
+        let path = directory.join("events.jsonl");
+        let mut bytes = serde_json::to_vec(record)
+            .map_err(|source| HoldStoreError::SerializeRecord { source })?;
+        bytes.push(b'\n');
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| HoldStoreError::OpenFile {
+                path: path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .map_err(|source| HoldStoreError::AppendFile {
+                path: path.clone(),
+                source,
+            })?;
+        file.sync_all()
+            .map_err(|source| HoldStoreError::SyncFile { path, source })?;
+        Ok(true)
     }
 
     /// Closes an open hold with a retained reason.

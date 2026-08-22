@@ -68,10 +68,28 @@ path in an option. Evidence and the reporting run's full report remain available
 Apply this order once to each open report:
 
 1. **Installed capability is absent.** Confirm the requested verb against the installed binary's
-   help surface. An absent verb or option is a tool defect, not a choice. Record an idempotent defect
-   brief under the store's overseer brief records. Include the requested command, observed surface,
-   source hold key, discriminating fact, and reproduction. Dispatch the brief to the binary repair
-   pipeline. Do not route a human hold for that report.
+   help surface. An absent verb or option is a tool defect, not a choice. A verified code fact must
+   begin with an exact repository-relative `PATH:LINE`, followed by the exact trimmed source line.
+   The reproduction must be executable and must fail before dispatch. Dispatch it once with:
+
+   ```bash
+   pce overseer defect-dispatch --root "$PCE_HOLD_STORE_ROOT" \
+     --source-hold <hold-key> \
+     --code-fact '<PATH:LINE exact trimmed source line>' \
+     --reproduction '<exact failing command>' \
+     --summary '<one-line fix>' \
+     --repository-root '<absolute pce checkout>'
+   ```
+
+   The command takes the global repair claim in the append-only store before it starts a worker, so
+   no two repair workers can overlap files. The claim carries the dispatcher PID and kernel start
+   identity. A later pass turns a dead unclosed dispatcher into a retained failure, then retries it.
+   A recorded worker or build failure can also be retried without losing the failed attempt. It creates a
+   dedicated worktree and `CARGO_TARGET_DIR`, runs `cargo fmt --check`, Clippy, the full workspace
+   suite, and a release build there, and records the staged binary digest. A repeated pass never
+   starts a second worker for the same finding. Never run Cargo in the primary checkout and never
+   run `install.sh`; either operation can move the installed binary before acceptance. Do not route
+   a human hold for a verified tool defect.
 2. **The report asks for a choice but names no options.** Use
    `pce hold route --root "$PCE_HOLD_STORE_ROOT" --key <key> --to reporting-run`. The retained request must
    tell the run to name every option and consequence. Do not route it to the human.
@@ -149,11 +167,27 @@ paths remain evidence and never become options.
 
 ## 5. Finish one pass
 
-Re-list holds after mutations. Report counts by route and state, any dispatched defect brief, any
-pending install, the number of run registrations inspected, and the number of labelled overseer
-facts supplied. If the fleet pass supplies none, include the exact line `overseer facts supplied: 0`.
-That line records the result of the search instead of leaving it unclear whether the search happened.
-A dead or missing heartbeat is a liveness fact, not evidence that the queue is empty.
+Re-list holds after mutations. Read durable repair state and run the safe install observation on
+every pass:
+
+```bash
+pce overseer repair-list --root "$PCE_HOLD_STORE_ROOT"
+pce overseer repair-install --root "$PCE_HOLD_STORE_ROOT"
+```
+
+A built repair stays visible until the operator accepts it once in the queue. Never call
+`repair-accept` as the overseer; the queue POST supplies the human attribution. `repair-install`
+holds every registered run journal lease, blocks on any running or judging dispatch, verifies the
+accepted artifact digest again, fast-forwards only the recorded commit, swaps the binary atomically,
+and addresses the digest to every registered run inbox. An unreadable journal or failed merge,
+swap, or notification is a retained failure, not permission to continue.
+
+Report counts by route and state, any dispatched defect brief, any pending install, named blocking
+runs, notification failures, the number of run registrations inspected, and the number of labelled
+overseer facts supplied. If the fleet pass supplies none, include the exact line
+`overseer facts supplied: 0`. That line records the result of the search instead of leaving it
+unclear whether the search happened. A dead or missing heartbeat is a liveness fact, not evidence
+that the queue is empty.
 
 One invocation is one pass. The session wakes, performs that pass, and exits; it is never
 long-lived, because it holds nothing in context that the store does not already hold. Finding
