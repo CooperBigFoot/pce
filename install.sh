@@ -217,16 +217,21 @@ if [ "${1:-}" = "--merge-hook-settings" ]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+case "${CARGO_TARGET_DIR:-}" in
+    "") BUILD_TARGET_DIR="$REPO_ROOT/target" ;;
+    /*) BUILD_TARGET_DIR="$CARGO_TARGET_DIR" ;;
+    *) BUILD_TARGET_DIR="$REPO_ROOT/$CARGO_TARGET_DIR" ;;
+esac
 
 # --- Build the release binary -------------------------------------------------
 echo "Building pce (release) in $REPO_ROOT ..."
-(cd "$REPO_ROOT" && cargo build --release)
+(cd "$REPO_ROOT" && CARGO_TARGET_DIR="$BUILD_TARGET_DIR" cargo build --release)
 
 # --- Link the binary onto PATH ------------------------------------------------
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
-ln -sfn "$REPO_ROOT/target/release/pce" "$BIN_DIR/pce"
-echo "Linked $BIN_DIR/pce -> $REPO_ROOT/target/release/pce"
+ln -sfn "$BUILD_TARGET_DIR/release/pce" "$BIN_DIR/pce"
+echo "Linked $BIN_DIR/pce -> $BUILD_TARGET_DIR/release/pce"
 
 case ":$PATH:" in
     *":$BIN_DIR:"*)

@@ -18,6 +18,7 @@ pub mod herdr_dispatch;
 pub mod hold_store;
 pub mod landing_readiness;
 pub mod overseer_registration;
+pub mod overseer_repair;
 pub mod overseer_routing;
 pub mod overseer_rulebook;
 pub mod overseer_view;
@@ -176,15 +177,22 @@ pub use herdr_dispatch::{
     WorkerEnvironment, compose_herdr_work_package_dispatch, derive_herdr_agent_name,
 };
 pub use hold_store::{
-    DOOR_QUESTION_KINDS, FeedbackEntry, Hold, HoldIdentity, HoldKey, HoldRecord, HoldRoute,
-    HoldState, HoldStore, HoldStoreError, OpenDisposition, OpenHoldResult, RegisterRunDisposition,
-    RegisterRunResult, RequestedAct, SiftedBlock, SiftedCard, SiftedOption,
+    DOOR_QUESTION_KINDS, FeedbackEntry, FleetRegistrationLease, Hold, HoldIdentity, HoldKey,
+    HoldRecord, HoldRoute, HoldState, HoldStore, HoldStoreError, OpenDisposition, OpenHoldResult,
+    RegisterRunDisposition, RegisterRunResult, RepairDispatcherIdentity, RepairFailureStage,
+    RepairRecord, RequestedAct, RunBinaryUpdate, SiftedBlock, SiftedCard, SiftedOption,
 };
 pub use landing_readiness::{
     CompletionCriterionIndex, LandingCriterionEvidence, LandingReadinessDecision,
     LandingReadinessProblem, LandingReadinessResult, evaluate_landing_readiness,
 };
 pub use overseer_registration::{RunRegistration, RunRegistrationError, RunRegistrationKey};
+pub use overseer_repair::{
+    BuiltRepair, DispatchRepairDecision, FleetRunObservation, InstallRepairDecision,
+    RepairDispatch, RepairInstall, RepairPipelineError, VerifiedDefect, accept_repair,
+    dispatch_repair, dispatch_repair_with_identity, install_repair, record_pending_install_failure,
+    recover_dead_repair_dispatch,
+};
 pub use overseer_routing::{
     DoorKind, InstallDecision, InstallRequest, OverseerRecord, OverseerRoutingError,
     ProposedRoutingRule, RouteDecision, RuleAdmission, RuleRefusal, admit_routing_rule,
@@ -196,8 +204,8 @@ pub use overseer_rulebook::{
 };
 pub use overseer_view::{
     OVERSEER_MODEL, OVERSEER_PROVIDER, OVERSEER_REASONING_EFFORT, OverseerEvent, OverseerJournal,
-    OverseerLiveness, OverseerViewError, OverseerWakeReason, QueueHold, QueueHoldState, QueueRun,
-    QueueView, derive_queue_view, render_queue_html,
+    OverseerLiveness, OverseerViewError, OverseerWakeReason, QueueHold, QueueHoldState,
+    QueueRepair, QueueRepairState, QueueRun, QueueView, derive_queue_view, render_queue_html,
 };
 pub use run_state::{
     ArtifactProvenance, ArtifactProvenanceCondition, AuthorityFailure, BlockingCriterion,

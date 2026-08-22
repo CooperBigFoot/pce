@@ -3,6 +3,7 @@
 //! The view is derived from durable store records. It never treats a missing or stale heartbeat as
 //! an empty queue, and it carries no repository authority.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{EventTimestamp, HoldRoute, HoldState, HoldStore, HoldStoreError, SiftedCard};
+use crate::{
+    EventTimestamp, HoldRoute, HoldState, HoldStore, HoldStoreError, RepairFailureStage,
+    RepairRecord, SiftedCard,
+};
 
 /// The provider used for every overseer session.
 ///
@@ -265,12 +269,41 @@ impl QueueRun {
     }
 }
 
+/// Operator-facing lifecycle of one binary repair.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum QueueRepairState {
+    Dispatching,
+    ReadyForAcceptance,
+    Accepted,
+    WaitingForFleet {
+        blocking_runs: Vec<String>,
+    },
+    Installed,
+    Failed {
+        stage: RepairFailureStage,
+        detail: String,
+    },
+}
+
+/// One durable binary repair shown independently of decision holds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct QueueRepair {
+    pub id: String,
+    pub summary: String,
+    pub digest: Option<String>,
+    pub state: QueueRepairState,
+    pub age_seconds: u64,
+    pub touched_paths: Vec<PathBuf>,
+}
+
 /// A complete queue snapshot. Holds are never suppressed because the overseer is unavailable.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct QueueView {
     pub overseer: OverseerLiveness,
     pub holds: Vec<QueueHold>,
     pub runs: Vec<QueueRun>,
+    pub repairs: Vec<QueueRepair>,
 }
 
 /// Derives a queue snapshot from the stores at a caller-supplied time.
@@ -432,11 +465,107 @@ pub fn derive_queue_view(
             })
         })
         .collect::<Result<Vec<_>, OverseerViewError>>()?;
+    let repairs = derive_queue_repairs(
+        &store
+            .repair_records()
+            .map_err(OverseerViewError::HoldStore)?,
+        now,
+    );
     Ok(QueueView {
         overseer,
         holds,
         runs,
+        repairs,
     })
+}
+
+fn derive_queue_repairs(records: &[RepairRecord], now: DateTime<Utc>) -> Vec<QueueRepair> {
+    let mut repairs: BTreeMap<String, QueueRepair> = BTreeMap::new();
+    for record in records {
+        match record {
+            RepairRecord::DefectBriefDispatched {
+                timestamp,
+                repair_id,
+                summary,
+                ..
+            } => {
+                let age_seconds = now
+                    .signed_duration_since(*timestamp.as_datetime())
+                    .num_seconds()
+                    .max(0) as u64;
+                repairs
+                    .entry(repair_id.clone())
+                    .and_modify(|repair| {
+                        repair.summary.clone_from(summary);
+                        repair.digest = None;
+                        repair.state = QueueRepairState::Dispatching;
+                        repair.age_seconds = age_seconds;
+                        repair.touched_paths.clear();
+                    })
+                    .or_insert_with(|| QueueRepair {
+                        id: repair_id.clone(),
+                        summary: summary.clone(),
+                        digest: None,
+                        state: QueueRepairState::Dispatching,
+                        age_seconds,
+                        touched_paths: Vec::new(),
+                    });
+            }
+            RepairRecord::Built {
+                repair_id,
+                digest,
+                touched_paths,
+                ..
+            } => {
+                if let Some(repair) = repairs.get_mut(repair_id) {
+                    repair.digest = Some(digest.clone());
+                    repair.touched_paths.clone_from(touched_paths);
+                    repair.state = QueueRepairState::ReadyForAcceptance;
+                }
+            }
+            RepairRecord::InstallAccepted { repair_id, .. } => {
+                if let Some(repair) = repairs.get_mut(repair_id) {
+                    repair.state = QueueRepairState::Accepted;
+                }
+            }
+            RepairRecord::InstallDeferred {
+                repair_id,
+                blocking_runs,
+                ..
+            } => {
+                if let Some(repair) = repairs.get_mut(repair_id) {
+                    repair.state = QueueRepairState::WaitingForFleet {
+                        blocking_runs: blocking_runs.clone(),
+                    };
+                }
+            }
+            RepairRecord::Installed { repair_id, .. } => {
+                if let Some(repair) = repairs.get_mut(repair_id) {
+                    repair.state = QueueRepairState::Installed;
+                }
+            }
+            RepairRecord::Failed {
+                repair_id,
+                stage,
+                detail,
+                ..
+            } => {
+                if let Some(repair) = repairs.get_mut(repair_id) {
+                    repair.state = QueueRepairState::Failed {
+                        stage: *stage,
+                        detail: detail.clone(),
+                    };
+                }
+            }
+            RepairRecord::NotificationsCompleted { repair_id, .. } => {
+                if let Some(repair) = repairs.get_mut(repair_id) {
+                    repair.state = QueueRepairState::Installed;
+                }
+            }
+            RepairRecord::RunNotified { .. } => {}
+        }
+    }
+    repairs.into_values().collect()
 }
 
 /// The page's stylesheet.
@@ -569,6 +698,10 @@ font-family:var(--serif);font-size:15px;line-height:1.45;color:var(--ink-2);max-
 .drawer-body code{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
 .drawer-note{margin:10px 0 0;font-size:12.5px;color:var(--ink-3)}
 .empty{padding:22px;font-family:var(--serif);font-size:16px;color:var(--ink-2)}
+.updates{display:flex;flex-direction:column;gap:8px}.update{background:var(--surface);border:1px solid var(--rule);
+border-left:4px solid var(--accent);border-radius:8px;padding:12px 14px;box-shadow:var(--shadow)}
+.update h2{margin:0 0 5px;font-family:var(--serif);font-size:18px}.update p{margin:3px 0;color:var(--ink-2)}
+.update code{font-family:var(--mono);font-size:11.5px}.update-waiting{border-left-color:var(--defect)}
 .foot{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);text-align:center;padding-top:4px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 "#;
@@ -627,15 +760,39 @@ pub fn render_queue_html(view: &QueueView) -> String {
     }
     html.push_str("</style></head><body><div class=\"shell\">");
 
+    let pending_installs = view
+        .repairs
+        .iter()
+        .filter(|repair| {
+            matches!(
+                repair.state,
+                QueueRepairState::Accepted
+                    | QueueRepairState::WaitingForFleet { .. }
+                    | QueueRepairState::Failed {
+                        stage: RepairFailureStage::Install | RepairFailureStage::Notify,
+                        ..
+                    }
+            )
+        })
+        .count();
     html.push_str(&format!(
-        "<header class=\"bar\"><div class=\"mark\">pce <span>overseer</span></div>\
-<div class=\"count\"><b>{waiting}</b> waiting for you &middot; {with_overseer} with the overseer &middot; {} settled without you</div>\
-<div class=\"bar-spacer\"></div>\
-<div class=\"pulse {live_class}\" id=\"overseer-status\"><span class=\"pulse-dot\"></span>{status}</div></header>",
-        settled.len()
+        r#"<header class="bar"><div class="mark">pce <span>overseer</span></div>
+<div class="count"><b>{waiting}</b> waiting for you &middot; {with_overseer} with the overseer &middot; {} settled without you &middot; {} defect briefs dispatched &middot; {pending_installs} pending installs</div>
+<div class="bar-spacer"></div>
+<div class="pulse {live_class}" id="overseer-status"><span class="pulse-dot"></span>{status}</div></header>"#,
+        settled.len(),
+        view.repairs.len(),
     ));
 
-    html.push_str("<div class=\"console\">");
+    if !view.repairs.is_empty() {
+        html.push_str(r#"<section class="updates" aria-label="Binary updates">"#);
+        for repair in &view.repairs {
+            html.push_str(&render_repair(repair));
+        }
+        html.push_str("</section>");
+    }
+
+    html.push_str(r#"<div class="console">"#);
     // The radios live before both columns so `:has()` on `.console` can see them.
     for (index, hold) in queue.iter().enumerate() {
         html.push_str(&format!(
@@ -751,6 +908,66 @@ setInterval(() => {
 </script></body></html>"#,
     );
     html
+}
+
+fn render_repair(repair: &QueueRepair) -> String {
+    let (label, class, detail) = match &repair.state {
+        QueueRepairState::Dispatching => (
+            "repair in progress",
+            "",
+            "Worker and checks are still running.".to_owned(),
+        ),
+        QueueRepairState::ReadyForAcceptance => (
+            "update ready",
+            "",
+            "Accept once. The overseer installs it when the fleet is quiet.".to_owned(),
+        ),
+        QueueRepairState::Accepted => (
+            "accepted; waiting for install pass",
+            "",
+            "The next safe pass installs this artifact.".to_owned(),
+        ),
+        QueueRepairState::WaitingForFleet { blocking_runs } => (
+            "accepted; fleet is not quiet",
+            " update-waiting",
+            format!("Blocking runs: {}", blocking_runs.join(", ")),
+        ),
+        QueueRepairState::Installed => (
+            "installed",
+            "",
+            "Every registered run received the installed digest.".to_owned(),
+        ),
+        QueueRepairState::Failed { stage, detail } => (
+            "repair failed",
+            " update-waiting",
+            format!("{stage:?}: {detail}"),
+        ),
+    };
+    let digest = repair.digest.as_deref().unwrap_or("not built");
+    let accept = if matches!(repair.state, QueueRepairState::ReadyForAcceptance) {
+        format!(
+            r#"<form method="post" action="/repairs/{}/accept"><button class="btn btn-primary" type="submit">Accept update</button></form>"#,
+            escape_html(&repair.id),
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<article class="update{class}" data-repair-id="{id}" data-state="{state}"><h2>{summary}</h2><p><strong>{label}</strong> &middot; {age}</p><p>{detail}</p><p><code>sha256 {digest}</code></p>{accept}</article>"#,
+        id = escape_html(&repair.id),
+        state = match repair.state {
+            QueueRepairState::Dispatching => "dispatching",
+            QueueRepairState::ReadyForAcceptance => "ready-for-acceptance",
+            QueueRepairState::Accepted => "accepted",
+            QueueRepairState::WaitingForFleet { .. } => "waiting-for-fleet",
+            QueueRepairState::Installed => "installed",
+            QueueRepairState::Failed { .. } => "failed",
+        },
+        summary = escape_html(&repair.summary),
+        age = escape_html(&format_age(repair.age_seconds)),
+        detail = escape_html(&detail),
+        digest = escape_html(digest),
+    )
 }
 
 fn render_card(hold: &QueueHold) -> String {
