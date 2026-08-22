@@ -235,3 +235,10 @@ Two findings, one of them severe.
 - Effect: the store loss cost a re-derivation, not a duplicate question to the human. The section-7
   rule that the identity must hash the immutable establishing event and never the report is what made
   recovery mechanical. This is worth keeping exactly as specified.
+
+## 2026-08-22T20:50Z — second occurrence of the store wipe
+
+- Observation: `~/.pce/holds` recreated 2026-08-22T20:47Z; `sessions/20260822T204724.850157.log` reads `Daemon worker client closed`; the next two overseer passes report `Run registrations inspected: 0` and `Open holds: 0`. `pce hold runs`/`hold list` empty. This run's registration from 2026-08-21T21:07Z and hold `fec9050d…ba23` were gone.
+- Recovery: `pce hold register` returned `disposition: created`; `pce hold open` with the recomputed `STOP_ID` returned the identical key `fec9050d…ba23`. Second time the deterministic identity absorbed the loss without a duplicate human question.
+- This raises the earlier finding from a single event to a repeated one (2/2 overseer restarts observed by this run). The "never destructively initialise the store root" recommendation stands; confidence in the located cause rises from `medium` to `high` for the correlation with `overseer serve` startup, still without reading the source.
+- Cost: every overseer restart silently dequeues every blocked run in the fleet until each supervisor happens to be re-invoked.

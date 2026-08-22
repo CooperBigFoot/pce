@@ -697,7 +697,7 @@ fn overseer_replies_obey_the_human_register_and_preserve_hedges() {
 }
 
 #[test]
-fn human_can_write_into_any_open_hold_and_reclaims_its_route() {
+fn human_can_write_into_any_open_hold_and_the_overseer_owes_the_reply() {
     for (index, route) in [HoldRoute::Overseer, HoldRoute::ReportingRun]
         .into_iter()
         .enumerate()
@@ -721,9 +721,9 @@ fn human_can_write_into_any_open_hold_and_reclaims_its_route() {
         assert_eq!(
             answered.state(),
             pce_core::HoldState::Open {
-                route: HoldRoute::Human
+                route: HoldRoute::Overseer
             },
-            "a human interjection must reclaim the route"
+            "a human interjection hands the next move to the overseer, never back to the human"
         );
     }
 

@@ -459,7 +459,13 @@ fn idle_peer_is_quiet_but_partial_request_warns() {
 }
 
 #[test]
-fn browser_human_message_reclaims_any_open_route() {
+/// A human message is accepted on any open hold and hands the next move to the overseer.
+///
+/// The first implementation of this derived the route as `Human`, so a hold read `waiting for you`
+/// from the moment the operator answered and never left that state. The queue then could not
+/// distinguish a card awaiting him from one he had already answered, and `with the overseer` became
+/// unreachable. Routing says who owes an action; the page accepts his words regardless of route.
+fn browser_human_message_hands_the_next_move_to_the_overseer() {
     let cwd = tempfile::tempdir().expect("cwd");
     let server = ServerFixture::start("sleep 10", cwd.path());
     let store = HoldStore::new(&server.root);
@@ -481,7 +487,15 @@ fn browser_human_message_reclaims_any_open_route() {
     assert_eq!(
         hold.state(),
         pce_core::HoldState::Open {
-            route: HoldRoute::Human
-        }
+            route: HoldRoute::Overseer
+        },
+        "a human answer hands the next move to the overseer, never back to the human"
+    );
+    let page =
+        String::from_utf8_lossy(&server.request(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+            .into_owned();
+    assert!(
+        page.contains("with the overseer"),
+        "an answered hold must stop reading as waiting for the operator"
     );
 }

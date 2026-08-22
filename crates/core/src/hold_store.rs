@@ -1986,9 +1986,14 @@ fn derive_hold(
             });
         }
         match record {
+            // A human message hands the next move to the overseer; it never assigns it back to
+            // the human. Routing says who owes an action, never who is allowed to speak — the page
+            // accepts the operator's words on any open hold regardless of route. Deriving `Human`
+            // here made every answered hold read `waiting for you` forever, so the queue could no
+            // longer distinguish a card awaiting the operator from one he had already answered.
             HoldRecord::Answered { by, .. } if by == "human" => {
                 state = HoldState::Open {
-                    route: HoldRoute::Human,
+                    route: HoldRoute::Overseer,
                 };
             }
             HoldRecord::Opened { .. } | HoldRecord::Answered { .. } | HoldRecord::Sifted { .. } => {

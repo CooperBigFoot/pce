@@ -1085,7 +1085,7 @@ unchanged.</p></section>",
 <label for=\"answer-{key}\">Your answer</label>\
 <textarea id=\"answer-{key}\" name=\"answer\" required placeholder=\"One sentence is enough. A question back is also an answer.\"></textarea>\
 <div class=\"answer-row\"><button class=\"btn btn-primary\" type=\"submit\">Record it</button>\
-<span class=\"hint\">This does not close the hold. Your words are recorded as yours and reclaim the route. \
+<span class=\"hint\">This does not close the hold. Your words are recorded as yours and the overseer answers next. \
 Only the overseer writes the closing record.</span></div></form>",
             key = escape_html(&hold.key)
         ));
