@@ -9,10 +9,12 @@ Turn the completed discussion into one standalone handoff for a fresh Prime Agen
 
 ## Name and path
 
-Use `$ARGUMENTS` as the human-readable vision name. If it is empty, ask only for the name. From the target repository root, run:
+When `$ARGUMENTS` contains a useful human-readable name, use it unchanged as the vision name. When it is empty, derive a concise, descriptive name from the confirmed shared understanding. Ask for a name only when the conversation does not contain enough information to choose a meaningful one. Do not reopen the completed discussion merely to name the file.
+
+From the target repository root, run the deterministic creation helper with the explicit or derived name:
 
 ```bash
-python3 <path-to-this-skill>/scripts/create_vision.py "$ARGUMENTS"
+python3 <path-to-this-skill>/scripts/create_vision.py "<vision name>"
 ```
 
 The helper prints `planning/visions/YYYY-MM-DD-<slug>.md`. It creates an empty file only when the path does not exist. A repeated call returns the existing path without changing its content.

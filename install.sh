@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install PCE's three skills and safely retire proven legacy entries.
+# Install PCE's six skills and safely retire proven legacy entries.
 set -eu
 
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
@@ -22,16 +22,20 @@ if not home_value:
 home_spelling = Path(os.path.abspath(Path(home_value).expanduser()))
 home = home_spelling.resolve(strict=False)
 
+authoring_skills = (
+    "grill-me", "to-vision", "chart-program", "grill-ticket", "land-ticket",
+)
 matrix = {
-    home / ".claude/skills/grill-me": repo / "skills/grill-me",
-    home / ".claude/skills/to-vision": repo / "skills/to-vision",
-    home / ".codex/skills/grill-me": repo / "skills/grill-me",
-    home / ".codex/skills/to-vision": repo / "skills/to-vision",
+    **{
+        home / environment / name: repo / "skills" / name
+        for environment in (".claude/skills", ".codex/skills")
+        for name in authoring_skills
+    },
     home / ".prime/agent/skills/implement-vision": repo / "skills/implement-vision",
 }
 retired_names = (
-    "pce", "to-graph", "work-graph", "overseer", "chart-program",
-    "work-ticket", "land-ticket", "grill-with-docs", "domain-modeling",
+    "pce", "to-graph", "work-graph", "overseer", "work-ticket",
+    "grill-with-docs", "domain-modeling",
 )
 skill_roots = (
     home / ".claude/skills",
@@ -42,8 +46,7 @@ skill_roots = (
 wrong_placements = (
     home / ".claude/skills/implement-vision",
     home / ".codex/skills/implement-vision",
-    home / ".prime/agent/skills/grill-me",
-    home / ".prime/agent/skills/to-vision",
+    *(home / ".prime/agent/skills" / name for name in authoring_skills),
 )
 
 
