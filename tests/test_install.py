@@ -9,11 +9,19 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
+AUTHORING_SKILLS = (
+    "grill-me",
+    "to-vision",
+    "chart-program",
+    "grill-ticket",
+    "land-ticket",
+)
 MATRIX = {
-    ".claude/skills/grill-me": ROOT / "skills/grill-me",
-    ".claude/skills/to-vision": ROOT / "skills/to-vision",
-    ".codex/skills/grill-me": ROOT / "skills/grill-me",
-    ".codex/skills/to-vision": ROOT / "skills/to-vision",
+    **{
+        f"{environment}/skills/{name}": ROOT / "skills" / name
+        for environment in (".claude", ".codex")
+        for name in AUTHORING_SKILLS
+    },
     ".prime/agent/skills/implement-vision": ROOT / "skills/implement-vision",
 }
 
@@ -89,6 +97,27 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(copied.read_text(encoding="utf-8"), "copied")
             self.assertIn(str(home.resolve() / ".claude/skills/overseer"), result.stderr)
             self.assertIn(str(copied.resolve()), result.stderr)
+
+    def test_retires_only_owned_grill_with_docs_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            owned = home / ".claude/skills/grill-with-docs"
+            owned.parent.mkdir(parents=True)
+            owned.symlink_to(ROOT / "skills/grill-with-docs", target_is_directory=True)
+            foreign_target = home / "foreign-grill-with-docs"
+            foreign_target.mkdir()
+            foreign = home / ".codex/skills/grill-with-docs"
+            foreign.parent.mkdir(parents=True)
+            foreign.symlink_to(foreign_target, target_is_directory=True)
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(os.path.lexists(owned))
+            self.assertTrue(foreign.is_symlink())
+            self.assertEqual(foreign.resolve(), foreign_target.resolve())
+            self.assertIn(str(foreign), result.stderr)
+            self.assert_matrix(home)
 
     def test_conflict_refuses_before_creating_any_matrix_link(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -262,6 +291,83 @@ class InstallTests(unittest.TestCase):
             actual = json.loads(settings_path.read_text(encoding="utf-8"))
             self.assertEqual(actual, settings)
             self.assertIn("preserved ambiguous PreToolUse hook", result.stderr)
+
+    def test_preserves_unrelated_hook_whose_command_is_inside_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            settings_path = home / ".claude/settings.json"
+            settings_path.parent.mkdir(parents=True)
+            command = str(ROOT / "README.md")
+            settings = {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": command}]}
+                    ]
+                }
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(settings_path.read_text(encoding="utf-8")), settings
+            )
+            self.assertNotIn("Removed retired PCE SessionStart hook", result.stdout)
+
+    def test_removes_exact_known_retired_hook_source_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            settings_path = home / ".claude/settings.json"
+            settings_path.parent.mkdir(parents=True)
+            retired = str(ROOT / "hooks/pce-rehydrate.sh")
+            keep = str(ROOT / "unrelated-tooling/pce-rehydrate")
+            settings = {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": retired},
+                                {"type": "command", "command": keep},
+                            ]
+                        }
+                    ]
+                }
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                actual["hooks"]["SessionStart"],
+                [{"hooks": [{"type": "command", "command": keep}]}],
+            )
+            self.assertIn(f"Removed retired PCE SessionStart hook: {retired}", result.stdout)
+
+    def test_preserves_unrelated_retired_basename_hook_inside_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            settings_path = home / ".claude/settings.json"
+            settings_path.parent.mkdir(parents=True)
+            command = str(ROOT / "unrelated-tooling/pce-rehydrate")
+            settings = {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": command}]}
+                    ]
+                }
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(settings_path.read_text(encoding="utf-8")), settings
+            )
+            self.assertNotIn("Removed retired PCE SessionStart hook", result.stdout)
 
     def test_malformed_settings_are_reported_and_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

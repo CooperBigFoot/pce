@@ -1,6 +1,6 @@
 # PCE Repository Instructions
 
-PCE is a lean distribution of three Agent Skills. The tracked product surface is limited to `skills/`, the durable vision in `planning/visions/`, standard-library tests, and repository documentation.
+PCE is a lean distribution of six Agent Skills. The tracked product surface is limited to `skills/`, durable visions in `planning/visions/`, standard-library tests, and repository documentation.
 
 ## Validation
 
