@@ -4,6 +4,12 @@
 .DS_Store
 Thumbs.db
 
-# PCE workflow scaffolding (per-vision planning tree + step worktrees)
-/planning/
+# Retired PCE workflow scaffolding; durable visions remain tracked.
+/planning/*
+!/planning/visions/
+!/planning/visions/*.md
 /.worktrees/
+
+# Python test artifacts
+__pycache__/
+*.py[cod]
