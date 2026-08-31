@@ -43,10 +43,12 @@ Program: <canonical GitHub issue URL>
 Effort: <canonical GitHub issue URL>
 ```
 
-Keep the rest flexible and sufficient for a fresh Prime Agent. Commit the vision only when the repository workflow explicitly calls for a commit; vision creation itself must not start implementation.
+Keep the rest flexible and sufficient for a fresh Prime Agent. Vision creation itself must not start implementation.
 
-Replace `Vision: pending` with exactly one repository-relative Markdown link to that file at the target branch's canonical GitHub URL. Ensure the vision's `Program:` and `Effort:` values are canonical issue URLs. Reload the issue and file to verify both directions. If linking fails after file creation, preserve the file, report the exact partial state, and do not invent success.
+Make the confirmed vision durable before changing `Vision: pending`. Follow the repository's contribution rules. From the intended target branch, create or reuse a dedicated vision branch, commit only the confirmed vision change, push it, and verify the pushed commit. Open a documentation PR when repository policy requires one, but do not pretend an unmerged file exists on the target branch. The initial `/grill-ticket` request and confirmed summary authorize this ordinary durable publication and issue linkage; they do not authorize implementation or bypass protected-branch policy.
 
-For a valid existing link, read and revise that same regular file only after confirmation. Preserve settled content. Verify both directions and add one concise issue comment describing the revision. Refuse symlinks, paths outside `planning/visions/`, missing files, competing links, or provenance mismatches.
+Replace `Vision: pending` with exactly one repository-relative Markdown link whose destination is the canonical GitHub blob URL pinned to the pushed commit that contains the file. Never publish a target-branch URL until that exact content is present there, and never link an uncommitted or unpushed file. Ensure the vision's `Program:` and `Effort:` values are canonical issue URLs. Fetch the linked URL and reload the issue to verify both directions. If commit, push, PR, or linking fails, preserve the inspectable state, report the exact partial result, and do not invent success.
 
-Stop before implementation. Report the vision path, Effort URL, linkage verification, and the exact handoff: `Give <vision path> to a root Prime Agent using implement-vision.`
+For a valid existing link, load the pinned durable content and revise that same regular repository path only after confirmation. Preserve settled content. Publish the revision as a new verified commit, update the ticket to its new commit-pinned URL, verify both directions, and add one concise issue comment describing the revision. Refuse symlinks, paths outside `planning/visions/`, missing or unreachable commits, competing links, or provenance mismatches.
+
+Stop before implementation. Report the vision path, durable Git ref and URL, Effort URL, linkage verification, and the exact handoff: `Give <vision path> at <git ref> to a root Prime Agent using implement-vision.`

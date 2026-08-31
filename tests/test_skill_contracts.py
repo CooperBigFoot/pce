@@ -53,6 +53,9 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(token, chart)
         for token in ("Program:", "Effort:", "Vision:"):
             self.assertIn(token, grill)
+        self.assertIn("commit only the confirmed vision change", grill)
+        self.assertIn("pinned to the pushed commit", grill)
+        self.assertIn("never link an uncommitted or unpushed file", grill)
         self.assertIn("<!-- pce:delivery -->", implement)
         self.assertIn("Leave the Effort open", implement)
         self.assertIn("<!-- pce:delivery -->", land)

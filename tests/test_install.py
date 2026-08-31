@@ -292,6 +292,29 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(actual, settings)
             self.assertIn("preserved ambiguous PreToolUse hook", result.stderr)
 
+    def test_preserves_unrelated_hook_whose_command_is_inside_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            settings_path = home / ".claude/settings.json"
+            settings_path.parent.mkdir(parents=True)
+            command = str(ROOT / "README.md")
+            settings = {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": command}]}
+                    ]
+                }
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(settings_path.read_text(encoding="utf-8")), settings
+            )
+            self.assertNotIn("Removed retired PCE SessionStart hook", result.stdout)
+
     def test_malformed_settings_are_reported_and_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)

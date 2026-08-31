@@ -184,7 +184,13 @@ def command_is_owned(event_name: str, command: object) -> bool:
         if identity in owned_command_path_identities[event_name]:
             return True
     try:
-        return command_path.is_absolute() and inside_repo(command_path.resolve(strict=False))
+        resolved = command_path.resolve(strict=False)
+        retired_names = {binary_name, f"{binary_name}.sh"}
+        return (
+            command_path.is_absolute()
+            and resolved.name in retired_names
+            and inside_repo(resolved)
+        )
     except (OSError, RuntimeError):
         return False
 
