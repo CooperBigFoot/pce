@@ -1,372 +1,253 @@
 #!/usr/bin/env bash
-# Installer for the pce tooling.
-#
-# Builds the release binary, links it onto $HOME/.local/bin, and symlinks the
-# repo's skill directories into $HOME/.claude/skills/ so repo edits reflect
-# live. Idempotent: safe to re-run; symlinks are replaced via ln -sfn.
-set -euo pipefail
+# Install PCE's three skills and safely retire proven legacy entries.
+set -eu
 
-python=${PCE_TEST_PYTHON:-/usr/bin/python3}
-if [ -x "$python" ]; then
-    python_executable=1
-else
-    python_executable=0
-fi
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+PYTHON="${PCE_TEST_PYTHON:-python3}"
+exec "$PYTHON" - "$REPO_ROOT" <<'PY'
+from __future__ import annotations
 
-merge_hook_settings() {
-    settings_path=$1
-    PYTHONDONTWRITEBYTECODE=1 "$python" -c '
 import json
 import os
+from pathlib import Path
 import stat
 import sys
 import tempfile
 
+repo = Path(sys.argv[1]).resolve()
+home_value = os.environ.get("HOME")
+if not home_value:
+    print("ERROR: HOME is not set.", file=sys.stderr)
+    raise SystemExit(1)
+home_spelling = Path(os.path.abspath(Path(home_value).expanduser()))
+home = home_spelling.resolve(strict=False)
 
-def merge(settings_path, rehydrate_command, protection_command):
-    if os.path.exists(settings_path):
-        with open(settings_path, "r", encoding="utf-8") as source:
-            settings = json.load(source)
-        existing_mode = stat.S_IMODE(os.stat(settings_path).st_mode)
+matrix = {
+    home / ".claude/skills/grill-me": repo / "skills/grill-me",
+    home / ".claude/skills/to-vision": repo / "skills/to-vision",
+    home / ".codex/skills/grill-me": repo / "skills/grill-me",
+    home / ".codex/skills/to-vision": repo / "skills/to-vision",
+    home / ".prime/agent/skills/implement-vision": repo / "skills/implement-vision",
+}
+retired_names = (
+    "pce", "to-graph", "work-graph", "overseer", "chart-program",
+    "work-ticket", "land-ticket", "grill-with-docs", "domain-modeling",
+)
+skill_roots = (
+    home / ".claude/skills",
+    home / ".codex/skills",
+    home / ".prime/agent/skills",
+)
+# Current skills in environments outside the supported matrix are legacy entries too.
+wrong_placements = (
+    home / ".claude/skills/implement-vision",
+    home / ".codex/skills/implement-vision",
+    home / ".prime/agent/skills/grill-me",
+    home / ".prime/agent/skills/to-vision",
+)
+
+
+def exists(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def link_target(path: Path) -> Path:
+    raw = Path(os.readlink(path))
+    if not raw.is_absolute():
+        raw = path.parent / raw
+    return raw.resolve(strict=False)
+
+
+def inside_repo(path: Path) -> bool:
+    try:
+        path.relative_to(repo)
+        return True
+    except ValueError:
+        return False
+
+
+def owned_link(path: Path) -> bool:
+    return path.is_symlink() and inside_repo(link_target(path))
+
+
+def conflict(path: Path, source: Path) -> str | None:
+    if not exists(path):
+        return None
+    if path.is_symlink():
+        if owned_link(path):
+            return None
+        return f"{path} is a symlink to {link_target(path)}, which is not owned by {repo}"
+    kind = "directory" if path.is_dir() else "file"
+    return f"{path} is a {kind}, not a PCE-owned symlink"
+
+
+for source in matrix.values():
+    if not source.is_dir():
+        print(f"ERROR: required skill directory is missing: {source}", file=sys.stderr)
+        raise SystemExit(1)
+
+conflicts = [(path, reason) for path, source in matrix.items() if (reason := conflict(path, source))]
+if conflicts:
+    for path, reason in conflicts:
+        print(f"ERROR: conflict: {reason}.", file=sys.stderr)
+        print(f"Move or remove {path}, then rerun install.sh.", file=sys.stderr)
+    raise SystemExit(1)
+
+# Capture binary ownership before cleanup so hook ownership can use it as evidence.
+binary_paths = (home / ".local/bin/pce", home / ".local/bin/pce-rehydrate")
+binary_was_owned = {path: owned_link(path) for path in binary_paths}
+rehydrate_binary = home / ".local/bin/pce-rehydrate"
+owned_rehydrate_path_identities: set[str] = set()
+if binary_was_owned[rehydrate_binary]:
+    # Keep both the user's spelling and the resolved spelling before unlinking.
+    # The former can contain symlinked HOME components that cannot be recovered
+    # by resolving the command after the leaf symlink has been removed.
+    for path in (
+        rehydrate_binary,
+        home_spelling / ".local/bin/pce-rehydrate",
+    ):
+        owned_rehydrate_path_identities.add(
+            os.path.normcase(os.path.normpath(os.fspath(path)))
+        )
+
+# Install only the exact supported matrix.
+for destination, source in matrix.items():
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if exists(destination):
+        destination.unlink()
+    destination.symlink_to(source, target_is_directory=True)
+    print(f"Linked {destination} -> {source}")
+
+cleanup_candidates = {root / name for root in skill_roots for name in retired_names}
+cleanup_candidates.update(wrong_placements)
+for path in sorted(cleanup_candidates, key=str):
+    if not exists(path):
+        continue
+    if owned_link(path):
+        target = link_target(path)
+        path.unlink()
+        print(f"Removed retired PCE link {path} -> {target}")
     else:
-        settings = {}
-        existing_mode = None
+        detail = f"symlink to {link_target(path)}" if path.is_symlink() else (
+            "directory" if path.is_dir() else "file"
+        )
+        print(
+            f"WARNING: preserved ambiguous retired skill artifact {path} ({detail}); "
+            "inspect and remove it manually if it belongs to PCE.",
+            file=sys.stderr,
+        )
 
-    if not isinstance(settings, dict):
-        raise ValueError("settings document must be a JSON object")
-    hooks = settings.get("hooks")
-    if hooks is None:
-        hooks = {}
-        settings["hooks"] = hooks
-    if not isinstance(hooks, dict):
-        raise ValueError("hooks must be a JSON object")
+for path in binary_paths:
+    if not exists(path):
+        continue
+    if owned_link(path):
+        target = link_target(path)
+        path.unlink()
+        print(f"Removed retired PCE link {path} -> {target}")
+    else:
+        detail = f"symlink to {link_target(path)}" if path.is_symlink() else (
+            "directory" if path.is_dir() else "file"
+        )
+        print(
+            f"WARNING: preserved ambiguous retired binary {path} ({detail}); "
+            "inspect and remove it manually if it belongs to PCE.",
+            file=sys.stderr,
+        )
 
-    for event_name, groups in list(hooks.items()):
+settings_path = home / ".claude/settings.json"
+
+
+def command_is_owned(command: object) -> bool:
+    if not isinstance(command, str):
+        return False
+    if command == "$HOME/.local/bin/pce-rehydrate":
+        return True  # Exact command emitted by the retired PCE installer.
+    command_path = Path(command).expanduser()
+    if command_path.is_absolute():
+        identity = os.path.normcase(os.path.normpath(os.fspath(command_path)))
+        if identity in owned_rehydrate_path_identities:
+            return True
+    try:
+        return command_path.is_absolute() and inside_repo(command_path.resolve(strict=False))
+    except (OSError, RuntimeError):
+        return False
+
+
+def clean_settings() -> None:
+    if not settings_path.exists():
+        return
+    try:
+        original = settings_path.read_bytes()
+        settings = json.loads(original)
+        hooks = settings.get("hooks") if isinstance(settings, dict) else None
+        if hooks is None:
+            return
+        if not isinstance(hooks, dict):
+            raise ValueError("hooks is not an object")
+        groups = hooks.get("SessionStart")
+        if groups is None:
+            return
         if not isinstance(groups, list):
-            raise ValueError(f"hooks.{event_name} must be an array")
+            raise ValueError("hooks.SessionStart is not an array")
+
+        changed = False
+        ambiguous: list[str] = []
         retained_groups = []
         for group in groups:
             if not isinstance(group, dict):
-                raise ValueError(f"hooks.{event_name} entries must be objects")
-            inner_hooks = group.get("hooks")
-            if inner_hooks is None:
+                raise ValueError("a hooks.SessionStart entry is not an object")
+            inner = group.get("hooks")
+            if inner is None:
                 retained_groups.append(group)
                 continue
-            if not isinstance(inner_hooks, list):
-                raise ValueError(f"hooks.{event_name} group hooks must be an array")
-            for hook in inner_hooks:
+            if not isinstance(inner, list):
+                raise ValueError("a hooks.SessionStart hooks value is not an array")
+            retained = []
+            for hook in inner:
                 if not isinstance(hook, dict):
-                    raise ValueError(f"hooks.{event_name} inner hooks must be objects")
-            filtered = [
-                hook
-                for hook in inner_hooks
-                if hook.get("command") not in (rehydrate_command, protection_command)
-            ]
-            removed_managed = len(filtered) != len(inner_hooks)
-            if removed_managed and not filtered:
-                continue
-            if removed_managed:
-                group["hooks"] = filtered
-            retained_groups.append(group)
-        hooks[event_name] = retained_groups
-
-    session_start = hooks.get("SessionStart")
-    if session_start is None:
-        session_start = []
-        hooks["SessionStart"] = session_start
-    if not isinstance(session_start, list):
-        raise ValueError("hooks.SessionStart must be an array")
-    session_start.append(
-        {
-            "matcher": "resume|compact",
-            "hooks": [{"type": "command", "command": rehydrate_command}],
-        }
-    )
-
-    pre_tool_use = hooks.get("PreToolUse")
-    if pre_tool_use is None:
-        pre_tool_use = []
-        hooks["PreToolUse"] = pre_tool_use
-    if not isinstance(pre_tool_use, list):
-        raise ValueError("hooks.PreToolUse must be an array")
-    pre_tool_use.append(
-        {
-            "matcher": "Bash|Edit|Write",
-            "hooks": [{"type": "command", "command": protection_command}],
-        }
-    )
-
-    encoded = (json.dumps(settings, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    parent = os.path.dirname(os.path.abspath(settings_path))
-    os.makedirs(parent, exist_ok=True)
-    descriptor = None
-    temporary_path = None
-    try:
-        descriptor, temporary_path = tempfile.mkstemp(
-            dir=parent, prefix=".settings.json."
-        )
-        with os.fdopen(descriptor, "wb") as destination:
-            descriptor = None
-            destination.write(encoded)
-            destination.flush()
-            os.fsync(destination.fileno())
-        if existing_mode is not None:
-            os.chmod(temporary_path, existing_mode)
-        os.replace(temporary_path, settings_path)
-        temporary_path = None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        if temporary_path is not None:
+                    raise ValueError("a SessionStart hook is not an object")
+                command = hook.get("command")
+                if command_is_owned(command):
+                    changed = True
+                    print(f"Removed retired PCE SessionStart hook: {command}")
+                else:
+                    retained.append(hook)
+                    if isinstance(command, str) and "pce" in command.lower():
+                        ambiguous.append(command)
+            if retained or not inner:
+                if len(retained) != len(inner):
+                    group = dict(group)
+                    group["hooks"] = retained
+                retained_groups.append(group)
+        if changed:
+            hooks["SessionStart"] = retained_groups
+            encoded = (json.dumps(settings, ensure_ascii=False, indent=2) + "\n").encode()
+            mode = stat.S_IMODE(settings_path.stat().st_mode)
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=".settings.json.", dir=settings_path.parent)
             try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
+                with os.fdopen(fd, "wb") as target:
+                    target.write(encoded)
+                    target.flush()
+                    os.fsync(target.fileno())
+                os.chmod(temporary, mode)
+                os.replace(temporary, settings_path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        for command in ambiguous:
+            print(
+                f"WARNING: preserved ambiguous SessionStart hook command {command!r}; "
+                "inspect it manually if it belongs to retired PCE.",
+                file=sys.stderr,
+            )
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(
+            f"WARNING: preserved ambiguous Claude settings {settings_path}: {error}; "
+            "inspect PCE SessionStart hooks manually.",
+            file=sys.stderr,
+        )
 
 
-try:
-    merge(sys.argv[1], sys.argv[2], sys.argv[3])
-except Exception as error:
-    sys.stderr.write(f"ERROR: failed to merge hook settings: {error}\n")
-    sys.exit(1)
-' "$settings_path" '$HOME/.local/bin/pce-rehydrate' '$HOME/.local/bin/pce-protect-criteria'
-}
-
-verify_hook_settings() {
-    settings_path=$1
-    PYTHONDONTWRITEBYTECODE=1 "$python" -c '
-import json
-import sys
-
-
-def verify(settings_path, rehydrate_command, protection_command):
-    with open(settings_path, "r", encoding="utf-8") as source:
-        settings = json.load(source)
-    if not isinstance(settings, dict):
-        raise ValueError("settings document must be a JSON object")
-    hooks = settings.get("hooks")
-    if not isinstance(hooks, dict):
-        raise ValueError("hooks must be a JSON object")
-    session_start = hooks.get("SessionStart")
-    if not isinstance(session_start, list):
-        raise ValueError("hooks.SessionStart must be an array")
-
-    counts = {rehydrate_command: 0, protection_command: 0}
-    exact_rehydrate = 0
-    exact_protection = 0
-    for event_name, groups in hooks.items():
-        if not isinstance(groups, list):
-            raise ValueError(f"hooks.{event_name} must be an array")
-        for group in groups:
-            if not isinstance(group, dict):
-                raise ValueError(f"hooks.{event_name} entries must be objects")
-            inner_hooks = group.get("hooks")
-            if inner_hooks is not None and not isinstance(inner_hooks, list):
-                raise ValueError(f"hooks.{event_name} group hooks must be an array")
-            if isinstance(inner_hooks, list):
-                for hook in inner_hooks:
-                    if not isinstance(hook, dict):
-                        raise ValueError(f"hooks.{event_name} inner hooks must be objects")
-                    command = hook.get("command")
-                    if command in counts:
-                        counts[command] += 1
-                        if command == rehydrate_command and event_name != "SessionStart":
-                            raise ValueError("managed rehydration command is under a noncanonical event")
-                        if command == protection_command and event_name != "PreToolUse":
-                            raise ValueError("managed protection command is under a noncanonical event")
-            if event_name == "SessionStart" and group == {
-                "matcher": "resume|compact",
-                "hooks": [{"type": "command", "command": rehydrate_command}],
-            }:
-                exact_rehydrate += 1
-            if event_name == "PreToolUse" and group == {
-                "matcher": "Bash|Edit|Write",
-                "hooks": [{"type": "command", "command": protection_command}],
-            }:
-                exact_protection += 1
-
-    if counts[rehydrate_command] != 1:
-        raise ValueError(f"managed rehydration command count is {counts[rehydrate_command]}, expected 1")
-    if exact_rehydrate != 1:
-        raise ValueError(f"canonical SessionStart group count is {exact_rehydrate}, expected 1")
-    if counts[protection_command] != 1:
-        raise ValueError(f"managed protection command count is {counts[protection_command]}, expected 1")
-    if exact_protection != 1:
-        raise ValueError(f"canonical PreToolUse group count is {exact_protection}, expected 1")
-
-
-try:
-    verify(sys.argv[1], sys.argv[2], sys.argv[3])
-except Exception as error:
-    sys.stderr.write(f"ERROR: hook settings verification failed: {error}\n")
-    sys.exit(1)
-' "$settings_path" '$HOME/.local/bin/pce-rehydrate' '$HOME/.local/bin/pce-protect-criteria'
-}
-
-if [ "${1:-}" = "--merge-hook-settings" ]; then
-    if [ "$#" -ne 2 ] || [ -z "${2:-}" ]; then
-        echo "ERROR: --merge-hook-settings requires exactly one nonempty settings path." >&2
-        exit 1
-    fi
-    if [ "$python_executable" -ne 1 ]; then
-        echo "ERROR: Python 3 interpreter is missing or not executable: $python" >&2
-        exit 1
-    fi
-    merge_hook_settings "$2"
-    exit 0
-fi
-
-REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
-case "${CARGO_TARGET_DIR:-}" in
-    "") BUILD_TARGET_DIR="$REPO_ROOT/target" ;;
-    /*) BUILD_TARGET_DIR="$CARGO_TARGET_DIR" ;;
-    *) BUILD_TARGET_DIR="$REPO_ROOT/$CARGO_TARGET_DIR" ;;
-esac
-
-# --- Build the release binary -------------------------------------------------
-echo "Building pce (release) in $REPO_ROOT ..."
-(cd "$REPO_ROOT" && CARGO_TARGET_DIR="$BUILD_TARGET_DIR" cargo build --release)
-
-# --- Link the binary onto PATH ------------------------------------------------
-BIN_DIR="$HOME/.local/bin"
-mkdir -p "$BIN_DIR"
-ln -sfn "$BUILD_TARGET_DIR/release/pce" "$BIN_DIR/pce"
-echo "Linked $BIN_DIR/pce -> $BUILD_TARGET_DIR/release/pce"
-
-case ":$PATH:" in
-    *":$BIN_DIR:"*)
-        ;;
-    *)
-        echo "WARNING: $BIN_DIR is not on your PATH." >&2
-        echo "Add it to your shell profile: export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
-        ;;
-esac
-
-# --- Symlink the skill directories (never copy) ---------------------------------
-SKILLS_DIR="$HOME/.claude/skills"
-mkdir -p "$SKILLS_DIR"
-
-# Derived from the repository, never hardcoded: a fixed list ships every future skill invisible by
-# default, and reports success while doing it. Both this loop and the verification loop below read
-# this one list, because two lists that can disagree is the same defect twice.
-SKILL_NAMES=""
-for manifest in "$REPO_ROOT"/skills/*/SKILL.md; do
-    [ -f "$manifest" ] || continue
-    skill_dir=$(dirname "$manifest")
-    SKILL_NAMES="$SKILL_NAMES $(basename "$skill_dir")"
-done
-if [ -z "$SKILL_NAMES" ]; then
-    echo "ERROR: no skills found under $REPO_ROOT/skills (expected */SKILL.md)." >&2
-    exit 1
-fi
-
-for skill in $SKILL_NAMES; do
-    src="$REPO_ROOT/skills/$skill"
-    dst="$SKILLS_DIR/$skill"
-    if [ -e "$dst" ] && [ ! -L "$dst" ]; then
-        echo "ERROR: $dst already exists and is not a symlink." >&2
-        echo "Refusing to overwrite it. Move it aside, then re-run install.sh." >&2
-        exit 1
-    fi
-    ln -sfn "$src" "$dst"
-    echo "Linked $dst -> $src"
-done
-
-# --- Install the rehydration hook -----------------------------------------------
-status=0
-
-HOOK_LINK="$BIN_DIR/pce-rehydrate"
-HOOK_SOURCE="$REPO_ROOT/hooks/pce-rehydrate.sh"
-HOOK_PROTECTION_LINK="$BIN_DIR/pce-protect-criteria"
-HOOK_PROTECTION_SOURCE="$REPO_ROOT/hooks/pce-protect-criteria.sh"
-for hook_link in "$HOOK_LINK" "$HOOK_PROTECTION_LINK"; do
-    if [ -e "$hook_link" ] && [ ! -L "$hook_link" ]; then
-        echo "ERROR: $hook_link already exists and is not a symlink." >&2
-        echo "Refusing to overwrite it. Move it aside, then re-run install.sh." >&2
-        exit 1
-    fi
-done
-ln -sfn "$HOOK_SOURCE" "$HOOK_LINK"
-echo "Linked $HOOK_LINK -> $HOOK_SOURCE"
-ln -sfn "$HOOK_PROTECTION_SOURCE" "$HOOK_PROTECTION_LINK"
-echo "Linked $HOOK_PROTECTION_LINK -> $HOOK_PROTECTION_SOURCE"
-
-SETTINGS_PATH="$HOME/.claude/settings.json"
-if [ "$python_executable" -eq 1 ]; then
-    if ! merge_hook_settings "$SETTINGS_PATH"; then
-        status=1
-    fi
-else
-    echo "ERROR: Python 3 interpreter is missing or not executable: $python" >&2
-    status=1
-fi
-
-# --- Post-install verification ---------------------------------------------------
-verify_links="$BIN_DIR/pce $HOOK_LINK $HOOK_PROTECTION_LINK"
-for skill in $SKILL_NAMES; do
-    verify_links="$verify_links $SKILLS_DIR/$skill"
-done
-for link in $verify_links; do
-    if [ -L "$link" ] && [ -e "$link" ]; then
-        echo "OK: $link resolves"
-    else
-        echo "ERROR: $link is missing or does not resolve." >&2
-        status=1
-    fi
-done
-
-if [ ! -x "$HOOK_LINK" ]; then
-    echo "ERROR: $HOOK_LINK is not executable." >&2
-    status=1
-fi
-if [ ! -x "$HOOK_PROTECTION_LINK" ]; then
-    echo "ERROR: $HOOK_PROTECTION_LINK is not executable." >&2
-    status=1
-fi
-
-if [ "$python_executable" -eq 1 ]; then
-    if ! verify_hook_settings "$SETTINGS_PATH"; then
-        status=1
-    fi
-fi
-
-for skill in domain-modeling grill-with-docs chart-program work-ticket land-ticket work-graph; do
-    skill_path="$SKILLS_DIR/$skill/SKILL.md"
-    if [ -f "$skill_path" ]; then
-        echo "OK: skill definition present at $skill_path"
-    else
-        echo "ERROR: skill definition missing at $skill_path" >&2
-        status=1
-    fi
-done
-
-SCHEMA_PATH="$SKILLS_DIR/pce/schemas/verdict.schema.json"
-if [ -f "$SCHEMA_PATH" ]; then
-    echo "OK: verdict schema present at $SCHEMA_PATH"
-else
-    echo "ERROR: verdict schema missing at $SCHEMA_PATH" >&2
-    status=1
-fi
-
-GRAPH_SCHEMA_PATH="$SKILLS_DIR/pce/schemas/graph.schema.json"
-if [ -f "$GRAPH_SCHEMA_PATH" ]; then
-    echo "OK: graph schema present at $GRAPH_SCHEMA_PATH"
-else
-    echo "ERROR: graph schema missing at $GRAPH_SCHEMA_PATH" >&2
-    status=1
-fi
-
-RUN_SNAPSHOT_SCHEMA_PATH="$SKILLS_DIR/pce/schemas/run-snapshot.schema.json"
-if [ -f "$RUN_SNAPSHOT_SCHEMA_PATH" ]; then
-    echo "OK: run snapshot schema present at $RUN_SNAPSHOT_SCHEMA_PATH"
-else
-    echo "ERROR: run snapshot schema missing at $RUN_SNAPSHOT_SCHEMA_PATH" >&2
-    status=1
-fi
-
-if [ "$status" -ne 0 ]; then
-    echo "Install verification FAILED." >&2
-    exit 1
-fi
-
-echo "pce install complete."
+clean_settings()
+PY
