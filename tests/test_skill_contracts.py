@@ -61,6 +61,92 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("<!-- pce:delivery -->", land)
         self.assertIn("recomput", land.lower())
 
+    def test_chart_resurvey_rejects_ambiguous_state_before_mutation(self) -> None:
+        chart = self.read_skill("chart-program")
+        gate = chart.index("## Pre-mutation state gate")
+        mutation = chart.index("Create labels if absent")
+        self.assertLess(gate, mutation)
+        pre_mutation = chart[gate:mutation]
+        for phrase in (
+            "exactly one Map membership",
+            "delivery and landing marker uniqueness",
+            "`landed` predicate",
+            "Stop without mutation",
+        ):
+            self.assertIn(phrase, pre_mutation)
+
+    def test_landed_predicate_is_consistent_and_rejects_closed_only(self) -> None:
+        required = (
+            "an Effort is `landed` only when all four facts are verified",
+            "exactly one authoritative `<!-- pce:delivery -->`",
+            "exactly one `<!-- pce:landed -->`",
+            "Closed alone never means landed",
+            "Cancelled, malformed, prematurely closed, duplicate-record, and "
+            "conflicting-record Efforts fail this predicate",
+        )
+        for name in ("chart-program", "implement-vision", "land-ticket"):
+            with self.subTest(name=name):
+                text = self.read_skill(name)
+                for phrase in required:
+                    self.assertIn(phrase, text)
+
+    def test_effort_dependency_and_map_ambiguity_stops_mutation(self) -> None:
+        grill = self.read_skill("grill-ticket")
+        implement = self.read_skill("implement-vision")
+        land = self.read_skill("land-ticket")
+        self.assertIn("exactly once as an open member", grill)
+        self.assertIn("Do not claim or mechanically repair", grill)
+        for text in (implement, land):
+            self.assertIn("exactly one unambiguous `Depends on:`", text)
+            self.assertIn("same Program", text)
+            self.assertIn("acyclic", text)
+            self.assertIn("duplicates", text)
+            self.assertIn("foreign-Program", text)
+            self.assertIn("cycles", text)
+
+    def test_delivery_records_are_unique_and_reruns_update_in_place(self) -> None:
+        implement = self.read_skill("implement-vision")
+        land = self.read_skill("land-ticket")
+        for text in (implement, land):
+            self.assertIn("sole authoritative", text)
+            self.assertIn("exactly one", text)
+            self.assertIn("update that same comment in place", text)
+            self.assertIn("stop", text.lower())
+        self.assertIn("more than one", implement)
+        self.assertIn("multiple markers", land)
+        self.assertIn("never append a competing record", implement)
+        self.assertIn("duplicate landing markers", land)
+
+    def test_vision_provenance_requires_unique_cross_artifact_match(self) -> None:
+        for name in ("grill-ticket", "implement-vision", "land-ticket"):
+            with self.subTest(name=name):
+                text = self.read_skill(name)
+                self.assertIn("exactly one canonical `Program:` line", text)
+                self.assertIn("exactly one canonical `Effort:` line", text)
+                self.assertIn("match", text.lower())
+                self.assertIn("duplicate", text.lower())
+                self.assertIn("stop", text.lower())
+
+    def test_repository_guidance_describes_both_workflows_and_identity_rules(self) -> None:
+        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for name in (
+            "grill-me",
+            "to-vision",
+            "chart-program",
+            "grill-ticket",
+            "land-ticket",
+        ):
+            self.assertIn(f"`{name}`", claude)
+        self.assertIn("grill-me → to-vision → implement-vision", claude)
+        self.assertIn(
+            "chart-program → grill-ticket → implement-vision → land-ticket", claude
+        )
+        self.assertIn("root Prime Agent", claude)
+        self.assertIn("accepts either a large idea", readme)
+        self.assertIn("require an explicit Effort identity", readme)
+        self.assertIn("No command infers a repository-wide singleton", readme)
+
     def test_to_vision_derives_name_only_when_no_explicit_name_exists(self) -> None:
         text = self.read_skill("to-vision")
         self.assertIn("When `$ARGUMENTS` contains", text)

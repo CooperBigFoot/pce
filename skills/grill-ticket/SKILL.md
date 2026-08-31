@@ -15,10 +15,12 @@ Before questions or mutation, inspect the repository and use `gh` to load the is
 
 - the issue is open, has label `pce:effort`, and contains `<!-- pce:effort -->`;
 - it has exactly one valid `Program: <canonical GitHub issue URL>` line pointing to an issue with label `pce:program` and `<!-- pce:program -->`;
-- its single `Depends on:` line names `none` or valid Efforts in that Program;
-- its single `Vision:` line is `pending` or identifies one repository vision that links back to this Program and Effort.
+- it has exactly one `Depends on:` line naming `none` or valid Efforts in that same Program, and the complete Program dependency graph is acyclic;
+- the Program Map contains this canonical Effort URL exactly once as an open member and not as a landed outcome or duplicate entry;
+- it has exactly one `Vision:` line that is `pending` or identifies one repository vision;
+- a linked vision contains exactly one canonical `Program:` line and exactly one canonical `Effort:` line, both matching the ticket, Map, and repository identity.
 
-Stop without mutation and report the malformed, closed, or ambiguous state. If unassigned, assign the authenticated GitHub user with `gh` and verify the assignment. If assigned only to that user, treat it as a resumable claim. If any other user is assigned, stop without mutation. Claiming does not require blockers to have landed; blockers constrain delivery, not discovery.
+Stop without mutation and report the malformed, closed, duplicate, mismatched, foreign-Program, cyclic, missing-membership, or otherwise ambiguous state. Do not claim or mechanically repair missing or duplicate Map membership. If unassigned, assign the authenticated GitHub user with `gh` and verify the assignment. If assigned only to that user, treat it as a resumable claim. If any other user is assigned, stop without mutation. Claiming does not require blockers to have landed; blockers constrain delivery, not discovery.
 
 ## Discover through the canonical interview
 
@@ -47,7 +49,7 @@ Keep the rest flexible and sufficient for a fresh Prime Agent. Vision creation i
 
 Make the confirmed vision durable before changing `Vision: pending`. Follow the repository's contribution rules. From the intended target branch, create or reuse a dedicated vision branch, commit only the confirmed vision change, push it, and verify the pushed commit. Open a documentation PR when repository policy requires one, but do not pretend an unmerged file exists on the target branch. The initial `/grill-ticket` request and confirmed summary authorize this ordinary durable publication and issue linkage; they do not authorize implementation or bypass protected-branch policy.
 
-Replace `Vision: pending` with exactly one repository-relative Markdown link whose destination is the canonical GitHub blob URL pinned to the pushed commit that contains the file. Never publish a target-branch URL until that exact content is present there, and never link an uncommitted or unpushed file. Ensure the vision's `Program:` and `Effort:` values are canonical issue URLs. Fetch the linked URL and reload the issue to verify both directions. If commit, push, PR, or linking fails, preserve the inspectable state, report the exact partial result, and do not invent success.
+Replace `Vision: pending` with exactly one repository-relative Markdown link whose destination is the canonical GitHub blob URL pinned to the pushed commit that contains the file. Never publish a target-branch URL until that exact content is present there, and never link an uncommitted or unpushed file. Ensure the vision contains exactly one canonical `Program:` line and exactly one canonical `Effort:` line, matching the ticket and Map. Fetch the linked URL and reload the issue to verify both directions and line uniqueness. If commit, push, PR, or linking fails, preserve the inspectable state, report the exact partial result, and do not invent success.
 
 For a valid existing link, load the pinned durable content and revise that same regular repository path only after confirmation. Preserve settled content. Publish the revision as a new verified commit, update the ticket to its new commit-pinned URL, verify both directions, and add one concise issue comment describing the revision. Refuse symlinks, paths outside `planning/visions/`, missing or unreachable commits, competing links, or provenance mismatches.
 

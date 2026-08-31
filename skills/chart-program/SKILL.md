@@ -32,6 +32,8 @@ If the survey finds one coherent Effort, do not create a Program or Effort issue
 
 ## Publish deterministically
 
+Use this predicate everywhere Frontier or blocker state is computed: an Effort is `landed` only when all four facts are verified: the Effort is closed; it has exactly one authoritative `<!-- pce:delivery -->` comment whose claims match merged PRs and target-branch evidence; it has exactly one `<!-- pce:landed -->` outcome comment linking its Program; and its canonical URL appears exactly once in that Map's landed-outcomes index and nowhere in open Efforts or Frontier. Closed alone never means landed. Cancelled, malformed, prematurely closed, duplicate-record, and conflicting-record Efforts fail this predicate.
+
 Use ordinary `gh` issue commands and preserve unrelated issue content. Use these minimum cold-session contracts:
 
 - Program issues have the `pce:program` label and `<!-- pce:program -->` marker.
@@ -39,8 +41,12 @@ Use ordinary `gh` issue commands and preserve unrelated issue content. Use these
 - Each Effort body contains exactly one `Program: <canonical GitHub issue URL>` line.
 - Each Effort body contains exactly one `Depends on: <none or comma-separated canonical Effort URLs>` line. Dependencies may refer only to Efforts in that Program and must not form a cycle.
 - Each Effort body initially contains exactly one `Vision: pending` line.
-- The Map links every Effort by canonical issue URL and separates open Efforts, Frontier, landed one-line outcomes, Fog, and exclusions. Frontier contains only open Efforts whose listed dependencies are closed.
+- The Map links every Effort by canonical issue URL and separates open Efforts, Frontier, landed one-line outcomes, Fog, and exclusions. Frontier contains only open, structurally valid Efforts whose listed dependencies satisfy the `landed` predicate.
+
+## Pre-mutation state gate
+
+Before any re-survey mutation, reload the complete Program and validate labels, markers, unique Program/Vision/dependency declarations, exactly one Map membership for every Effort across open, Frontier, and landed sections, dependency membership and acyclicity, delivery and landing marker uniqueness, delivery claims, and the `landed` predicate for every blocker and indexed outcome. Stop without mutation on missing or duplicate membership, duplicate markers, conflicting records, invalid claims, foreign-Program dependencies, cycles, or any state that admits more than one interpretation. Do not use mutation to discover or repair ambiguity. For a new Program, validate the approved proposed membership and dependency graph before creating its first issue.
 
 Create labels if absent without changing unrelated labels. For a new chart, create the Program first, then Efforts, then replace the approved Map placeholders with their canonical URLs. For re-survey, edit the explicit Map and affected open tickets in place; never create duplicates for unchanged Efforts. Preserve closed outcomes and auditable comments. Do not turn Fog into speculative tickets.
 
-After mutation, reload every changed issue from GitHub. Validate markers, labels, unique Program and dependency lines, Program membership, links, dependency acyclicity, Map completeness, and computed Frontier. Report exact partial failures and the state that exists; never claim an unverified mutation. Finish with the Program URL, created or changed Effort URLs, Frontier, retained Fog, and no implementation start.
+After mutation, reload every changed issue from GitHub. Validate markers, labels, unique Program and dependency lines, exactly one Map membership per Effort, links, dependency acyclicity, authoritative delivery and landing record uniqueness, Map completeness, the `landed` predicate for every indexed outcome and blocker, and computed Frontier. Stop on duplicate or conflicting records rather than classifying the issue as landed. Report exact partial failures and the state that exists; never claim an unverified mutation. Finish with the Program URL, created or changed Effort URLs, Frontier, retained Fog, and no implementation start.

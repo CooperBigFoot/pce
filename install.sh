@@ -185,12 +185,8 @@ def command_is_owned(event_name: str, command: object) -> bool:
             return True
     try:
         resolved = command_path.resolve(strict=False)
-        retired_names = {binary_name, f"{binary_name}.sh"}
-        return (
-            command_path.is_absolute()
-            and resolved.name in retired_names
-            and inside_repo(resolved)
-        )
+        known_source = repo / "hooks" / f"{binary_name}.sh"
+        return command_path.is_absolute() and resolved == known_source.resolve(strict=False)
     except (OSError, RuntimeError):
         return False
 

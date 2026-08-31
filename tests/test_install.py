@@ -315,6 +315,60 @@ class InstallTests(unittest.TestCase):
             )
             self.assertNotIn("Removed retired PCE SessionStart hook", result.stdout)
 
+    def test_removes_exact_known_retired_hook_source_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            settings_path = home / ".claude/settings.json"
+            settings_path.parent.mkdir(parents=True)
+            retired = str(ROOT / "hooks/pce-rehydrate.sh")
+            keep = str(ROOT / "unrelated-tooling/pce-rehydrate")
+            settings = {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": retired},
+                                {"type": "command", "command": keep},
+                            ]
+                        }
+                    ]
+                }
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                actual["hooks"]["SessionStart"],
+                [{"hooks": [{"type": "command", "command": keep}]}],
+            )
+            self.assertIn(f"Removed retired PCE SessionStart hook: {retired}", result.stdout)
+
+    def test_preserves_unrelated_retired_basename_hook_inside_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            settings_path = home / ".claude/settings.json"
+            settings_path.parent.mkdir(parents=True)
+            command = str(ROOT / "unrelated-tooling/pce-rehydrate")
+            settings = {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": command}]}
+                    ]
+                }
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(settings_path.read_text(encoding="utf-8")), settings
+            )
+            self.assertNotIn("Removed retired PCE SessionStart hook", result.stdout)
+
     def test_malformed_settings_are_reported_and_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)

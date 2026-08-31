@@ -25,7 +25,7 @@ chart-program → grill-ticket → implement-vision → land-ticket
 3. Give that vision to a root Prime Agent through `implement-vision`. It records delivery evidence without closing the Effort.
 4. Use `land-ticket <issue>` to verify delivery, close the Effort, update the Map, and evolve newly sharp Fog.
 
-A repository may have multiple active Programs. Program commands always take an explicit issue identity. `grill-me` remains the canonical interview behavior composed by Program skills. Vision documents remain flexible standalone project records with no fixed schema beyond the two provenance lines on Effort-derived visions.
+A repository may have multiple active Programs. `chart-program` accepts either a large idea for a new Program or an explicit Program issue for re-survey. `grill-ticket` and `land-ticket` require an explicit Effort identity. No command infers a repository-wide singleton. `grill-me` remains the canonical interview behavior composed by Program skills. Vision documents remain flexible standalone project records with no fixed schema beyond the two provenance lines on Effort-derived visions.
 
 ## Install
 

@@ -9,11 +9,15 @@ description: Verify and land one delivered Program Effort, repair safe records, 
 
 ## Reconstruct evidence
 
-From the repository root, inspect the explicit ticket, comments and timeline, its single linked vision, Program Map, dependencies, implementation PRs, target-branch commits and files, checks and validation, delivery record, related Efforts, and Fog. Validate the `pce:effort` / `<!-- pce:effort -->` and `pce:program` / `<!-- pce:program -->` contracts, the unique `Program:`, `Depends on:`, and `Vision:` lines, and the vision's matching `Program:` and `Effort:` provenance.
+From the repository root, inspect the explicit ticket, comments and timeline, its single linked vision, Program Map, dependencies, implementation PRs, target-branch commits and files, checks and validation, delivery record, related Efforts, and Fog. Validate the `pce:effort` / `<!-- pce:effort -->` and `pce:program` / `<!-- pce:program -->` contracts. Require exactly one Program, dependency, and Vision declaration on the ticket; exactly one Map membership; and exactly one canonical `Program:` line plus exactly one canonical `Effort:` line in the vision. All issue, Map, repository, and vision identities must match. Stop on duplicates, missing lines, foreign Programs, noncanonical URLs, or mismatches.
+
+Parse the complete Program dependency graph before landing. Every involved Effort must have exactly one unambiguous `Depends on:` declaration naming only structurally valid Efforts in the same Program, and the graph must be acyclic. Stop on duplicates, conflicts, malformed references, missing membership, foreign-Program dependencies, or cycles.
 
 Do not ask the human to explain code, PRs, tests, technical decisions, status, or any fact available through the repository or GitHub. Questions are only for genuine intent, priority, scope, outcome decisions, contradictions, or external authority.
 
-A sufficient implementation record consists of an Effort comment marked `<!-- pce:delivery -->` that concisely records the delivered outcome, every merged PR URL, validation evidence, material deviations, and unresolved follow-up risks. Verify its claims against the target branch and GitHub rather than trusting the comment alone. PRs must reference the Effort but must not have closed it before landing.
+The sole authoritative implementation record is exactly one Effort comment marked `<!-- pce:delivery -->`. It concisely records the delivered outcome, every merged PR URL, validation evidence, material deviations, and unresolved follow-up risks. Verify its claims against the target branch and GitHub rather than trusting the comment alone. If no marker exists but complete inspectable evidence permits safe mechanical reconstruction, create one and read it back. If exactly one exists, reconcile or update that same comment in place. If multiple markers or conflicting identities exist, stop without landing; never select one or append another. PRs must reference the Effort but must not have closed it before landing.
+
+Use this predicate everywhere Frontier or blocker state is computed: an Effort is `landed` only when all four facts are verified: the Effort is closed; it has exactly one authoritative `<!-- pce:delivery -->` comment whose claims match merged PRs and target-branch evidence; it has exactly one `<!-- pce:landed -->` outcome comment linking its Program; and its canonical URL appears exactly once in that Map's landed-outcomes index and nowhere in open Efforts or Frontier. Closed alone never means landed. Cancelled, malformed, prematurely closed, duplicate-record, and conflicting-record Efforts fail this predicate.
 
 ## Recovery hierarchy
 
@@ -24,11 +28,11 @@ Apply the first matching result:
 3. When implementation reveals a flawed outcome, missing requirement, or obsolete assumption in the vision, leave the Effort open and recommend rerunning `grill-ticket` on this same ticket and vision.
 4. Never require regrilling only because an agent stopped, a PR split changed, or a comment was omitted.
 
-If evidence is ambiguous or delivery blockers remain open, do not close the Effort. Report the exact gap. Do not manufacture delivery evidence.
+If evidence is ambiguous or any delivery blocker fails the `landed` predicate, do not close the Effort. Report the exact gap. Do not manufacture delivery or landing evidence.
 
 ## Land and evolve the Map
 
-Once the complete vision and delivery record are verified on the target branch, close the Effort with a concise outcome comment. Add or update exactly one linked outcome-level line for it in the Program Map, remove it from open Efforts and Frontier, and recompute Frontier from the remaining open Efforts' dependencies.
+Once the complete vision and sole delivery record are verified on the target branch, create or update exactly one concise outcome comment marked `<!-- pce:landed -->` that links the Program and states the landed outcome. Add or update exactly one linked outcome-level Map line for the Effort, remove it from open Efforts and Frontier, close the Effort, and recompute Frontier using the `landed` predicate for every dependency. Perform read-back verification of the comment, Map, and issue state. On a partial rerun, reconcile the one existing landing comment and Map line from evidence instead of duplicating either. Stop on conflicting duplicate landing markers or Map entries.
 
 Inspect the Program's Fog against the landed result. Classify from evidence where established practice settles it. Load and follow canonical PCE `grill-me`, rather than copying its question loop, only when newly visible territory requires genuine human intent, priority, scope, or outcome decisions. After confirmation, show one concise mutation proposal in the same intent-level form as `chart-program`. Newly sharp Fog may become proposed `pce:effort` tickets with the deterministic Program, dependency, and pending-Vision contracts. Retained uncertainty stays Fog. Obtain approval before those issue or Map mutations, then execute and verify them. Do not create speculative tickets.
 
