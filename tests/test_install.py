@@ -142,6 +142,90 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(commands, ["echo keep", "other"])
             self.assertEqual(actual["hooks"]["PreToolUse"], settings["hooks"]["PreToolUse"])
 
+    def test_cleans_owned_absolute_hook_when_home_uses_symlink_spelling(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_home = root / "real-home"
+            real_home.mkdir()
+            spelled_home = root / "home-alias"
+            spelled_home.symlink_to(real_home, target_is_directory=True)
+
+            binary = real_home / ".local/bin/pce-rehydrate"
+            binary.parent.mkdir(parents=True)
+            binary.symlink_to(ROOT / "hooks/pce-rehydrate.sh")
+            settings_path = real_home / ".claude/settings.json"
+            settings_path.parent.mkdir(parents=True)
+            owned_command = str(spelled_home / ".local/bin/pce-rehydrate")
+            settings = {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": owned_command},
+                                {"type": "command", "command": "echo keep"},
+                            ]
+                        }
+                    ]
+                }
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            result = self.run_installer(spelled_home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(settings_path.read_text(encoding="utf-8"))
+            commands = [
+                hook["command"]
+                for group in actual["hooks"]["SessionStart"]
+                for hook in group.get("hooks", [])
+            ]
+            self.assertEqual(commands, ["echo keep"])
+            self.assertFalse(os.path.lexists(binary))
+
+    def test_removes_owned_absolute_hook_with_symlink_spelled_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            real_home = base / "real-home"
+            real_home.mkdir()
+            home = base / "home-alias"
+            home.symlink_to(real_home, target_is_directory=True)
+
+            owned_binary = home / ".local/bin/pce-rehydrate"
+            owned_binary.parent.mkdir(parents=True)
+            owned_binary.symlink_to(ROOT / "target/release/pce-rehydrate")
+            owned_command = str(home / ".local/bin/pce-rehydrate")
+            ambiguous_command = str(home / ".local/bin/pce")
+            settings_path = home / ".claude/settings.json"
+            settings_path.parent.mkdir(parents=True)
+            settings = {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": owned_command},
+                                {"type": "command", "command": ambiguous_command},
+                                {"type": "command", "command": "echo keep"},
+                            ]
+                        }
+                    ]
+                }
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(os.path.lexists(owned_binary))
+            actual = json.loads(settings_path.read_text(encoding="utf-8"))
+            commands = [
+                hook["command"]
+                for group in actual["hooks"]["SessionStart"]
+                for hook in group.get("hooks", [])
+            ]
+            self.assertEqual(commands, [ambiguous_command, "echo keep"])
+            self.assertIn(f"Removed retired PCE SessionStart hook: {owned_command}", result.stdout)
+            self.assertIn(repr(ambiguous_command), result.stderr)
+
     def test_malformed_settings_are_reported_and_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)

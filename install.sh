@@ -19,7 +19,8 @@ home_value = os.environ.get("HOME")
 if not home_value:
     print("ERROR: HOME is not set.", file=sys.stderr)
     raise SystemExit(1)
-home = Path(home_value).expanduser().resolve(strict=False)
+home_spelling = Path(os.path.abspath(Path(home_value).expanduser()))
+home = home_spelling.resolve(strict=False)
 
 matrix = {
     home / ".claude/skills/grill-me": repo / "skills/grill-me",
@@ -95,6 +96,19 @@ if conflicts:
 # Capture binary ownership before cleanup so hook ownership can use it as evidence.
 binary_paths = (home / ".local/bin/pce", home / ".local/bin/pce-rehydrate")
 binary_was_owned = {path: owned_link(path) for path in binary_paths}
+rehydrate_binary = home / ".local/bin/pce-rehydrate"
+owned_rehydrate_path_identities: set[str] = set()
+if binary_was_owned[rehydrate_binary]:
+    # Keep both the user's spelling and the resolved spelling before unlinking.
+    # The former can contain symlinked HOME components that cannot be recovered
+    # by resolving the command after the leaf symlink has been removed.
+    for path in (
+        rehydrate_binary,
+        home_spelling / ".local/bin/pce-rehydrate",
+    ):
+        owned_rehydrate_path_identities.add(
+            os.path.normcase(os.path.normpath(os.fspath(path)))
+        )
 
 # Install only the exact supported matrix.
 for destination, source in matrix.items():
@@ -148,10 +162,12 @@ def command_is_owned(command: object) -> bool:
         return False
     if command == "$HOME/.local/bin/pce-rehydrate":
         return True  # Exact command emitted by the retired PCE installer.
-    if command == str(home / ".local/bin/pce-rehydrate"):
-        return binary_was_owned[home / ".local/bin/pce-rehydrate"]
+    command_path = Path(command).expanduser()
+    if command_path.is_absolute():
+        identity = os.path.normcase(os.path.normpath(os.fspath(command_path)))
+        if identity in owned_rehydrate_path_identities:
+            return True
     try:
-        command_path = Path(command).expanduser()
         return command_path.is_absolute() and inside_repo(command_path.resolve(strict=False))
     except (OSError, RuntimeError):
         return False
