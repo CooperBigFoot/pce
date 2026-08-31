@@ -94,21 +94,30 @@ if conflicts:
     raise SystemExit(1)
 
 # Capture binary ownership before cleanup so hook ownership can use it as evidence.
-binary_paths = (home / ".local/bin/pce", home / ".local/bin/pce-rehydrate")
+binary_paths = (
+    home / ".local/bin/pce",
+    home / ".local/bin/pce-rehydrate",
+    home / ".local/bin/pce-protect-criteria",
+)
 binary_was_owned = {path: owned_link(path) for path in binary_paths}
-rehydrate_binary = home / ".local/bin/pce-rehydrate"
-owned_rehydrate_path_identities: set[str] = set()
-if binary_was_owned[rehydrate_binary]:
-    # Keep both the user's spelling and the resolved spelling before unlinking.
-    # The former can contain symlinked HOME components that cannot be recovered
-    # by resolving the command after the leaf symlink has been removed.
-    for path in (
-        rehydrate_binary,
-        home_spelling / ".local/bin/pce-rehydrate",
-    ):
-        owned_rehydrate_path_identities.add(
-            os.path.normcase(os.path.normpath(os.fspath(path)))
-        )
+managed_hook_commands = {
+    "SessionStart": ("pce-rehydrate", "$HOME/.local/bin/pce-rehydrate"),
+    "PreToolUse": ("pce-protect-criteria", "$HOME/.local/bin/pce-protect-criteria"),
+}
+owned_command_path_identities: dict[str, set[str]] = {}
+for event_name, (binary_name, _literal) in managed_hook_commands.items():
+    binary = home / ".local/bin" / binary_name
+    identities: set[str] = set()
+    if binary_was_owned[binary]:
+        # Keep both the user's spelling and the resolved spelling before unlinking.
+        # The former can contain symlinked HOME components that cannot be recovered
+        # by resolving the command after the leaf symlink has been removed.
+        for path in (
+            binary,
+            home_spelling / ".local/bin" / binary_name,
+        ):
+            identities.add(os.path.normcase(os.path.normpath(os.fspath(path))))
+    owned_command_path_identities[event_name] = identities
 
 # Install only the exact supported matrix.
 for destination, source in matrix.items():
@@ -157,15 +166,19 @@ for path in binary_paths:
 settings_path = home / ".claude/settings.json"
 
 
-def command_is_owned(command: object) -> bool:
+def command_is_owned(event_name: str, command: object) -> bool:
     if not isinstance(command, str):
         return False
-    if command == "$HOME/.local/bin/pce-rehydrate":
-        return True  # Exact command emitted by the retired PCE installer.
+    binary_name, literal = managed_hook_commands[event_name]
+    if command == literal:
+        binary = home / ".local/bin" / binary_name
+        # The literal is evidence from the retired installer unless a foreign
+        # artifact currently occupies the command path.
+        return not exists(binary) or binary_was_owned[binary]
     command_path = Path(command).expanduser()
     if command_path.is_absolute():
         identity = os.path.normcase(os.path.normpath(os.fspath(command_path)))
-        if identity in owned_rehydrate_path_identities:
+        if identity in owned_command_path_identities[event_name]:
             return True
     try:
         return command_path.is_absolute() and inside_repo(command_path.resolve(strict=False))
@@ -184,43 +197,44 @@ def clean_settings() -> None:
             return
         if not isinstance(hooks, dict):
             raise ValueError("hooks is not an object")
-        groups = hooks.get("SessionStart")
-        if groups is None:
-            return
-        if not isinstance(groups, list):
-            raise ValueError("hooks.SessionStart is not an array")
-
         changed = False
-        ambiguous: list[str] = []
-        retained_groups = []
-        for group in groups:
-            if not isinstance(group, dict):
-                raise ValueError("a hooks.SessionStart entry is not an object")
-            inner = group.get("hooks")
-            if inner is None:
-                retained_groups.append(group)
+        ambiguous: list[tuple[str, str]] = []
+        for event_name in managed_hook_commands:
+            groups = hooks.get(event_name)
+            if groups is None:
                 continue
-            if not isinstance(inner, list):
-                raise ValueError("a hooks.SessionStart hooks value is not an array")
-            retained = []
-            for hook in inner:
-                if not isinstance(hook, dict):
-                    raise ValueError("a SessionStart hook is not an object")
-                command = hook.get("command")
-                if command_is_owned(command):
-                    changed = True
-                    print(f"Removed retired PCE SessionStart hook: {command}")
-                else:
-                    retained.append(hook)
-                    if isinstance(command, str) and "pce" in command.lower():
-                        ambiguous.append(command)
-            if retained or not inner:
-                if len(retained) != len(inner):
-                    group = dict(group)
-                    group["hooks"] = retained
-                retained_groups.append(group)
+            if not isinstance(groups, list):
+                raise ValueError(f"hooks.{event_name} is not an array")
+
+            retained_groups = []
+            for group in groups:
+                if not isinstance(group, dict):
+                    raise ValueError(f"a hooks.{event_name} entry is not an object")
+                inner = group.get("hooks")
+                if inner is None:
+                    retained_groups.append(group)
+                    continue
+                if not isinstance(inner, list):
+                    raise ValueError(f"a hooks.{event_name} hooks value is not an array")
+                retained = []
+                for hook in inner:
+                    if not isinstance(hook, dict):
+                        raise ValueError(f"a {event_name} hook is not an object")
+                    command = hook.get("command")
+                    if command_is_owned(event_name, command):
+                        changed = True
+                        print(f"Removed retired PCE {event_name} hook: {command}")
+                    else:
+                        retained.append(hook)
+                        if isinstance(command, str) and "pce" in command.lower():
+                            ambiguous.append((event_name, command))
+                if retained or not inner:
+                    if len(retained) != len(inner):
+                        group = dict(group)
+                        group["hooks"] = retained
+                    retained_groups.append(group)
+            hooks[event_name] = retained_groups
         if changed:
-            hooks["SessionStart"] = retained_groups
             encoded = (json.dumps(settings, ensure_ascii=False, indent=2) + "\n").encode()
             mode = stat.S_IMODE(settings_path.stat().st_mode)
             settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,16 +249,16 @@ def clean_settings() -> None:
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
-        for command in ambiguous:
+        for event_name, command in ambiguous:
             print(
-                f"WARNING: preserved ambiguous SessionStart hook command {command!r}; "
+                f"WARNING: preserved ambiguous {event_name} hook command {command!r}; "
                 "inspect it manually if it belongs to retired PCE.",
                 file=sys.stderr,
             )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(
             f"WARNING: preserved ambiguous Claude settings {settings_path}: {error}; "
-            "inspect PCE SessionStart hooks manually.",
+            "inspect retired PCE hooks manually.",
             file=sys.stderr,
         )
 

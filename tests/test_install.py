@@ -186,6 +186,83 @@ class InstallTests(unittest.TestCase):
             self.assertIn(f"Removed retired PCE SessionStart hook: {owned_command}", result.stdout)
             self.assertIn(repr(ambiguous_command), result.stderr)
 
+    def test_removes_owned_protection_hook_and_preserves_other_pre_tool_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            owned_binary = home / ".local/bin/pce-protect-criteria"
+            owned_binary.parent.mkdir(parents=True)
+            owned_binary.symlink_to(ROOT / "hooks/pce-protect-criteria.sh")
+            settings_path = home / ".claude/settings.json"
+            settings_path.parent.mkdir(parents=True)
+            settings = {
+                "theme": "dark",
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash|Edit|Write",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "$HOME/.local/bin/pce-protect-criteria",
+                                },
+                                {"type": "command", "command": "echo keep-pre"},
+                            ],
+                        }
+                    ],
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "echo keep-session"}]}
+                    ],
+                },
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(os.path.lexists(owned_binary))
+            actual = json.loads(settings_path.read_text(encoding="utf-8"))
+            pre_commands = [
+                hook["command"]
+                for group in actual["hooks"]["PreToolUse"]
+                for hook in group.get("hooks", [])
+            ]
+            self.assertEqual(pre_commands, ["echo keep-pre"])
+            self.assertEqual(actual["hooks"]["SessionStart"], settings["hooks"]["SessionStart"])
+            self.assertEqual(actual["theme"], "dark")
+
+    def test_preserves_foreign_protection_binary_and_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            foreign_binary = home / ".local/bin/pce-protect-criteria"
+            foreign_binary.parent.mkdir(parents=True)
+            foreign_binary.write_text("foreign", encoding="utf-8")
+            settings_path = home / ".claude/settings.json"
+            settings_path.parent.mkdir(parents=True)
+            settings = {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "$HOME/.local/bin/pce-protect-criteria",
+                                },
+                                {"type": "command", "command": "echo keep"},
+                            ]
+                        }
+                    ]
+                }
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(foreign_binary.read_text(encoding="utf-8"), "foreign")
+            actual = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(actual, settings)
+            self.assertIn("preserved ambiguous PreToolUse hook", result.stderr)
+
     def test_malformed_settings_are_reported_and_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
