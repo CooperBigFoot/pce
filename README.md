@@ -28,7 +28,7 @@ The installer creates only this active skill matrix:
 
 Each entry is a symlink to this checkout. The installer is safe to rerun. It replaces links owned by this checkout, refuses conflicting files, directories, and foreign links, and reports ambiguous legacy artifacts for manual cleanup.
 
-During migration, obsolete PCE skill links and the retired `~/.local/bin/pce` and `pce-rehydrate` links are removed only when their targets prove that this checkout owns them. Known PCE-owned Claude `SessionStart` hook entries are removed without changing unrelated settings. Copied files, directories, foreign links, and ambiguous settings are preserved.
+During migration, obsolete PCE skill links and the retired `~/.local/bin/pce`, `pce-rehydrate`, and `pce-protect-criteria` links are removed only when their targets prove that this checkout owns them. Known PCE-owned Claude `SessionStart` and `PreToolUse` hook entries are removed without changing unrelated settings. Copied files, directories, foreign links, and ambiguous settings are preserved.
 
 ## Local tests
 
