@@ -27,6 +27,8 @@ Assign every PR to a fresh reviewer that did not implement it. The reviewer read
 
 Return findings to the implementation owner for repair. Repeat review after material repairs. A reviewer may merge only when findings are resolved and required checks pass. Follow any explicit instruction that withholds merge authority.
 
+After a confirmed merge, delete the merged remote implementation branch. During the final target-branch audit, remove local implementation branches only after proving that each branch is fully merged and is not checked out in a worktree. Preserve any branch with unmerged commits or uncertain ownership, and report why it remains.
+
 Ordinary implementation branches, PRs, repairs, and merges are authorized by the act of handing over the vision. Deployments, destructive data operations, spending, credentials, external publication, infrastructure changes, and other irreversible external acts not clearly authorized by the vision still require human authority.
 
 After all approved PRs land, inspect the resulting target branch against the complete vision, run its local tests, report the merged changes and evidence, and close the tracked outcome. Do not recreate planning, scheduling, recovery, review, or merge state machines that the Prime Agent harness already supplies.
