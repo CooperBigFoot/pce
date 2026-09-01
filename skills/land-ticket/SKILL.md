@@ -30,6 +30,12 @@ Apply the first matching result:
 
 If evidence is ambiguous or any delivery blocker fails the `landed` predicate, do not close the Effort. Report the exact gap. Do not manufacture delivery or landing evidence.
 
+## Target-copy and worktree closure gate
+
+Before landing, fetch the intended target branch and read the linked vision from that fetched ref. Require one regular `planning/visions/` file tracked on the target branch, never a symlink or worktree-only path. Compare its exact matching provenance and content with the ticket's commit-pinned `Vision:` link. Verify that its single `Program:` and `Effort:` lines match the Map, ticket, repository, and canonical URLs. A pushed branch, open PR, local checkout, or delivery comment is not a substitute for the target-branch copy. Do not close the Effort when this check fails.
+
+Enumerate canonical Effort worktrees below `<repository>/.worktrees/visions/effort-<number>-*/` and relate them to publication and implementation branches. Remove only safely removable clean worktrees whose branch and effects are verified merged into the intended target and have no unique commits or files; then remove only fully merged local branches that are no longer checked out. For incomplete evidence, preserve and report worktrees or branches with uncommitted, unpushed, unmerged, conflicting, or uncertain evidence. Do not close the Effort while a safely removable canonical worktree remains, or while an incomplete worktree exposes unresolved delivery state. Absence of a worktree is valid because durable reconstruction comes from Git and GitHub.
+
 ## Land and evolve the Map
 
 Once the complete vision and sole delivery record are verified on the target branch, create or update exactly one concise outcome comment marked `<!-- pce:landed -->` that links the Program and states the landed outcome. Add or update exactly one linked outcome-level Map line for the Effort, remove it from open Efforts and Frontier, close the Effort, and recompute Frontier using the `landed` predicate for every dependency. Perform read-back verification of the comment, Map, and issue state. On a partial rerun, reconcile the one existing landing comment and Map line from evidence instead of duplicating either. Stop on conflicting duplicate landing markers or Map entries.

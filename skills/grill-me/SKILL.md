@@ -45,4 +45,4 @@ Ask only when the answer depends on a real human preference, authority, or outco
 
 When the frontier is empty, do not ask a ceremonial question. Summarize the resulting understanding so it can stand alone for a fresh implementing agent. Include the intended outcome, material decisions, constraints, and any assumptions. Ask the human to confirm or correct that summary.
 
-Confirmation completes `grill-me`; it does not authorize further action. Stop after confirmation. Do not implement, edit files, write a vision, or invoke another workflow unless the human explicitly requests that next action.
+Confirmation completes `grill-me`; confirmation is not publication and does not authorize further action. The confirmed summary alone is not ready for `implement-vision`: it must first become a repository vision and satisfy the target-branch durability gate. Stop after confirmation. Do not implement, edit files, write a vision, or invoke another workflow unless the human explicitly requests that next action.

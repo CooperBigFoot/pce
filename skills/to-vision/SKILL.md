@@ -36,4 +36,4 @@ Write enough context that the fresh agent can implement without the prior conver
 
 Translate intent into useful technical context, but leave reversible mechanisms to the implementing agent. Do not invent unresolved questions to fill a section. Do not reopen decisions settled during the grill.
 
-After writing, report the path and a concise summary of what the document captures. Do not invoke implementation automatically.
+After writing, report the path and a concise summary of what the document captures. Describe it as a local draft, not as a durable or implementation-ready handoff. State that it is not yet verified on the target branch and that `implement-vision` must publish and verify a new standalone draft before substantive work. Do not invoke implementation automatically.

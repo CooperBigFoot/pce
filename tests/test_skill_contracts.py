@@ -163,6 +163,119 @@ class SkillContractTests(unittest.TestCase):
                 self.assertIn("ADRs", text)
                 self.assertIn("domain-modeling", text)
 
+    def test_implement_vision_has_unified_recoverable_inputs(self) -> None:
+        text = self.read_skill("implement-vision")
+        for phrase in (
+            "Effort issue number in the current repository",
+            "canonical Effort issue URL",
+            "repository-relative `planning/visions/` path",
+        ):
+            self.assertIn(phrase, text)
+        self.assertIn("derive the repository from the URL", text)
+        self.assertIn("do not use the caller's current repository", text)
+        self.assertIn("may name a repository different from the caller's current checkout", text)
+        self.assertIn("rather than rejecting it as cross-repository", text)
+        self.assertNotIn("Reject missing, extra, ambiguous, shorthand, cross-repository", text)
+        self.assertIn("normalized canonical remote matches that repository", text)
+        self.assertIn("Never read, branch, create a worktree, or implement URL-derived work", text)
+        self.assertIn("A path input is standalone only when it has no `Effort:` provenance", text)
+        self.assertIn("require that Effort's number or canonical URL", text)
+
+    def test_vision_target_copy_gate_is_strict_for_efforts_and_standalone(self) -> None:
+        text = self.read_skill("implement-vision")
+        for phrase in (
+            "regular file",
+            "tracked on the intended target branch",
+            "fetch the intended target branch",
+            "read the vision from that fetched ref",
+            "exact content",
+        ):
+            self.assertIn(phrase, text)
+        self.assertIn("An Effort-derived vision must already", text)
+        self.assertIn("stop before planning or substantive implementation", text)
+        self.assertIn("Do not bootstrap publication for an Effort", text)
+
+    def test_standalone_publication_distinguishes_bootstrap_from_resume_gap(self) -> None:
+        text = self.read_skill("implement-vision")
+        self.assertIn("local standalone bootstrap", text.lower())
+        self.assertIn("new local vision created by `to-vision`", text)
+        self.assertIn("publish it through the repository's normal branch and review process", text)
+        self.assertIn("verify the resulting target-branch copy", text)
+        self.assertIn("unresolved publication gap", text)
+        self.assertIn("preserve and report", text)
+        self.assertIn("do not begin substantive implementation", text)
+        self.assertIn("When repository policy uses a PR", text)
+        self.assertIn("when policy permits another reviewed publication path", text)
+        self.assertNotIn("verify the pushed commit, PR, merge", text)
+
+    def test_reruns_use_five_way_cold_reconstruction_and_complete_noop(self) -> None:
+        text = self.read_skill("implement-vision")
+        for classification in ("merged", "open", "abandoned", "incomplete", "remaining"):
+            self.assertRegex(text, rf"\b{classification}\b")
+        for evidence in (
+            "target-branch commits",
+            "branches",
+            "validation evidence",
+            "structured local worktrees",
+        ):
+            self.assertIn(evidence, text)
+        self.assertIn("without the prior agent session", text)
+        self.assertIn("already complete", text)
+        self.assertIn("no-op", text)
+        self.assertIn("do not create a branch, commit, worktree, PR, or delivery record", text)
+
+    def test_vision_worktrees_are_canonical_and_cleanup_is_evidence_safe(self) -> None:
+        text = self.read_skill("implement-vision")
+        self.assertIn("<repository>/.worktrees/visions/effort-<number>-<slug>/", text)
+        self.assertIn("standalone", text)
+        self.assertIn("`/private/tmp`", text)
+        self.assertIn("arbitrary sibling directories", text)
+        for evidence in ("uncommitted", "unpushed", "unmerged", "uncertain ownership"):
+            self.assertIn(evidence, text)
+        self.assertIn("preserve", text.lower())
+        self.assertIn("remove", text.lower())
+        self.assertIn("verified merged", text)
+
+    def test_land_ticket_requires_target_vision_and_worktree_closure_gate(self) -> None:
+        text = self.read_skill("land-ticket")
+        gate = text.index("## Target-copy and worktree closure gate")
+        land = text.index("## Land and evolve the Map")
+        self.assertLess(gate, land)
+        section = text[gate:land]
+        for phrase in (
+            "fetch the intended target branch",
+            "regular `planning/visions/` file",
+            "exact matching provenance",
+            "canonical Effort worktrees",
+            "safely removable",
+            "preserve and report",
+            "Do not close the Effort",
+        ):
+            self.assertIn(phrase, section)
+
+    def test_authoring_workflows_report_publication_readiness_precisely(self) -> None:
+        expectations = {
+            "grill-me": ("confirmation is not publication", "not ready for `implement-vision`"),
+            "to-vision": ("local draft", "not yet verified on the target branch"),
+            "chart-program": ("publish and verify the merged target-branch copy", "exact `implement-vision` handoff"),
+            "grill-ticket": ("merged into the intended target branch", "ready for `implement-vision <Effort number or canonical URL>`"),
+        }
+        for name, phrases in expectations.items():
+            with self.subTest(name=name):
+                text = self.read_skill(name)
+                for phrase in phrases:
+                    self.assertIn(phrase, text)
+
+    def test_repository_guidance_documents_recovery_and_durable_handoffs(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        for text in (readme, claude):
+            self.assertIn("implement-vision <Effort number or canonical URL>", text)
+            self.assertIn("planning/visions/<vision>.md", text)
+            self.assertIn(".worktrees/visions/", text)
+            self.assertIn("target branch", text)
+            self.assertIn("resume", text.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
