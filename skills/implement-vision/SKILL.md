@@ -7,6 +7,18 @@ description: Execute a standalone vision with a root Prime Agent using native pl
 
 Act as the root owner of the vision-level outcome. Treat the supplied vision as the durable product intent, not as a prescribed code mechanism.
 
+## Resolve the input and target
+
+Accept exactly one of these inputs:
+
+- an Effort issue number in the current repository;
+- a canonical Effort issue URL, in which case derive the repository from the URL and do not use the caller's current repository identity;
+- a repository-relative `planning/visions/` path for a standalone vision.
+
+Reject missing, extra, ambiguous, shorthand, and noncanonical issue identities. Resolve a number only after identifying the current repository with GitHub. A canonical URL may name a repository different from the caller's current checkout; resolve and operate on the canonical owner and repository encoded in that URL rather than rejecting it as cross-repository. Locate an existing checkout only after verifying that its normalized canonical remote matches that repository. If none exists, create a durable checkout of the URL-derived repository in a user-owned location. Never read, branch, create a worktree, or implement URL-derived work in an unrelated caller checkout. For either Effort form, load the ticket and follow its single `Vision:` link. A path input is standalone only when it has no `Effort:` provenance line. If a path contains Effort provenance, stop and require that Effort's number or canonical URL so the ticket validation cannot be bypassed. Do not require a person to recover a session identifier, worktree path, branch name, or prior conversation.
+
+Determine one intended target branch from repository policy and durable PR evidence, normally the repository default branch, and use that identity for publication, implementation PRs, effect checks, delivery records, and cleanup. Stop if the evidence conflicts. Fetch the intended target branch before treating any intent or implementation as durable. A vision path must remain inside `planning/visions/`, must name a regular file rather than a symlink, and must have one canonical repository-relative identity.
+
 ## Establish the work
 
 1. Read the entire vision, repository instructions, relevant code, tests, and recent project context.
@@ -14,6 +26,14 @@ Act as the root owner of the vision-level outcome. Treat the supplied vision as 
 3. Ask the human only about missing intent, priorities, outcome-level trade-offs, credentials, legal or organizational authority, or permission for an exceptional irreversible external act. Explain consequences and recommend an answer.
 4. Define and track the vision-level outcome with the harness's native goal and progress capabilities.
 5. Choose one PR or several coherent vertical slices. Do not split work only by technical layer.
+
+## Target-branch durability gate
+
+For every invocation, fetch the intended target branch and read the vision from that fetched ref. Verify that the canonical path is a regular file tracked on the intended target branch. Compare the relevant local or commit-pinned document with the target copy and require exact content before using it as accepted intent.
+
+An Effort-derived vision must already satisfy this publication contract through `grill-ticket`. Verify that the ticket's one `Vision:` link, its commit-pinned copy, and the target-branch copy identify the same regular `planning/visions/` file with exactly matching `Program:` and `Effort:` provenance and exact content. Do not bootstrap publication for an Effort. On any missing, unmerged, stale, or conflicting target copy, stop before planning or substantive implementation and report the publication gap.
+
+A standalone target-branch vision is a normal start or resume. The only publication exception is a local standalone bootstrap: a new local vision created by `to-vision` that has no prior implementation evidence may be accepted as input. For that bootstrap, publish it through the repository's normal branch and review process, verify the pushed commit and required review evidence, and verify the resulting target-branch copy before continuing. When repository policy uses a PR, verify its target and merge; when policy permits another reviewed publication path, verify that authorized target update instead. If publication cannot complete, or evidence shows this is a resumed vision with an unresolved publication gap, preserve and report the inspectable file, branch, commit, PR, and target state; do not begin substantive implementation. Never manufacture Program or Effort provenance for standalone work.
 
 ## Detect Effort provenance
 
@@ -23,11 +43,29 @@ For an Effort-derived vision, use `gh`, the repository, and those links to recon
 
 Before planning or delivery, parse the complete Program dependency graph. Require exactly one unambiguous `Depends on:` declaration on every involved Effort. Every dependency must be a structurally valid Effort in the same Program, and the graph must be acyclic. Stop on duplicates, conflicts, foreign-Program dependencies, missing membership, malformed references, or cycles; do not choose an interpretation.
 
-Reconstruct prior work before planning. Classify linked PRs and commits as merged, open, abandoned, or remaining, verify their actual target-branch effects, and continue only the remaining vision outcome. A stopped earlier agent, changed PR split, or missing status comment is not a reason to restart or regrill. Regrill is appropriate only when implementation evidence exposes a material flaw, missing outcome, or obsolete assumption in the vision.
+## Reconstruct every run
+
+Reconstruct prior work before planning, including after an apparent clean start. For an Effort, inspect the linked vision, Program Map, complete dependency graph, issue timeline and comments, authoritative delivery record, implementation PRs, target-branch commits and effects, branches, validation evidence, and structured local worktrees. For a standalone vision, inspect the fetched target-branch vision, related commits, branches and PRs discoverable from repository and GitHub evidence, target effects, validation evidence, and structured local worktrees. Reconstruction must work without the prior agent session or its conversation.
+
+Classify every relevant unit of prior work into exactly the applicable five-way account: **merged** work whose target effects are verified; **open** work in an active PR or durable pushed branch; **abandoned** work whose branch or PR no longer provides a viable delivery path; **incomplete** surviving work, including local committed, uncommitted, or unpushed evidence; and **remaining** vision outcome not delivered by any of the preceding evidence. Record overlaps explicitly rather than treating a branch or PR status as proof of an effect. Verify the actual target-branch result, then plan and execute only the remaining outcome.
+
+When the entire outcome is already complete, rerun current validation, verify target effects and, for an Effort, require its existing authoritative delivery record to be valid before classifying the workflow as complete. A missing or stale required record is remaining reconciliation work under the delivery rules below. Report a truly already complete invocation as a no-op. For this no-op, do not create a branch, commit, worktree, PR, or delivery record. A stopped earlier agent, changed PR split, absent worktree, or missing status comment is not a reason to restart completed work or regrill. Regrill only when implementation evidence exposes a material flaw, missing outcome, or obsolete assumption in the vision.
 
 Use this predicate everywhere blocker state is computed: an Effort is `landed` only when all four facts are verified: the Effort is closed; it has exactly one authoritative `<!-- pce:delivery -->` comment whose claims match merged PRs and target-branch evidence; it has exactly one `<!-- pce:landed -->` outcome comment linking its Program; and its canonical URL appears exactly once in that Map's landed-outcomes index and nowhere in open Efforts or Frontier. Closed alone never means landed. Cancelled, malformed, prematurely closed, duplicate-record, and conflicting-record Efforts fail this predicate.
 
 Treat recorded dependencies as delivery blockers. Use ordinary tracker and engineering judgment to determine which investigation or implementation can proceed, but do not deliver or merge an outcome that relies on a blocker that fails the `landed` predicate. Report any blocker that prevents safe progress.
+
+## Worktree and preservation policy
+
+A branch does not require a separate worktree. Use the current checkout when safe. When isolation is needed, place every PCE-created vision worktree in the repository-owned hierarchy:
+
+```text
+<repository>/.worktrees/visions/effort-<number>-<slug>/
+```
+
+For standalone work, use an equally descriptive child of `<repository>/.worktrees/visions/` without an invented Effort number. Never put an active vision worktree in `/private/tmp`, another temporary directory, or arbitrary sibling directories. A worktree is an ephemeral checkout, not a recovery database or the canonical home of the vision.
+
+Before cleanup, inspect worktree status, branch reachability, upstream state, target merge evidence, and ownership. After the associated publication or implementation is verified merged, remove its clean worktree and fully merged local branch. Remove a remote implementation branch only under the existing post-merge rule below. Preserve and report any worktree or branch with uncommitted, unpushed, unmerged, or uncertain ownership evidence. Never move, delete, reset, or clean such evidence merely because another PR delivered the outcome. Cleanup is allowed only for a verified merged branch with no unique changes and no ownership ambiguity.
 
 ## Execute
 

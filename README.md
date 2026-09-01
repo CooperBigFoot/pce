@@ -11,8 +11,8 @@ grill-me → to-vision → implement-vision
 ```
 
 1. Use `grill-me` in Claude Code or Codex to clarify intent and material trade-offs.
-2. Use `to-vision` there to write the confirmed understanding to `planning/visions/YYYY-MM-DD-<slug>.md`.
-3. Give that file to a root Prime Agent through `implement-vision` for implementation and independent PR review.
+2. Use `to-vision` there to write the confirmed understanding to `planning/visions/YYYY-MM-DD-<slug>.md`. This is a local draft until publication is verified.
+3. Give the repository-relative path to a root Prime Agent through `implement-vision planning/visions/<vision>.md`. On the first run it publishes a new local standalone draft through normal review and verifies the target branch before substantive implementation.
 
 For an outcome too large for one useful vision:
 
@@ -21,11 +21,18 @@ chart-program → grill-ticket → implement-vision → land-ticket
 ```
 
 1. Use `chart-program` in Claude Code or Codex to survey the repository and publish an approved GitHub Program Map with contained Effort tickets, dependencies, Frontier, and Fog.
-2. Use `grill-ticket <issue>` to claim and discover one explicit Effort and create or revise its single linked vision.
-3. Give that vision to a root Prime Agent through `implement-vision`. It records delivery evidence without closing the Effort.
+2. Use `grill-ticket <issue>` to claim and discover one explicit Effort, publish its single linked vision, and verify the merged target-branch copy.
+3. From the owning repository, use `implement-vision <Effort number or canonical URL>` with a root Prime Agent. A number resolves in the current repository. A canonical URL resolves its encoded repository. The workflow records delivery evidence without closing the Effort.
 4. Use `land-ticket <issue>` to verify delivery, close the Effort, update the Map, and evolve newly sharp Fog.
 
 A repository may have multiple active Programs. `chart-program` accepts either a large idea for a new Program or an explicit Program issue for re-survey. `grill-ticket` and `land-ticket` require an explicit Effort identity. No command infers a repository-wide singleton. `grill-me` remains the canonical interview behavior composed by Program skills. Vision documents remain flexible standalone project records with no fixed schema beyond the two provenance lines on Effort-derived visions.
+
+
+## Durable start and recovery
+
+Every accepted vision has one canonical `planning/visions/<vision>.md` path and an exact copy on the intended target branch before implementation proceeds. `implement-vision` uses Git refs, GitHub issues and PRs, target-branch effects, and delivery records to start or resume work. It does not depend on the prior agent session or local checkout. An already completed rerun verifies and reports the result without creating replacement work.
+
+When isolation is needed, PCE-created checkouts live below `<repository>/.worktrees/visions/`. Clean worktrees for verified merged branches are removed. Worktrees with uncommitted, unpushed, unmerged, or uncertain evidence are preserved and reported. Temporary directories and arbitrary repository siblings are not recovery locations. `land-ticket` verifies the target-branch vision and this cleanup boundary before it closes an Effort.
 
 ## Install
 

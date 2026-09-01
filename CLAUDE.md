@@ -23,3 +23,9 @@ chart-program → grill-ticket → implement-vision → land-ticket
 ```
 
 Claude Code owns authoring, Program discovery, and ticket landing. Implementation planning, delegation, PR execution, independent review, and Effort delivery records belong to a root Prime Agent through `implement-vision`.
+
+## Durable handoffs
+
+For tracked work, invoke the root workflow as `implement-vision <Effort number or canonical URL>`. A number uses the current repository. A canonical URL supplies its repository identity. For standalone work, invoke `implement-vision planning/visions/<vision>.md`.
+
+A vision is ready only after its exact regular-file copy is verified on the intended target branch. A first standalone run can publish a new local draft before implementation. An Effort vision must already be published by `grill-ticket`. Each invocation reconstructs durable Git and GitHub evidence so it can start or resume without the previous session. Isolated PCE worktrees belong under `<repository>/.worktrees/visions/`; merged clean worktrees are removed, while incomplete or uncertain evidence is preserved.
