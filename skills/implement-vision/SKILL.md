@@ -1,6 +1,6 @@
 ---
 name: implement-vision
-description: Execute a standalone vision with a root Prime Agent using native planning, delegation, progress tracking, implementation PRs, and independent review. Use when the user gives Prime Agent a vision to implement.
+description: Execute a standalone or Effort-derived vision with a root Prime Agent using native planning, delegation, progress tracking, implementation PRs, and independent review. Use when the user gives Prime Agent a vision to implement.
 ---
 
 # Implement Vision
@@ -13,35 +13,46 @@ Accept exactly one of these inputs:
 
 - an Effort issue number in the current repository;
 - a canonical Effort issue URL, in which case derive the repository from the URL and do not use the caller's current repository identity;
-- a repository-relative `planning/visions/` path for a standalone vision.
+- a repository-relative `planning/visions/` path.
 
-Reject missing, extra, ambiguous, shorthand, and noncanonical issue identities. Resolve a number only after identifying the current repository with GitHub. A canonical URL may name a repository different from the caller's current checkout; resolve and operate on the canonical owner and repository encoded in that URL rather than rejecting it as cross-repository. Locate an existing checkout only after verifying that its normalized canonical remote matches that repository. If none exists, create a durable checkout of the URL-derived repository in a user-owned location. Never read, branch, create a worktree, or implement URL-derived work in an unrelated caller checkout. For either Effort form, load the ticket and follow its single `Vision:` link. A path input is standalone only when it has no `Effort:` provenance line. If a path contains Effort provenance, stop and require that Effort's number or canonical URL so the ticket validation cannot be bypassed. Do not require a person to recover a session identifier, worktree path, branch name, or prior conversation.
+Reject missing, extra, ambiguous, shorthand, and noncanonical issue identities. Resolve a number only after identifying the current repository with GitHub. A canonical URL may name a repository different from the caller's current checkout; resolve and operate on the canonical owner and repository encoded in that URL rather than rejecting it as cross-repository. Locate an existing checkout only after verifying that its normalized canonical remote matches that repository. If none exists, create a durable checkout of the URL-derived repository in a user-owned location. Never read, branch, create a worktree, or implement URL-derived work in an unrelated caller checkout.
 
-Determine one intended target branch from repository policy and durable PR evidence, normally the repository default branch, and use that identity for publication, implementation PRs, effect checks, delivery records, and cleanup. Stop if the evidence conflicts. Fetch the intended target branch before treating any intent or implementation as durable. A vision path must remain inside `planning/visions/`, must name a regular file rather than a symlink, and must have one canonical repository-relative identity.
+For a path input, first identify the current checkout's canonical GitHub repository. The path must remain inside `planning/visions/`, name a regular file rather than a symlink, and have one canonical repository-relative identity. Read it only after those checks, then scan its provenance before classifying it. A path input is standalone only when it has no `Effort:` provenance line. If it has exactly one canonical `Effort:` line, derive the canonical repository and Effort identity from that URL, require its repository to match the normalized canonical remote of the checkout containing the path, and promote the path to that Effort identity. From that point it must run the same complete Effort validation as a number or canonical URL and never continue as standalone. The supplied path remains only a locator; it is not authoritative and does not bypass the ticket or its `Vision:` link.
 
-## Establish the work
+For all three Effort entry forms, normalize to one canonical repository and Effort URL, load the ticket, and follow its single `Vision:` link. Do not require a person to repeat identity already recovered from valid provenance or to recover a session identifier, worktree path, branch name, or prior conversation.
 
-1. Read the entire vision, repository instructions, relevant code, tests, and recent project context.
-2. Investigate before asking. Decide reversible technical details from repository evidence and established engineering practice.
-3. Ask the human only about missing intent, priorities, outcome-level trade-offs, credentials, legal or organizational authority, or permission for an exceptional irreversible external act. Explain consequences and recommend an answer.
-4. Define and track the vision-level outcome with the harness's native goal and progress capabilities.
-5. Choose one PR or several coherent vertical slices. Do not split work only by technical layer.
+Determine one intended target branch from repository policy and durable PR evidence, normally the repository default branch, and use that identity for publication, implementation PRs, effect checks, delivery records, and cleanup. Stop if the evidence conflicts. Fetch the intended target branch before treating any intent or implementation as durable.
 
-## Target-branch durability gate
+## Validate the resolved input
+
+Complete input validation before creating the harness's persistent vision-level goal. Read the entire candidate vision, repository instructions, relevant code, tests, and recent project context. Stop on missing, duplicated, malformed, foreign, ambiguous, or conflicting provenance or durable linkage. Give one precise explanation. Do not create a persistent goal, and end normally without a continuation loop. Do not ask the human to supply an identity that the rejected evidence cannot establish safely.
 
 For every invocation, fetch the intended target branch and read the vision from that fetched ref. Verify that the canonical path is a regular file tracked on the intended target branch. Compare the relevant local or commit-pinned document with the target copy and require exact content before using it as accepted intent.
+
+### Target-branch durability gate
 
 An Effort-derived vision must already satisfy this publication contract through `grill-ticket`. Verify that the ticket's one `Vision:` link, its commit-pinned copy, and the target-branch copy identify the same regular `planning/visions/` file with exactly matching `Program:` and `Effort:` provenance and exact content. Do not bootstrap publication for an Effort. On any missing, unmerged, stale, or conflicting target copy, stop before planning or substantive implementation and report the publication gap.
 
 A standalone target-branch vision is a normal start or resume. The only publication exception is a local standalone bootstrap: a new local vision created by `to-vision` that has no prior implementation evidence may be accepted as input. For that bootstrap, publish it through the repository's normal branch and review process, verify the pushed commit and required review evidence, and verify the resulting target-branch copy before continuing. When repository policy uses a PR, verify its target and merge; when policy permits another reviewed publication path, verify that authorized target update instead. If publication cannot complete, or evidence shows this is a resumed vision with an unresolved publication gap, preserve and report the inspectable file, branch, commit, PR, and target state; do not begin substantive implementation. Never manufacture Program or Effort provenance for standalone work.
 
-## Detect Effort provenance
+### Effort provenance and durable linkage
 
-Scan provenance before classifying the vision. With no `Effort:` line, treat it as standalone and keep the workflow below unchanged. With more than one `Effort:` line, stop as ambiguous. An Effort-derived vision must contain exactly one canonical `Effort:` line and exactly one canonical `Program:` line.
+Scan provenance before classifying any candidate vision, including the ticket-linked and target-branch copies. With no `Effort:` line, a path input remains standalone and follows the standalone workflow unchanged. Any vision reached through an Effort identity must contain exactly one canonical `Effort:` line and exactly one canonical `Program:` line. More than one line, a malformed or noncanonical URL, a foreign repository, a missing line where Effort provenance is required, or disagreement among copies is invalid rather than standalone.
 
-For an Effort-derived vision, use `gh`, the repository, and those links to reconstruct the Effort, Program Map, dependencies, comments, delivery records, linked PRs, target-branch state, and validation. Validate that the open issue has the `pce:effort` label and `<!-- pce:effort -->` marker; its body has exactly one Program, dependency, and Vision declaration; the Map contains exactly one membership for it; and the issue, Map, repository, linked vision, and both provenance URLs all match. Stop on duplicate, missing, noncanonical, conflicting, or mismatched provenance rather than attaching delivery to the wrong ticket.
+For an Effort-derived vision, use `gh`, the repository, and those links to reconstruct the Effort, Program Map, dependencies, comments, delivery records, linked PRs, target-branch state, and validation. Validate that the open issue has the `pce:effort` label and `<!-- pce:effort -->` marker; its body has exactly one Program, dependency, and Vision declaration; the Map contains exactly one membership for it; and the issue, Map, repository, linked vision path, supplied path when present, and both provenance URLs all match. Stop on duplicate, missing, noncanonical, conflicting, or mismatched provenance or durable linkage rather than attaching delivery to the wrong ticket.
 
 Before planning or delivery, parse the complete Program dependency graph. Require exactly one unambiguous `Depends on:` declaration on every involved Effort. Every dependency must be a structurally valid Effort in the same Program, and the graph must be acyclic. Stop on duplicates, conflicts, foreign-Program dependencies, missing membership, malformed references, or cycles; do not choose an interpretation.
+
+Only after every applicable input, provenance, repository, ticket, Program Map, vision-link, commit-pinned-content, target-copy, and dependency check succeeds is the input valid. A number, URL, and recovered path then converge on the same validated Effort workflow.
+
+## Establish the persistent goal
+
+After input validation succeeds:
+
+1. Define and track the vision-level outcome with the harness's native goal and progress capabilities.
+2. Investigate before asking. Decide reversible technical details from repository evidence and established engineering practice.
+3. Ask the human only about missing intent, priorities, outcome-level trade-offs, credentials, legal or organizational authority, or permission for an exceptional irreversible external act. Explain consequences and recommend an answer.
+4. Choose one PR or several coherent vertical slices. Do not split work only by technical layer.
 
 ## Reconstruct every run
 
