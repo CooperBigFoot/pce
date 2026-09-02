@@ -179,7 +179,24 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("normalized canonical remote matches that repository", text)
         self.assertIn("Never read, branch, create a worktree, or implement URL-derived work", text)
         self.assertIn("A path input is standalone only when it has no `Effort:` provenance", text)
-        self.assertIn("require that Effort's number or canonical URL", text)
+        self.assertIn("derive the canonical repository and Effort identity", text)
+        self.assertIn("promote the path to that Effort identity", text)
+        self.assertIn("never continue as standalone", text)
+        self.assertNotIn("require that Effort's number or canonical URL", text)
+
+    def test_implement_vision_rejects_bad_recovery_before_goal_creation(self) -> None:
+        text = self.read_skill("implement-vision")
+        validation = text.index("## Validate the resolved input")
+        goal = text.index("## Establish the persistent goal")
+        self.assertLess(validation, goal)
+        gate = text[validation:goal]
+        for phrase in (
+            "missing, duplicated, malformed, foreign, ambiguous, or conflicting",
+            "durable linkage",
+            "Do not create a persistent goal",
+            "end normally without a continuation loop",
+        ):
+            self.assertIn(phrase, gate)
 
     def test_vision_target_copy_gate_is_strict_for_efforts_and_standalone(self) -> None:
         text = self.read_skill("implement-vision")
@@ -272,6 +289,7 @@ class SkillContractTests(unittest.TestCase):
         for text in (readme, claude):
             self.assertIn("implement-vision <Effort number or canonical URL>", text)
             self.assertIn("planning/visions/<vision>.md", text)
+            self.assertIn("Effort-derived path", text)
             self.assertIn(".worktrees/visions/", text)
             self.assertIn("target branch", text)
             self.assertIn("resume", text.lower())
