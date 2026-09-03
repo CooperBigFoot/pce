@@ -22,7 +22,10 @@ MATRIX = {
         for environment in (".claude", ".codex")
         for name in AUTHORING_SKILLS
     },
-    ".prime/agent/skills/implement-vision": ROOT / "skills/implement-vision",
+    **{
+        f".prime/agent/skills/{name}": ROOT / "skills" / name
+        for name in (*AUTHORING_SKILLS, "implement-vision")
+    },
 }
 
 
@@ -72,16 +75,18 @@ class InstallTests(unittest.TestCase):
             owned_skill = home / ".codex/skills/overseer"
             owned_skill.parent.mkdir(parents=True)
             owned_skill.symlink_to(ROOT / "skills/overseer", target_is_directory=True)
-            wrong_placement = home / ".prime/agent/skills/to-vision"
+            wrong_placement = home / ".claude/skills/implement-vision"
             wrong_placement.parent.mkdir(parents=True)
-            wrong_placement.symlink_to(ROOT / "skills/to-vision", target_is_directory=True)
+            wrong_placement.symlink_to(
+                ROOT / "skills/implement-vision", target_is_directory=True
+            )
             owned_binary = home / ".local/bin/pce"
             owned_binary.parent.mkdir(parents=True)
             owned_binary.symlink_to(ROOT / "target/release/pce")
             foreign_target = home / "foreign-skill"
             foreign_target.mkdir()
             foreign_link = home / ".claude/skills/overseer"
-            foreign_link.parent.mkdir(parents=True)
+            foreign_link.parent.mkdir(parents=True, exist_ok=True)
             foreign_link.symlink_to(foreign_target, target_is_directory=True)
             copied = home / ".local/bin/pce-rehydrate"
             copied.write_text("copied", encoding="utf-8")

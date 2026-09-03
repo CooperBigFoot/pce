@@ -147,6 +147,26 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("require an explicit Effort identity", readme)
         self.assertIn("No command infers a repository-wide singleton", readme)
 
+    def test_repository_guidance_documents_all_six_prime_skills(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        prime_row = next(
+            line
+            for line in readme.splitlines()
+            if line.startswith("| Prime Agent (`~/.prime/agent/skills`) |")
+        )
+        for name in (
+            "grill-me",
+            "to-vision",
+            "chart-program",
+            "grill-ticket",
+            "implement-vision",
+            "land-ticket",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(f"`{name}`", prime_row)
+        self.assertIn("Prime Agent installs all six PCE skills globally", claude)
+
     def test_to_vision_derives_name_only_when_no_explicit_name_exists(self) -> None:
         text = self.read_skill("to-vision")
         self.assertIn("When `$ARGUMENTS` contains", text)

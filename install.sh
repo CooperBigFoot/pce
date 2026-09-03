@@ -31,7 +31,10 @@ matrix = {
         for environment in (".claude/skills", ".codex/skills")
         for name in authoring_skills
     },
-    home / ".prime/agent/skills/implement-vision": repo / "skills/implement-vision",
+    **{
+        home / ".prime/agent/skills" / name: repo / "skills" / name
+        for name in (*authoring_skills, "implement-vision")
+    },
 }
 retired_names = (
     "pce", "to-graph", "work-graph", "overseer", "work-ticket",
@@ -46,7 +49,6 @@ skill_roots = (
 wrong_placements = (
     home / ".claude/skills/implement-vision",
     home / ".codex/skills/implement-vision",
-    *(home / ".prime/agent/skills" / name for name in authoring_skills),
 )
 
 
