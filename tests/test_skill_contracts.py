@@ -142,30 +142,71 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn(
             "chart-program → grill-ticket → implement-vision → land-ticket", claude
         )
-        self.assertIn("root Prime Agent", claude)
+        self.assertIn("root implementing agent", claude)
         self.assertIn("accepts either a large idea", readme)
         self.assertIn("require an explicit Effort identity", readme)
         self.assertIn("No command infers a repository-wide singleton", readme)
 
-    def test_repository_guidance_documents_all_six_prime_skills(self) -> None:
+    def test_repository_guidance_documents_all_six_skills_in_every_environment(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-        prime_row = next(
-            line
-            for line in readme.splitlines()
-            if line.startswith("| Prime Agent (`~/.prime/agent/skills`) |")
-        )
-        for name in (
-            "grill-me",
-            "to-vision",
-            "chart-program",
-            "grill-ticket",
-            "implement-vision",
-            "land-ticket",
+        rows = {
+            environment: next(
+                line
+                for line in readme.splitlines()
+                if line.startswith(f"| {environment} (`{directory}`) |")
+            )
+            for environment, directory in (
+                ("Claude Code", "~/.claude/skills"),
+                ("Codex", "~/.codex/skills"),
+                ("Prime Agent", "~/.prime/agent/skills"),
+            )
+        }
+        for environment, row in rows.items():
+            for name in (
+                "grill-me",
+                "to-vision",
+                "implement-vision",
+                "chart-program",
+                "grill-ticket",
+                "land-ticket",
+            ):
+                with self.subTest(environment=environment, name=name):
+                    self.assertIn(f"`{name}`", row)
+        for text in (readme, claude):
+            self.assertRegex(text, r"All six (PCE )?skills are available in every supported environment")
+            self.assertIn("spawn subagents", text)
+            self.assertIn("Git and GitHub", text)
+        self.assertNotIn("five", claude)
+        self.assertNotIn("root Prime Agent", readme)
+
+    def test_skill_text_is_harness_agnostic(self) -> None:
+        for path in sorted(SKILLS.glob("*/SKILL.md")):
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(skill=path.parent.name):
+                for phrase in (
+                    "Prime Agent",
+                    "Claude Code",
+                    "Codex",
+                    "harness",
+                    "persistent goal",
+                    "heartbeat",
+                    "wake-up",
+                    "if your",
+                ):
+                    self.assertNotIn(phrase, text)
+        implement = self.read_skill("implement-vision")
+        self.assertNotRegex(implement, r"\bgoals?\b")
+        for phrase in (
+            "spawning subagents",
+            "Work within the active turn",
+            "resuming as each delegated subagent completes",
+            "stop cleanly, explain exactly what is needed, and end the turn",
+            "re-invokes this skill",
+            "Nothing outside the vision, Git, and GitHub evidence is the durable truth",
+            "environment's own planning and delegation facilities",
         ):
-            with self.subTest(name=name):
-                self.assertIn(f"`{name}`", prime_row)
-        self.assertIn("Prime Agent installs all six PCE skills globally", claude)
+            self.assertIn(phrase, implement)
 
     def test_to_vision_derives_name_only_when_no_explicit_name_exists(self) -> None:
         text = self.read_skill("to-vision")
@@ -204,19 +245,28 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("never continue as standalone", text)
         self.assertNotIn("require that Effort's number or canonical URL", text)
 
-    def test_implement_vision_rejects_bad_recovery_before_goal_creation(self) -> None:
+    def test_implement_vision_validates_before_planning(self) -> None:
         text = self.read_skill("implement-vision")
         validation = text.index("## Validate the resolved input")
-        goal = text.index("## Establish the persistent goal")
-        self.assertLess(validation, goal)
-        gate = text[validation:goal]
+        planning = text.index("## Plan the outcome")
+        self.assertLess(validation, planning)
+        gate = text[validation:planning]
         for phrase in (
+            "before any planning, delegation, branch creation, or substantive implementation",
             "missing, duplicated, malformed, foreign, ambiguous, or conflicting",
             "durable linkage",
-            "Do not create a persistent goal",
-            "end normally without a continuation loop",
+            "Do not plan, delegate, or create any work",
+            "end the turn normally without a continuation loop",
+            "### Target-branch durability gate",
         ):
             self.assertIn(phrase, gate)
+        plan = text[planning:text.index("## Reconstruct every run")]
+        for phrase in (
+            "Investigate before asking",
+            "Ask the human only about missing intent, priorities, outcome-level trade-offs, credentials, legal or organizational authority, or permission for an exceptional irreversible external act",
+            "Choose one PR or several coherent vertical slices",
+        ):
+            self.assertIn(phrase, plan)
 
     def test_implement_vision_keeps_delivery_identity_out_of_product_architecture(self) -> None:
         text = self.read_skill("implement-vision")

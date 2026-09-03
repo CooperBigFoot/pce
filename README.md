@@ -1,6 +1,6 @@
 # PCE
 
-PCE is a lean distribution of six Agent Skills. It turns either one coherent idea or a large Program into durable visions for Prime Agent. GitHub Issues and repository vision documents are the only workflow records.
+PCE is a lean distribution of six Agent Skills. It turns either one coherent idea or a large Program into durable visions that an implementing agent delivers. All six skills are available in every supported environment: Claude Code, Codex, and Prime Agent. Any environment that can spawn subagents, run shell commands, read and write files, and use Git and GitHub can run either workflow. GitHub Issues and repository vision documents are the only workflow records.
 
 ## Workflows
 
@@ -12,7 +12,7 @@ grill-me → to-vision → implement-vision
 
 1. Use `grill-me` in Claude Code, Codex, or Prime Agent to clarify intent and material trade-offs.
 2. Use `to-vision` in the same environment to write the confirmed understanding to `planning/visions/YYYY-MM-DD-<slug>.md`. This is a local draft until publication is verified.
-3. Give the repository-relative path to a root Prime Agent through `implement-vision planning/visions/<vision>.md`. On the first run it publishes a new local standalone draft through normal review and verifies the target branch before substantive implementation.
+3. Give the repository-relative path to a fresh implementing agent through `implement-vision planning/visions/<vision>.md`. On the first run it publishes a new local standalone draft through normal review and verifies the target branch before substantive implementation.
 
 For an outcome too large for one useful vision:
 
@@ -22,7 +22,7 @@ chart-program → grill-ticket → implement-vision → land-ticket
 
 1. Use `chart-program` in Claude Code, Codex, or Prime Agent to survey the repository and publish an approved GitHub Program Map with contained Effort tickets, dependencies, Frontier, and Fog.
 2. Use `grill-ticket <issue>` in Claude Code, Codex, or Prime Agent to claim and discover one explicit Effort, publish its single linked vision, and verify the merged target-branch copy.
-3. Use `implement-vision <Effort number or canonical URL>` or pass the linked repository-relative vision path to a root Prime Agent. A number resolves in the current repository. A canonical URL resolves its encoded repository. An Effort-derived path recovers that same identity from its canonical provenance, then runs the complete ticket workflow. The workflow records delivery evidence without closing the Effort.
+3. Use `implement-vision <Effort number or canonical URL>` or pass the linked repository-relative vision path to a fresh implementing agent. A number resolves in the current repository. A canonical URL resolves its encoded repository. An Effort-derived path recovers that same identity from its canonical provenance, then runs the complete ticket workflow. The workflow records delivery evidence without closing the Effort.
 4. Use `land-ticket <issue>` in Claude Code, Codex, or Prime Agent to verify delivery, close the Effort, update the Map, and evolve newly sharp Fog.
 
 A repository may have multiple active Programs. `chart-program` accepts either a large idea for a new Program or an explicit Program issue for re-survey. `grill-ticket` and `land-ticket` require an explicit Effort identity. No command infers a repository-wide singleton. `grill-me` remains the canonical interview behavior composed by Program skills. Vision documents remain flexible standalone project records with no fixed schema beyond the two provenance lines on Effort-derived visions.
@@ -30,7 +30,7 @@ A repository may have multiple active Programs. `chart-program` accepts either a
 
 ## Durable start and recovery
 
-Every accepted vision has one canonical `planning/visions/<vision>.md` path and an exact copy on the intended target branch before implementation proceeds. A path with canonical Effort provenance is an Effort-derived path and only locates the ticket workflow; a path without it remains standalone. `implement-vision` validates input and durable linkage before creating a persistent goal, then uses Git refs, GitHub issues and PRs, target-branch effects, and delivery records to start or resume work. It does not depend on the prior agent session or local checkout. An already completed rerun verifies and reports the result without creating replacement work.
+Every accepted vision has one canonical `planning/visions/<vision>.md` path and an exact copy on the intended target branch before implementation proceeds. A path with canonical Effort provenance is an Effort-derived path and only locates the ticket workflow; a path without it remains standalone. `implement-vision` validates input and durable linkage before any planning or implementation, then uses Git refs, GitHub issues and PRs, target-branch effects, and delivery records to start or resume work. It does not depend on the prior agent session or local checkout. An already completed rerun verifies and reports the result without creating replacement work.
 
 When isolation is needed, PCE-created checkouts live below `<repository>/.worktrees/visions/`. Clean worktrees for verified merged branches are removed. Worktrees with uncommitted, unpushed, unmerged, or uncertain evidence are preserved and reported. Temporary directories and arbitrary repository siblings are not recovery locations. `land-ticket` verifies the target-branch vision and this cleanup boundary before it closes an Effort.
 
@@ -46,9 +46,9 @@ The installer creates only this active skill matrix:
 
 | Environment | Skills |
 | --- | --- |
-| Claude Code (`~/.claude/skills`) | `grill-me`, `to-vision`, `chart-program`, `grill-ticket`, `land-ticket` |
-| Codex (`~/.codex/skills`) | `grill-me`, `to-vision`, `chart-program`, `grill-ticket`, `land-ticket` |
-| Prime Agent (`~/.prime/agent/skills`) | `grill-me`, `to-vision`, `chart-program`, `grill-ticket`, `implement-vision`, `land-ticket` |
+| Claude Code (`~/.claude/skills`) | `grill-me`, `to-vision`, `implement-vision`, `chart-program`, `grill-ticket`, `land-ticket` |
+| Codex (`~/.codex/skills`) | `grill-me`, `to-vision`, `implement-vision`, `chart-program`, `grill-ticket`, `land-ticket` |
+| Prime Agent (`~/.prime/agent/skills`) | `grill-me`, `to-vision`, `implement-vision`, `chart-program`, `grill-ticket`, `land-ticket` |
 
 Each entry is a symlink to this checkout. The installer is safe to rerun. It replaces links owned by this checkout, refuses conflicting files, directories, and foreign links, and reports ambiguous legacy artifacts for manual cleanup.
 

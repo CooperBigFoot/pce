@@ -1,11 +1,13 @@
 ---
 name: implement-vision
-description: Execute a standalone or Effort-derived vision with a root Prime Agent using native planning, delegation, progress tracking, implementation PRs, and independent review. Use when the user gives Prime Agent a vision to implement.
+description: Execute a standalone or Effort-derived vision as the root implementing agent using planning, delegation, implementation PRs, and independent review, reconstructing progress from Git and GitHub evidence on every invocation. Use when the user hands an agent a vision to implement.
 ---
 
 # Implement Vision
 
 Act as the root owner of the vision-level outcome. Treat the supplied vision as the durable product intent, not as a prescribed code mechanism.
+
+This skill relies only on capabilities every supported environment provides: spawning subagents, running commands, reading and writing files, and using Git and GitHub. Delegation and a fresh independent reviewer are therefore always available.
 
 ## Resolve the input and target
 
@@ -25,7 +27,7 @@ Determine one intended target branch from repository policy and durable PR evide
 
 ## Validate the resolved input
 
-Complete input validation before creating the harness's persistent vision-level goal. Read the entire candidate vision, repository instructions, relevant code, tests, and recent project context. Stop on missing, duplicated, malformed, foreign, ambiguous, or conflicting provenance or durable linkage. Give one precise explanation. Do not create a persistent goal, and end normally without a continuation loop. Do not ask the human to supply an identity that the rejected evidence cannot establish safely.
+Complete input validation and the target-branch durability gate below before any planning, delegation, branch creation, or substantive implementation. Read the entire candidate vision, repository instructions, relevant code, tests, and recent project context. Stop on missing, duplicated, malformed, foreign, ambiguous, or conflicting provenance or durable linkage. Give one precise explanation. Do not plan, delegate, or create any work, and end the turn normally without a continuation loop. Do not ask the human to supply an identity that the rejected evidence cannot establish safely.
 
 For every invocation, fetch the intended target branch and read the vision from that fetched ref. Verify that the canonical path is a regular file tracked on the intended target branch. Compare the relevant local or commit-pinned document with the target copy and require exact content before using it as accepted intent.
 
@@ -45,11 +47,11 @@ Before planning or delivery, parse the complete Program dependency graph. Requir
 
 Only after every applicable input, provenance, repository, ticket, Program Map, vision-link, commit-pinned-content, target-copy, and dependency check succeeds is the input valid. A number, URL, and recovered path then converge on the same validated Effort workflow.
 
-## Establish the persistent goal
+## Plan the outcome
 
 After input validation succeeds:
 
-1. Define and track the vision-level outcome with the harness's native goal and progress capabilities.
+1. Own the vision-level outcome for the whole invocation. Work within the active turn, resuming as each delegated subagent completes. When human input is required, stop cleanly, explain exactly what is needed, and end the turn; a person re-invokes this skill to continue, and the durable evidence below carries the progress.
 2. Investigate before asking. Decide reversible technical details from repository evidence and established engineering practice.
 3. Ask the human only about missing intent, priorities, outcome-level trade-offs, credentials, legal or organizational authority, or permission for an exceptional irreversible external act. Explain consequences and recommend an answer.
 4. Choose one PR or several coherent vertical slices. Do not split work only by technical layer.
@@ -128,4 +130,4 @@ For an Effort-derived vision, then reload every Effort comment. The sole authori
 
 Verify every PR is merged into the intended target, the reported effects exist on that branch, validation is current, exactly one delivery marker remains, and the updated durable comment can be read back. Deterministic reruns update or preserve that one comment; they never append a competing record. Report partial GitHub failure precisely and do not invent a delivery record. Leave the Effort open for `land-ticket`; implementation completion does not authorize its closure, a `<!-- pce:landed -->` record, or the Program Map mutation.
 
-Close the harness's tracked vision outcome only after final verification and, for an Effort, the delivery record is verified. Do not recreate planning, scheduling, recovery, review, or merge state machines that the Prime Agent harness already supplies.
+Report the vision outcome as complete only after final verification and, for an Effort, the delivery record is verified. Use the environment's own planning and delegation facilities rather than inventing replacement planning, scheduling, recovery, review, or merge machinery. Nothing outside the vision, Git, and GitHub evidence is the durable truth of the workflow: a lost session resumes when a person re-invokes this skill and it reconstructs from that evidence.
