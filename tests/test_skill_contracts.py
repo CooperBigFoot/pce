@@ -227,6 +227,7 @@ class SkillContractTests(unittest.TestCase):
         for phrase in (
             "Every implementation owner",
             "before designing or editing production code",
+            "inspect the repository's existing architecture and vocabulary",
             "established repository and domain vocabulary",
             "stable responsibility",
             "vague generic names",
@@ -237,8 +238,19 @@ class SkillContractTests(unittest.TestCase):
             "Preserve compatibility for existing public interfaces",
             "explicit migration",
             "delivery metadata and traceability evidence",
+            "issues, vision provenance",
+            "PR descriptions",
+            "delivery records",
+            "branch and worktree names",
+            "commit messages",
+            "historical evidence",
+            "test names, fixtures, examples, or study-specific data configuration",
+            "maintained artifacts should prefer behavioral or domain names",
+            "explicit metadata or a comment rather than making it the artifact's organizing name",
             "repository-wide naming linter",
             "universal naming convention",
+            "perform unrelated cleanup",
+            "Do not rename PCE's Program or Effort workflow artifacts",
         ):
             self.assertIn(phrase, implementation_contract)
 
@@ -249,6 +261,7 @@ class SkillContractTests(unittest.TestCase):
             "inherited ticket-shaped architecture that the implementation extends",
             "Effort-shaped abstractions after cosmetic renames",
             "vague generic APIs",
+            "compatibility breaks to an existing public interface without an explicit migration",
         ):
             self.assertIn(phrase, review_contract)
 

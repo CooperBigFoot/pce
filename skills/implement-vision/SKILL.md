@@ -90,7 +90,7 @@ Do not introduce or expand ticket-shaped product architecture. Repair inherited 
 
 Ticket identity remains valid delivery metadata and traceability evidence in issues, vision provenance, PR descriptions, delivery records, branch and worktree names, commit messages, and historical evidence. It may also appear where traceability requires it in test names, fixtures, examples, or study-specific data configuration, although maintained artifacts should prefer behavioral or domain names where practical. Carry a necessary reference as explicit metadata or a comment rather than making it the artifact's organizing name.
 
-Enforce this boundary through implementation and review. Do not add a repository-wide naming linter, impose a universal naming convention on downstream repositories, or perform unrelated cleanup.
+Enforce this boundary through implementation and review. Do not add a repository-wide naming linter, impose a universal naming convention on downstream repositories, or perform unrelated cleanup. Do not rename PCE's Program or Effort workflow artifacts.
 
 Delegate substantive work when it improves speed or independence. Give each implementation agent complete context and ownership of one branch, its tests, commit, push, and PR. Each branch must start from the intended target branch. Keep the human informed at meaningful milestones without forwarding routine mechanism choices.
 
