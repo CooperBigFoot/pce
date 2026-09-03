@@ -9,23 +9,19 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
-AUTHORING_SKILLS = (
+SKILLS = (
     "grill-me",
     "to-vision",
+    "implement-vision",
     "chart-program",
     "grill-ticket",
     "land-ticket",
 )
+ENVIRONMENT_ROOTS = (".claude/skills", ".codex/skills", ".prime/agent/skills")
 MATRIX = {
-    **{
-        f"{environment}/skills/{name}": ROOT / "skills" / name
-        for environment in (".claude", ".codex")
-        for name in AUTHORING_SKILLS
-    },
-    **{
-        f".prime/agent/skills/{name}": ROOT / "skills" / name
-        for name in (*AUTHORING_SKILLS, "implement-vision")
-    },
+    f"{root}/{name}": ROOT / "skills" / name
+    for root in ENVIRONMENT_ROOTS
+    for name in SKILLS
 }
 
 
@@ -75,9 +71,9 @@ class InstallTests(unittest.TestCase):
             owned_skill = home / ".codex/skills/overseer"
             owned_skill.parent.mkdir(parents=True)
             owned_skill.symlink_to(ROOT / "skills/overseer", target_is_directory=True)
-            wrong_placement = home / ".claude/skills/implement-vision"
-            wrong_placement.parent.mkdir(parents=True)
-            wrong_placement.symlink_to(
+            prior_link = home / ".claude/skills/implement-vision"
+            prior_link.parent.mkdir(parents=True)
+            prior_link.symlink_to(
                 ROOT / "skills/implement-vision", target_is_directory=True
             )
             owned_binary = home / ".local/bin/pce"
@@ -95,7 +91,8 @@ class InstallTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(os.path.lexists(owned_skill))
-            self.assertFalse(os.path.lexists(wrong_placement))
+            self.assertTrue(prior_link.is_symlink())
+            self.assertEqual(prior_link.resolve(), (ROOT / "skills/implement-vision").resolve())
             self.assertFalse(os.path.lexists(owned_binary))
             self.assertTrue(foreign_link.is_symlink())
             self.assertEqual(foreign_link.resolve(), foreign_target.resolve())

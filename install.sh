@@ -22,33 +22,23 @@ if not home_value:
 home_spelling = Path(os.path.abspath(Path(home_value).expanduser()))
 home = home_spelling.resolve(strict=False)
 
-authoring_skills = (
-    "grill-me", "to-vision", "chart-program", "grill-ticket", "land-ticket",
-)
-matrix = {
-    **{
-        home / environment / name: repo / "skills" / name
-        for environment in (".claude/skills", ".codex/skills")
-        for name in authoring_skills
-    },
-    **{
-        home / ".prime/agent/skills" / name: repo / "skills" / name
-        for name in (*authoring_skills, "implement-vision")
-    },
-}
-retired_names = (
-    "pce", "to-graph", "work-graph", "overseer", "work-ticket",
-    "grill-with-docs", "domain-modeling",
+skills = (
+    "grill-me", "to-vision", "implement-vision",
+    "chart-program", "grill-ticket", "land-ticket",
 )
 skill_roots = (
     home / ".claude/skills",
     home / ".codex/skills",
     home / ".prime/agent/skills",
 )
-# Current skills in environments outside the supported matrix are legacy entries too.
-wrong_placements = (
-    home / ".claude/skills/implement-vision",
-    home / ".codex/skills/implement-vision",
+matrix = {
+    root / name: repo / "skills" / name
+    for root in skill_roots
+    for name in skills
+}
+retired_names = (
+    "pce", "to-graph", "work-graph", "overseer", "work-ticket",
+    "grill-with-docs", "domain-modeling",
 )
 
 
@@ -133,7 +123,6 @@ for destination, source in matrix.items():
     print(f"Linked {destination} -> {source}")
 
 cleanup_candidates = {root / name for root in skill_roots for name in retired_names}
-cleanup_candidates.update(wrong_placements)
 for path in sorted(cleanup_candidates, key=str):
     if not exists(path):
         continue

@@ -5,7 +5,7 @@ description: Materialize the current conversation's shared understanding as a du
 
 # To Vision
 
-Turn the completed discussion into one standalone handoff for a fresh Prime Agent that cannot see the conversation.
+Turn the completed discussion into one standalone handoff for a fresh implementing agent that cannot see the conversation.
 
 ## Name and path
 

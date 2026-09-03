@@ -45,7 +45,7 @@ Program: <canonical GitHub issue URL>
 Effort: <canonical GitHub issue URL>
 ```
 
-Keep the rest flexible and sufficient for a fresh Prime Agent. Vision creation itself must not start implementation.
+Keep the rest flexible and sufficient for a fresh implementing agent. Vision creation itself must not start implementation.
 
 Make the confirmed vision durable before changing `Vision: pending`. Follow the repository's contribution rules. From the intended target branch, create or reuse a dedicated vision branch, commit only the confirmed vision change, push it, and verify the pushed commit. When repository policy requires a documentation PR, open it and take it through the repository's normal review process; otherwise use and verify the permitted reviewed publication path. The initial `/grill-ticket` request and confirmed summary authorize this ordinary durable publication and issue linkage; they do not authorize implementation or bypass protected-branch policy.
 
