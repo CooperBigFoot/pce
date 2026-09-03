@@ -22,7 +22,7 @@ Use the Program workflow for a large outcome:
 chart-program → grill-ticket → implement-vision → land-ticket
 ```
 
-Claude Code owns authoring, Program discovery, and ticket landing. Implementation planning, delegation, PR execution, independent review, and Effort delivery records belong to a root Prime Agent through `implement-vision`.
+Claude Code and Codex support the five authoring skills listed above. Prime Agent installs all six PCE skills globally, so it can run either complete workflow without changing environments. Implementation planning, delegation, PR execution, independent review, and Effort delivery records belong to a root Prime Agent through `implement-vision`.
 
 ## Durable handoffs
 
