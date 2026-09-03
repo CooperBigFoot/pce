@@ -218,6 +218,56 @@ class SkillContractTests(unittest.TestCase):
         ):
             self.assertIn(phrase, gate)
 
+    def test_implement_vision_keeps_delivery_identity_out_of_product_architecture(self) -> None:
+        text = self.read_skill("implement-vision")
+        execute = text.index("## Execute")
+        review = text.index("## Review and land")
+        self.assertLess(execute, review)
+        implementation_contract = text[execute:review]
+        for phrase in (
+            "Every implementation owner",
+            "before designing or editing production code",
+            "read the complete vision",
+            "inspect the repository's existing architecture and vocabulary",
+            "established repository and domain vocabulary",
+            "stable responsibility",
+            "vague generic names",
+            "Delivery identity must not determine production modules, packages, types, functions, commands, routes, services, runtime schemas, user-facing configuration keys, public APIs, or other maintained product architecture",
+            "Removing a ticket number is not enough",
+            "Do not introduce or expand ticket-shaped product architecture.",
+            "directly modifies or depends on",
+            "report unrelated occurrences",
+            "Preserve compatibility for existing public interfaces",
+            "explicit migration",
+            "delivery metadata and traceability evidence",
+            "issues, vision provenance",
+            "PR descriptions",
+            "delivery records",
+            "branch and worktree names",
+            "commit messages",
+            "historical evidence",
+            "where traceability requires it",
+            "test names, fixtures, examples, or study-specific data configuration",
+            "maintained artifacts should prefer behavioral or domain names",
+            "explicit metadata or a comment rather than making it the artifact's organizing name",
+            "repository-wide naming linter",
+            "universal naming convention",
+            "perform unrelated cleanup",
+            "Do not rename PCE's Program or Effort workflow artifacts",
+        ):
+            self.assertIn(phrase, implementation_contract)
+
+        review_contract = text[review:]
+        for phrase in (
+            "complete repository and vision",
+            "newly introduced or expanded ticket-derived production identifiers",
+            "inherited ticket-shaped architecture that the implementation extends",
+            "Effort-shaped abstractions after cosmetic renames",
+            "vague generic APIs",
+            "compatibility breaks to an existing public interface without an explicit migration",
+        ):
+            self.assertIn(phrase, review_contract)
+
     def test_vision_target_copy_gate_is_strict_for_efforts_and_standalone(self) -> None:
         text = self.read_skill("implement-vision")
         for phrase in (
