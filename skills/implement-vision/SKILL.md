@@ -80,6 +80,18 @@ Before cleanup, inspect worktree status, branch reachability, upstream state, ta
 
 ## Execute
 
+### Product naming boundary
+
+Every implementation owner must receive this complete naming boundary in its delegated context before designing or editing production code. The owner must read the complete vision and inspect the repository's existing architecture and vocabulary before choosing names or boundaries. Production identifiers and architectural boundaries must use established repository and domain vocabulary and express the component's stable responsibility. Do not substitute vague generic names such as `Manager`, `Runner`, or `Handler` for a clear domain capability.
+
+Delivery identity must not determine production modules, packages, types, functions, commands, routes, services, runtime schemas, user-facing configuration keys, public APIs, or other maintained product architecture. Removing a ticket number is not enough when the renamed component remains organized around an Effort, ticket title, vision, or implementation phase rather than a stable product responsibility.
+
+Do not introduce or expand ticket-shaped product architecture. Repair inherited ticket-shaped components that the implementation directly modifies or depends on, and report unrelated occurrences without turning the vision into repository-wide cleanup. Preserve compatibility for existing public interfaces, or use an explicit migration when a repair changes one.
+
+Ticket identity remains valid delivery metadata and traceability evidence in issues, vision provenance, PR descriptions, delivery records, branch and worktree names, commit messages, and historical evidence. It may also appear where traceability requires it in test names, fixtures, examples, or study-specific data configuration, although maintained artifacts should prefer behavioral or domain names where practical. Carry a necessary reference as explicit metadata or a comment rather than making it the artifact's organizing name.
+
+Enforce this boundary through implementation and review. Do not add a repository-wide naming linter, impose a universal naming convention on downstream repositories, or perform unrelated cleanup.
+
 Delegate substantive work when it improves speed or independence. Give each implementation agent complete context and ownership of one branch, its tests, commit, push, and PR. Each branch must start from the intended target branch. Keep the human informed at meaningful milestones without forwarding routine mechanism choices.
 
 Use repository-native tools and tests. Preserve unrelated user changes and local state. An implementation agent must provide the full diff and validation evidence for review.
@@ -89,6 +101,14 @@ For an Effort-derived vision, every implementation PR body must include `Effort:
 ## Review and land
 
 Assign every PR to a fresh reviewer that did not implement it. The reviewer reads the full vision, repository rules, complete diff, and validation evidence. It checks real behavior, scope, safety, regressions, and consistency with the whole vision.
+
+The reviewer must evaluate names and architectural boundaries in the context of the complete repository and vision, not merely search for a particular ticket-number pattern. Reject:
+
+- newly introduced or expanded ticket-derived production identifiers;
+- inherited ticket-shaped architecture that the implementation extends;
+- Effort-shaped abstractions after cosmetic renames remove the literal delivery identifier;
+- vague generic APIs that conceal rather than express a stable capability;
+- compatibility breaks to an existing public interface without an explicit migration.
 
 Return findings to the implementation owner for repair. Repeat review after material repairs. A reviewer may merge only when findings are resolved and required checks pass. Follow any explicit instruction that withholds merge authority.
 
