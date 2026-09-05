@@ -10,7 +10,7 @@ This matters because current models follow instructions closely and literally. A
 
 A prompt audit on 2026-09-05 (target model Claude Fable 5.1, the current Claude Code default) scanned `AGENTS.md`, `CLAUDE.md`, and every `skills/*/SKILL.md`. The surface is close to clean: zero caps-lock emphasis, zero thinking scaffolds, zero retired model names, zero update suppressors or anti-formatting rules, no request code, and plain skill trigger descriptions. Every line in scope was written between 2026-08-31 and 2026-09-03. The one fossil is the retired PCE product itself. Five sentences still reference it or carry emphasis written for older models.
 
-## The five edits
+## The six edits
 
 These are the settled changes. Each is one hunk. Replacement wording is settled at the level of meaning; the implementing agent may polish phrasing as long as the test contracts below still hold.
 
