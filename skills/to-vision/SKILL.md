@@ -23,7 +23,7 @@ Read an existing file before editing it. Never silently replace prior content. R
 
 ## Authoring contract
 
-Choose the structure that best communicates this specific work. Do not impose fixed headings, a JSON schema, command-level acceptance syntax, or a universal template.
+Choose the structure that best communicates this specific work. There is no required template or heading set.
 
 Write enough context that the fresh agent can implement without the prior conversation. Where relevant, communicate:
 
