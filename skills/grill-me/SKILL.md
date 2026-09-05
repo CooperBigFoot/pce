@@ -9,7 +9,7 @@ Reach shared understanding of the proposed outcome before implementation begins.
 
 Build a **design tree** from the current conversation and available repository evidence. Each unresolved decision can branch into later decisions that depend on it. Work through that tree in **rounds**.
 
-For each round, identify the **frontier**: every material decision whose prerequisites are already settled. Ask the whole frontier in one batch. Do not include a question if its answer depends on another unresolved question in the same round. After the human answers, update the design tree, recompute the frontier, and ask the next round. If the frontier is already empty, do not manufacture a question merely to create interaction.
+For each round, identify the **frontier**: every material decision whose prerequisites are already settled. Ask the whole frontier in one batch. Do not include a question if its answer depends on another unresolved question in the same round. After the human answers, update the design tree, recompute the frontier, and ask the next round.
 
 Number every question so the human can answer by number. Use this format:
 

@@ -215,14 +215,22 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Ask for a name only when", text)
         self.assertIn("Never silently replace prior content", text)
 
-    def test_program_discovery_rejects_retired_document_workflow(self) -> None:
+    def test_program_discovery_uses_only_canonical_records_and_interview(self) -> None:
         for name in ("chart-program", "grill-ticket"):
             with self.subTest(name=name):
                 text = self.read_skill(name)
-                self.assertIn("Do not invoke `grill-with-docs`", text)
-                self.assertIn("`CONTEXT.md`", text)
-                self.assertIn("ADRs", text)
-                self.assertIn("domain-modeling", text)
+                self.assertIn("only discovery records", text)
+                self.assertIn(
+                    "canonical `grill-me` interview is the only discovery mechanism",
+                    text,
+                )
+                for retired_term in (
+                    "grill-with-docs",
+                    "CONTEXT.md",
+                    "ADR",
+                    "domain-modeling",
+                ):
+                    self.assertNotIn(retired_term, text)
 
     def test_implement_vision_has_unified_recoverable_inputs(self) -> None:
         text = self.read_skill("implement-vision")

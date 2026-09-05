@@ -7,7 +7,7 @@ description: Claim and deeply discover one explicit Program Effort, then create 
 
 `$ARGUMENTS` must identify exactly one Effort issue by number or URL. Ask only for the missing identity. Never choose an Effort from a repository-wide singleton assumption.
 
-Keep discovery in the ticket and its repository vision. Do not invoke `grill-with-docs`, edit `CONTEXT.md`, create ADRs, or use domain-modeling machinery.
+The ticket and its repository vision are the only discovery records. PCE's canonical `grill-me` interview is the only discovery mechanism.
 
 ## Validate and claim
 

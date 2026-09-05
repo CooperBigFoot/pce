@@ -7,11 +7,11 @@ description: Chart a large outcome as an approved GitHub Program Map and contain
 
 Turn a large outcome into a concise GitHub Map. `$ARGUMENTS` must contain either the idea for a new Program or the issue number or URL of one Program to re-survey. Ask for that missing identity only when the conversation does not supply it. Never infer a repository-wide current Program. Multiple open Programs are valid.
 
-Keep discovery in GitHub issues and repository visions. Do not invoke `grill-with-docs`, edit `CONTEXT.md`, create ADRs, or restore domain-modeling or retired PCE runtime machinery.
+GitHub issues and repository visions are the only discovery records. PCE's canonical `grill-me` interview is the only discovery mechanism.
 
 ## Investigate first
 
-From the repository root, use repository files and `gh` to identify the repository and authenticated user. Read relevant code, documentation, issues, labels, comments, linked visions, PRs, delivery records, and existing Program Maps. For re-survey, validate the explicit issue as an open or closed Program and reconstruct all linked Efforts, dependencies, landed outcomes, and Fog. Spend enough effort to recover complete current state. Do not ask for facts that this evidence or established practice can answer.
+From the repository root, use repository files and `gh` to identify the repository and authenticated user. Read relevant code, documentation, issues, labels, comments, linked visions, PRs, delivery records, and existing Program Maps. For re-survey, validate the explicit issue as an open or closed Program and reconstruct all linked Efforts, dependencies, landed outcomes, and Fog. Do not ask for facts that this evidence or established practice can answer.
 
 Load and follow PCE's canonical `grill-me` skill. It owns the interview rounds, question format, investigation policy, and confirmation gate; do not restate or replace its loop here. Run it at Program altitude and breadth-first across destination, boundaries, candidate Efforts, genuine delivery dependencies, success, exclusions, risks, and Fog. An Effort is an ambitious, independently meaningful outcome suitable for one contained vision, not an implementation task or technical layer. Do not deeply design an Effort. On re-survey, preserve settled outcomes unless evidence conflicts and grill only additions, changed boundaries, conflicts, and Fog that may now be sharp.
 
@@ -19,7 +19,7 @@ Load and follow PCE's canonical `grill-me` skill. It owns the interview rounds, 
 
 Before any GitHub mutation, present one intent-level proposal:
 
-- **Destination:** at most three sentences.
+- **Destination:** a brief statement of the outcome.
 - **Effort tickets:** title and one-sentence outcome question for each.
 - **Dependencies:** one line per genuine blocker.
 - **Fog:** short bullets.
