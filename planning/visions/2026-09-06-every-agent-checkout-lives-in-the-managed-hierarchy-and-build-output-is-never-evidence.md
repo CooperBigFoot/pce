@@ -6,6 +6,8 @@ Any checkout a PCE agent creates, for any purpose, lives under the repository's 
 
 Today the policy covers "vision worktrees" and cleanup of the worktree an implementation used. Agents read review, audit, red-reproduction, and comparison checkouts as outside that rule. Nothing tells them build directories are not evidence.
 
+The initial canonical clone is exempt from managed placement and disposable-checkout cleanup when no local checkout exists. It may be created in a durable user-owned location and retained as the repository root. All additional agent-created checkouts live below that root's `.worktrees/` hierarchy. The final enumeration still reports a canonical clone created by the invocation and its retained role.
+
 ## Why now
 
 On 2026-09-06 a 2 TB machine ran out of disk. Rust `target/` directories held about 300 GB. About 165 GB of it came from a single Effort's work on 2026-09-01 and 2026-09-02 in the `orthographos` and `metis` repositories, all created by PCE agents outside the managed hierarchy:
