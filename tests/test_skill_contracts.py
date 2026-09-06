@@ -380,6 +380,29 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("preserve", text.lower())
         self.assertIn("remove", text.lower())
         self.assertIn("verified merged", text)
+        policy = text.split("## Worktree and preservation policy", 1)[1].split("## Execute", 1)[0]
+        for phrase in (
+            "every checkout any agent in the invocation creates",
+            "implementation, independent review, audit, red or failing reproduction",
+            "side-by-side comparison",
+            "git worktrees, clones, and plain copies",
+            "below `<repository>/.worktrees/`",
+            "Reviewers and other delegated agents must receive this policy",
+            "initial canonical clone",
+            "when no local checkout exists",
+            "exempt from managed placement and disposable-checkout cleanup",
+            "retained role",
+            "Build output, dependency caches, compiled binaries, and other regenerable artifacts are never evidence",
+            "logs, receipts, diffs, and patches",
+            "never copy or retain a build directory to prove a result",
+            "source and history, not build output",
+            "final target-branch audit, enumerate every checkout the invocation created, in every location",
+            "status, branch reachability, upstream state, target merge evidence, and ownership",
+            "another run or a human created",
+            "plain copies without Git metadata",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, policy)
 
     def test_land_ticket_requires_target_vision_and_worktree_closure_gate(self) -> None:
         text = self.read_skill("land-ticket")
@@ -397,6 +420,38 @@ class SkillContractTests(unittest.TestCase):
             "Do not close the Effort",
         ):
             self.assertIn(phrase, section)
+        for phrase in (
+            "every checkout under `<repository>/.worktrees/` that relates to the Effort",
+            "git worktrees, clones, and plain copies",
+            "review, audit, reproduction, and comparison",
+            "only to checkouts this invocation created",
+            "another run or a human created",
+            "Build output, dependency caches, compiled binaries, and other regenerable artifacts are never evidence",
+            "logs, receipts, diffs, and patches",
+            "never a reason to preserve a checkout",
+            "status, branch reachability, upstream state, target merge evidence, and ownership",
+            "plain copies without Git metadata",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section)
+
+    def test_repository_guidance_covers_all_created_checkouts(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        paragraph = next(p for p in readme.split("\n\n") if "PCE-created checkouts" in p)
+        for phrase in (
+            "Every checkout PCE creates, for any purpose",
+            "`<repository>/.worktrees/`",
+            "git worktrees, clones, and plain copies",
+            "review, audit, reproduction, and comparison",
+            "initial canonical clone",
+            "when no local checkout exists",
+            "Build output is never evidence",
+            "logs, receipts, diffs, and patches",
+            "every checkout the invocation created",
+            "another run or a human",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, paragraph)
 
     def test_authoring_workflows_report_publication_readiness_precisely(self) -> None:
         expectations = {
