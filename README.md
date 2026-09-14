@@ -11,8 +11,8 @@ grill-me → to-vision → implement-vision
 ```
 
 1. Use `grill-me` in Claude Code, Codex, or Prime Agent to clarify intent and material trade-offs.
-2. Use `to-vision` in the same environment to write the confirmed understanding to `planning/visions/YYYY-MM-DD-<slug>.md`. This is a local draft until publication is verified.
-3. Give the repository-relative path to a fresh implementing agent through `implement-vision planning/visions/<vision>.md`. On the first run it publishes a new local standalone draft through normal review and verifies the target branch before substantive implementation.
+2. Use `to-vision` in the same environment to author the confirmed understanding at `planning/visions/YYYY-MM-DD-<slug>.md`, publish it through an independently reviewed documentation PR, merge under repository policy, and verify exact target-branch content. This invocation authorizes ordinary vision publication, not implementation. Explicit draft-only output performs no publication and is not implementation-ready; a later `to-vision` invocation can publish the same path.
+3. After verified publication, give the repository-relative path to a fresh implementing agent through `implement-vision planning/visions/<vision>.md`. It verifies existing publication before planning or implementation. A missing publication stops the workflow and must be resolved through `to-vision`, not by the implementing agent.
 
 For an outcome too large for one useful vision:
 
@@ -25,7 +25,9 @@ chart-program → grill-ticket → implement-vision → land-ticket
 3. Use `implement-vision <Effort number or canonical URL>` or pass the linked repository-relative vision path to a fresh implementing agent. A number resolves in the current repository. A canonical URL resolves its encoded repository. An Effort-derived path recovers that same identity from its canonical provenance, then runs the complete ticket workflow. The workflow records delivery evidence without closing the Effort.
 4. Use `land-ticket <issue>` in Claude Code, Codex, or Prime Agent to verify delivery, close the Effort, update the Map, and evolve newly sharp Fog.
 
-A repository may have multiple active Programs. `chart-program` accepts either a large idea for a new Program or an explicit Program issue for re-survey. `grill-ticket` and `land-ticket` require an explicit Effort identity. No command infers a repository-wide singleton. `grill-me` remains the canonical interview behavior composed by Program skills. Vision documents remain flexible standalone project records with no fixed schema beyond the two provenance lines on Effort-derived visions.
+A repository may have multiple active Programs. `chart-program` accepts either a large idea for a new Program or an explicit Program issue for re-survey. `grill-ticket` and `land-ticket` require an explicit Effort identity. No command infers a repository-wide singleton. `grill-me` remains the canonical interview behavior composed by Program skills. Vision documents remain flexible standalone project records with no fixed schema beyond the two provenance lines on Effort-derived visions. `grill-me` confirmation alone authorizes neither publication nor implementation.
+
+Both authoring workflows report success only after reviewed documentation publication and exact target-branch verification. Effort authoring also verifies one commit-pinned link, matching provenance, and an open Effort after merge. Vision PR descriptions and commit messages must avoid auto-closing references, including negated phrases; inspect existing text and explicit closing relationships before merge. Publication is never delivery or landing. Blocked publication reports precise partial file, branch, commit, PR, and linkage state without claiming readiness. A successful handoff reports the vision path, publication PR, verified Git refs, and exact `implement-vision` invocation; it does not start implementation automatically.
 
 
 ## Durable start and recovery

@@ -532,7 +532,7 @@ class SkillContractTests(unittest.TestCase):
     def test_authoring_workflows_report_publication_readiness_precisely(self) -> None:
         expectations = {
             "grill-me": ("confirmation is not publication", "not ready for `implement-vision`"),
-            "to-vision": ("local draft", "not yet verified on the target branch"),
+            "to-vision": ("publication PR", "verified Git refs", "Do not start implementation automatically"),
             "chart-program": ("publish and verify the merged target-branch copy", "exact `implement-vision` handoff"),
             "grill-ticket": ("merged into the intended target branch", "ready for `implement-vision <Effort number or canonical URL>`"),
         }
