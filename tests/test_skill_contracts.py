@@ -340,18 +340,115 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("stop before planning or substantive implementation", text)
         self.assertIn("Do not bootstrap publication for an Effort", text)
 
-    def test_standalone_publication_distinguishes_bootstrap_from_resume_gap(self) -> None:
+    def test_implementation_refuses_unpublished_standalone_without_bootstrap(self) -> None:
         text = self.read_skill("implement-vision")
-        self.assertIn("local standalone bootstrap", text.lower())
-        self.assertIn("new local vision created by `to-vision`", text)
-        self.assertIn("publish it through the repository's normal branch and review process", text)
-        self.assertIn("verify the resulting target-branch copy", text)
-        self.assertIn("unresolved publication gap", text)
-        self.assertIn("preserve and report", text)
-        self.assertIn("do not begin substantive implementation", text)
-        self.assertIn("When repository policy uses a PR", text)
-        self.assertIn("when policy permits another reviewed publication path", text)
-        self.assertNotIn("verify the pushed commit, PR, merge", text)
+        gate = text.split("### Target-branch durability gate", 1)[1].split(
+            "### Effort provenance", 1
+        )[0]
+        self.assertNotIn("local standalone bootstrap", gate)
+        self.assertIn("Do not publish drafts", gate)
+        self.assertIn("`to-vision`", gate)
+        self.assertIn("stop before planning", gate)
+        self.assertIn("preserve and report", gate)
+        self.assertIn("Never manufacture Program or Effort provenance", gate)
+
+    def test_authoring_owns_ordered_reviewed_publication(self) -> None:
+        # These tests inspect the actual instructions, not simulated GitHub behavior.
+        text = self.read_skill("to-vision")
+        self.assertIn("Invoking `to-vision` authorizes publication", text)
+        self.assertNotIn("`implement-vision` must publish", text)
+        publication = text.split("## Publish and verify", 1)[1]
+        ordered = (
+            "Inspect contribution rules", "commit only the confirmed vision change",
+            "verify the remote commit", "Open or reuse a documentation PR",
+            "independent review", "Before issue mutation", "Before merge",
+            "Merge the documentation PR", "Fetch the intended target branch",
+        )
+        positions = [publication.index(phrase) for phrase in ordered]
+        self.assertEqual(positions, sorted(positions))
+        for phrase in (
+            "ignored planning paths", "required checks", "required approvals",
+            "exact authored content", "regular", "nonblocking progress updates",
+            "file, branch, commit, PR", "not implementation-ready",
+            "publication PR", "verified Git refs", "Do not start implementation",
+        ):
+            self.assertIn(phrase, text)
+
+    def test_draft_only_has_no_publication_and_preserves_same_path(self) -> None:
+        text = self.read_skill("to-vision")
+        draft = text.split("## Draft-only output", 1)[1].split("## Publish and verify", 1)[0]
+        for phrase in (
+            "explicitly requests draft-only", "no commit, push, PR, issue mutation, or merge",
+            "not yet verified on the target branch", "not implementation-ready",
+            "same path",
+        ):
+            self.assertIn(phrase, draft)
+        self.assertIn("reuse that same regular", text)
+
+    def test_effort_publication_composes_validation_and_safe_linkage(self) -> None:
+        author = self.read_skill("to-vision")
+        grill = self.read_skill("grill-ticket")
+        for phrase in (
+            "Before issue mutation", "Validate and claim", "repository identity",
+            "exactly one Markdown link", "commit-pinned GitHub blob URL",
+            "Reload the issue", "both directions", "declaration uniqueness",
+            "matching provenance", "issue remains open",
+        ):
+            self.assertIn(phrase, author)
+        self.assertIn("Load and follow", grill)
+        self.assertIn("`to-vision` publication contract", grill)
+        self.assertIn("publication PR", grill)
+        self.assertIn("issue remains open", grill)
+
+    def test_effort_draft_only_precedes_claim_and_keeps_validation_read_only(self) -> None:
+        # Follow the composed entry path: grill-ticket claims before authoring.
+        text = self.read_skill("grill-ticket")
+        validation = text.split("## Validate and claim", 1)[1].split(
+            "## Discover through", 1
+        )[0]
+        detection = validation.index("Detect an explicit draft-only request before any mutation")
+        assignment = validation.index("If unassigned, assign")
+        self.assertLess(detection, assignment)
+        self.assertIn("For draft-only, validate read-only and do not assign", validation)
+        self.assertIn("For publication mode only", validation)
+        author = self.read_skill("to-vision")
+        self.assertIn("state validation, not its assignment action", author)
+
+    def test_publication_checks_prospective_merge_payload_before_merge(self) -> None:
+        text = self.read_skill("to-vision")
+        guard = text.split("Before merge", 1)[1].split("Merge the documentation PR", 1)[0]
+        self.assertIn("prospective exact merge or squash title and body", guard)
+        self.assertIn("before submitting the merge", guard)
+        self.assertIn("pass that inspected payload explicitly", guard)
+
+    def test_publication_guards_cover_negated_closing_reference_failure(self) -> None:
+        text = self.read_skill("to-vision")
+        guard = text.split("Before merge", 1)[1].split("Merge the documentation PR", 1)[0]
+        for phrase in (
+            "PR descriptions", "commit messages", "including negated phrases",
+            "existing PR text", "explicit closing relationships",
+            "Related Effort: #225", "close", "closes", "closed", "fix", "fixes",
+            "fixed", "resolve", "resolves", "resolved",
+        ):
+            self.assertIn(phrase, guard)
+        for phrase in (
+            "Unexpected closure is a publication error", "not evidence of delivery",
+            "Do not blindly reopen", "restored and verified through permitted action",
+            "`land-ticket`", "never mark an Effort delivered or landed",
+        ):
+            self.assertIn(phrase, text)
+        self.assertIn("closing-reference safeguards", self.read_skill("grill-ticket"))
+
+    def test_guidance_removes_deferred_publication_and_documents_draft_only(self) -> None:
+        for filename in ("README.md", "CLAUDE.md"):
+            with self.subTest(filename=filename):
+                text = (ROOT / filename).read_text(encoding="utf-8")
+                self.assertIn("draft-only", text)
+                self.assertIn("documentation PR", text)
+                self.assertNotIn("first run it publishes", text)
+                self.assertNotIn("first standalone run can publish", text)
+        chart = self.read_skill("chart-program")
+        self.assertIn("`to-vision` publication contract", chart)
 
     def test_reruns_use_five_way_cold_reconstruction_and_complete_noop(self) -> None:
         text = self.read_skill("implement-vision")
@@ -456,7 +553,7 @@ class SkillContractTests(unittest.TestCase):
     def test_authoring_workflows_report_publication_readiness_precisely(self) -> None:
         expectations = {
             "grill-me": ("confirmation is not publication", "not ready for `implement-vision`"),
-            "to-vision": ("local draft", "not yet verified on the target branch"),
+            "to-vision": ("publication PR", "verified Git refs", "Do not start implementation automatically"),
             "chart-program": ("publish and verify the merged target-branch copy", "exact `implement-vision` handoff"),
             "grill-ticket": ("merged into the intended target branch", "ready for `implement-vision <Effort number or canonical URL>`"),
         }
