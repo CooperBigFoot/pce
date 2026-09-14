@@ -400,6 +400,27 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("publication PR", grill)
         self.assertIn("issue remains open", grill)
 
+    def test_effort_draft_only_precedes_claim_and_keeps_validation_read_only(self) -> None:
+        # Follow the composed entry path: grill-ticket claims before authoring.
+        text = self.read_skill("grill-ticket")
+        validation = text.split("## Validate and claim", 1)[1].split(
+            "## Discover through", 1
+        )[0]
+        detection = validation.index("Detect an explicit draft-only request before any mutation")
+        assignment = validation.index("If unassigned, assign")
+        self.assertLess(detection, assignment)
+        self.assertIn("For draft-only, validate read-only and do not assign", validation)
+        self.assertIn("For publication mode only", validation)
+        author = self.read_skill("to-vision")
+        self.assertIn("state validation, not its assignment action", author)
+
+    def test_publication_checks_prospective_merge_payload_before_merge(self) -> None:
+        text = self.read_skill("to-vision")
+        guard = text.split("Before merge", 1)[1].split("Merge the documentation PR", 1)[0]
+        self.assertIn("prospective exact merge or squash title and body", guard)
+        self.assertIn("before submitting the merge", guard)
+        self.assertIn("pass that inspected payload explicitly", guard)
+
     def test_publication_guards_cover_negated_closing_reference_failure(self) -> None:
         text = self.read_skill("to-vision")
         guard = text.split("Before merge", 1)[1].split("Merge the documentation PR", 1)[0]
