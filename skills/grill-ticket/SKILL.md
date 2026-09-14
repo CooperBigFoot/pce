@@ -11,6 +11,8 @@ The ticket and its repository vision are the only discovery records. PCE's canon
 
 ## Validate and claim
 
+Detect an explicit draft-only request before any mutation, including assignment. For draft-only, validate read-only and do not assign, change issue content, publish, or merge. Still require every state and ownership check below; draft-only does not bypass Effort validation.
+
 Before questions or mutation, inspect the repository and use `gh` to load the issue, its comments and timeline, authenticated user, linked Program Map, all member Efforts and dependencies, relevant repository evidence, delivery records, and any linked vision. Require all of the following:
 
 - the issue is open, has label `pce:effort`, and contains `<!-- pce:effort -->`;
@@ -20,7 +22,7 @@ Before questions or mutation, inspect the repository and use `gh` to load the is
 - it has exactly one `Vision:` line that is `pending` or identifies one repository vision;
 - a linked vision contains exactly one canonical `Program:` line and exactly one canonical `Effort:` line, both matching the ticket, Map, and repository identity.
 
-Stop without mutation and report the malformed, closed, duplicate, mismatched, foreign-Program, cyclic, missing-membership, or otherwise ambiguous state. Do not claim or mechanically repair missing or duplicate Map membership. If unassigned, assign the authenticated GitHub user with `gh` and verify the assignment. If assigned only to that user, treat it as a resumable claim. If any other user is assigned, stop without mutation. Claiming does not require blockers to have landed; blockers constrain delivery, not discovery.
+Stop without mutation and report the malformed, closed, duplicate, mismatched, foreign-Program, cyclic, missing-membership, or otherwise ambiguous state. Do not claim or mechanically repair missing or duplicate Map membership. If any other user is assigned, stop without mutation in either mode. For publication mode only: If unassigned, assign the authenticated GitHub user with `gh` and verify the assignment. If assigned only to that user, treat it as a resumable claim. For draft-only, an unassigned or same-user issue remains unchanged. Claiming does not require blockers to have landed; blockers constrain delivery, not discovery.
 
 ## Discover through the canonical interview
 
