@@ -130,7 +130,7 @@ class SemanticDecisionTests(unittest.TestCase):
         self.assertEqual(result["decisions"][0]["action"], "reasoning-agent")
 
     def test_known_secret_patterns_and_actual_key_block_network(self):
-        for value in ("TYPESAFE_API_KEY=example", "Authorization: Bearer abc", 
+        for value in ("TYPESAFE_API_KEY=example", "Authorization: Bearer abc",
                       "-----BEGIN PRIVATE KEY-----", "fixture-credential"):
             entry = item()
             entry["candidate"]["text"] = value
