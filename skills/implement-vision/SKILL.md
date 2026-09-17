@@ -47,6 +47,32 @@ Before planning or delivery, parse the complete Program dependency graph. Requir
 
 Only after every applicable input, provenance, repository, ticket, Program Map, vision-link, commit-pinned-content, target-copy, and dependency check succeeds is the input valid. A number, URL, and recovered path then converge on the same validated Effort workflow.
 
+## Automatic semantic decisions
+
+Only after the complete input-validation gate succeeds, load this skill's
+`semantic-decisions.md`. Follow its shared permission, invocation, and fallback
+contract automatically at these checkpoints, for standalone and Effort work:
+
+- During investigation, reconstruction of resumed work, and delegation preparation,
+  batch `context` comparisons of gathered candidates against individual requirements.
+  Keep mandatory instructions, the complete vision, gate evidence, and uncertain
+  or conflicting sources available regardless of relevance scores. Delegates
+  receive inspected source context, not model labels as a substitute.
+- Before assigning the fresh independent reviewer, batch `review` comparisons of
+  coherent changes against requirements and repository vocabulary. Use all five
+  dimensions to supplement review focus, never to narrow the full remit.
+- During validation, before completion claims, and before preparing or updating
+  an Effort delivery record, batch `evidence` comparisons of individual requirements
+  with candidate tests, source, and observed results. Investigate gaps and run
+  missing validation before claiming success. Include current target evidence in
+  the final audit; semantic support never verifies a merge or target effect.
+
+Use `scripts/semantic_decisions.py` through the guide's stdin contract. No separate
+user invocation or routine approval prompt is needed. A fallback returns work to
+the reasoning agent with every existing gate intact. Jev cannot approve publication,
+merge, delivery, or landing. Keep compact details and actual resulting actions
+inspectable in the active session, not a replacement durable record.
+
 ## Plan the outcome
 
 After input validation succeeds:

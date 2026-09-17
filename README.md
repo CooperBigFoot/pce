@@ -58,6 +58,60 @@ During migration, proven links for retired PCE skills, including `grill-with-doc
 
 PCE does not install an application, runtime, scheduler, package manager, hooks, or generated state.
 
+## Automatic Jev support
+
+Normal `to-vision`, `implement-vision`, and Program handoffs automatically use
+TypeSafe's hosted Jev for focused context, draft fidelity/scope, review focus, and
+requirement-to-evidence judgments. The existing commands and approval boundaries
+stay unchanged. `grill-me` and its interview process do not change. There is no
+seventh skill or separate Jev workflow to invoke.
+
+The standard-library helper and full agent contract live in
+[`skills/implement-vision/semantic-decisions.md`](skills/implement-vision/semantic-decisions.md).
+Existing installer symlinks share it across all three supported environments;
+Python 3 is the only local requirement. No SDK or package installation is needed.
+
+### One-time credential and sharing setup
+
+Supply `TYPESAFE_API_KEY` to the **agent command process environment** through your
+trusted OS/session secret facility or environment's secret injection setting.
+For a POSIX interactive shell, a hidden prompt avoids putting a literal key in
+shell history (disable shell tracing first):
+
+```bash
+set +x
+read -r -s -p 'TypeSafe API key: ' TYPESAFE_API_KEY; printf '\n'
+export TYPESAFE_API_KEY
+# Start the agent from this shell so its command processes inherit the variable.
+```
+
+Never paste the value into chat, tracked files, arguments, diagnostic output, or
+PRs. Do not run `env` or otherwise dump credentials to verify setup. The helper
+never reads `.env`, including the locally excluded file in the canonical PCE
+checkout. That file is not portable setup and is not shared with delegates or
+downstream projects. Provision each intended environment securely. No paid
+connectivity test is required; missing access simply uses normal reasoning.
+
+Credentials are **not consent to transmit private content**. Initially use only
+actually public or explicitly permitted, inspected excerpts, including subjects,
+requirements, confirmed interview decisions, and unpublished drafts. Private
+projects need existing project-level permission covering TypeSafe and the relevant
+content, recorded in their normal policy/instructions by an authorized person.
+Absent that permission, continue locally without Jev, without per-call prompts.
+Exclude secrets and sensitive material even from otherwise permitted projects.
+Standard hosted use is not zero retention; see the shared guide for the reviewed
+storage, US-hosting, no-training, telemetry, backup, and enterprise distinctions.
+
+Fallback is disclosed briefly once per invocation, not a retry loop. Normal
+review, tests, source/target verification, and publication/landing gates remain
+mandatory. Compact questions, evidence references, answers/uncertainty, model
+identity, and actual resulting actions are inspectable on request during the
+session. Payloads are not retained by PCE by default, and no decision database is
+created. Actual speed and reliability gains remain unproven until everyday use;
+judge fewer lost decisions, unsupported claims, irrelevant reading, and rework,
+not confidence scores alone. Removing the helper hooks restores ordinary PCE
+behavior without migrating Git, GitHub, or vision records.
+
 ## Local tests
 
 No project environment or third-party package is required:
