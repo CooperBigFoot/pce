@@ -180,6 +180,31 @@ class SemanticDecisionTests(unittest.TestCase):
                 self.assertNotIn("Existing source", json.dumps(result))
                 self.assertNotIn(str(10 ** 400), json.dumps(result))
 
+    def test_safe_failure_categories_preserve_diagnostics(self):
+        import ssl
+        cases = [
+            (TimeoutError("private"), "timeout", None),
+            (URLError(TimeoutError("private")), "timeout", None),
+            (URLError(ssl.SSLCertVerificationError("private")), "tls-error", None),
+            (URLError("private"), "network-error", None),
+            (IncompleteRead(b"private", 10), "transport-error", None),
+            (HTTPError("https://private", 401, "private", {}, None), "http-error", 401),
+            (HTTPError("https://private", 429, "private", {}, None), "http-error", 429),
+        ]
+        for error, category, status in cases:
+            with self.subTest(category=category, status=status):
+                result, transport = self.evaluate([item()], Transport(error=error))
+                expected = {"category": category}
+                if status is not None:
+                    expected["http_status"] = status
+                self.assertEqual(result.get("diagnostic"), expected)
+                self.assertEqual(result["reason"], "service-or-response-unavailable")
+                self.assertEqual(len(transport.calls), 1)
+                for private in ("private", "fixture-credential", "Existing source"):
+                    self.assertNotIn(private, json.dumps(result))
+        result, _ = self.evaluate([item()], Transport(mutate=lambda r: r.update(answers={})))
+        self.assertEqual(result.get("diagnostic"), {"category": "response-validation-error"})
+
     def test_service_failures_never_retry_or_echo_error(self):
         for error in (IncompleteRead(b"private", 10), URLError("private server content"), TimeoutError("private"),
                       HTTPError("https://api.typesafe.ai", 401, "private", {}, None),
@@ -315,6 +340,23 @@ class SemanticWorkflowTests(unittest.TestCase):
                     self.assertIn("insufficient", question["criteria"])
                     self.assertIn(".subject`", question["instructions"])
                     self.assertIn(".candidate`", question["instructions"])
+
+    def test_real_http_diagnostics_distinguish_failure_paths(self):
+        cases = (("failure", {"category": "http-error", "http_status": 503}),
+                 ("redirect", {"category": "http-error", "http_status": 307}),
+                 ("malformed", {"category": "response-json-error"}),
+                 ("oversized", {"category": "response-too-large"}),
+                 ("incomplete", {"category": "transport-error"}))
+        for mode, diagnostic in cases:
+            with self.subTest(mode=mode), http_fixture(mode) as (url, calls), \
+                    patch.object(MODULE, "ENDPOINT", url), \
+                    patch.dict(os.environ, {"TYPESAFE_API_KEY": "contract-only"}, clear=True):
+                result = MODULE.evaluate({"items": [item()]})
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(result["status"], "fallback")
+                self.assertEqual(result.get("diagnostic"), diagnostic)
+                for private in ("private", "contract-only", "Existing source"):
+                    self.assertNotIn(private, json.dumps(result))
 
     def test_real_http_failures_and_redirects_do_not_retry_or_leak(self):
         for mode in ("redirect", "failure", "malformed", "oversized", "incomplete"):

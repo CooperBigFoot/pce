@@ -142,8 +142,22 @@ including 429, unavailable-model, authentication, malformed response, and servic
 failures. It does not echo server bodies or exception messages. A fallback result
 exits successfully so normal work can continue; it is not a successful judgment.
 
-Briefly disclose fallback **once per root invocation**, for example: "Jev is
-unavailable for this work; continuing with normal review and verification."
+Service/response fallback includes a safe `diagnostic` object. Its `category` is
+one of `http-error`, `timeout`, `tls-error`, `network-error`, `transport-error`,
+`request-error`, `response-too-large`, `response-json-error`, or
+`response-validation-error`. HTTP errors also include a numeric `http_status`
+when available. The top-level fallback reason remains
+`service-or-response-unavailable`. These diagnostics contain no exception text,
+server bodies, headers, URLs, credentials, or source payloads.
+
+Briefly disclose fallback **once per root invocation**, using the returned
+category and HTTP status when present, for example: "Jev returned HTTP 429;
+continuing with normal review and verification." For `timeout`, report a timeout;
+for `response-validation-error`, report that the response failed local validation.
+Do not describe a network or validation failure as a service-returned error, or
+infer a specific root cause beyond the diagnostic. If no diagnostic is available,
+state: "Jev is unavailable for this work; the cause is not recorded. Continuing
+with normal review and verification."
 After missing credentials or service failure, skip further Jev attempts for that
 invocation. Delegates report fallback to the root rather than repeating user
 warnings. Do not build a retry loop, persist circuit-breaker state, or relax any

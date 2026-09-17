@@ -11,8 +11,9 @@ import json
 import math
 import os
 import re
+import ssl
 import sys
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
@@ -171,6 +172,27 @@ def validate_response(response, questions):
     return model, answers
 
 
+def safe_failure_diagnostic(error, stage):
+    """Expose only fixed categories and numeric HTTP status, never error text."""
+    if isinstance(error, HTTPError):
+        diagnostic = {"category": "http-error"}
+        if type(error.code) is int and 100 <= error.code <= 599:
+            diagnostic["http_status"] = error.code
+        return diagnostic
+    cause = error.reason if isinstance(error, URLError) else error
+    if isinstance(cause, TimeoutError):
+        category = "timeout"
+    elif isinstance(cause, ssl.SSLError):
+        category = "tls-error"
+    elif isinstance(error, (URLError, OSError)):
+        category = "network-error"
+    elif isinstance(error, HTTPException):
+        category = "transport-error"
+    else:
+        category = stage
+    return {"category": category}
+
+
 def evaluate(batch):
     """Return recommendations only. Every input pair remains available to the agent."""
     if not isinstance(batch, dict) or set(batch) != {"items"}:
@@ -202,6 +224,7 @@ def evaluate(batch):
     encoded = json.dumps(payload, allow_nan=False).encode("utf-8")
     if len(encoded) > MAX_BYTES:
         return fallback("batch-too-large", decisions)
+    stage = "request-error"
     try:
         request = Request(ENDPOINT, data=encoded, headers={
             "Authorization": "Bearer " + key, "Content-Type": "application/json"}, method="POST")
@@ -209,16 +232,22 @@ def evaluate(batch):
         # environment-selected intermediary. TLS verification remains enabled.
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=TIMEOUT) as stream:
             raw = stream.read(MAX_BYTES + 1)
+        stage = "response-too-large"
         if len(raw) > MAX_BYTES:
             raise ValueError("response too large")
-        model, answers = validate_response(json.loads(raw), payload["questions"])
+        stage = "response-json-error"
+        response = json.loads(raw)
+        stage = "response-validation-error"
+        model, answers = validate_response(response, payload["questions"])
     except (OSError, ValueError, TypeError, HTTPException) as error:
         if isinstance(error, HTTPError):
             error.close()
         # Never echo exception text, response body, input excerpts, or credentials.
         for index, _ in allowed:
             decisions[index]["reason"] = "service-or-response-unavailable"
-        return fallback("service-or-response-unavailable", decisions)
+        result = fallback("service-or-response-unavailable", decisions)
+        result["diagnostic"] = safe_failure_diagnostic(error, stage)
+        return result
     for question_id, (index, dimension, instruction) in ownership.items():
         answer = answers[question_id]
         decisions[index]["answers"][dimension] = {
