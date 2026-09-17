@@ -138,7 +138,9 @@ def build_questions(items):
 
 
 def probability(value):
-    return type(value) in (float, int) and math.isfinite(value) and 0 <= value <= 1
+    # Compare integers before isfinite converts them to float; JSON integers
+    # can exceed the floating-point range even in a small response.
+    return type(value) in (float, int) and 0 <= value <= 1 and math.isfinite(value)
 
 
 def validate_response(response, questions):

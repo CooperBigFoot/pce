@@ -161,6 +161,25 @@ class SemanticDecisionTests(unittest.TestCase):
             self.assertEqual(len(transport.calls), 1)
             self.assertEqual(result["decisions"][0]["action"], "reasoning-agent")
 
+    def test_oversized_numeric_answers_fall_back_without_retry_or_diagnostics(self):
+        def huge_confidence(response):
+            next(iter(response["answers"].values()))["confidence"] = 10 ** 400
+
+        def huge_probability(response):
+            probabilities = next(iter(response["answers"].values()))["probabilities"]
+            probabilities[next(iter(probabilities))] = 10 ** 400
+
+        for mutate in (huge_confidence, huge_probability):
+            with self.subTest(field=mutate.__name__):
+                result, transport = self.evaluate([item()], Transport(mutate=mutate))
+                self.assertEqual(result["status"], "fallback")
+                self.assertEqual(result["authority"], "advisory-only")
+                self.assertEqual(result["decisions"][0]["action"], "reasoning-agent")
+                self.assertEqual(len(transport.calls), 1)
+                self.assertNotIn("fixture-credential", json.dumps(result))
+                self.assertNotIn("Existing source", json.dumps(result))
+                self.assertNotIn(str(10 ** 400), json.dumps(result))
+
     def test_service_failures_never_retry_or_echo_error(self):
         for error in (IncompleteRead(b"private", 10), URLError("private server content"), TimeoutError("private"),
                       HTTPError("https://api.typesafe.ai", 401, "private", {}, None),
