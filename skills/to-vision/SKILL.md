@@ -36,6 +36,20 @@ Write enough context that the fresh agent can implement without the prior conver
 
 Translate intent into useful technical context, but leave reversible mechanisms to the implementing agent. Do not invent unresolved questions to fill a section. Do not reopen decisions settled during the grill.
 
+## Automatic semantic checks
+
+Before authoring, load `semantic-decisions.md` from the resolved installed
+`implement-vision` skill directory and follow its privacy and fallback contract.
+Automatically use `context` comparisons to focus gathered source evidence against
+confirmed requirements. After drafting (including draft-only), use `fidelity` for
+each confirmed decision and `scope` for proposed requirements, batching independent
+pairs through `scripts/semantic_decisions.py` as that guide specifies. Investigate
+and repair mismatches before publication review; keep uncertain/conflicting
+sources available. No Jev result approves publication or changes the gates below.
+This same authoring check applies when called by `grill-ticket` or when
+`chart-program` converges on a standalone vision; do not repeat completed checks
+for the same unchanged draft within one invocation.
+
 ## Draft-only output
 
 When the user explicitly requests draft-only output, write or revise the local draft and perform no commit, push, PR, issue mutation, or merge. Report its path and concise summary. State that it is not yet verified on the target branch and is not implementation-ready. A later authoring invocation can publish the same path. Stop without an implementation handoff.

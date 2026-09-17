@@ -19,6 +19,22 @@ The sole authoritative implementation record is exactly one Effort comment marke
 
 Use this predicate everywhere Frontier or blocker state is computed: an Effort is `landed` only when all four facts are verified: the Effort is closed; it has exactly one authoritative `<!-- pce:delivery -->` comment whose claims match merged PRs and target-branch evidence; it has exactly one `<!-- pce:landed -->` outcome comment linking its Program; and its canonical URL appears exactly once in that Map's landed-outcomes index and nowhere in open Efforts or Frontier. Closed alone never means landed. Cancelled, malformed, prematurely closed, duplicate-record, and conflicting-record Efforts fail this predicate.
 
+## Automatic evidence matching
+
+After deterministic identity and dependency validation, load
+`semantic-decisions.md` from the resolved installed `implement-vision` directory.
+Before accepting delivery claims, repairing a delivery record, or landing, batch
+`evidence` comparisons through its `scripts/semantic_decisions.py`: one requirement
+against candidate tests, source excerpts, and observed target-branch validation.
+Follow the guide's sharing permission and quiet fallback contract automatically.
+Inspect missing, indirect, unsupported, uncertain, or contradictory evidence on
+the normal reasoning path before completion claims. A model label is not proof:
+run required validation and inspect source and target effects. Never use Jev to
+determine merge status, equality, provenance, dependency acyclicity, permissions,
+or landing authority. All recovery, target-copy, worktree, and closure gates remain
+mandatory, including on fallback. Keep compact decisions and actual actions
+inspectable in session only, without a second delivery record.
+
 ## Recovery hierarchy
 
 Apply the first matching result:

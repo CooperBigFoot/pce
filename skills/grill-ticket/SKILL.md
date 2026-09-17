@@ -49,6 +49,14 @@ Effort: <canonical GitHub issue URL>
 
 Keep the rest flexible and sufficient for a fresh implementing agent. Vision creation itself must not start implementation.
 
+After drafting, load the resolved installed `implement-vision/semantic-decisions.md`
+shared guide and run the `to-vision` Automatic semantic checks: `context` during
+authoring investigation, then `fidelity` and `scope` against the confirmed decisions.
+These checks are automatic in draft-only and publication modes, not part of the
+canonical interview or question screening. Apply sharing permission to confirmed
+conversation content as well as draft/source excerpts. Fall back to normal
+reasoning without changing validation, confirmation, or publication authority.
+
 Make the confirmed vision durable before changing `Vision: pending`. Load and follow the `to-vision` publication contract, including its closing-reference safeguards, independent review, required checks and approvals, nonblocking progress updates, preservation rules, and exact target verification. Follow the repository's contribution rules. From the intended target branch, create or reuse a dedicated vision branch, commit only the confirmed vision change, account explicitly for ignored planning paths without staging unrelated files, push it, and verify the pushed commit contains the exact regular file. Open or reuse a documentation PR and take it through the normal review and merge process. The initial `/grill-ticket` request and confirmed summary authorize ordinary documentation publication and issue linkage, not implementation, merging research or implementation PRs, or bypassing protected-branch policy. Explicit draft-only output follows `to-vision`'s draft-only boundary and stops before publication or linkage; retain this Effort's provenance and same path for later publication.
 
 Before any vision-link mutation, reload and repeat the complete Validate and claim state gate above. Reject malformed, duplicate, ambiguous, or conflicting state without mutation. Publication must never close the Effort or mark it delivered or landed. Use neutral references, never auto-closing syntax even in negated phrases. Inspect existing PR text, commit messages, and explicit closing relationships before merge as required by `to-vision`.
