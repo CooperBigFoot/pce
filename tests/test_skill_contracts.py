@@ -12,6 +12,103 @@ class SkillContractTests(unittest.TestCase):
     def read_skill(self, name: str) -> str:
         return (SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
 
+    def test_active_surface_has_no_hosted_semantic_integration(self) -> None:
+        paths = list(SKILLS.rglob("*.md")) + list(SKILLS.rglob("*.py"))
+        paths += [ROOT / name for name in ("README.md", "CLAUDE.md", "install.sh")]
+        for path in paths:
+            with self.subTest(path=path.relative_to(ROOT)):
+                text = path.read_text(encoding="utf-8")
+                self.assertIsNone(re.search(
+                    r"(?i)\bjev\b|typesafe|semantic[_-]decisions|automatic semantic|fallback",
+                    text,
+                ), f"Active hosted integration remains in {path.relative_to(ROOT)}")
+        for relative in (
+            "skills/implement-vision/scripts/semantic_decisions.py",
+            "skills/implement-vision/semantic-decisions.md",
+            "tests/test_semantic_decisions.py",
+        ):
+            self.assertFalse((ROOT / relative).exists(), relative)
+
+    def test_native_authoring_checks_preserve_fidelity_and_scope(self) -> None:
+        author = self.read_skill("to-vision")
+        section = author.split("## Authoring checks", 1)[-1].split("## Draft-only output", 1)[0]
+        for phrase in (
+            "Investigate source evidence", "each confirmed decision",
+            "unapproved outcomes or constraints", "ordinary technical elaboration",
+            "uncertain or conflicting", "including draft-only",
+            "before publication review",
+        ):
+            self.assertTrue(phrase in section, phrase)
+        for caller in ("chart-program", "grill-ticket"):
+            self.assertIn("`to-vision` authoring checks", self.read_skill(caller))
+
+    def test_shared_publication_has_one_owner_and_no_caller_tail(self) -> None:
+        author = self.read_skill("to-vision")
+        self.assertIn("sole execution owner", author)
+        for name in ("grill-ticket", "chart-program"):
+            text = self.read_skill(name)
+            self.assertTrue("Consume its verified result" in text, name)
+            self.assertTrue("do not repeat publication, linkage, or final verification" in text, name)
+            for repeated_action in (
+                "Replace `Vision: pending`", "Before any vision-link mutation",
+                "Fetch the intended target branch after publication",
+                "update the ticket to its new commit-pinned URL",
+            ):
+                self.assertNotIn(repeated_action, text)
+        self.assertIn("fresh state validation", author)
+        self.assertIn("after an interview or review interval", author)
+        self.assertIn("reusing the path, branch, PR, and single link", author)
+
+    def test_same_invocation_evidence_reuse_requires_freshness(self) -> None:
+        text = self.read_skill("implement-vision")
+        for phrase in (
+            "one evidence-gathering pass", "within this invocation",
+            "Do not repeat reads solely", "not a persistent cache",
+            "after relevant state changes", "external activity or waits",
+            "before consequential mutations", "for final verification",
+            "earlier valid snapshot is not proof of current state",
+        ):
+            self.assertTrue(phrase in text, phrase)
+        self.assertIn("Only after input validation succeeds, classify prior work", text)
+        self.assertIn("Every fresh invocation must reconstruct from Git and GitHub", text)
+        for classification in ("merged", "open", "abandoned", "incomplete", "remaining"):
+            self.assertIn(f"**{classification}**", text)
+        self.assertIn("Reconstruct prior work before planning", text)
+
+    def test_native_evidence_checks_and_independent_review_remain_explicit(self) -> None:
+        implement = self.read_skill("implement-vision")
+        land = self.read_skill("land-ticket")
+        for text in (implement, land):
+            for phrase in (
+                "Match each requirement", "tests, source, and observed results",
+                "Investigate missing, indirect, unsupported, uncertain, or contradictory evidence",
+                "run required validation", "inspect source and target effects",
+            ):
+                self.assertTrue(phrase in text, phrase)
+        self.assertIn("full vision", implement)
+        self.assertIn("complete diff", implement)
+        self.assertIn("fresh reviewer that did not implement it", implement)
+        self.assertIn("Before delegation", implement)
+        self.assertIn("uncertain or conflicting sources", implement)
+
+    def test_complete_fog_proposal_can_be_approved_once(self) -> None:
+        text = self.read_skill("land-ticket")
+        fog = text.split("Inspect the Program's Fog", 1)[1].split("When no open Efforts", 1)[0]
+        for phrase in (
+            "complete intent-level mutation proposal", "explicitly requests authorization",
+            "one approval is sufficient", "proposed outcomes", "Efforts",
+            "genuine dependencies", "retained Fog", "relevant exclusions",
+            "Mere agreement with an interview summary", "unspecified mutations",
+            "omits proposed changes", "materially changes afterward",
+            "approval for the missing or changed scope before mutation",
+            "execute and verify", "Do not create speculative tickets",
+        ):
+            self.assertTrue(phrase in fog, phrase)
+        closure = text.split("When no open Efforts", 1)[1]
+        self.assertIn("Ask once for authority to close the Program Map", closure)
+        self.assertIn("only after that explicit confirmation", closure)
+        self.assertIn("does not authorize Program closure", fog)
+
     def test_tracked_surface_has_exactly_six_skills(self) -> None:
         expected = {
             "grill-me",
@@ -53,9 +150,12 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(token, chart)
         for token in ("Program:", "Effort:", "Vision:"):
             self.assertIn(token, grill)
-        self.assertIn("commit only the confirmed vision change", grill)
-        self.assertIn("pinned to the pushed commit", grill)
-        self.assertIn("never link an uncommitted or unpushed file", grill)
+        # The shared procedure owns these safeguards, not a second caller tail.
+        author = self.read_skill("to-vision")
+        self.assertIn("`to-vision` publication contract once", grill)
+        self.assertIn("commit only the confirmed vision change", author)
+        self.assertIn("verified commit-pinned GitHub blob URL", author)
+        self.assertIn("Never create competing links, link unpushed content", author)
         self.assertIn("<!-- pce:delivery -->", implement)
         self.assertIn("Leave the Effort open", implement)
         self.assertIn("<!-- pce:delivery -->", land)
@@ -357,7 +457,7 @@ class SkillContractTests(unittest.TestCase):
         text = self.read_skill("to-vision")
         self.assertIn("Invoking `to-vision` authorizes publication", text)
         self.assertNotIn("`implement-vision` must publish", text)
-        publication = text.split("## Publish and verify", 1)[1]
+        publication = text.split("## Publish and verify", 1)[1].split("\n1. ", 1)[1]
         ordered = (
             "Inspect contribution rules", "commit only the confirmed vision change",
             "verify the remote commit", "Open or reuse a documentation PR",

@@ -19,21 +19,9 @@ The sole authoritative implementation record is exactly one Effort comment marke
 
 Use this predicate everywhere Frontier or blocker state is computed: an Effort is `landed` only when all four facts are verified: the Effort is closed; it has exactly one authoritative `<!-- pce:delivery -->` comment whose claims match merged PRs and target-branch evidence; it has exactly one `<!-- pce:landed -->` outcome comment linking its Program; and its canonical URL appears exactly once in that Map's landed-outcomes index and nowhere in open Efforts or Frontier. Closed alone never means landed. Cancelled, malformed, prematurely closed, duplicate-record, and conflicting-record Efforts fail this predicate.
 
-## Automatic evidence matching
+## Requirement-to-evidence checks
 
-After deterministic identity and dependency validation, load
-`semantic-decisions.md` from the resolved installed `implement-vision` directory.
-Before accepting delivery claims, repairing a delivery record, or landing, batch
-`evidence` comparisons through its `scripts/semantic_decisions.py`: one requirement
-against candidate tests, source excerpts, and observed target-branch validation.
-Follow the guide's sharing permission and quiet fallback contract automatically.
-Inspect missing, indirect, unsupported, uncertain, or contradictory evidence on
-the normal reasoning path before completion claims. A model label is not proof:
-run required validation and inspect source and target effects. Never use Jev to
-determine merge status, equality, provenance, dependency acyclicity, permissions,
-or landing authority. All recovery, target-copy, worktree, and closure gates remain
-mandatory, including on fallback. Keep compact decisions and actual actions
-inspectable in session only, without a second delivery record.
+Complete identity and dependency validation first. Match each requirement to candidate tests, source, and observed results before accepting delivery claims, repairing a delivery record, or landing. Investigate missing, indirect, unsupported, uncertain, or contradictory evidence; run required validation and inspect source and target effects. Assertions alone do not prove delivery. Verify merge status, exact content equality, provenance, dependency acyclicity, permissions, and landing authority from Git/GitHub evidence and the applicable gates. Keep the sole delivery record; do not create a second record for this reasoning.
 
 ## Recovery hierarchy
 
@@ -60,7 +48,11 @@ Build output, dependency caches, compiled binaries, and other regenerable artifa
 
 Once the complete vision and sole delivery record are verified on the target branch, create or update exactly one concise outcome comment marked `<!-- pce:landed -->` that links the Program and states the landed outcome. Add or update exactly one linked outcome-level Map line for the Effort, remove it from open Efforts and Frontier, close the Effort, and recompute Frontier using the `landed` predicate for every dependency. Perform read-back verification of the comment, Map, and issue state. On a partial rerun, reconcile the one existing landing comment and Map line from evidence instead of duplicating either. Stop on conflicting duplicate landing markers or Map entries.
 
-Inspect the Program's Fog against the landed result. Classify from evidence where established practice settles it. Load and follow canonical PCE `grill-me`, rather than copying its question loop, only when newly visible territory requires genuine human intent, priority, scope, or outcome decisions. After confirmation, show one concise mutation proposal in the same intent-level form as `chart-program`. Newly sharp Fog may become proposed `pce:effort` tickets with the deterministic Program, dependency, and pending-Vision contracts. Retained uncertainty stays Fog. Obtain approval before those issue or Map mutations, then execute and verify them. Do not create speculative tickets.
+Inspect the Program's Fog against the landed result. Classify from evidence where established practice settles it. Load and follow canonical PCE `grill-me`, rather than copying its question loop, only when newly visible territory requires genuine human intent, priority, scope, or outcome decisions.
+
+Present the complete intent-level mutation proposal in the same form as `chart-program`: proposed outcomes, Efforts, genuine dependencies, retained Fog, and relevant exclusions. When the confirmation summary contains this complete proposal and explicitly requests authorization for those changes, one approval is sufficient. Mere agreement with an interview summary does not authorize unspecified mutations. If the summary omits proposed changes, or the proposal materially changes afterward, obtain approval for the missing or changed scope before mutation. Without such an authorized confirmation, obtain approval of the proposal before changing issues or the Map.
+
+Newly sharp Fog may become approved `pce:effort` tickets with the deterministic Program, dependency, and pending-Vision contracts. Retained uncertainty stays Fog. After approval, execute and verify the mutations using `chart-program`'s complete pre-mutation state gate and mutation read-back checks. Do not create speculative tickets. Approval to evolve Fog does not authorize Program closure.
 
 When no open Efforts and no substantive Fog remain, show a short completion summary with destination, linked landed outcomes, and exclusions. Ask once for authority to close the Program Map. Close it only after that explicit confirmation. Do not ask again if the answer is no; leave it open and report that state.
 

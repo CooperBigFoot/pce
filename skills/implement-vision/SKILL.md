@@ -25,11 +25,15 @@ For all three Effort entry forms, normalize to one canonical repository and Effo
 
 Determine one intended target branch from repository policy and durable PR evidence, normally the repository default branch, and use that identity for publication, implementation PRs, effect checks, delivery records, and cleanup. Stop if the evidence conflicts. Fetch the intended target branch before treating any intent or implementation as durable.
 
+Use one evidence-gathering pass for input validation and recovery reconstruction within this invocation when the evidence remains current. Do not repeat reads solely because execution reaches another instruction section. This is in-session reuse, not a persistent cache or replacement authority. Every fresh invocation must reconstruct from Git and GitHub without relying on a prior conversation. Refresh affected evidence after relevant state changes, external activity or waits that may make it stale, before consequential mutations, and for final verification. An earlier valid snapshot is not proof of current state. Investigate uncertain or conflicting evidence.
+
+Only after input validation succeeds, classify prior work and plan the remaining outcome. Gathering recovery evidence alongside validation does not authorize early planning, delegation, branch creation, or implementation.
+
 ## Validate the resolved input
 
 Complete input validation and the target-branch durability gate below before any planning, delegation, branch creation, or substantive implementation. Read the entire candidate vision, repository instructions, relevant code, tests, and recent project context. Stop on missing, duplicated, malformed, foreign, ambiguous, or conflicting provenance or durable linkage. Give one precise explanation. Do not plan, delegate, or create any work, and end the turn normally without a continuation loop. Do not ask the human to supply an identity that the rejected evidence cannot establish safely.
 
-For every invocation, fetch the intended target branch and read the vision from that fetched ref. Verify that the canonical path is a regular file tracked on the intended target branch. Compare the relevant local or commit-pinned document with the target copy and require exact content before using it as accepted intent.
+For every invocation, fetch the intended target branch and read the vision from that fetched ref. The current fetch and reads gathered during input resolution may serve this gate; apply the refresh rules above rather than fetching twice solely for this section. Verify that the canonical path is a regular file tracked on the intended target branch. Compare the relevant local or commit-pinned document with the target copy and require exact content before using it as accepted intent.
 
 ### Target-branch durability gate
 
@@ -47,31 +51,11 @@ Before planning or delivery, parse the complete Program dependency graph. Requir
 
 Only after every applicable input, provenance, repository, ticket, Program Map, vision-link, commit-pinned-content, target-copy, and dependency check succeeds is the input valid. A number, URL, and recovered path then converge on the same validated Effort workflow.
 
-## Automatic semantic decisions
+## Source and requirement evidence
 
-Only after the complete input-validation gate succeeds, load this skill's
-`semantic-decisions.md`. Follow its shared permission, invocation, and fallback
-contract automatically at these checkpoints, for standalone and Effort work:
+After the input-validation gate succeeds, investigate gathered source evidence against the vision requirements. Keep mandatory instructions, the complete vision, gate evidence, and uncertain or conflicting sources available. Before delegation, give agents inspected source context and investigate conflicts rather than hiding them.
 
-- During investigation, reconstruction of resumed work, and delegation preparation,
-  batch `context` comparisons of gathered candidates against individual requirements.
-  Keep mandatory instructions, the complete vision, gate evidence, and uncertain
-  or conflicting sources available regardless of relevance scores. Delegates
-  receive inspected source context, not model labels as a substitute.
-- Before assigning the fresh independent reviewer, batch `review` comparisons of
-  coherent changes against requirements and repository vocabulary. Use all five
-  dimensions to supplement review focus, never to narrow the full remit.
-- During validation, before completion claims, and before preparing or updating
-  an Effort delivery record, batch `evidence` comparisons of individual requirements
-  with candidate tests, source, and observed results. Investigate gaps and run
-  missing validation before claiming success. Include current target evidence in
-  the final audit; semantic support never verifies a merge or target effect.
-
-Use `scripts/semantic_decisions.py` through the guide's stdin contract. No separate
-user invocation or routine approval prompt is needed. A fallback returns work to
-the reasoning agent with every existing gate intact. Jev cannot approve publication,
-merge, delivery, or landing. Keep compact details and actual resulting actions
-inspectable in the active session, not a replacement durable record.
+Match each requirement to candidate tests, source, and observed results during validation, before completion claims, and before preparing or updating an Effort delivery record. Investigate missing, indirect, unsupported, uncertain, or contradictory evidence; run required validation and inspect source and target effects. Include current target evidence in the final audit. Requirement-to-evidence reasoning does not replace deterministic Git/GitHub, exact-content, provenance, dependency, or authority gates, or the fresh independent full-diff review below.
 
 ## Plan the outcome
 
@@ -84,7 +68,7 @@ After input validation succeeds:
 
 ## Reconstruct every run
 
-Reconstruct prior work before planning, including after an apparent clean start. For an Effort, inspect the linked vision, Program Map, complete dependency graph, issue timeline and comments, authoritative delivery record, implementation PRs, target-branch commits and effects, branches, validation evidence, and structured local worktrees. For a standalone vision, inspect the fetched target-branch vision, related commits, branches and PRs discoverable from repository and GitHub evidence, target effects, validation evidence, and structured local worktrees. Reconstruction must work without the prior agent session or its conversation.
+Reconstruct prior work before planning, including after an apparent clean start. Reuse still-current evidence gathered for input validation, and gather any missing recovery evidence; do not repeat an unchanged read only to reconstruct it. For an Effort, inspect the linked vision, Program Map, complete dependency graph, issue timeline and comments, authoritative delivery record, implementation PRs, target-branch commits and effects, branches, validation evidence, and structured local worktrees. For a standalone vision, inspect the fetched target-branch vision, related commits, branches and PRs discoverable from repository and GitHub evidence, target effects, validation evidence, and structured local worktrees. Reconstruction must work without the prior agent session or its conversation.
 
 Classify every relevant unit of prior work into exactly the applicable five-way account: **merged** work whose target effects are verified; **open** work in an active PR or durable pushed branch; **abandoned** work whose branch or PR no longer provides a viable delivery path; **incomplete** surviving work, including local committed, uncommitted, or unpushed evidence; and **remaining** vision outcome not delivered by any of the preceding evidence. Record overlaps explicitly rather than treating a branch or PR status as proof of an effect. Verify the actual target-branch result, then plan and execute only the remaining outcome.
 
