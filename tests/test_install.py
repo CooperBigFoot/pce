@@ -65,6 +65,28 @@ class InstallTests(unittest.TestCase):
             }
             self.assertEqual(installed, set(MATRIX))
 
+    def test_preserves_independently_installed_skills_and_user_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            installed = []
+            for environment_root in ENVIRONMENT_ROOTS:
+                skill = home / environment_root / "typesafe-ai"
+                skill.mkdir(parents=True)
+                marker = skill / "SKILL.md"
+                marker.write_text("independently installed", encoding="utf-8")
+                installed.append(marker)
+            configuration = home / ".env"
+            configuration.write_text("UNRELATED_SETTING=fixture\n", encoding="utf-8")
+            original = configuration.read_bytes()
+
+            result = self.run_installer(home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assert_matrix(home)
+            for marker in installed:
+                self.assertEqual(marker.read_text(encoding="utf-8"), "independently installed")
+            self.assertEqual(configuration.read_bytes(), original)
+
     def test_removes_only_proven_owned_legacy_links(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
