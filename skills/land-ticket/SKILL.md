@@ -1,6 +1,6 @@
 ---
 name: land-ticket
-description: Verify and land one delivered Program Effort, repair safe records, evolve Fog, and optionally complete its Program. Use for /land-ticket with an Effort issue URL or number.
+description: Verify and land one delivered Program Effort, repair safe records, update its Map, and optionally complete its Program. Use for /land-ticket with an Effort issue URL or number.
 ---
 
 # Land Ticket
@@ -9,7 +9,7 @@ description: Verify and land one delivered Program Effort, repair safe records, 
 
 ## Reconstruct evidence
 
-From the repository root, inspect the explicit ticket, comments and timeline, its single linked vision, Program Map, dependencies, implementation PRs, target-branch commits and files, checks and validation, delivery record, related Efforts, and Fog. Validate the `pce:effort` / `<!-- pce:effort -->` and `pce:program` / `<!-- pce:program -->` contracts. Require exactly one Program, dependency, and Vision declaration on the ticket; exactly one Map membership; and exactly one canonical `Program:` line plus exactly one canonical `Effort:` line in the vision. All issue, Map, repository, and vision identities must match. Stop on duplicates, missing lines, foreign Programs, noncanonical URLs, or mismatches.
+From the repository root, inspect the explicit ticket, comments and timeline, its single linked vision, Program Map, dependencies, implementation PRs, target-branch commits and files, checks and validation, delivery record, and related Efforts. Validate the `pce:effort` / `<!-- pce:effort -->` and `pce:program` / `<!-- pce:program -->` contracts. Require exactly one Program, dependency, and Vision declaration on the ticket; exactly one Map membership; and exactly one canonical `Program:` line plus exactly one canonical `Effort:` line in the vision. All issue, Map, repository, and vision identities must match. Stop on duplicates, missing lines, foreign Programs, noncanonical URLs, or mismatches.
 
 Parse the complete Program dependency graph before landing. Every involved Effort must have exactly one unambiguous `Depends on:` declaration naming only structurally valid Efforts in the same Program, and the graph must be acyclic. Stop on duplicates, conflicts, malformed references, missing membership, foreign-Program dependencies, or cycles.
 
@@ -44,16 +44,16 @@ Removal applies only to checkouts this invocation created. Never remove a checko
 
 Build output, dependency caches, compiled binaries, and other regenerable artifacts are never evidence and are never a reason to preserve a checkout. Preserve logs, receipts, diffs, and patches, not build directories. These preservation rules protect source and history, not build output. Report every checkout this invocation created, in every location, and its removal or retention reason at the end. If this invocation created the initial canonical clone when no local checkout existed, report its retained repository-root role; it is exempt from managed placement and disposable-checkout cleanup.
 
-## Land and evolve the Map
+## Land and update the Map
 
 Once the complete vision and sole delivery record are verified on the target branch, create or update exactly one concise outcome comment marked `<!-- pce:landed -->` that links the Program and states the landed outcome. Add or update exactly one linked outcome-level Map line for the Effort, remove it from open Efforts and Frontier, close the Effort, and recompute Frontier using the `landed` predicate for every dependency. Perform read-back verification of the comment, Map, and issue state. On a partial rerun, reconcile the one existing landing comment and Map line from evidence instead of duplicating either. Stop on conflicting duplicate landing markers or Map entries.
 
-Inspect the Program's Fog against the landed result. Classify from evidence where established practice settles it. Load and follow canonical PCE `grill-me`, rather than copying its question loop, only when newly visible territory requires genuine human intent, priority, scope, or outcome decisions.
+Do not discover future work, interview about future work, or propose new Efforts. Investigate and report concrete delivery problems through the requirement-to-evidence checks and recovery hierarchy above. An explicitly requested `chart-program` re-survey remains the route for changing Program scope; landing does not authorize scope expansion.
 
-Present the complete intent-level mutation proposal in the same form as `chart-program`: proposed outcomes, Efforts, genuine dependencies, retained Fog, and relevant exclusions. When the confirmation summary contains this complete proposal and explicitly requests authorization for those changes, one approval is sufficient. Mere agreement with an interview summary does not authorize unspecified mutations. If the summary omits proposed changes, or the proposal materially changes afterward, obtain approval for the missing or changed scope before mutation. Without such an authorized confirmation, obtain approval of the proposal before changing issues or the Map.
+When no open Efforts remain, verify delivery for all agreed outcomes before proposing completion. Do not propose completion with unresolved delivery gaps. Show a short completion summary with destination, linked landed outcomes, verified delivery, and exclusions. Ask once for authority to close the Program Map. Close it only after that explicit confirmation. Do not ask again if the answer is no; leave it open and report that state.
 
-Newly sharp Fog may become approved `pce:effort` tickets with the deterministic Program, dependency, and pending-Vision contracts. Retained uncertainty stays Fog. After approval, execute and verify the mutations using `chart-program`'s complete pre-mutation state gate and mutation read-back checks. Do not create speculative tickets. Approval to evolve Fog does not authorize Program closure.
+Report the Effort URL and closure, verified delivery evidence, Map change, recomputed Frontier, and Program status. Keep the report at outcome altitude and link detailed evidence.
 
-When no open Efforts and no substantive Fog remain, show a short completion summary with destination, linked landed outcomes, and exclusions. Ask once for authority to close the Program Map. Close it only after that explicit confirmation. Do not ask again if the answer is no; leave it open and report that state.
+## Legacy Program content
 
-Report the Effort URL and closure, verified delivery evidence, Map change, recomputed Frontier and Fog, any new approved Efforts, and Program status. Keep the report at outcome altitude and link detailed evidence.
+Legacy Fog text is not a prerequisite for charting, re-survey, landing, or proposing Program completion. Preserve unrelated issue content, including legacy text; do not silently delete it or convert it into tickets. Do not bulk-edit existing Programs. Only an explicitly requested `chart-program` re-survey can propose changes to agreed Program scope, subject to its approval and state gates.

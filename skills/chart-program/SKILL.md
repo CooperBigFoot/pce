@@ -11,9 +11,9 @@ GitHub issues and repository visions are the only discovery records. PCE's canon
 
 ## Investigate first
 
-From the repository root, use repository files and `gh` to identify the repository and authenticated user. Read relevant code, documentation, issues, labels, comments, linked visions, PRs, delivery records, and existing Program Maps. For re-survey, validate the explicit issue as an open or closed Program and reconstruct all linked Efforts, dependencies, landed outcomes, and Fog. Do not ask for facts that this evidence or established practice can answer.
+From the repository root, use repository files and `gh` to identify the repository and authenticated user. Read relevant code, documentation, issues, labels, comments, linked visions, PRs, delivery records, and existing Program Maps. For re-survey, validate the explicit issue as an open or closed Program and reconstruct all linked Efforts, dependencies, and landed outcomes. Do not ask for facts that this evidence or established practice can answer.
 
-Load and follow PCE's canonical `grill-me` skill. It owns the interview rounds, question format, investigation policy, and confirmation gate; do not restate or replace its loop here. Run it at Program altitude and breadth-first across destination, boundaries, candidate Efforts, genuine delivery dependencies, success, exclusions, risks, and Fog. An Effort is an ambitious, independently meaningful outcome suitable for one contained vision, not an implementation task or technical layer. Do not deeply design an Effort. On re-survey, preserve settled outcomes unless evidence conflicts and grill only additions, changed boundaries, conflicts, and Fog that may now be sharp.
+Load and follow PCE's canonical `grill-me` skill. It owns the interview rounds, question format, investigation policy, and confirmation gate; do not restate or replace its loop here. Run it at Program altitude and breadth-first across destination, boundaries, candidate Efforts, genuine delivery dependencies, success, and exclusions. Resolve material questions about the proposed outcome. Concrete risks belong with the relevant issue or vision when useful. Future work may emerge during the interview, but do not add a speculative backlog or mandatory uncertainty inventory. Do not invent work to populate a template. An Effort is an ambitious, independently meaningful outcome suitable for one contained vision, not an implementation task or technical layer. Do not deeply design an Effort. On re-survey, preserve settled outcomes unless evidence conflicts and grill only additions, changed boundaries, and conflicts.
 
 ## Approval gate
 
@@ -22,7 +22,6 @@ Before any GitHub mutation, present one intent-level proposal:
 - **Destination:** a brief statement of the outcome.
 - **Effort tickets:** title and one-sentence outcome question for each.
 - **Dependencies:** one line per genuine blocker.
-- **Fog:** short bullets.
 - **Exclusions:** short bullets when useful.
 - **Re-survey changes:** only substantive additions, removals, conflicts, or boundary changes.
 
@@ -41,12 +40,16 @@ Use ordinary `gh` issue commands and preserve unrelated issue content. Use these
 - Each Effort body contains exactly one `Program: <canonical GitHub issue URL>` line.
 - Each Effort body contains exactly one `Depends on: <none or comma-separated canonical Effort URLs>` line. Dependencies may refer only to Efforts in that Program and must not form a cycle.
 - Each Effort body initially contains exactly one `Vision: pending` line.
-- The Map links every Effort by canonical issue URL and separates open Efforts, Frontier, landed one-line outcomes, Fog, and exclusions. Frontier contains only open, structurally valid Efforts whose listed dependencies satisfy the `landed` predicate.
+- The Map links every Effort by canonical issue URL and separates open Efforts, Frontier, landed one-line outcomes, and exclusions. Frontier contains only open, structurally valid Efforts whose listed dependencies satisfy the `landed` predicate.
 
 ## Pre-mutation state gate
 
 Before any re-survey mutation, reload the complete Program and validate labels, markers, unique Program/Vision/dependency declarations, exactly one Map membership for every Effort across open, Frontier, and landed sections, dependency membership and acyclicity, delivery and landing marker uniqueness, delivery claims, and the `landed` predicate for every blocker and indexed outcome. Stop without mutation on missing or duplicate membership, duplicate markers, conflicting records, invalid claims, foreign-Program dependencies, cycles, or any state that admits more than one interpretation. Do not use mutation to discover or repair ambiguity. For a new Program, validate the approved proposed membership and dependency graph before creating its first issue.
 
-Create labels if absent without changing unrelated labels. For a new chart, create the Program first, then Efforts, then replace the approved Map placeholders with their canonical URLs. For re-survey, edit the explicit Map and affected open tickets in place; never create duplicates for unchanged Efforts. Preserve closed outcomes and auditable comments. Do not turn Fog into speculative tickets.
+Create labels if absent without changing unrelated labels. For a new chart, create the Program first, then Efforts, then replace the approved Map placeholders with their canonical URLs. For re-survey, edit the explicit Map and affected open tickets in place; never create duplicates for unchanged Efforts. Preserve closed outcomes and auditable comments. Do not create speculative tickets.
 
-After mutation, reload every changed issue from GitHub. Validate markers, labels, unique Program and dependency lines, exactly one Map membership per Effort, links, dependency acyclicity, authoritative delivery and landing record uniqueness, Map completeness, the `landed` predicate for every indexed outcome and blocker, and computed Frontier. Stop on duplicate or conflicting records rather than classifying the issue as landed. Report exact partial failures and the state that exists; never claim an unverified mutation. Finish with the Program URL, created or changed Effort URLs, Frontier, retained Fog, and no implementation start.
+After mutation, reload every changed issue from GitHub. Validate markers, labels, unique Program and dependency lines, exactly one Map membership per Effort, links, dependency acyclicity, authoritative delivery and landing record uniqueness, Map completeness, the `landed` predicate for every indexed outcome and blocker, and computed Frontier. Stop on duplicate or conflicting records rather than classifying the issue as landed. Report exact partial failures and the state that exists; never claim an unverified mutation. Finish with the Program URL, created or changed Effort URLs, Frontier, and no implementation start.
+
+## Legacy Program content
+
+Legacy Fog text is not a prerequisite for charting, re-survey, landing, or proposing Program completion. Preserve unrelated issue content, including legacy text; do not silently delete it or convert it into tickets. Do not bulk-edit existing Programs. Only an explicitly requested `chart-program` re-survey can propose changes to agreed Program scope, subject to its approval and state gates.
