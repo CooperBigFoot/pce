@@ -91,23 +91,82 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Before delegation", implement)
         self.assertIn("uncertain or conflicting sources", implement)
 
-    def test_complete_fog_proposal_can_be_approved_once(self) -> None:
-        text = self.read_skill("land-ticket")
-        fog = text.split("Inspect the Program's Fog", 1)[1].split("When no open Efforts", 1)[0]
+    def test_chart_contract_describes_agreed_work_without_uncertainty_inventory(self) -> None:
+        text = self.read_skill("chart-program")
+        active = text.split("## Legacy Program content", 1)[0]
+        self.assertNotRegex(active, r"(?i)\bfog\b")
+        proposal = active.split("## Approval gate", 1)[1].split("## Publish deterministically", 1)[0]
+        for field in ("Destination", "Effort tickets", "Dependencies", "Exclusions", "Re-survey changes"):
+            self.assertIn(f"**{field}:**", proposal)
         for phrase in (
-            "complete intent-level mutation proposal", "explicitly requests authorization",
-            "one approval is sufficient", "proposed outcomes", "Efforts",
-            "genuine dependencies", "retained Fog", "relevant exclusions",
-            "Mere agreement with an interview summary", "unspecified mutations",
-            "omits proposed changes", "materially changes afterward",
-            "approval for the missing or changed scope before mutation",
-            "execute and verify", "Do not create speculative tickets",
+            "Do not invent work to populate a template",
+            "Concrete risks belong with the relevant issue or vision",
+            "grill only additions, changed boundaries, and conflicts",
+            "open Efforts, Frontier, landed one-line outcomes, and exclusions",
         ):
-            self.assertTrue(phrase in fog, phrase)
-        closure = text.split("When no open Efforts", 1)[1]
+            self.assertIn(phrase, active)
+        self.assertNotRegex(active, r"(?i)\*\*(?:risks|uncertainty|backlog):\*\*")
+
+    def test_landing_verifies_delivery_without_scope_expansion(self) -> None:
+        text = self.read_skill("land-ticket")
+        active = text.split("## Legacy Program content", 1)[0]
+        self.assertNotRegex(active, r"(?i)\bfog\b")
+        self.assertNotIn("`grill-me`", text)
+        for removed in (
+            "newly visible territory", "intent-level mutation proposal",
+            "new approved Efforts", "evolve Fog", "evolve the Map",
+        ):
+            self.assertNotIn(removed, text)
+        for phrase in (
+            "Do not discover future work, interview about future work, or propose new Efforts",
+            "explicitly requested `chart-program` re-survey",
+            "Investigate and report concrete delivery problems",
+            "recompute Frontier using the `landed` predicate",
+            "Perform read-back verification",
+        ):
+            self.assertIn(phrase, text)
+        closure = active.split("When no open Efforts remain", 1)[1]
+        self.assertIn("verified delivery", closure)
         self.assertIn("Ask once for authority to close the Program Map", closure)
         self.assertIn("only after that explicit confirmation", closure)
-        self.assertIn("does not authorize Program closure", fog)
+        self.assertIn("leave it open", closure)
+        for phrase in (
+            "implementation is incomplete and the vision remains valid",
+            "recommend resuming `implement-vision` with the same vision",
+            "flawed outcome, missing requirement, or obsolete assumption",
+            "recommend rerunning `grill-ticket` on this same ticket and vision",
+            "If evidence is ambiguous or any delivery blocker fails",
+            "do not close the Effort",
+        ):
+            self.assertIn(phrase, text)
+
+    def test_legacy_program_content_is_not_a_gate_or_migration_authority(self) -> None:
+        for name in ("chart-program", "land-ticket"):
+            with self.subTest(name=name):
+                text = self.read_skill(name)
+                self.assertIn("## Legacy Program content", text)
+                legacy = text.split("## Legacy Program content", 1)[1]
+                for phrase in (
+                    "Legacy Fog text is not a prerequisite",
+                    "proposing Program completion",
+                    "Preserve unrelated issue content",
+                    "do not silently delete it or convert it into tickets",
+                    "Do not bulk-edit existing Programs",
+                ):
+                    self.assertIn(phrase, legacy)
+
+    def test_guidance_describes_delivery_only_landing(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertNotRegex(readme, r"(?i)\bfog\b")
+        for phrase in (
+            "recompute Frontier", "no open Efforts", "explicit human approval",
+            "explicitly requested `chart-program` re-survey",
+            "ordinary GitHub issues", "does not grant blanket authority to expand scope",
+        ):
+            self.assertIn(phrase, readme)
+        self.assertNotIn("Program evolution", claude)
+        self.assertIn("delivery verification", claude)
 
     def test_tracked_surface_has_exactly_six_skills(self) -> None:
         expected = {
@@ -127,7 +186,7 @@ class SkillContractTests(unittest.TestCase):
     def test_program_skills_compose_canonical_grill_without_copying_its_loop(self) -> None:
         canonical = self.read_skill("grill-me")
         self.assertIn("❓ **Q1 - <question title>**", canonical)
-        for name in ("chart-program", "grill-ticket", "land-ticket"):
+        for name in ("chart-program", "grill-ticket"):
             with self.subTest(name=name):
                 text = self.read_skill(name)
                 self.assertIn("canonical", text.lower())
@@ -604,7 +663,8 @@ class SkillContractTests(unittest.TestCase):
     def test_land_ticket_requires_target_vision_and_worktree_closure_gate(self) -> None:
         text = self.read_skill("land-ticket")
         gate = text.index("## Target-copy and worktree closure gate")
-        land = text.index("## Land and evolve the Map")
+        self.assertIn("## Land and update the Map", text)
+        land = text.index("## Land and update the Map")
         self.assertLess(gate, land)
         section = text[gate:land]
         for phrase in (

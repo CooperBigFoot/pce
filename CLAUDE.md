@@ -9,7 +9,7 @@ Claude Code is one supported environment for PCE. It installs and uses all six s
 - `implement-vision` for root implementation, delegation, PR execution, independent review, and Effort delivery records;
 - `chart-program` for approved Program Maps and Effort tickets;
 - `grill-ticket` for one explicit Effort's discovery and vision;
-- `land-ticket` for evidence-first Effort landing and Program evolution.
+- `land-ticket` for delivery verification, Effort landing, Map updates, and explicitly approved Program completion.
 
 Use the standalone workflow for one coherent idea:
 
