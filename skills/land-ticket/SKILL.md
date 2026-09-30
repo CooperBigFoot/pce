@@ -1,6 +1,6 @@
 ---
 name: land-ticket
-description: Verify and land one delivered Program Effort, repair safe records, update its Map, and optionally complete its Program. Use for /land-ticket with an Effort issue URL or number.
+description: Verify and land one delivered Effort and update its Program Map. Use for /land-ticket with an Effort issue number or URL.
 ---
 
 # Land Ticket

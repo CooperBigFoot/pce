@@ -12,6 +12,9 @@ class SkillContractTests(unittest.TestCase):
     def read_skill(self, name: str) -> str:
         return (SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
 
+    def read_reference(self, relative: str) -> str:
+        return (SKILLS / relative).read_text(encoding="utf-8")
+
     def test_active_surface_has_no_hosted_semantic_integration(self) -> None:
         paths = list(SKILLS.rglob("*.md")) + list(SKILLS.rglob("*.py"))
         paths += [ROOT / name for name in ("README.md", "CLAUDE.md", "install.sh")]
@@ -43,7 +46,7 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn("`to-vision` authoring checks", self.read_skill(caller))
 
     def test_shared_publication_has_one_owner_and_no_caller_tail(self) -> None:
-        author = self.read_skill("to-vision")
+        author = self.read_reference("to-vision/publication.md")
         self.assertIn("sole execution owner", author)
         for name in ("grill-ticket", "chart-program"):
             text = self.read_skill(name)
@@ -96,7 +99,7 @@ class SkillContractTests(unittest.TestCase):
         active = text.split("## Legacy Program content", 1)[0]
         self.assertNotRegex(active, r"(?i)\bfog\b")
         proposal = active.split("## Approval gate", 1)[1].split("## Publish deterministically", 1)[0]
-        for field in ("Destination", "Effort tickets", "Dependencies", "Exclusions", "Re-survey changes"):
+        for field in ("Destination", "Effort tickets", "Dependencies", "Exclusions", "Re-survey changes (explicit Program input only)"):
             self.assertIn(f"**{field}:**", proposal)
         for phrase in (
             "Do not invent work to populate a template",
@@ -194,16 +197,17 @@ class SkillContractTests(unittest.TestCase):
             "Vision: pending",
         ):
             self.assertIn(token, chart)
-        for token in ("Program:", "Effort:", "Vision:"):
+        for token in ("Program:", "Effort:"):
             self.assertIn(token, grill)
+        self.assertIn("Vision:", self.read_reference("grill-ticket/effort-validation.md"))
         # The shared procedure owns these safeguards, not a second caller tail.
-        author = self.read_skill("to-vision")
+        author = self.read_reference("to-vision/publication.md")
         self.assertIn("`to-vision` publication contract once", grill)
         self.assertIn("commit only the confirmed vision change", author)
         self.assertIn("verified commit-pinned GitHub blob URL", author)
         self.assertIn("Never create competing links, link unpushed content", author)
         self.assertIn("<!-- pce:delivery -->", implement)
-        self.assertIn("Leave the Effort open", implement)
+        self.assertIn("Leave the Effort open", self.read_reference("implement-vision/effort-implementation.md"))
         self.assertIn("<!-- pce:delivery -->", land)
         self.assertIn("recomput", land.lower())
 
@@ -237,8 +241,8 @@ class SkillContractTests(unittest.TestCase):
                     self.assertIn(phrase, text)
 
     def test_effort_dependency_and_map_ambiguity_stops_mutation(self) -> None:
-        grill = self.read_skill("grill-ticket")
-        implement = self.read_skill("implement-vision")
+        grill = self.read_reference("grill-ticket/effort-validation.md")
+        implement = self.read_reference("implement-vision/effort-implementation.md")
         land = self.read_skill("land-ticket")
         self.assertIn("exactly once as an open member", grill)
         self.assertIn("Do not claim or mechanically repair", grill)
@@ -251,7 +255,7 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn("cycles", text)
 
     def test_delivery_records_are_unique_and_reruns_update_in_place(self) -> None:
-        implement = self.read_skill("implement-vision")
+        implement = self.read_reference("implement-vision/effort-implementation.md")
         land = self.read_skill("land-ticket")
         for text in (implement, land):
             self.assertIn("sole authoritative", text)
@@ -266,7 +270,9 @@ class SkillContractTests(unittest.TestCase):
     def test_vision_provenance_requires_unique_cross_artifact_match(self) -> None:
         for name in ("grill-ticket", "implement-vision", "land-ticket"):
             with self.subTest(name=name):
-                text = self.read_skill(name)
+                text = (self.read_skill(name) if name == "land-ticket" else
+                        self.read_reference({"grill-ticket": "grill-ticket/effort-validation.md",
+                                             "implement-vision": "implement-vision/effort-implementation.md"}[name]))
                 self.assertIn("exactly one canonical `Program:` line", text)
                 self.assertIn("exactly one canonical `Effort:` line", text)
                 self.assertIn("match", text.lower())
@@ -274,7 +280,7 @@ class SkillContractTests(unittest.TestCase):
                 self.assertIn("stop", text.lower())
 
     def test_skill_text_is_harness_agnostic(self) -> None:
-        for path in sorted(SKILLS.glob("*/SKILL.md")):
+        for path in sorted(SKILLS.rglob("*.md")):
             text = path.read_text(encoding="utf-8")
             with self.subTest(skill=path.parent.name):
                 for phrase in (
@@ -361,7 +367,7 @@ class SkillContractTests(unittest.TestCase):
             "### Target-branch durability gate",
         ):
             self.assertIn(phrase, gate)
-        plan = text[planning:text.index("## Reconstruct every run")]
+        plan = text[planning:text.index("## Execute")]
         for phrase in (
             "Investigate before asking",
             "Ask the human only about missing intent, priorities, outcome-level trade-offs, credentials, legal or organizational authority, or permission for an exceptional irreversible external act",
@@ -429,6 +435,7 @@ class SkillContractTests(unittest.TestCase):
             "exact content",
         ):
             self.assertIn(phrase, text)
+        text = self.read_reference("implement-vision/effort-implementation.md")
         self.assertIn("An Effort-derived vision must already", text)
         self.assertIn("stop before planning or substantive implementation", text)
         self.assertIn("Do not bootstrap publication for an Effort", text)
@@ -450,7 +457,8 @@ class SkillContractTests(unittest.TestCase):
         text = self.read_skill("to-vision")
         self.assertIn("Invoking `to-vision` authorizes publication", text)
         self.assertNotIn("`implement-vision` must publish", text)
-        publication = text.split("## Publish and verify", 1)[1].split("\n1. ", 1)[1]
+        text = self.read_reference("to-vision/publication.md")
+        publication = text.split("\n1. ", 1)[1]
         ordered = (
             "Inspect contribution rules", "commit only the confirmed vision change",
             "verify the remote commit", "Open or reuse a documentation PR",
@@ -479,10 +487,10 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("reuse that same regular", text)
 
     def test_effort_publication_composes_validation_and_safe_linkage(self) -> None:
-        author = self.read_skill("to-vision")
+        author = self.read_reference("to-vision/publication.md")
         grill = self.read_skill("grill-ticket")
         for phrase in (
-            "Before issue mutation", "Validate and claim", "repository identity",
+            "Before issue mutation", "read-only Effort validation", "repository identity",
             "exactly one Markdown link", "commit-pinned GitHub blob URL",
             "Reload the issue", "both directions", "declaration uniqueness",
             "matching provenance", "issue remains open",
@@ -504,18 +512,18 @@ class SkillContractTests(unittest.TestCase):
         self.assertLess(detection, assignment)
         self.assertIn("For draft-only, validate read-only and do not assign", validation)
         self.assertIn("For publication mode only", validation)
-        author = self.read_skill("to-vision")
+        author = self.read_reference("to-vision/publication.md")
         self.assertIn("state validation, not its assignment action", author)
 
     def test_publication_checks_prospective_merge_payload_before_merge(self) -> None:
-        text = self.read_skill("to-vision")
+        text = self.read_reference("to-vision/publication.md")
         guard = text.split("Before merge", 1)[1].split("Merge the documentation PR", 1)[0]
         self.assertIn("prospective exact merge or squash title and body", guard)
         self.assertIn("before submitting the merge", guard)
         self.assertIn("pass that inspected payload explicitly", guard)
 
     def test_publication_guards_cover_negated_closing_reference_failure(self) -> None:
-        text = self.read_skill("to-vision")
+        text = self.read_reference("to-vision/publication.md")
         guard = text.split("Before merge", 1)[1].split("Merge the documentation PR", 1)[0]
         for phrase in (
             "PR descriptions", "commit messages", "including negated phrases",
@@ -553,7 +561,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("do not create a branch, commit, worktree, PR, or delivery record", text)
 
     def test_vision_worktrees_are_canonical_and_cleanup_is_evidence_safe(self) -> None:
-        text = self.read_skill("implement-vision")
+        text = self.read_reference("implement-vision/checkout-preservation.md")
         self.assertIn("<repository>/.worktrees/visions/effort-<number>-<slug>/", text)
         self.assertIn("standalone", text)
         self.assertIn("`/private/tmp`", text)
@@ -563,7 +571,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("preserve", text.lower())
         self.assertIn("remove", text.lower())
         self.assertIn("verified merged", text)
-        policy = text.split("## Worktree and preservation policy", 1)[1].split("## Execute", 1)[0]
+        policy = text
         for phrase in (
             "every checkout any agent in the invocation creates",
             "implementation, independent review, audit, red or failing reproduction",
@@ -628,9 +636,90 @@ class SkillContractTests(unittest.TestCase):
         }
         for name, phrases in expectations.items():
             with self.subTest(name=name):
-                text = self.read_skill(name)
+                text = (self.read_reference("to-vision/publication.md")
+                        if name == "to-vision" else self.read_skill(name))
                 for phrase in phrases:
                     self.assertIn(phrase, text)
+
+    def test_exact_owned_references_and_repository_links(self) -> None:
+        expected = {
+            "implement-vision/effort-implementation.md",
+            "implement-vision/checkout-preservation.md",
+            "to-vision/publication.md",
+            "grill-ticket/effort-validation.md",
+        }
+        actual = {p.relative_to(SKILLS).as_posix() for p in SKILLS.rglob("*.md")
+                  if p.name != "SKILL.md"}
+        self.assertEqual(actual, expected)
+        for path in SKILLS.rglob("*.md"):
+            for target in re.findall(r"\[[^]]+\]\(([^)]+\.md(?:#[^)]+)?)\)", path.read_text()):
+                destination, _, anchor = target.partition("#")
+                linked = path.parent / destination
+                self.assertTrue(linked.is_file(), (path, target))
+                if anchor:
+                    headings = re.findall(r"^#+ (.+)$", linked.read_text(), re.MULTILINE)
+                    self.assertIn(anchor, [h.lower().replace(" ", "-") for h in headings])
+
+    def test_implementation_loading_and_execution_order(self) -> None:
+        text = self.read_skill("implement-vision")
+        ordered = (
+            "load and follow [Effort implementation rules](effort-implementation.md)",
+            "For all three Effort entry forms",
+            "## Validate the resolved input",
+            "## Reconstruct every run", "## Plan the outcome", "## Execute",
+            "## Review and land",
+        )
+        positions = [text.index(s) for s in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("Once an input is classified as Effort-derived, load and follow", text)
+        self.assertIn("before applicable validation and before planning, delegation, branch creation, or substantive implementation", text)
+        self.assertIn("Standalone inputs do not load these rules", text)
+        self.assertIn("[delivery blocker rules](effort-implementation.md#delivery-blockers) before delivery or merge", text)
+        self.assertIn("[PR reference rules](effort-implementation.md#implementation-prs)", text)
+        self.assertIn("[final delivery record rules](effort-implementation.md#final-delivery-record)", text)
+        self.assertIn("verify it before reporting completion", text)
+        for phrase in ("exactly one unambiguous `Depends on:`", "every implementation PR body", "never append a competing record"):
+            self.assertNotIn(phrase, text)
+            self.assertIn(phrase, self.read_reference("implement-vision/effort-implementation.md"))
+
+    def test_checkout_policy_is_required_before_creation_and_delegated(self) -> None:
+        implement = self.read_skill("implement-vision")
+        self.assertLess(implement.index("[checkout and preservation policy](checkout-preservation.md)"),
+                        implement.index("If none exists, create a durable checkout"))
+        for text in (implement, self.read_reference("to-vision/publication.md")):
+            self.assertIn("load and follow", text.lower())
+            self.assertIn("Pass the complete policy to reviewers and other delegates before they create", text)
+            self.assertIn("even when the root uses an existing checkout", text)
+        publication = self.read_reference("to-vision/publication.md")
+        self.assertLess(publication.index("[checkout and preservation policy](../implement-vision/checkout-preservation.md)"),
+                        publication.index("Create or reuse a dedicated vision branch"))
+        self.assertIn("Before branch or checkout creation, load and follow", publication)
+
+    def test_publication_and_discovery_load_scoped_rules_before_actions(self) -> None:
+        author = self.read_skill("to-vision")
+        self.assertIn("For publication or resumed publication, load and follow the [vision publication procedure](publication.md) after the authoring checks", author)
+        self.assertIn("Draft-only output stops above without loading the procedure", author)
+        for name in ("chart-program", "grill-ticket"):
+            text = self.read_skill(name)
+            self.assertIn("For publication or resumed publication", text)
+            self.assertIn("load and follow the [vision publication procedure](../to-vision/publication.md)", text)
+            self.assertLess(text.index("`to-vision` authoring checks"), text.index("[vision publication procedure]"))
+            self.assertIn("without loading or executing publication", text)
+        grill = self.read_skill("grill-ticket")
+        ordered = ("Detect an explicit draft-only request", "load and follow [read-only Effort validation](effort-validation.md)",
+                   "If unassigned, assign", "## Discover through", "## Create or revise")
+        positions = [grill.index(s) for s in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("Do not proceed to assignment or discovery unless every state and ownership check succeeds", grill)
+        validation = self.read_reference("grill-ticket/effort-validation.md")
+        self.assertIn("If any other user is assigned, stop without mutation in either mode", validation)
+        self.assertIn("do not assign, mutate, or invoke the interview", validation)
+        publication = self.read_reference("to-vision/publication.md")
+        ordered = ("Before issue mutation", "Load and apply [read-only Effort validation](../grill-ticket/effort-validation.md) before issue mutation",
+                   "Replace the unique `Vision: pending`", "Before merge", "Merge the documentation PR", "Fetch the intended target branch after merge")
+        positions = [publication.index(s) for s in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("without claiming the issue or invoking the interview", publication)
 
     def test_repository_guidance_is_a_small_skill_index(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
