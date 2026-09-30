@@ -35,4 +35,3 @@ After all approved implementation PRs land and final target-branch validation pa
 - unresolved follow-up risks, or `None`.
 
 Verify every PR is merged into the intended target, the reported effects exist on that branch, validation is current, exactly one delivery marker remains, and the updated durable comment can be read back. Deterministic reruns update or preserve that one comment; they never append a competing record. Report partial GitHub failure precisely and do not invent a delivery record. Leave the Effort open for `land-ticket`; implementation completion does not authorize its closure, a `<!-- pce:landed -->` record, or the Program Map mutation.
-

@@ -19,4 +19,3 @@ During the final target-branch audit, enumerate every checkout the invocation cr
 ## Post-merge implementation branches
 
 After a confirmed merge, delete the merged remote implementation branch. During the final target-branch audit, remove local implementation branches only after proving that each branch is fully merged and is not checked out in a worktree. Preserve any branch with unmerged commits or uncertain ownership, and report why it remains.
-
