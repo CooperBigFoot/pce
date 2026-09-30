@@ -155,19 +155,6 @@ class SkillContractTests(unittest.TestCase):
                 ):
                     self.assertIn(phrase, legacy)
 
-    def test_guidance_describes_delivery_only_landing(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-        self.assertNotRegex(readme, r"(?i)\bfog\b")
-        for phrase in (
-            "recompute Frontier", "no open Efforts", "explicit human approval",
-            "explicitly requested `chart-program` re-survey",
-            "ordinary GitHub issues", "does not grant blanket authority to expand scope",
-        ):
-            self.assertIn(phrase, readme)
-        self.assertNotIn("Program evolution", claude)
-        self.assertIn("delivery verification", claude)
-
     def test_tracked_surface_has_exactly_six_skills(self) -> None:
         expected = {
             "grill-me",
@@ -285,59 +272,6 @@ class SkillContractTests(unittest.TestCase):
                 self.assertIn("match", text.lower())
                 self.assertIn("duplicate", text.lower())
                 self.assertIn("stop", text.lower())
-
-    def test_repository_guidance_describes_both_workflows_and_identity_rules(self) -> None:
-        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        for name in (
-            "grill-me",
-            "to-vision",
-            "chart-program",
-            "grill-ticket",
-            "land-ticket",
-        ):
-            self.assertIn(f"`{name}`", claude)
-        self.assertIn("grill-me → to-vision → implement-vision", claude)
-        self.assertIn(
-            "chart-program → grill-ticket → implement-vision → land-ticket", claude
-        )
-        self.assertIn("root implementing agent", claude)
-        self.assertIn("accepts either a large idea", readme)
-        self.assertIn("require an explicit Effort identity", readme)
-        self.assertIn("No command infers a repository-wide singleton", readme)
-
-    def test_repository_guidance_documents_all_six_skills_in_every_environment(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-        rows = {
-            environment: next(
-                line
-                for line in readme.splitlines()
-                if line.startswith(f"| {environment} (`{directory}`) |")
-            )
-            for environment, directory in (
-                ("Claude Code", "~/.claude/skills"),
-                ("Codex", "~/.codex/skills"),
-                ("Prime Agent", "~/.prime/agent/skills"),
-            )
-        }
-        for environment, row in rows.items():
-            for name in (
-                "grill-me",
-                "to-vision",
-                "implement-vision",
-                "chart-program",
-                "grill-ticket",
-                "land-ticket",
-            ):
-                with self.subTest(environment=environment, name=name):
-                    self.assertIn(f"`{name}`", row)
-        for text in (readme, claude):
-            self.assertRegex(text, r"All six (PCE )?skills are available in every supported environment")
-            self.assertIn("spawn subagents", text)
-            self.assertIn("Git and GitHub", text)
-        self.assertNotIn("five", claude)
-        self.assertNotIn("root Prime Agent", readme)
 
     def test_skill_text_is_harness_agnostic(self) -> None:
         for path in sorted(SKILLS.glob("*/SKILL.md")):
@@ -598,14 +532,7 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(phrase, text)
         self.assertIn("closing-reference safeguards", self.read_skill("grill-ticket"))
 
-    def test_guidance_removes_deferred_publication_and_documents_draft_only(self) -> None:
-        for filename in ("README.md", "CLAUDE.md"):
-            with self.subTest(filename=filename):
-                text = (ROOT / filename).read_text(encoding="utf-8")
-                self.assertIn("draft-only", text)
-                self.assertIn("documentation PR", text)
-                self.assertNotIn("first run it publishes", text)
-                self.assertNotIn("first standalone run can publish", text)
+    def test_chart_uses_shared_publication_contract(self) -> None:
         chart = self.read_skill("chart-program")
         self.assertIn("`to-vision` publication contract", chart)
 
@@ -692,24 +619,6 @@ class SkillContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, section)
 
-    def test_repository_guidance_covers_all_created_checkouts(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        paragraph = next(p for p in readme.split("\n\n") if "PCE-created checkouts" in p)
-        for phrase in (
-            "Every checkout PCE creates, for any purpose",
-            "`<repository>/.worktrees/`",
-            "git worktrees, clones, and plain copies",
-            "review, audit, reproduction, and comparison",
-            "initial canonical clone",
-            "when no local checkout exists",
-            "Build output is never evidence",
-            "logs, receipts, diffs, and patches",
-            "every checkout the invocation created",
-            "another run or a human",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, paragraph)
-
     def test_authoring_workflows_report_publication_readiness_precisely(self) -> None:
         expectations = {
             "grill-me": ("confirmation is not publication", "not ready for `implement-vision`"),
@@ -723,16 +632,26 @@ class SkillContractTests(unittest.TestCase):
                 for phrase in phrases:
                     self.assertIn(phrase, text)
 
-    def test_repository_guidance_documents_recovery_and_durable_handoffs(self) -> None:
+    def test_repository_guidance_is_a_small_skill_index(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"^## (.+)$", readme, re.MULTILINE),
+                         ["Install", "Skills", "Workflows"])
+        links = re.findall(r"\[([^]]+)\]\((skills/[^)]+)\)", readme)
+        self.assertEqual({name for name, _ in links},
+                         {path.name for path in SKILLS.iterdir() if path.is_dir()})
+        self.assertEqual(len(links), 6)
+        for name, target in links:
+            self.assertEqual(target, f"skills/{name}/SKILL.md")
+            self.assertTrue((ROOT / target).is_file())
+        for phrase in ("./install.sh", "~/.claude/skills", "~/.codex/skills",
+                       "~/.prime/agent/skills",
+                       "grill-me → to-vision → implement-vision",
+                       "chart-program → grill-ticket → implement-vision → land-ticket"):
+            self.assertIn(phrase, readme)
+        self.assertLess(len(readme.split()), 250)
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-        for text in (readme, claude):
-            self.assertIn("implement-vision <Effort number or canonical URL>", text)
-            self.assertIn("planning/visions/<vision>.md", text)
-            self.assertIn("Effort-derived path", text)
-            self.assertIn(".worktrees/visions/", text)
-            self.assertIn("target branch", text)
-            self.assertIn("resume", text.lower())
+        self.assertIn("`AGENTS.md`", claude)
+        self.assertLess(len(claude.split()), 40)
 
 
 if __name__ == "__main__":
