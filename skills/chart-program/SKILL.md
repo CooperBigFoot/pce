@@ -1,6 +1,6 @@
 ---
 name: chart-program
-description: Chart a large outcome as an approved GitHub Program Map and contained Effort tickets, or re-survey one explicit Program. Use for /chart-program with a large idea or Program issue URL or number.
+description: Chart a large outcome into a GitHub Program and Efforts, or re-survey an explicit Program. Use for /chart-program.
 ---
 
 # Chart Program
@@ -23,11 +23,11 @@ Before any GitHub mutation, present one intent-level proposal:
 - **Effort tickets:** title and one-sentence outcome question for each.
 - **Dependencies:** one line per genuine blocker.
 - **Exclusions:** short bullets when useful.
-- **Re-survey changes:** only substantive additions, removals, conflicts, or boundary changes.
+- **Re-survey changes (explicit Program input only):** only substantive additions, removals, conflicts, or boundary changes.
 
 Do not show generated bodies, identifiers, API calls, unchanged inventories, or placeholder mechanics unless requested. The canonical grill confirmation is the publication approval for this explicitly requested charting workflow only when the summary contains this complete proposal. Otherwise ask for concise approval. Do not mutate before approval.
 
-If the survey finds one coherent Effort, do not create a Program or Effort issue. Continue the same explicitly requested workflow by running canonical `grill-me` at standalone-vision depth. After its confirmed summary, use the `to-vision` creation mechanism with a descriptive derived name and author the standalone vision. Load and follow the `to-vision` authoring checks. Execute the complete `to-vision` publication contract once to publish and verify the merged target-branch copy, including its independent review, required checks, closing-reference safeguards, and draft-only handling. Consume its verified result; do not repeat publication, linkage, or final verification. For draft-only or partial failure, report that shared result and its precise state without calling the vision ready. Only a successful verified publication result permits the exact `implement-vision` handoff with its path. Do not start implementation.
+If the survey finds one coherent Effort, do not create a Program or Effort issue. Continue the same explicitly requested workflow by running canonical `grill-me` at standalone-vision depth. After its confirmed summary, use the `to-vision` creation mechanism with a descriptive derived name and author the standalone vision. Load and follow the `to-vision` authoring checks. For publication or resumed publication, load and follow the [vision publication procedure](../to-vision/publication.md), the `to-vision` publication contract, once to publish and verify the merged target-branch copy. For draft-only, return the local draft result without loading or executing publication. Consume its verified result; do not repeat publication, linkage, or final verification. For draft-only or partial failure, report that shared result and its precise state without calling the vision ready. Only a successful verified publication result permits the exact `implement-vision` handoff with its path. Do not start implementation.
 
 ## Publish deterministically
 

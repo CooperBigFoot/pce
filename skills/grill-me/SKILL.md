@@ -1,6 +1,6 @@
 ---
 name: grill-me
-description: Clarify an idea or plan through rigorous, dependency-aware rounds of questions. Use when the user asks to be grilled, stress-test a plan, or reach shared understanding before writing a vision.
+description: Clarify an idea through focused questions. Use for grilling, stress-testing a plan, or reaching shared understanding before a vision.
 ---
 
 # Grill Me

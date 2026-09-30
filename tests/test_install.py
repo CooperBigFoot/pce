@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -63,6 +64,24 @@ class InstallTests(unittest.TestCase):
                 if path.is_symlink()
             }
             self.assertEqual(installed, set(MATRIX))
+
+    def test_supporting_links_resolve_from_each_installed_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            result = self.run_installer(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for environment_root in ENVIRONMENT_ROOTS:
+                for name in SKILLS:
+                    installed = home / environment_root / name
+                    for source in (ROOT / "skills" / name).glob("*.md"):
+                        path = installed / source.name
+                        self.assertEqual(path.read_bytes(), source.read_bytes())
+                        targets = re.findall(r"\[[^]]+\]\(([^)]+\.md(?:#[^)]+)?)\)", path.read_text())
+                        for target in targets:
+                            relative = target.split("#", 1)[0]
+                            linked = path.parent / relative
+                            self.assertTrue(linked.is_file(), (path, target))
+                            self.assertEqual(linked.resolve(), (source.parent / relative).resolve())
 
     def test_preserves_independently_installed_skills_and_user_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

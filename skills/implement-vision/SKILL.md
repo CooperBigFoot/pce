@@ -1,6 +1,6 @@
 ---
 name: implement-vision
-description: Execute a standalone or Effort-derived vision as the root implementing agent using planning, delegation, implementation PRs, and independent review, reconstructing progress from Git and GitHub evidence on every invocation. Use when the user hands an agent a vision to implement.
+description: Implement or resume a published vision. Accept a vision path or an Effort issue number or URL.
 ---
 
 # Implement Vision
@@ -11,6 +11,8 @@ This skill relies only on capabilities every supported environment provides: spa
 
 ## Resolve the input and target
 
+Load and follow the [checkout and preservation policy](checkout-preservation.md) for every invocation, before any checkout creation. Pass the complete policy to reviewers and other delegates before they create any checkout, even when the root uses an existing checkout. Loading it does not invoke another workflow.
+
 Accept exactly one of these inputs:
 
 - an Effort issue number in the current repository;
@@ -20,6 +22,8 @@ Accept exactly one of these inputs:
 Reject missing, extra, ambiguous, shorthand, and noncanonical issue identities. Resolve a number only after identifying the current repository with GitHub. A canonical URL may name a repository different from the caller's current checkout; resolve and operate on the canonical owner and repository encoded in that URL rather than rejecting it as cross-repository. Locate an existing checkout only after verifying that its normalized canonical remote matches that repository. If none exists, create a durable checkout of the URL-derived repository in a user-owned location. Never read, branch, create a worktree, or implement URL-derived work in an unrelated caller checkout.
 
 For a path input, first identify the current checkout's canonical GitHub repository. The path must remain inside `planning/visions/`, name a regular file rather than a symlink, and have one canonical repository-relative identity. Read it only after those checks, then scan its provenance before classifying it. A path input is standalone only when it has no `Effort:` provenance line. If it has exactly one canonical `Effort:` line, derive the canonical repository and Effort identity from that URL, require its repository to match the normalized canonical remote of the checkout containing the path, and promote the path to that Effort identity. From that point it must run the same complete Effort validation as a number or canonical URL and never continue as standalone. The supplied path remains only a locator; it is not authoritative and does not bypass the ticket or its `Vision:` link.
+
+Once an input is classified as Effort-derived, load and follow [Effort implementation rules](effort-implementation.md) before applicable validation and before planning, delegation, branch creation, or substantive implementation. Standalone inputs do not load these rules.
 
 For all three Effort entry forms, normalize to one canonical repository and Effort URL, load the ticket, and follow its single `Vision:` link. Do not require a person to repeat identity already recovered from valid provenance or to recover a session identifier, worktree path, branch name, or prior conversation.
 
@@ -37,34 +41,15 @@ For every invocation, fetch the intended target branch and read the vision from 
 
 ### Target-branch durability gate
 
-An Effort-derived vision must already satisfy the authoring publication contract through `grill-ticket` or a `to-vision` invocation that applies the same complete Effort validation and linkage safeguards. Verify that the ticket's one `Vision:` link, its commit-pinned copy, and the target-branch copy identify the same regular `planning/visions/` file with exactly matching `Program:` and `Effort:` provenance and exact content. Do not bootstrap publication for an Effort. On any missing, unmerged, stale, or conflicting target copy, stop before planning or substantive implementation and report the publication gap.
+For Effort-derived inputs, complete the published-intent checks in [Effort implementation rules](effort-implementation.md) before proceeding.
 
 A standalone target-branch vision is a normal start or resume only when its exact regular-file copy is already published and verified. Do not publish drafts or bootstrap publication, even on a first run. On missing, unmerged, stale, or conflicting publication, stop before planning, delegation, branch creation, or substantive implementation; preserve and report the inspectable file, branch, commit, PR, and target state. Direct the authoring workflow to `to-vision` to publish and verify that same path before a later implementation invocation. Explicit draft-only output is not implementation-ready. Never manufacture Program or Effort provenance for standalone work.
-
-### Effort provenance and durable linkage
-
-Scan provenance before classifying any candidate vision, including the ticket-linked and target-branch copies. With no `Effort:` line, a path input remains standalone and follows the standalone workflow unchanged. Any vision reached through an Effort identity must contain exactly one canonical `Effort:` line and exactly one canonical `Program:` line. More than one line, a malformed or noncanonical URL, a foreign repository, a missing line where Effort provenance is required, or disagreement among copies is invalid rather than standalone.
-
-For an Effort-derived vision, use `gh`, the repository, and those links to reconstruct the Effort, Program Map, dependencies, comments, delivery records, linked PRs, target-branch state, and validation. Validate that the open issue has the `pce:effort` label and `<!-- pce:effort -->` marker; its body has exactly one Program, dependency, and Vision declaration; the Map contains exactly one membership for it; and the issue, Map, repository, linked vision path, supplied path when present, and both provenance URLs all match. Stop on duplicate, missing, noncanonical, conflicting, or mismatched provenance or durable linkage rather than attaching delivery to the wrong ticket.
-
-Before planning or delivery, parse the complete Program dependency graph. Require exactly one unambiguous `Depends on:` declaration on every involved Effort. Every dependency must be a structurally valid Effort in the same Program, and the graph must be acyclic. Stop on duplicates, conflicts, foreign-Program dependencies, missing membership, malformed references, or cycles; do not choose an interpretation.
-
-Only after every applicable input, provenance, repository, ticket, Program Map, vision-link, commit-pinned-content, target-copy, and dependency check succeeds is the input valid. A number, URL, and recovered path then converge on the same validated Effort workflow.
 
 ## Source and requirement evidence
 
 After the input-validation gate succeeds, investigate gathered source evidence against the vision requirements. Keep mandatory instructions, the complete vision, gate evidence, and uncertain or conflicting sources available. Before delegation, give agents inspected source context and investigate conflicts rather than hiding them.
 
 Match each requirement to candidate tests, source, and observed results during validation, before completion claims, and before preparing or updating an Effort delivery record. Investigate missing, indirect, unsupported, uncertain, or contradictory evidence; run required validation and inspect source and target effects. Include current target evidence in the final audit. Requirement-to-evidence reasoning does not replace deterministic Git/GitHub, exact-content, provenance, dependency, or authority gates, or the fresh independent full-diff review below.
-
-## Plan the outcome
-
-After input validation succeeds:
-
-1. Own the vision-level outcome for the whole invocation. Work within the active turn, resuming as each delegated subagent completes. When human input is required, stop cleanly, explain exactly what is needed, and end the turn; a person re-invokes this skill to continue, and the durable evidence below carries the progress.
-2. Investigate before asking. Decide reversible technical details from repository evidence and established engineering practice.
-3. Ask the human only about missing intent, priorities, outcome-level trade-offs, credentials, legal or organizational authority, or permission for an exceptional irreversible external act. Explain consequences and recommend an answer.
-4. Choose one PR or several coherent vertical slices. Do not split work only by technical layer.
 
 ## Reconstruct every run
 
@@ -76,25 +61,16 @@ When the entire outcome is already complete, rerun current validation, verify ta
 
 Use this predicate everywhere blocker state is computed: an Effort is `landed` only when all four facts are verified: the Effort is closed; it has exactly one authoritative `<!-- pce:delivery -->` comment whose claims match merged PRs and target-branch evidence; it has exactly one `<!-- pce:landed -->` outcome comment linking its Program; and its canonical URL appears exactly once in that Map's landed-outcomes index and nowhere in open Efforts or Frontier. Closed alone never means landed. Cancelled, malformed, prematurely closed, duplicate-record, and conflicting-record Efforts fail this predicate.
 
-Treat recorded dependencies as delivery blockers. Use ordinary tracker and engineering judgment to determine which investigation or implementation can proceed, but do not deliver or merge an outcome that relies on a blocker that fails the `landed` predicate. Report any blocker that prevents safe progress.
+For Effort delivery, apply the [delivery blocker rules](effort-implementation.md#delivery-blockers) before delivery or merge; report blockers that prevent safe progress.
 
-## Worktree and preservation policy
+## Plan the outcome
 
-A branch does not require a separate worktree. Use the current checkout when safe. Place every checkout any agent in the invocation creates, for any purpose, below `<repository>/.worktrees/`. This covers implementation, independent review, audit, red or failing reproduction, side-by-side comparison, and any other purpose, including git worktrees, clones, and plain copies of the tree. Reviewers and other delegated agents must receive this policy in their delegated context before creating a checkout. A single repository-owned hierarchy keeps all disposable checkouts visible for inspection and cleanup.
+After input validation and reconstruction succeed, plan only the remaining outcome:
 
-The initial canonical clone, created when no local checkout exists, is exempt from managed placement and disposable-checkout cleanup. It may live in a durable user-owned location and remain as the repository root. All additional agent-created checkouts live below that root's `.worktrees/` hierarchy. Report a canonical clone created by this invocation in the final enumeration with its retained role.
-
-Keep the existing vision worktree layout:
-
-```text
-<repository>/.worktrees/visions/effort-<number>-<slug>/
-```
-
-For standalone work, use an equally descriptive child of `<repository>/.worktrees/visions/` without an invented Effort number. Non-vision checkouts use equally descriptive paths below `<repository>/.worktrees/`. Apart from the initial canonical clone exception, never put an agent-created checkout in `/private/tmp`, another temporary directory, or arbitrary sibling directories. A disposable checkout is not a recovery database or the canonical home of the vision.
-
-Build output, dependency caches, compiled binaries, and other regenerable artifacts are never evidence. Preserve logs, receipts, diffs, and patches; never copy or retain a build directory to prove a result. The preservation rules concern source and history, not build output.
-
-During the final target-branch audit, enumerate every checkout the invocation created, in every location, including those created by delegated agents. For each checkout, inspect status, branch reachability, upstream state, target merge evidence, and ownership. For plain copies without Git metadata, establish source provenance and compare source changes against the intended target; if this cannot be proven, preserve and report the uncertainty rather than assuming the copy is merged. After the associated publication or implementation is verified merged, remove its clean disposable checkout and fully merged local branch. Remove a remote implementation branch only under the existing post-merge rule below. Preserve and report any checkout or branch with uncommitted, unpushed, unmerged, conflicting, or uncertain ownership evidence. Never move, delete, reset, or clean such evidence merely because another PR delivered the outcome. Cleanup is allowed only for verified merged work with no unique source changes and no ownership ambiguity. Remove only checkouts this invocation created; never remove a checkout another run or a human created, even if merged. Report every retained checkout and its reason, including the canonical root exception.
+1. Own the vision-level outcome for the whole invocation. Work within the active turn, resuming as each delegated subagent completes. When human input is required, stop cleanly, explain exactly what is needed, and end the turn; a person re-invokes this skill to continue, and the durable Git and GitHub evidence carries the progress.
+2. Investigate before asking. Decide reversible technical details from repository evidence and established engineering practice.
+3. Ask the human only about missing intent, priorities, outcome-level trade-offs, credentials, legal or organizational authority, or permission for an exceptional irreversible external act. Explain consequences and recommend an answer.
+4. Choose one PR or several coherent vertical slices. Do not split work only by technical layer.
 
 ## Execute
 
@@ -114,7 +90,7 @@ Delegate substantive work when it improves speed or independence. Give each impl
 
 Use repository-native tools and tests. Preserve unrelated user changes and local state. An implementation agent must provide the full diff and validation evidence for review.
 
-For an Effort-derived vision, every implementation PR body must include `Effort: <canonical GitHub issue URL>` as a plain reference. Do not use `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, or `resolved` with the Effort reference. An individual PR must never close the Effort, including when one PR happens to deliver the full vision. Keep detailed implementation and validation evidence on the PRs and Effort rather than expanding the Program Map.
+For every Effort implementation PR, apply the [PR reference rules](effort-implementation.md#implementation-prs).
 
 ## Review and land
 
@@ -130,20 +106,12 @@ The reviewer must evaluate names and architectural boundaries in the context of 
 
 Return findings to the implementation owner for repair. Repeat review after material repairs. A reviewer may merge only when findings are resolved and required checks pass. Follow any explicit instruction that withholds merge authority.
 
-After a confirmed merge, delete the merged remote implementation branch. During the final target-branch audit, remove local implementation branches only after proving that each branch is fully merged and is not checked out in a worktree. Preserve any branch with unmerged commits or uncertain ownership, and report why it remains.
+After merge, apply the [checkout and preservation policy](checkout-preservation.md) for branch removal and the final checkout audit.
 
 Ordinary implementation branches, PRs, repairs, and merges are authorized by the act of handing over the vision. Deployments, destructive data operations, spending, credentials, external publication, infrastructure changes, and other irreversible external acts not clearly authorized by the vision still require human authority.
 
 After all approved PRs land, inspect the resulting target branch against the complete vision, run its local tests, and report the merged changes and evidence.
 
-For an Effort-derived vision, then reload every Effort comment. The sole authoritative delivery record is exactly one comment marked `<!-- pce:delivery -->`. If none exists, create one. If exactly one exists, reconcile its claims with current target-branch and GitHub evidence and update that same comment in place on rerun. If more than one exists, or its identity conflicts with the linked vision, Program, PRs, or target branch, stop and report the conflict without posting another record or completing the tracked outcome. The authoritative comment must contain:
-
-- the delivered outcome;
-- canonical URLs for every merged implementation PR;
-- validation evidence, including commands and results;
-- material deviations from the vision, or `None`;
-- unresolved follow-up risks, or `None`.
-
-Verify every PR is merged into the intended target, the reported effects exist on that branch, validation is current, exactly one delivery marker remains, and the updated durable comment can be read back. Deterministic reruns update or preserve that one comment; they never append a competing record. Report partial GitHub failure precisely and do not invent a delivery record. Leave the Effort open for `land-ticket`; implementation completion does not authorize its closure, a `<!-- pce:landed -->` record, or the Program Map mutation.
+For an Effort-derived vision, apply the [final delivery record rules](effort-implementation.md#final-delivery-record), reconcile the single authoritative record, and verify it before reporting completion. Leave the Effort open for `land-ticket`.
 
 Report the vision outcome as complete only after final verification and, for an Effort, the delivery record is verified. Use the environment's own planning and delegation facilities rather than inventing replacement planning, scheduling, recovery, review, or merge machinery. Nothing outside the vision, Git, and GitHub evidence is the durable truth of the workflow: a lost session resumes when a person re-invokes this skill and it reconstructs from that evidence.

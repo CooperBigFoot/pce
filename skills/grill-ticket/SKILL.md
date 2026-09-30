@@ -1,6 +1,6 @@
 ---
 name: grill-ticket
-description: Claim and deeply discover one explicit Program Effort, then author, publish, and verify its single linked vision. Use for /grill-ticket with an Effort issue URL or number.
+description: Claim and discover one Effort, then publish its vision. Use for /grill-ticket with an Effort issue number or URL.
 ---
 
 # Grill Ticket
@@ -11,18 +11,11 @@ The ticket and its repository vision are the only discovery records. PCE's canon
 
 ## Validate and claim
 
-Detect an explicit draft-only request before any mutation, including assignment. For draft-only, validate read-only and do not assign, change issue content, publish, or merge. Still require every state and ownership check below; draft-only does not bypass Effort validation.
+Detect an explicit draft-only request before any mutation, including assignment. For draft-only, validate read-only and do not assign, change issue content, publish, or merge. Still require every state and ownership check in the required reference; draft-only does not bypass Effort validation.
 
-Before questions or mutation, inspect the repository and use `gh` to load the issue, its comments and timeline, authenticated user, linked Program Map, all member Efforts and dependencies, relevant repository evidence, delivery records, and any linked vision. Require all of the following:
+Before questions or mutation in either mode, load and follow [read-only Effort validation](effort-validation.md). Do not proceed to assignment or discovery unless every state and ownership check succeeds.
 
-- the issue is open, has label `pce:effort`, and contains `<!-- pce:effort -->`;
-- it has exactly one valid `Program: <canonical GitHub issue URL>` line pointing to an issue with label `pce:program` and `<!-- pce:program -->`;
-- it has exactly one `Depends on:` line naming `none` or valid Efforts in that same Program, and the complete Program dependency graph is acyclic;
-- the Program Map contains this canonical Effort URL exactly once as an open member and not as a landed outcome or duplicate entry;
-- it has exactly one `Vision:` line that is `pending` or identifies one repository vision;
-- a linked vision contains exactly one canonical `Program:` line and exactly one canonical `Effort:` line, both matching the ticket, Map, and repository identity.
-
-Stop without mutation and report the malformed, closed, duplicate, mismatched, foreign-Program, cyclic, missing-membership, or otherwise ambiguous state. Do not claim or mechanically repair missing or duplicate Map membership. If any other user is assigned, stop without mutation in either mode. For publication mode only: If unassigned, assign the authenticated GitHub user with `gh` and verify the assignment. If assigned only to that user, treat it as a resumable claim. For draft-only, an unassigned or same-user issue remains unchanged. Claiming does not require blockers to have landed; blockers constrain delivery, not discovery.
+For publication mode only: If unassigned, assign the authenticated GitHub user with `gh` and verify the assignment. If assigned only to that user, treat it as a resumable claim. For draft-only, an unassigned or same-user issue remains unchanged. Claiming does not require blockers to have landed; blockers constrain delivery, not discovery.
 
 ## Discover through the canonical interview
 
@@ -40,7 +33,7 @@ For a new vision, derive a concise descriptive name from the confirmed understan
 python3 <path-to-to-vision>/scripts/create_vision.py "<derived name>"
 ```
 
-Author a standalone vision whose first non-title metadata lines are:
+Author a self-contained Effort vision whose first non-title metadata lines are:
 
 ```markdown
 Program: <canonical GitHub issue URL>
@@ -55,7 +48,7 @@ For a valid existing link, load the pinned durable content and revise that same 
 
 ## Publish through the shared procedure
 
-Load and follow the complete `to-vision` publication contract once. It owns publication, the single link mutation, independent review, merge, closing-reference safeguards, fresh pre-mutation state validation, and final read-back verification. This skill owns discovery, initial validation and claim, and confirmed vision preparation, not a second publication tail. The initial `/grill-ticket` request and confirmed summary authorize ordinary documentation publication and issue linkage, not implementation, merging research or implementation PRs, or bypassing protected-branch policy.
+For publication or resumed publication, after the authoring checks, load and follow the [vision publication procedure](../to-vision/publication.md), the complete `to-vision` publication contract once. For draft-only, stop with the local draft result without loading or executing publication. It owns publication, the single link mutation, independent review, merge, closing-reference safeguards, fresh pre-mutation state validation, and final read-back verification. This skill owns discovery, initial validation and claim, and confirmed vision preparation, not a second publication tail. The initial `/grill-ticket` request and confirmed summary authorize ordinary documentation publication and issue linkage, not implementation, merging research or implementation PRs, or bypassing protected-branch policy.
 
 Consume its verified result; do not repeat publication, linkage, or final verification. The result must establish that the exact vision is merged into the intended target branch, its single commit-pinned link and matching provenance are verified, Program membership remains valid, and the issue remains open. For draft-only or partial failure, consume and report that result instead, retaining the same path, branch, PR, and single link for resumption under the shared procedure. Never call an unverified result ready.
 
