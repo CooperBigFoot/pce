@@ -7,7 +7,7 @@ description: Implement or resume a published vision. Accept a vision path or an 
 
 Act as the root owner of the vision-level outcome. Treat the supplied vision as the durable product intent, not as a prescribed code mechanism.
 
-This skill relies only on capabilities every supported environment provides: spawning subagents, running commands, reading and writing files, and using Git and GitHub. Delegation and a fresh independent reviewer are therefore always available.
+Delegation and independent review are available.
 
 ## Resolve the input and target
 
@@ -35,7 +35,7 @@ Only after input validation succeeds, classify prior work and plan the remaining
 
 ## Validate the resolved input
 
-Complete input validation and the target-branch durability gate below before any planning, delegation, branch creation, or substantive implementation. Read the entire candidate vision, repository instructions, relevant code, tests, and recent project context. Stop on missing, duplicated, malformed, foreign, ambiguous, or conflicting provenance or durable linkage. Give one precise explanation. Do not plan, delegate, or create any work, and end the turn normally without a continuation loop. Do not ask the human to supply an identity that the rejected evidence cannot establish safely.
+Complete input validation and the target-branch durability gate below before any planning, delegation, branch creation, or substantive implementation. Read the entire candidate vision, repository instructions, relevant code, tests, and recent project context. Stop on missing, duplicated, malformed, foreign, ambiguous, or conflicting provenance or durable linkage. Give one precise explanation. Do not plan, delegate, or create any work. Do not ask the human to supply an identity that the rejected evidence cannot establish safely.
 
 For every invocation, fetch the intended target branch and read the vision from that fetched ref. The current fetch and reads gathered during input resolution may serve this gate; apply the refresh rules above rather than fetching twice solely for this section. Verify that the canonical path is a regular file tracked on the intended target branch. Compare the relevant local or commit-pinned document with the target copy and require exact content before using it as accepted intent.
 
@@ -47,7 +47,7 @@ A standalone target-branch vision is a normal start or resume only when its exac
 
 ## Source and requirement evidence
 
-After the input-validation gate succeeds, investigate gathered source evidence against the vision requirements. Keep mandatory instructions, the complete vision, gate evidence, and uncertain or conflicting sources available. Before delegation, give agents inspected source context and investigate conflicts rather than hiding them.
+After the input-validation gate succeeds, investigate gathered source evidence against the vision requirements. Keep mandatory instructions, the complete vision, gate evidence, and uncertain or conflicting sources available. Before delegation, give agents the complete vision, relevant constraints, and inspected source context; investigate conflicts rather than hiding them.
 
 Match each requirement to candidate tests, source, and observed results during validation, before completion claims, and before preparing or updating an Effort delivery record. Investigate missing, indirect, unsupported, uncertain, or contradictory evidence; run required validation and inspect source and target effects. Include current target evidence in the final audit. Requirement-to-evidence reasoning does not replace deterministic Git/GitHub, exact-content, provenance, dependency, or authority gates, or the fresh independent full-diff review below.
 
@@ -67,10 +67,9 @@ For Effort delivery, apply the [delivery blocker rules](effort-implementation.md
 
 After input validation and reconstruction succeed, plan only the remaining outcome:
 
-1. Own the vision-level outcome for the whole invocation. Work within the active turn, resuming as each delegated subagent completes. When human input is required, stop cleanly, explain exactly what is needed, and end the turn; a person re-invokes this skill to continue, and the durable Git and GitHub evidence carries the progress.
-2. Investigate before asking. Decide reversible technical details from repository evidence and established engineering practice.
-3. Ask the human only about missing intent, priorities, outcome-level trade-offs, credentials, legal or organizational authority, or permission for an exceptional irreversible external act. Explain consequences and recommend an answer.
-4. Choose one PR or several coherent vertical slices. Do not split work only by technical layer.
+1. Investigate before asking. Decide reversible technical details from repository evidence and established engineering practice.
+2. Ask the human only about missing intent, priorities, outcome-level trade-offs, credentials, legal or organizational authority, or permission for an exceptional irreversible external act. Explain consequences and recommend an answer.
+3. Choose one PR or several coherent vertical slices. Do not split work only by technical layer.
 
 ## Execute
 
@@ -86,15 +85,27 @@ Ticket identity remains valid delivery metadata and traceability evidence in iss
 
 Enforce this boundary through implementation and review. Do not add a repository-wide naming linter, impose a universal naming convention on downstream repositories, or perform unrelated cleanup. Do not rename PCE's Program or Effort workflow artifacts.
 
-Delegate substantive work when it improves speed or independence. Give each implementation agent complete context and ownership of one branch, its tests, commit, push, and PR. Each branch must start from the intended target branch. Keep the human informed at meaningful milestones without forwarding routine mechanism choices.
+Each implementation owner owns one branch, its tests, commit, push, and PR. Each branch must start from the intended target branch.
 
-Use repository-native tools and tests. Preserve unrelated user changes and local state. An implementation agent must provide the full diff and validation evidence for review.
+Preserve unrelated user changes and local state. An implementation agent must provide the full diff and validation evidence for review.
+
+Before authoring GitHub issues, PR bodies, or delivery and landing summaries, load and follow only the [GitHub writing rules](../to-vision/publication.md#github-writing), not the publication procedure.
 
 For every Effort implementation PR, apply the [PR reference rules](effort-implementation.md#implementation-prs).
 
+### Test-first development
+
+Read and follow the target repository's testing guidance when implementing or reviewing tests; keep project-specific rules in that repository, in its existing layout. Use repository-native tools and the simplest sufficient test level.
+
+For bug fixes and new behavior, default to small test-first increments: choose a meaningful behavior, write a focused test with an independently established expected result, observe that it fails for the intended reason, implement the behavior, then improve the code while keeping tests passing. Derive expectations from requirements, independently worked examples, or suitable independent evidence, never from the implementation under test. An unrelated setup failure is not proof. Do not batch a large test suite before a large implementation.
+
+Reuse coverage that already proves the promise. Add cases for distinct relevant failures, not every input combination. Avoid duplicate coverage, incidental implementation assertions, elaborate fixtures, and parallel implementations where a small example suffices. Allow narrow, explained exceptions when a new failing test adds no value, including prose-only changes and refactors already protected by existing tests. Repository requirements and changed behavior determine validation; no new test per edit, test inventory, extra approval gate, or repeated full-suite run is required merely for this procedure.
+
 ## Review and land
 
-Assign every PR to a fresh reviewer that did not implement it. The reviewer reads the full vision, repository rules, complete diff, and validation evidence. It checks real behavior, scope, safety, regressions, and consistency with the whole vision.
+Assign every PR to a fresh reviewer that did not implement it. The reviewer reads the full vision, repository rules, complete diff, and validation evidence. It checks real behavior, scope, safety, regressions, and consistency with the whole vision, including whether the change fits the repository without unnecessary behavior or complexity.
+
+Review tests as design evidence, not a passing count. For each meaningful new case, check its promise, independent expectation, whether it reaches the intended rule, and whether a plausible broken implementation could still pass. Challenge duplicate coverage and implementation-shaped assertions. When coverage changes or is removed, verify that its useful guarantee remains protected or is intentionally no longer required. Large PRs require a necessity review: what can be removed without weakening the agreed outcome? This is not a minimal-patch rule or a reason to reject justified redesign.
 
 The reviewer must evaluate names and architectural boundaries in the context of the complete repository and vision, not merely search for a particular ticket-number pattern. Reject:
 
@@ -114,4 +125,4 @@ After all approved PRs land, inspect the resulting target branch against the com
 
 For an Effort-derived vision, apply the [final delivery record rules](effort-implementation.md#final-delivery-record), reconcile the single authoritative record, and verify it before reporting completion. Leave the Effort open for `land-ticket`.
 
-Report the vision outcome as complete only after final verification and, for an Effort, the delivery record is verified. Use the environment's own planning and delegation facilities rather than inventing replacement planning, scheduling, recovery, review, or merge machinery. Nothing outside the vision, Git, and GitHub evidence is the durable truth of the workflow: a lost session resumes when a person re-invokes this skill and it reconstructs from that evidence.
+Report the vision outcome as complete only after final verification and, for an Effort, the delivery record is verified. Nothing outside the vision, Git, and GitHub evidence is the durable truth of the workflow. Reconstruct from that evidence on a later invocation.

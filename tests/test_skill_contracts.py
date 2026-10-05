@@ -296,16 +296,39 @@ class SkillContractTests(unittest.TestCase):
                     self.assertNotIn(phrase, text)
         implement = self.read_skill("implement-vision")
         self.assertNotRegex(implement, r"\bgoals?\b")
-        for phrase in (
-            "spawning subagents",
-            "Work within the active turn",
-            "resuming as each delegated subagent completes",
-            "stop cleanly, explain exactly what is needed, and end the turn",
-            "re-invokes this skill",
-            "Nothing outside the vision, Git, and GitHub evidence is the durable truth",
-            "environment's own planning and delegation facilities",
-        ):
-            self.assertIn(phrase, implement)
+        self.assertIn("Delegation and independent review are available", implement)
+        self.assertIn("Nothing outside the vision, Git, and GitHub evidence is the durable truth", implement)
+        for path in sorted(SKILLS.rglob("*.md")):
+            with self.subTest(path=path.relative_to(SKILLS)):
+                self.assertNotRegex(path.read_text(),
+                    r"spawning subagents|Work within the active turn|"
+                    r"resuming as each delegated subagent completes|"
+                    r"nonblocking progress updates|Delegate substantive work when|"
+                    r"environment's own planning and delegation facilities")
+
+    def test_github_writing_has_one_scoped_authority(self) -> None:
+        reference = self.read_reference("to-vision/publication.md")
+        self.assertIn("## GitHub writing", reference)
+        rules = reference.split("## GitHub writing", 1)[1]
+        for promise in ("why it matters", "<details>", "visible", "Program and Effort contracts"):
+            self.assertIn(promise, rules)
+        for name in ("chart-program", "implement-vision", "land-ticket"):
+            with self.subTest(name=name):
+                self.assertIn("[GitHub writing rules](../to-vision/publication.md#github-writing)",
+                              self.read_skill(name))
+        self.assertIn("follow the GitHub writing rules below", reference)
+
+    def test_development_and_review_require_meaningful_proof(self) -> None:
+        text = self.read_skill("implement-vision")
+        self.assertIn("### Test-first development", text)
+        development = text.split("### Test-first development", 1)[1].split("## Review and land", 1)[0]
+        for promise in ("independently established expected result", "fails for the intended reason",
+                        "simplest sufficient", "prose-only", "repository's testing guidance"):
+            self.assertIn(promise, development)
+        review = text.split("## Review and land", 1)[1]
+        for promise in ("plausible broken implementation", "useful guarantee",
+                        "Large PRs", "unnecessary behavior or complexity"):
+            self.assertIn(promise, review)
 
     def test_to_vision_derives_name_only_when_no_explicit_name_exists(self) -> None:
         text = self.read_skill("to-vision")
@@ -363,7 +386,6 @@ class SkillContractTests(unittest.TestCase):
             "missing, duplicated, malformed, foreign, ambiguous, or conflicting",
             "durable linkage",
             "Do not plan, delegate, or create any work",
-            "end the turn normally without a continuation loop",
             "### Target-branch durability gate",
         ):
             self.assertIn(phrase, gate)
@@ -469,7 +491,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         for phrase in (
             "ignored planning paths", "required checks", "required approvals",
-            "exact authored content", "regular", "nonblocking progress updates",
+            "exact authored content", "regular",
             "file, branch, commit, PR", "not implementation-ready",
             "publication PR", "verified Git refs", "Do not start implementation",
         ):
