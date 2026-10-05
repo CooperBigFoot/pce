@@ -7,6 +7,8 @@ description: Verify and land one delivered Effort and update its Program Map. Us
 
 `$ARGUMENTS` must identify exactly one Effort issue by number or URL. Ask only for missing identity. Never assume one active Program.
 
+Before authoring GitHub issues, PR bodies, or delivery and landing summaries, load and follow only the [GitHub writing rules](../to-vision/publication.md#github-writing), not the publication procedure.
+
 ## Reconstruct evidence
 
 From the repository root, inspect the explicit ticket, comments and timeline, its single linked vision, Program Map, dependencies, implementation PRs, target-branch commits and files, checks and validation, delivery record, and related Efforts. Validate the `pce:effort` / `<!-- pce:effort -->` and `pce:program` / `<!-- pce:program -->` contracts. Require exactly one Program, dependency, and Vision declaration on the ticket; exactly one Map membership; and exactly one canonical `Program:` line plus exactly one canonical `Effort:` line in the vision. All issue, Map, repository, and vision identities must match. Stop on duplicates, missing lines, foreign Programs, noncanonical URLs, or mismatches.
