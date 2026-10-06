@@ -16,6 +16,8 @@ SKILLS = (
     "chart-program",
     "grill-ticket",
     "land-ticket",
+    "github-writing",
+    "test-first-development",
 )
 ENVIRONMENT_ROOTS = (".claude/skills", ".codex/skills", ".prime/agent/skills")
 MATRIX = {
@@ -153,6 +155,124 @@ class InstallTests(unittest.TestCase):
                     self.assertEqual(conflict.read_text(), "keep")
                 else:
                     self.assertEqual(os.readlink(conflict), str(target))
+
+    def test_creates_global_task_pointers_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            result = self.run_installer(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            agents = home / ".prime/agent/AGENTS.md"
+            self.assertTrue(agents.is_file())
+            content = agents.read_bytes()
+            text = content.decode()
+            self.assertEqual(text.count("<!-- pce:guidance:start -->"), 1)
+            self.assertEqual(text.count("<!-- pce:guidance:end -->"), 1)
+            for trigger in ("Before drafting or revising a GitHub issue or PR body",
+                            "Before implementing or reviewing code or tests"):
+                self.assertIn(trigger, text)
+            for name in ("github-writing", "test-first-development"):
+                self.assertIn(f"~/.prime/agent/skills/{name}/SKILL.md", text)
+                self.assertTrue((home / ".prime/agent/skills" / name / "SKILL.md").is_file())
+            self.assertNotIn("compaction", text)
+            self.assertEqual(self.run_installer(home).returncode, 0)
+            self.assertEqual(agents.read_bytes(), content)
+
+    def test_updates_only_owned_section_and_preserves_other_user_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            agents = home / ".prime/agent/AGENTS.md"
+            agents.parent.mkdir(parents=True)
+            prefix = b"# Personal rules\r\nKeep my exact bytes.\r\n"
+            suffix = b"\n# More rules\nKeep these too."
+            stale = b"<!-- pce:guidance:start -->\nOld PCE pointers\n<!-- pce:guidance:end -->"
+            agents.write_bytes(prefix + stale + suffix)
+            agents.chmod(0o640)
+            user_files = [home / ".claude/CLAUDE.md", home / ".codex/AGENTS.md",
+                          home / ".prime/agent/settings.json", home / ".prime/agent/extensions/custom.ts"]
+            for path in user_files:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"unrelated user state\r\n")
+            result = self.run_installer(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            updated = agents.read_bytes()
+            self.assertTrue(updated.startswith(prefix))
+            self.assertTrue(updated.endswith(suffix))
+            self.assertNotIn(b"Old PCE pointers", updated)
+            self.assertIn(b"skills/github-writing/SKILL.md", updated)
+            self.assertEqual(agents.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(self.run_installer(home).returncode, 0)
+            self.assertEqual(agents.read_bytes(), updated)
+            for path in user_files:
+                self.assertEqual(path.read_bytes(), b"unrelated user state\r\n")
+
+    def test_appends_to_unowned_content_without_rewriting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            agents = home / ".prime/agent/AGENTS.md"
+            agents.parent.mkdir(parents=True)
+            original = b"# My instructions\r\nNo final newline"
+            agents.write_bytes(original)
+            result = self.run_installer(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(agents.read_bytes().startswith(original + b"\n\n<!-- pce:guidance:start -->"))
+
+    def test_refuses_ambiguous_global_ownership_before_mutation(self) -> None:
+        start = b"<!-- pce:guidance:start -->"
+        end = b"<!-- pce:guidance:end -->"
+        for content in (start, end, end + b"\n" + start,
+                        start + b"\n" + end + b"\n" + start + b"\n" + end,
+                        b"user text " + start + b"\n" + end,
+                        start + b"\n" + end + b" user text",
+                        b"<!-- pce:guidance:unknown -->"):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                agents = home / ".prime/agent/AGENTS.md"
+                agents.parent.mkdir(parents=True)
+                agents.write_bytes(content)
+                result = self.run_installer(home)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ERROR: conflict:", result.stderr)
+                self.assertEqual(agents.read_bytes(), content)
+                self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
+
+    def test_refuses_indirect_or_nonregular_global_instructions(self) -> None:
+        for kind in ("symlink", "dangling-link", "directory", "hardlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                agents = home / ".prime/agent/AGENTS.md"
+                agents.parent.mkdir(parents=True)
+                target = home / "personal.md"
+                target.write_bytes(b"personal rules")
+                if kind == "directory":
+                    agents.mkdir()
+                elif kind == "hardlink":
+                    os.link(target, agents)
+                else:
+                    agents.symlink_to(target if kind == "symlink" else home / "missing")
+                result = self.run_installer(home)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ERROR: conflict:", result.stderr)
+                self.assertEqual(target.read_bytes(), b"personal rules")
+                self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
+                if kind in ("symlink", "dangling-link"):
+                    self.assertTrue(agents.is_symlink())
+                elif kind == "directory":
+                    self.assertTrue(agents.is_dir())
+                else:
+                    self.assertEqual(agents.stat().st_ino, target.stat().st_ino)
+
+    def test_does_not_shadow_alternate_global_instructions(self) -> None:
+        for name in ("AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                alternative = home / ".prime/agent" / name
+                alternative.parent.mkdir(parents=True)
+                alternative.write_bytes(b"user global instructions")
+                result = self.run_installer(home)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ERROR: conflict:", result.stderr)
+                self.assertEqual(alternative.read_bytes(), b"user global instructions")
+                self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
 
     def test_replaces_checkout_owned_link(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

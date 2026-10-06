@@ -158,7 +158,7 @@ class SkillContractTests(unittest.TestCase):
                 ):
                     self.assertIn(phrase, legacy)
 
-    def test_tracked_surface_has_exactly_six_skills(self) -> None:
+    def test_tracked_surface_has_six_workflows_and_two_guidance_skills(self) -> None:
         expected = {
             "grill-me",
             "to-vision",
@@ -166,6 +166,8 @@ class SkillContractTests(unittest.TestCase):
             "chart-program",
             "grill-ticket",
             "land-ticket",
+            "github-writing",
+            "test-first-development",
         }
         actual = {path.name for path in SKILLS.iterdir() if path.is_dir()}
         self.assertEqual(actual, expected)
@@ -308,20 +310,22 @@ class SkillContractTests(unittest.TestCase):
 
     def test_github_writing_has_one_scoped_authority(self) -> None:
         reference = self.read_reference("to-vision/publication.md")
-        self.assertIn("## GitHub writing", reference)
-        rules = reference.split("## GitHub writing", 1)[1]
+        rules = self.read_skill("github-writing")
+        self.assertNotIn("Start with a short, plain explanation", reference)
         for promise in ("why it matters", "<details>", "visible", "Program and Effort contracts"):
             self.assertIn(promise, rules)
         for name in ("chart-program", "implement-vision", "land-ticket"):
             with self.subTest(name=name):
-                self.assertIn("[GitHub writing rules](../to-vision/publication.md#github-writing)",
+                self.assertIn("[GitHub writing skill](../github-writing/SKILL.md)",
                               self.read_skill(name))
-        self.assertIn("follow the GitHub writing rules below", reference)
+        self.assertIn("[GitHub writing skill](../github-writing/SKILL.md)", reference)
 
     def test_development_and_review_require_meaningful_proof(self) -> None:
         text = self.read_skill("implement-vision")
         self.assertIn("### Test-first development", text)
-        development = text.split("### Test-first development", 1)[1].split("## Review and land", 1)[0]
+        self.assertIn("[test-first development skill](../test-first-development/SKILL.md)", text)
+        development = self.read_skill("test-first-development")
+        self.assertNotIn("independently established expected result", text)
         for promise in ("independently established expected result", "fails for the intended reason",
                         "simplest sufficient", "prose-only", "repository's testing guidance"):
             self.assertIn(promise, development)
@@ -750,7 +754,7 @@ class SkillContractTests(unittest.TestCase):
         links = re.findall(r"\[([^]]+)\]\((skills/[^)]+)\)", readme)
         self.assertEqual({name for name, _ in links},
                          {path.name for path in SKILLS.iterdir() if path.is_dir()})
-        self.assertEqual(len(links), 6)
+        self.assertEqual(len(links), 8)
         for name, target in links:
             self.assertEqual(target, f"skills/{name}/SKILL.md")
             self.assertTrue((ROOT / target).is_file())
@@ -759,7 +763,7 @@ class SkillContractTests(unittest.TestCase):
                        "grill-me → to-vision → implement-vision",
                        "chart-program → grill-ticket → implement-vision → land-ticket"):
             self.assertIn(phrase, readme)
-        self.assertLess(len(readme.split()), 250)
+        self.assertLess(len(readme.split()), 400)
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertIn("`AGENTS.md`", claude)
         self.assertLess(len(claude.split()), 40)
