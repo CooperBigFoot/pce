@@ -1,6 +1,6 @@
 # Global skill guidance restoration after compaction
 
-PCE's GitHub writing and test-first development standards should remain available after Prime Agent compacts a conversation. The owner observed an issue written after compaction that no longer followed the carefully authored writing guidance. Preserve the instructions themselves rather than relying on a conversation summary to remember them.
+PCE's GitHub writing and test-first development standards should remain available after Prime Agent compacts a conversation. The owner observed an issue written after compaction that no longer followed the carefully authored writing guidance. Keep task-triggered pointers in Prime Agent's persistent global instructions, with the detailed rules in dedicated skills, rather than relying on a conversation summary to remember them.
 
 The solution should work across the owner's Prime Agent projects after one global installation. Do not require edits to existing projects' `AGENTS.md` files, project-local hook configuration, repeated commands, or a new user-facing workflow step. Keep the six existing planning, discovery, implementation, and landing workflows intact.
 
@@ -16,68 +16,50 @@ Preserve the skill-authoring principles already used by PCE and reinforced by th
 
 ## Global installation without project edits
 
-Ship a small Prime Agent extension in this repository and extend the existing installer to install it globally alongside the supporting skills. Use the current linked-installation approach: skill directories point back to this checkout, and the extension is linked into Prime Agent's global extension discovery directory, `~/.prime/agent/extensions/`. The rules remain in the skill files, not duplicated in the extension or a generated prompt copy.
+Extend the existing installer to install the two supporting skills globally using the current linked-installation approach. The installer already links PCE skills into Prime Agent, Claude Code, and Codex; keep those installations working and make the supporting skills available wherever the existing workflow references them. Skill directories point back to this checkout, which must remain in place. Do not maintain generated or copied versions of the detailed guidance.
 
-The existing installer links skills into Prime Agent, Claude Code, and Codex. Keep those installations working and make the new supporting skills available wherever the PCE workflow references them. The compaction extension is Prime Agent-specific; do not build equivalent hooks or compatibility machinery for other harnesses. No project-by-project opt-in is required: installing this global extension enables restoration across the owner's Prime Agent projects. Each standard applies to its relevant activity, and project-specific testing rules remain in their existing repositories.
+For Prime Agent, install a small, clearly PCE-owned section in the global `~/.prime/agent/AGENTS.md` that tells the agent when to read each skill. Use the installed skill names and resolvable locations. The intended instructions are:
 
-Preserve unrelated user files, links, extensions, and settings. Keep installation safe to rerun and refuse conflicting foreign paths rather than replacing them. Explain the one-time installation, the need to retain the source checkout, and how existing sessions load installed or changed extensions through `/reload` or restart. Reading guidance at restoration time should use the current installed skill files, so changing guidance does not require maintaining a second copy or editing every project.
+> Before drafting or revising a GitHub issue or PR body, read and follow the GitHub-writing skill.
+>
+> Before implementing or reviewing code or tests, read and follow the test-first-development skill.
 
-This extends PCE's current six-skill-only distribution with supporting skills and one narrowly scoped extension. Update PCE's own documentation and repository instructions where needed to describe that agreed surface; do not edit downstream projects' `AGENTS.md` files. Do not add a compiled application, package manager, CI workflow, orchestration runtime, generated runtime state in the repository, or retired PCE machinery.
+Choose concise wording and concrete links consistent with the installed skill names. Keep the detailed rules in the skills, not in the global file. Do not add “after compaction” wording, repeat the entire workflow, or require reading both skills for unrelated tasks. Existing workflow references should continue to cover publication, delivery, and landing summaries where the current writing rules apply.
 
-## Restore once after compaction, not at every message
+Prime Agent loads the global instructions alongside discovered project instructions into its system prompt. Compaction retains that loaded prompt; it does not reread `AGENTS.md` from disk. The persistent task-triggered pointers are the agreed mechanism for retrieving the relevant skill bodies when needed. This design relies on the agent following those instructions; it does not promise automatic reinjection or permanent retention of full skill bodies. No compaction-triggered reload is required. Explain `/reload` or restart only for refreshing installed resources or global instructions changed during an existing session.
 
-Use Prime Agent's compaction and context extension events as a coordinated pair:
+No project-by-project installation, opt-in, configuration, or edits to downstream projects' `AGENTS.md` files are required. Project-specific instructions and testing guidance stay in their existing repositories. Do not modify other harnesses' global instruction files; the global instruction integration here is for Prime Agent.
 
-1. A successful compaction marks restoration as pending for that session.
-2. At the next context event, before the model resumes work, load the full bodies of the two supporting skills and restore them to its context.
-3. Clear the pending state once restoration succeeds. Later context events add nothing until another successful compaction arms restoration again.
+Preserve unrelated user content in the global `AGENTS.md`, as well as unrelated files, links, extensions, and settings. Create the global file when absent. When present, add or update only PCE's clearly delimited section; do not replace the whole file, take ownership of unrelated instructions, or accumulate duplicate sections on rerun. Handle conflicting or ambiguous ownership safely rather than guessing or silently overwriting content. Preserve the existing installer's protection against replacing foreign skill paths. Validate all installer mutations with an isolated temporary `HOME`, never the owner's real global instructions as a test fixture.
 
-The context callback may be called before every model request, but that must not cause injection on every request, user message, or tool step. Restore both short guidance skills rather than constructing an elaborate active-skill detector. Do not load the entire PCE workflow or all installed skills.
+Update PCE's own documentation and repository instructions where needed to describe the additional supporting skills and the global instruction section. Keep installation and updates simple. Do not add an extension, compaction/context hooks, pending-restoration state, session tracking, a compiled application, package manager, CI workflow, orchestration runtime, generated runtime state in the repository, or retired PCE machinery.
 
-Load the actual Markdown instructions, with their source identity and reference base preserved. In this harness a Markdown skill invocation reads its body into context; a literal `/skill:name` string inside a custom message is not sufficient evidence of invocation. Do not ask the agent merely to remember to retrieve a pointer, rely on a summary preserving the rules, or maintain a separately summarized version of them.
+## Read the harness documentation directly
 
-The restored guidance must remain available for subsequent work, not only the first request after compaction. Prime Agent's context hook modifies a request copy non-destructively, so implementation must verify retention rather than assume a one-off request mutation persists in the session. Meet both constraints: effective restoration and no reinjection on ordinary subsequent requests. Prevent stale or duplicate restoration blocks from accumulating across repeated compactions.
-
-Restoration must not start an extra model turn, interrupt or restart a workflow, or change publication and merge authority. Cancelled, skipped, or failed compaction must not be treated as a successful restoration boundary. Do not silently mark restoration complete if a required skill cannot be loaded; make the failure visible and retain a recoverable state rather than claim success.
-
-Keep restoration state isolated to the correct session. Support daemon-managed Prime Agent sessions, including parents, children, and grandchildren. Verify restoration in each supported delegate path rather than assume a parent's extension closure is safely inherited. Loading or restarting the extension must not create periodic or every-message injection. Preserve pending restoration across a relevant reload or resume boundary so the next model request cannot silently skip it.
-
-Inline SDK delegation is out of scope because of the verified v0.9.8 session-isolation defect: inline children inherit the parent context callback and share extension runtime bindings. Do not fix the harness, disable delegation, or build a workaround for that path. Document this limitation clearly. Daemon-managed delegation uses separate runtimes, but the absence of the inline defect is not proof that restoration works.
-
-## Harness evidence and implementation boundary
-
-The owner's installed stable Prime Agent is the TypeScript/Bun `v0.9.8` release. The official stable release manifest was checked during discovery and matched that installation. Its extension API supports `session_compact` after successful compaction and `context` before model calls. Its automatically loaded `AGENTS.md` contents stay in the system prompt, but compaction does not reread those files from disk. Full skill bodies read into conversation history can be summarized away.
-
-### Mandatory documentation read before implementation
-
-Before designing or implementing the extension, the implementing agent must read the installed Prime Agent documentation directly at:
+Before implementing the global instruction integration, the implementing agent must read the relevant installed Prime Agent documentation directly at:
 
 ```text
 ~/.local/share/prime-agent/releases/0.9.8-darwin-arm64-078c9abd519978ef27f6404367e37a2981267db47f1b95b60940ea7fe6ead8b9/docs/
 ```
 
-Read `extensions.md`, `compaction.md`, and `skills.md` in full, and follow applicable references for message/session persistence, extension loading, and reload behavior. Reviewers must independently consult the relevant documented contracts when verifying the extension. This is a required investigation step: this vision's API descriptions and the discovery agent's summary are not substitutes for reading those documents. Verify assumptions against the documented contract and inspect the released source where the documentation leaves an important question unanswered. If the installed release has changed, locate and read the documentation for the runtime actually being used; do not assume the older summary remains correct.
+Read `skills.md` and `compaction.md`, and the shipped README or relevant referenced documentation covering global/project `AGENTS.md` discovery, system-prompt inclusion, installed resource paths, and `/reload`. Reviewers must independently consult the relevant contracts. This is a required investigation step: this vision and prior agents' summaries are not substitutes for reading the documentation. Inspect the released source where the documentation leaves an important question unanswered. If the installed release has changed, read the documentation for the runtime actually used rather than treating the older summary as authoritative.
 
-Use the documentation and source for the actual installed release, not an old working checkout or an unrelated development architecture:
+Useful released references are [skills.md](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/docs/skills.md), [compaction.md](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/docs/compaction.md), and the [shipped README](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/README.md). The implementation does not depend on the extension API and does not require an upstream harness fix or a compatibility project.
 
-- [Official extension documentation](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/docs/extensions.md), including global locations, compaction events, and context events.
-- [Official skill documentation](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/docs/skills.md).
-- [Released session implementation](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/src/core/agent-session.ts), including Markdown skill expansion and post-compaction message reconstruction.
+## Superseded hook design
 
-At discovery time upstream `main` had moved to a Rust implementation without the released TypeScript extension API. Do not turn that development change into a compatibility project, require a harness migration, or ask the owner to choose internal hook mechanics. Verify the supported API against the runtime used for implementation and validation. If that runtime no longer supports the necessary behavior, report the concrete blocker instead of shipping an inert extension or silently weakening restoration.
+This revision replaces the earlier extension-based design and its daemon/inline scope distinction. Implementation investigation reported that request-only context injection was not retained, while persistent delivery started an extra turn despite `triggerTurn: false`; inline delegation also had session-isolation problems. These explain why the owner chose persistent global instructions instead. Do not resume hook development, reproduce those probes as a prerequisite, repair Prime Agent, or carry the old restoration-state and delegate-hook acceptance requirements into this simpler solution. Preserve any existing investigation evidence without treating it as product machinery.
 
 ## Evidence of completion
 
-Demonstrate that one global installation makes the guidance available across projects without editing their instructions. Verify sibling skill references through installed links and that changes to the source guidance are read at the next restoration. Test installer success, reruns, conflicts, and preservation with an isolated temporary `HOME`.
+Demonstrate the agreed result with focused, proportional checks:
 
-Verify the extension behavior with the installed harness's actual contract, using focused, proportional tests and an integration check where needed:
+- The writing and TDD guidance each have one authoritative supporting skill, preserving their existing substance and concise, task-specific descriptions. Existing workflow references resolve both from the repository and through installed global skill links.
+- One installer run makes the supporting skills available and creates or updates exactly one PCE-owned section in Prime Agent's global `AGENTS.md`. Repeated runs do not duplicate it. Unrelated content and user state remain unchanged; conflicts do not cause destructive replacement.
+- An isolated-home check verifies that the global guidance pointers and a fixture project's local instructions can both be loaded into Prime Agent's system prompt. Establish from the actual harness contract that compaction retains this prompt rather than relying on a conversation summary. Do not impose a new live-model compaction benchmark or extension test matrix.
+- The global section uses task triggers, not special compaction instructions. There are no extension files, hook registrations, automatic reloads, or edits to downstream projects needed for this feature.
+- Documentation explains installation, source-checkout retention, and when an existing session needs `/reload` or restart. It distinguishes persistent pointers from on-demand skill bodies without claiming automatic skill invocation.
 
-- A normal context call before compaction adds no restoration block.
-- Successful manual and automatic compaction restore both complete skill bodies before the next model request, including automatic continuation without a new user prompt.
-- Later model requests retain the restored guidance without another injection; another successful compaction permits exactly one fresh restoration without accumulating duplicate blocks.
-- Failed or cancelled compaction does not arm restoration; missing guidance does not silently consume a pending restoration.
-- Prove the complete restoration behavior in daemon-managed parents, children, and grandchildren, including repeated compaction and relevant reload/resume boundaries, without cross-session state leakage or extra agent turns. If a separate blocker affects these supported paths, report its specific evidence rather than weaken the requirements.
+Run `python3 -m unittest discover -s tests -v` and test installer behavior with an isolated temporary `HOME`. Use meaningful behavioral checks rather than only literal string inventories, but do not introduce a package-managed application or testing bureaucracy. Keep independent review and all existing workflow safety and authority boundaries.
 
-Use tests that prove these behaviors, not only literal string inventories. Preserve the repository's standard-library validation command, `python3 -m unittest discover -s tests -v`, and keep any additional extension validation lean and isolated rather than introducing a package-managed application. Check representative GitHub text and test-first behavior against the preserved guidance without introducing mandatory output templates.
-
-This vision authorizes its described future implementation only when explicitly handed to `implement-vision`. Publishing it does not install the extension, edit the workflow skills, update other projects, or start implementation.
+This vision authorizes its described future implementation only when explicitly handed to `implement-vision`. Publishing this revision does not install skills, modify the owner's global instructions, edit workflow skills, or start implementation.
