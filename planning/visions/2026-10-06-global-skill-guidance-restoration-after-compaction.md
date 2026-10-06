@@ -40,7 +40,9 @@ The restored guidance must remain available for subsequent work, not only the fi
 
 Restoration must not start an extra model turn, interrupt or restart a workflow, or change publication and merge authority. Cancelled, skipped, or failed compaction must not be treated as a successful restoration boundary. Do not silently mark restoration complete if a required skill cannot be loaded; make the failure visible and retain a recoverable state rather than claim success.
 
-Keep restoration state isolated to the correct session. Cover delegated agents as well as the parent, and verify the relevant Prime Agent delegate paths rather than assume a parent's extension closure is safely inherited. Loading or restarting the extension must not create periodic or every-message injection. Preserve pending restoration across a relevant reload or resume boundary so the next model request cannot silently skip it.
+Keep restoration state isolated to the correct session. Support daemon-managed Prime Agent sessions, including parents, children, and grandchildren. Verify restoration in each supported delegate path rather than assume a parent's extension closure is safely inherited. Loading or restarting the extension must not create periodic or every-message injection. Preserve pending restoration across a relevant reload or resume boundary so the next model request cannot silently skip it.
+
+Inline SDK delegation is out of scope because of the verified v0.9.8 session-isolation defect: inline children inherit the parent context callback and share extension runtime bindings. Do not fix the harness, disable delegation, or build a workaround for that path. Document this limitation clearly. Daemon-managed delegation uses separate runtimes, but the absence of the inline defect is not proof that restoration works.
 
 ## Harness evidence and implementation boundary
 
@@ -74,7 +76,7 @@ Verify the extension behavior with the installed harness's actual contract, usin
 - Successful manual and automatic compaction restore both complete skill bodies before the next model request, including automatic continuation without a new user prompt.
 - Later model requests retain the restored guidance without another injection; another successful compaction permits exactly one fresh restoration without accumulating duplicate blocks.
 - Failed or cancelled compaction does not arm restoration; missing guidance does not silently consume a pending restoration.
-- Session reload/resume and delegated execution preserve the required behavior without cross-session state leakage or extra agent turns.
+- Prove the complete restoration behavior in daemon-managed parents, children, and grandchildren, including repeated compaction and relevant reload/resume boundaries, without cross-session state leakage or extra agent turns. If a separate blocker affects these supported paths, report its specific evidence rather than weaken the requirements.
 
 Use tests that prove these behaviors, not only literal string inventories. Preserve the repository's standard-library validation command, `python3 -m unittest discover -s tests -v`, and keep any additional extension validation lean and isolated rather than introducing a package-managed application. Check representative GitHub text and test-first behavior against the preserved guidance without introducing mandatory output templates.
 
