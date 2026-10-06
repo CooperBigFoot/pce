@@ -7,7 +7,7 @@ description: Verify and land one delivered Effort and update its Program Map. Us
 
 `$ARGUMENTS` must identify exactly one Effort issue by number or URL. Ask only for missing identity. Never assume one active Program.
 
-Before authoring GitHub issues, PR bodies, or delivery and landing summaries, load and follow only the [GitHub writing rules](../to-vision/publication.md#github-writing), not the publication procedure.
+Before authoring GitHub issues, PR bodies, or delivery and landing summaries, load and follow only the [GitHub writing skill](../github-writing/SKILL.md), not the publication procedure.
 
 ## Reconstruct evidence
 
