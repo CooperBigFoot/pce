@@ -501,6 +501,22 @@ class SkillContractTests(unittest.TestCase):
         ):
             self.assertIn(phrase, text)
 
+    def test_publication_requires_safe_local_handoff(self) -> None:
+        text = self.read_reference("to-vision/publication.md")
+        for phrase in (
+            "Before cleanup or handoff",
+            "canonical vision path as a regular file",
+            "content exactly matching the verified fetched target copy",
+            "preserving unrelated working-tree changes, staged changes, and branch state",
+            "preserve the publication checkout and report the blocker",
+            "published, but local handoff blocked",
+            "not implementation-ready from that checkout",
+            "report the implementation checkout, vision path",
+        ):
+            self.assertIn(phrase, text)
+        self.assertLess(text.index("Before cleanup or handoff"),
+                        text.index("Only after all applicable checks pass"))
+
     def test_draft_only_has_no_publication_and_preserves_same_path(self) -> None:
         text = self.read_skill("to-vision")
         draft = text.split("## Draft-only output", 1)[1].split("## Publish and verify", 1)[0]
