@@ -1,6 +1,6 @@
 # PCE
 
-PCE provides six workflow skills for turning ideas into delivered work, plus two supporting guidance skills.
+PCE provides five workflow skills for turning ideas into delivered work, plus two supporting guidance skills.
 
 ## Install
 
@@ -10,10 +10,12 @@ With Bash and Python 3 available, run from this checkout:
 ./install.sh
 ```
 
-All eight skills are linked into Claude Code (`~/.claude/skills`), Codex
+All seven skills are linked into Claude Code (`~/.claude/skills`), Codex
 (`~/.codex/skills`), and Prime Agent (`~/.prime/agent/skills`). Keep this checkout
 in place: the links load its files, not copied guidance. Pull updates here and
-rerun the installer. It replaces checkout-owned links and refuses foreign paths.
+rerun the installer. It replaces checkout-owned links and refuses foreign paths for supported skills.
+It removes checkout-owned `land-ticket` links, including dangling links, but
+preserves foreign links and user-owned files or directories at that retired path.
 
 For Prime Agent only, installation creates or updates one section delimited by
 `<!-- pce:guidance:start -->` and `<!-- pce:guidance:end -->` in
@@ -38,16 +40,21 @@ installed resources, not after each compaction.
 - [implement-vision](skills/implement-vision/SKILL.md): Implement a vision with delegation and independent review.
 - [chart-program](skills/chart-program/SKILL.md): Chart a large outcome as a Program and Effort tickets.
 - [grill-ticket](skills/grill-ticket/SKILL.md): Discover one Effort and publish its vision.
-- [land-ticket](skills/land-ticket/SKILL.md): Verify delivery, land an Effort, and update its Program.
 
 Supporting guidance (loading it starts no workflow):
 
-- [github-writing](skills/github-writing/SKILL.md): Write clear GitHub bodies and publication, delivery, and landing summaries.
+- [github-writing](skills/github-writing/SKILL.md): Write clear GitHub bodies and publication and completion summaries.
 - [test-first-development](skills/test-first-development/SKILL.md): Implement and review code and tests with small, meaningful test-first increments.
 
 ## Workflows
 
 ```text
 grill-me → to-vision → implement-vision
-chart-program → grill-ticket → implement-vision → land-ticket
+chart-program → grill-ticket → implement-vision
 ```
+
+Programs link meaningful Efforts; tickets can be short starting points for later
+discovery. A ticket-linked vision uses the same implementation process as a
+standalone vision. Publication leaves its Effort open. Implementation closes it
+only after the whole outcome is delivered and verified on the target branch;
+partial PRs do not imply completion. Programs are not automatically closed.

@@ -32,6 +32,7 @@ Write enough context that the fresh agent can implement without the prior conver
 - scope boundaries and explicit exclusions;
 - constraints and settled decisions;
 - important repository facts learned during the grill;
+- an ordinary link to the associated Effort, when there is one;
 - material risks or genuine uncertainty that remains.
 
 Translate intent into useful technical context, but leave reversible mechanisms to the implementing agent. Do not invent unresolved questions to fill a section. Do not reopen decisions settled during the grill.

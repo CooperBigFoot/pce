@@ -1,57 +1,26 @@
 ---
 name: chart-program
-description: Chart a large outcome into a GitHub Program and Efforts, or re-survey an explicit Program. Use for /chart-program.
+description: Chart a large outcome into a GitHub Program and Efforts, or revisit an explicit Program.
 ---
 
 # Chart Program
 
-Turn a large outcome into a concise GitHub Map. `$ARGUMENTS` must contain either the idea for a new Program or the issue number or URL of one Program to re-survey. Ask for that missing identity only when the conversation does not supply it. Never infer a repository-wide current Program. Multiple open Programs are valid.
+Use the supplied idea or explicit Program issue. Ask for missing identity only when the conversation cannot establish it; never infer a repository-wide current Program.
 
-GitHub issues and repository visions are the only discovery records. PCE's canonical `grill-me` interview is the only discovery mechanism.
+Investigate relevant repository files, GitHub issues and comments, linked guides, visions, and PRs. Resolve repository identity and permissions before mutation. For an existing Program, reconstruct its current destination and linked work without treating old records as current authority.
 
-## Investigate first
+Load the canonical [grill-me](../grill-me/SKILL.md) interview and conduct it breadth-first: destination, boundaries, meaningful Efforts, real blockers, and success. Preserve settled decisions, reconcile new evidence, and ask genuine user choices. Do not design each Effort in depth, invent requirements, or populate a speculative backlog. An Effort is a meaningful piece of work to explore, not necessarily a fully specified solution.
 
-From the repository root, use repository files and `gh` to identify the repository and authenticated user. Read relevant code, documentation, issues, labels, comments, linked visions, PRs, delivery records, and existing Program Maps. For re-survey, validate the explicit issue as an open or closed Program and reconstruct all linked Efforts, dependencies, and landed outcomes. Do not ask for facts that this evidence or established practice can answer.
+Before GitHub mutation, present a concise intent-level proposal covering the destination, proposed Efforts, real dependencies, and any scope changes or exclusions that matter. The interview confirmation approves chart publication when it includes this proposal; otherwise obtain that approval. Do not require generated bodies or a separate charting-summary artifact.
 
-Load and follow PCE's canonical `grill-me` skill. It owns the interview rounds, question format, investigation policy, and confirmation gate; do not restate or replace its loop here. Run it at Program altitude and breadth-first across destination, boundaries, candidate Efforts, genuine delivery dependencies, success, and exclusions. Resolve material questions about the proposed outcome. Concrete risks belong with the relevant issue or vision when useful. Future work may emerge during the interview, but do not add a speculative backlog or mandatory uncertainty inventory. Do not invent work to populate a template. An Effort is an ambitious, independently meaningful outcome suitable for one contained vision, not an implementation task or technical layer. Do not deeply design an Effort. On re-survey, preserve settled outcomes unless evidence conflicts and grill only additions, changed boundaries, and conflicts.
+If the outcome is one coherent Effort, continue the interview at standalone-vision depth instead of creating unnecessary issues. After confirmation, use [to-vision](../to-vision/SKILL.md), including its authoring checks and shared publication procedure. An explicit draft-only request permits only the local draft. Consume that workflow's result without repeating publication or starting implementation.
 
-## Approval gate
+## Publish useful context
 
-Before any GitHub mutation, present one intent-level proposal:
+Before writing GitHub text, follow [github-writing](../github-writing/SKILL.md). A Program states the destination and links its Efforts. Include useful shared understanding, but link an existing guide, research record, or vision rather than duplicating it. Efforts can range from one-line reminders to decisions already reached. For example, an existing provider guide can supply a simple list of porting Efforts without copying its steps into each ticket.
 
-- **Destination:** a brief statement of the outcome.
-- **Effort tickets:** title and one-sentence outcome question for each.
-- **Dependencies:** one line per genuine blocker.
-- **Exclusions:** short bullets when useful.
-- **Re-survey changes (explicit Program input only):** only substantive additions, removals, conflicts, or boundary changes.
+Use ordinary issue links and open/closed state. Link each Effort to its Program for context; existing Program/Effort labels may help navigation but are not prerequisites. Record real blockers in plain language. Create the Program and Efforts, then add their actual links; on a requested revisit, update affected records without duplicating unchanged work. Preserve unrelated content and historical evidence, and do not bulk-migrate old records.
 
-Do not show generated bodies, identifiers, API calls, unchanged inventories, or placeholder mechanics unless requested. The canonical grill confirmation is the publication approval for this explicitly requested charting workflow only when the summary contains this complete proposal. Otherwise ask for concise approval. Do not mutate before approval.
+Record material changes to understanding as concise issue comments, often bullets: a concrete finding, a decision and reason, an unresolved question, or a consequence for the work. Do not post comments merely to announce that plans can change. Keep useful context once, linked where it already exists; the user need not synchronize a parallel document.
 
-If the survey finds one coherent Effort, do not create a Program or Effort issue. Continue the same explicitly requested workflow by running canonical `grill-me` at standalone-vision depth. After its confirmed summary, use the `to-vision` creation mechanism with a descriptive derived name and author the standalone vision. Load and follow the `to-vision` authoring checks. For publication or resumed publication, load and follow the [vision publication procedure](../to-vision/publication.md), the `to-vision` publication contract, once to publish and verify the merged target-branch copy. For draft-only, return the local draft result without loading or executing publication. Consume its verified result; do not repeat publication, linkage, or final verification. For draft-only or partial failure, report that shared result and its precise state without calling the vision ready. Only a successful verified publication result permits the exact `implement-vision` handoff with its path. Do not start implementation.
-
-Before authoring GitHub issues, PR bodies, or delivery and landing summaries, load and follow only the [GitHub writing skill](../github-writing/SKILL.md), not the publication procedure.
-
-## Publish deterministically
-
-Use this predicate everywhere Frontier or blocker state is computed: an Effort is `landed` only when all four facts are verified: the Effort is closed; it has exactly one authoritative `<!-- pce:delivery -->` comment whose claims match merged PRs and target-branch evidence; it has exactly one `<!-- pce:landed -->` outcome comment linking its Program; and its canonical URL appears exactly once in that Map's landed-outcomes index and nowhere in open Efforts or Frontier. Closed alone never means landed. Cancelled, malformed, prematurely closed, duplicate-record, and conflicting-record Efforts fail this predicate.
-
-Use ordinary `gh` issue commands and preserve unrelated issue content. Use these minimum cold-session contracts:
-
-- Program issues have the `pce:program` label and `<!-- pce:program -->` marker.
-- Effort issues have the `pce:effort` label and `<!-- pce:effort -->` marker.
-- Each Effort body contains exactly one `Program: <canonical GitHub issue URL>` line.
-- Each Effort body contains exactly one `Depends on: <none or comma-separated canonical Effort URLs>` line. Dependencies may refer only to Efforts in that Program and must not form a cycle.
-- Each Effort body initially contains exactly one `Vision: pending` line.
-- The Map links every Effort by canonical issue URL and separates open Efforts, Frontier, landed one-line outcomes, and exclusions. Frontier contains only open, structurally valid Efforts whose listed dependencies satisfy the `landed` predicate.
-
-## Pre-mutation state gate
-
-Before any re-survey mutation, reload the complete Program and validate labels, markers, unique Program/Vision/dependency declarations, exactly one Map membership for every Effort across open, Frontier, and landed sections, dependency membership and acyclicity, delivery and landing marker uniqueness, delivery claims, and the `landed` predicate for every blocker and indexed outcome. Stop without mutation on missing or duplicate membership, duplicate markers, conflicting records, invalid claims, foreign-Program dependencies, cycles, or any state that admits more than one interpretation. Do not use mutation to discover or repair ambiguity. For a new Program, validate the approved proposed membership and dependency graph before creating its first issue.
-
-Create labels if absent without changing unrelated labels. For a new chart, create the Program first, then Efforts, then replace the approved Map placeholders with their canonical URLs. For re-survey, edit the explicit Map and affected open tickets in place; never create duplicates for unchanged Efforts. Preserve closed outcomes and auditable comments. Do not create speculative tickets.
-
-After mutation, reload every changed issue from GitHub. Validate markers, labels, unique Program and dependency lines, exactly one Map membership per Effort, links, dependency acyclicity, authoritative delivery and landing record uniqueness, Map completeness, the `landed` predicate for every indexed outcome and blocker, and computed Frontier. Stop on duplicate or conflicting records rather than classifying the issue as landed. Report exact partial failures and the state that exists; never claim an unverified mutation. Finish with the Program URL, created or changed Effort URLs, Frontier, and no implementation start.
-
-## Legacy Program content
-
-Legacy Fog text is not a prerequisite for charting, re-survey, landing, or proposing Program completion. Preserve unrelated issue content, including legacy text; do not silently delete it or convert it into tickets. Do not bulk-edit existing Programs. Only an explicitly requested `chart-program` re-survey can propose changes to agreed Program scope, subject to its approval and state gates.
+Read back changed issues to verify the approved outcome and links. Report their URLs and any partial failure honestly. Do not begin implementation. Completing an Effort does not authorize reorganizing remaining tickets or closing the Program; revisit the backlog only when the user asks.
