@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from itertools import product
 import re
 from pathlib import Path
 import subprocess
@@ -15,7 +16,6 @@ SKILLS = (
     "implement-vision",
     "chart-program",
     "grill-ticket",
-    "land-ticket",
     "github-writing",
     "test-first-development",
 )
@@ -229,9 +229,13 @@ class InstallTests(unittest.TestCase):
                 agents = home / ".prime/agent/AGENTS.md"
                 agents.parent.mkdir(parents=True)
                 agents.write_bytes(content)
+                retired = home / ".prime/agent/skills/land-ticket"
+                retired.parent.mkdir(parents=True)
+                retired.symlink_to(ROOT / "skills/land-ticket")
                 result = self.run_installer(home)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("ERROR: conflict:", result.stderr)
+                self.assertTrue(retired.is_symlink())
                 self.assertEqual(agents.read_bytes(), content)
                 self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
 
@@ -273,6 +277,35 @@ class InstallTests(unittest.TestCase):
                 self.assertIn("ERROR: conflict:", result.stderr)
                 self.assertEqual(alternative.read_bytes(), b"user global instructions")
                 self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
+
+    def test_removes_only_checkout_owned_retired_skill_links(self) -> None:
+        for kind, environment_root in product(
+            ("owned", "relative-owned", "foreign", "directory", "file"), ENVIRONMENT_ROOTS
+        ):
+            with self.subTest(kind=kind, root=environment_root), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                retired = home / environment_root / "land-ticket"
+                retired.parent.mkdir(parents=True)
+                target = ROOT / "skills/land-ticket" if "owned" in kind else home / "foreign"
+                if kind == "directory":
+                    retired.mkdir()
+                    (retired / "SKILL.md").write_text("user skill")
+                elif kind == "file":
+                    retired.write_text("user skill")
+                else:
+                    retired.symlink_to(os.path.relpath(target, retired.parent.resolve())
+                                       if kind == "relative-owned" else target)
+                result = self.run_installer(home)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_matrix(home)
+                if "owned" in kind:
+                    self.assertFalse(os.path.lexists(retired))
+                elif kind == "directory":
+                    self.assertEqual((retired / "SKILL.md").read_text(), "user skill")
+                elif kind == "file":
+                    self.assertEqual(retired.read_text(), "user skill")
+                else:
+                    self.assertEqual(os.readlink(retired), str(target))
 
     def test_replaces_checkout_owned_link(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
