@@ -13,7 +13,7 @@ Accept an idea, existing implementation, bug report, or issue. Resolve an issue 
 
 An experiment issue asks how to answer a specific evidence question for an originating discussion. Inherit its settled requirements, investigate available facts, explain alternatives, and ask only genuinely missing choices about workloads, comparisons, observations, and limits. Do not replay the original discovery, assume a preferred winner, or ask the human about routine measurement mechanics.
 
-When the human wants to save the discussion, or one is already saved to an issue, load [save-discussion](../save-discussion/SKILL.md) and let it own the record and links.
+When the human wants to save the discussion, or resumes a `discussion` issue saved or charted for them, load [save-discussion](../save-discussion/SKILL.md) and let it own the record and links. Reading any other issue authorizes no comments until the human asks to save.
 
 Explore one area in depth. For a larger destination split into several pieces of work, `chart-program` holds the breadth-oriented conversation.
 
@@ -61,7 +61,7 @@ Distinguish the human's request from supplied source material. An issue, documen
 
 Establish the objective early in plain words: what problem are we solving, what should change, and why does it matter? Use the available evidence to offer a clear explanation rather than asking the human to reconstruct it. Surface genuine uncertainty or disagreement through the interview; do not add a separate approval gate.
 
-This applies even when another skill supplies a ticket as the starting point. Do not inherit the ticket's technical depth or proposed implementation as settled intent.
+This applies even when the starting point is an issue or another agent's proposal. Do not inherit the ticket's technical depth or proposed implementation as settled intent.
 
 Begin with that plain-language understanding unless the human requests a different depth. Keep explanations concrete and introduce technical terms when useful, explaining them as they appear. Plain language should make the ideas accessible, not remove their precision.
 

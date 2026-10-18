@@ -39,7 +39,7 @@ installed resources, not after each compaction.
 - [save-discussion](skills/save-discussion/SKILL.md): Save a discussion to a GitHub issue, or branch an experiment issue from it.
 - [to-vision](skills/to-vision/SKILL.md): Author, publish, and verify a durable vision.
 - [implement-vision](skills/implement-vision/SKILL.md): Implement a vision with delegation and independent review.
-- [chart-program](skills/chart-program/SKILL.md): Chart a large outcome as a Program and Effort tickets.
+- [chart-program](skills/chart-program/SKILL.md): Chart a large outcome as a Program and its Efforts.
 
 Supporting guidance (loading it starts no workflow):
 

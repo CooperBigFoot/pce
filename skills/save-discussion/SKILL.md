@@ -9,7 +9,7 @@ Preserve useful understanding so a later `grill-me <issue>` can continue without
 
 ## Choose the record
 
-Append to the issue already associated with the discussion. Otherwise create a normal GitHub issue in the verified current repository, or the repository the human names, with the `discussion` label; create the label if the repository lacks it and permissions allow. Use ordinary open/closed state, not status labels. These are GitHub issues, not GitHub Discussions. Do not migrate historical issues or labels.
+Append to the issue already associated with the discussion. Otherwise create a normal GitHub issue in the verified current repository, or the repository the human names, with the `discussion` label; create the label if the repository lacks it and permissions allow. If another user is assigned or owns the discussion, resolve that before writing rather than taking over. An explicit draft-only request permits no GitHub mutation. Use ordinary open/closed state, not status labels. These are GitHub issues, not GitHub Discussions. Do not migrate historical issues or labels.
 
 Program membership adds shared context, not another protocol. Link a related Program when one exists; a standalone discussion needs none. Put Program-level findings on the Program and issue-specific findings on the issue. Link shared evidence instead of duplicating it. Respect repository permissions and privacy, especially when linking across repositories.
 
@@ -23,7 +23,7 @@ Once saving is authorized, keep recording substantive new context on the same is
 
 ## Branch an experiment
 
-When missing evidence blocks a decision and the human authorizes an experiment, record the evidence need on the originating discussion and create a linked experiment issue with the `discussion` label in the repository where the work belongs. Give it enough context that its agent need not ask the human to reconstruct the reasoning:
+When missing evidence blocks a decision and the human authorizes an experiment, record the evidence need on the originating discussion, create a linked experiment issue, and link it back from the originating discussion. Create the experiment issue with the `discussion` label in the repository where the work belongs. Give it enough context that its agent need not ask the human to reconstruct the reasoning:
 
 - the decision requiring evidence and why it matters;
 - agreed requirements, relevant findings, and uncertainties;
