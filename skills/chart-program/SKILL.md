@@ -13,7 +13,7 @@ Load the canonical [grill-me](../grill-me/SKILL.md) interview and conduct it bre
 
 Before GitHub mutation, present a concise intent-level proposal covering the destination, proposed Efforts, real dependencies, and any scope changes or exclusions that matter. The interview confirmation approves chart publication when it includes this proposal; otherwise obtain that approval. Do not require generated bodies or a separate charting-summary artifact.
 
-If the outcome is one coherent Effort, continue the interview at standalone-vision depth instead of creating unnecessary issues. After confirmation, use [to-vision](../to-vision/SKILL.md), including its authoring checks and shared publication procedure. An explicit draft-only request permits only the local draft. Consume that workflow's result without repeating publication or starting implementation.
+If the outcome is one coherent Effort, continue the interview at standalone-vision depth instead of creating unnecessary issues. Confirmation does not publish. Only when the human explicitly requests `to-vision`, use [to-vision](../to-vision/SKILL.md), including its authoring checks and shared publication procedure. An explicit draft-only request permits only the local draft. Consume that workflow's result without repeating publication or starting implementation.
 
 ## Publish useful context
 

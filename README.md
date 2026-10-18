@@ -62,6 +62,6 @@ When a decision needs evidence, a linked experiment issue carries the question. 
 vision authorizes bounded experimental work, and implementation returns the findings
 to the originating discussion, which stays open.
 
-Publication leaves its issue open. Implementation closes only the issue a vision
+Publication leaves its issue open. Implementation closes only the issue a vision explicitly
 designates to complete, after the whole outcome is delivered and verified on the
 target branch; partial PRs do not imply completion. Programs are not automatically closed.

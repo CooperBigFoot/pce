@@ -32,12 +32,12 @@ Write enough context that the fresh agent can implement without the prior conver
 - scope boundaries and explicit exclusions;
 - constraints and settled decisions;
 - important repository facts learned during the grill;
-- an ordinary link to the associated discussion issue, when there is one, and whether this vision is designated to complete it;
+- an ordinary link to the associated discussion issue, when there is one, and an explicit statement of whether this vision completes it;
 - material risks or genuine uncertainty that remains.
 
 Reuse and link existing evidence and discussion history rather than duplicating it. The designated outcome can itself be research or design; completing an issue does not imply production software.
 
-An experiment vision authorizes bounded experimental work, not adoption into production. It carries the originating discussion's evidence question and links the discussion where findings must return; it completes only its own experiment issue. Keep the experiment proportionate and use project-native tools, not a mandatory platform, benchmark framework, or exhaustive tournament. Where relevant, separate correctness from performance, account for preparation and deferred work, compare equivalent outputs, and name the data, settings, uncertainty, and measurement limits.
+An experiment vision authorizes bounded experimental work, not adoption into production. It carries the originating discussion's evidence question and links the discussion where findings must return; it explicitly designates its own experiment issue for completion, never the originating discussion. Keep the experiment proportionate and use project-native tools, not a mandatory platform, benchmark framework, or exhaustive tournament. Where relevant, separate correctness from performance, account for preparation and deferred work, compare equivalent outputs, and name the data, settings, uncertainty, and measurement limits.
 
 Translate intent into useful technical context, but leave reversible mechanisms to the implementing agent. Do not invent unresolved questions to fill a section. Do not reopen decisions settled during the grill.
 
