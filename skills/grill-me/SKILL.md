@@ -61,7 +61,7 @@ Distinguish the human's request from supplied source material. An issue, documen
 
 Establish the objective early in plain words: what problem are we solving, what should change, and why does it matter? Use the available evidence to offer a clear explanation rather than asking the human to reconstruct it. Surface genuine uncertainty or disagreement through the interview; do not add a separate approval gate.
 
-This applies even when the starting point is an issue or another agent's proposal. Do not inherit the ticket's technical depth or proposed implementation as settled intent.
+This applies even when the starting point is an issue or another agent's proposal. Do not inherit the issue's technical depth or proposed implementation as settled intent.
 
 Begin with that plain-language understanding unless the human requests a different depth. Keep explanations concrete and introduce technical terms when useful, explaining them as they appear. Plain language should make the ideas accessible, not remove their precision.
 
