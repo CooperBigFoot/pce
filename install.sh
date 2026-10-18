@@ -20,7 +20,7 @@ home = Path(home_value).expanduser().resolve(strict=False)
 
 skills = (
     "grill-me", "to-vision", "implement-vision",
-    "chart-program", "grill-ticket",
+    "chart-program", "save-discussion",
     "github-writing", "test-first-development",
 )
 skill_roots = (
@@ -129,10 +129,11 @@ else:
 
 # Retire only links owned by this checkout, after all conflict checks pass.
 for root in skill_roots:
-    retired = root / "land-ticket"
-    if owned_link(retired):
-        retired.unlink()
-        print(f"Removed retired skill link {retired}")
+    for name in ("land-ticket", "grill-ticket"):
+        retired = root / name
+        if owned_link(retired):
+            retired.unlink()
+            print(f"Removed retired skill link {retired}")
 
 # Install only the exact supported matrix.
 for destination, source in matrix.items():

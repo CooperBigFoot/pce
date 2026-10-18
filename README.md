@@ -1,6 +1,6 @@
 # PCE
 
-PCE provides five workflow skills for turning ideas into delivered work, plus two supporting guidance skills.
+PCE provides workflow skills for turning ideas into delivered work, plus supporting guidance skills.
 
 ## Install
 
@@ -10,12 +10,12 @@ With Bash and Python 3 available, run from this checkout:
 ./install.sh
 ```
 
-All seven skills are linked into Claude Code (`~/.claude/skills`), Codex
+All skills listed below are linked into Claude Code (`~/.claude/skills`), Codex
 (`~/.codex/skills`), and Prime Agent (`~/.prime/agent/skills`). Keep this checkout
 in place: the links load its files, not copied guidance. Pull updates here and
 rerun the installer. It replaces checkout-owned links and refuses foreign paths for supported skills.
-It removes checkout-owned `land-ticket` links, including dangling links, but
-preserves foreign links and user-owned files or directories at that retired path.
+It removes checkout-owned `land-ticket` and `grill-ticket` links, including dangling
+links, but preserves foreign links and user-owned files or directories at those retired paths.
 
 For Prime Agent only, installation creates or updates one section delimited by
 `<!-- pce:guidance:start -->` and `<!-- pce:guidance:end -->` in
@@ -35,11 +35,11 @@ installed resources, not after each compaction.
 
 ## Skills
 
-- [grill-me](skills/grill-me/SKILL.md): Clarify an idea through focused questions.
+- [grill-me](skills/grill-me/SKILL.md): Clarify and design an idea, or resume a saved discussion issue.
+- [save-discussion](skills/save-discussion/SKILL.md): Save a discussion to a GitHub issue, or branch an experiment issue from it.
 - [to-vision](skills/to-vision/SKILL.md): Author, publish, and verify a durable vision.
 - [implement-vision](skills/implement-vision/SKILL.md): Implement a vision with delegation and independent review.
 - [chart-program](skills/chart-program/SKILL.md): Chart a large outcome as a Program and Effort tickets.
-- [grill-ticket](skills/grill-ticket/SKILL.md): Discover one Effort and publish its vision.
 
 Supporting guidance (loading it starts no workflow):
 
@@ -49,12 +49,19 @@ Supporting guidance (loading it starts no workflow):
 ## Workflows
 
 ```text
-grill-me → to-vision → implement-vision
-chart-program → grill-ticket → implement-vision
+grill-me ⇄ save-discussion → to-vision → implement-vision
+chart-program → grill-me <issue> → to-vision → implement-vision
 ```
 
-Programs link meaningful Efforts; tickets can be short starting points for later
-discovery. A ticket-linked vision uses the same implementation process as a
-standalone vision. Publication leaves its Effort open. Implementation closes it
-only after the whole outcome is delivered and verified on the target branch;
-partial PRs do not imply completion. Programs are not automatically closed.
+A discussion is an ordinary GitHub issue with the `discussion` label. Saved grills
+and Efforts charted under a Program use the same mechanism: comments append context,
+and `grill-me <issue>` resumes from it. Nothing is published until the human invokes
+`to-vision`.
+
+When a decision needs evidence, a linked experiment issue carries the question. Its
+vision authorizes bounded experimental work, and implementation returns the findings
+to the originating discussion, which stays open.
+
+Publication leaves its issue open. Implementation closes only the issue a vision
+designates to complete, after the whole outcome is delivered and verified on the
+target branch; partial PRs do not imply completion. Programs are not automatically closed.
