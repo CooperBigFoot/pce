@@ -1,6 +1,6 @@
 # Vision publication
 
-Use after the `to-vision` authoring checks, not for draft-only output. This shared procedure publishes a normal vision whether or not it has an associated Effort. It does not authorize implementation. Follow [github-writing](../github-writing/SKILL.md) for GitHub text.
+Use after the `to-vision` authoring checks, not for draft-only output. This shared procedure publishes a normal vision whether or not it has an associated issue. It does not authorize implementation. Follow [github-writing](../github-writing/SKILL.md) for GitHub text.
 
 ## Publish the confirmed document
 
@@ -12,13 +12,13 @@ Open or reuse a documentation PR against the intended target. Obtain independent
 
 ## Keep publication separate from delivery
 
-Use neutral references to an associated Effort. Before merging, inspect PR text, commit messages, GitHub closing relationships, and the exact prospective merge or squash title and body for auto-closing references. Negation does not make closing syntax safe. Remove unintended closing references through permitted edits and verify the correction. Submit the inspected merge payload explicitly or prove the actual payload matches it; otherwise stop. Publication must leave the Effort open.
+Use neutral references to an associated issue, including an experiment's originating discussion. Before merging, inspect PR text, commit messages, GitHub closing relationships, and the exact prospective merge or squash title and body for auto-closing references. Negation does not make closing syntax safe. Remove unintended closing references through permitted edits and verify the correction. Submit the inspected merge payload explicitly or prove the actual payload matches it; otherwise stop. Publication must leave the issue open.
 
 The authoring invocation authorizes the ordinary documentation merge, not research or implementation PR merges. Merge through the permitted process and verify the PR's target and merge result. Fetch the intended target branch and read the regular vision file there, requiring exact authored content rather than merely a path or merged status.
 
 ## Link and hand off
 
-For an associated Effort, reload the issue before mutation to confirm identity, ownership, and current context. Add or update an ordinary link to the verified target-branch vision, preserving unrelated content. Include a reciprocal issue link in the vision during authoring so path-based implementation can recover the association. No fixed metadata format, commit-pinned issue declaration, or Program membership validation is required. If links conflict, resolve the uncertainty rather than overwriting evidence or creating competing visions. Verify the link resolves to the intended content and that the issue remains open. Standalone visions need no issue or Program metadata.
+For an associated issue, reload it before mutation to confirm identity, ownership, and current context. Add or update an ordinary link to the verified target-branch vision, preserving unrelated content. Include a reciprocal issue link in the vision during authoring so path-based implementation can recover the association. No fixed metadata format, commit-pinned issue declaration, or Program membership validation is required. If links conflict, resolve the uncertainty rather than overwriting evidence or creating competing visions. Verify the link resolves to the intended content and that the issue remains open. Standalone visions need no issue or Program metadata.
 
 Unexpected issue closure is not proof of delivery. Report it and preserve timeline evidence; do not blindly reopen an issue that may have been legitimately completed elsewhere. Resolve the state through permitted action before claiming an open-issue handoff.
 
@@ -26,4 +26,4 @@ Ensure the implementation checkout has the same canonical regular vision path an
 
 On any failure, report the precise blocker and available path, branch, commit, PR, issue link, and target-copy state. Keep inspectable partial work and resume the same path and PR rather than duplicating them. Do not call an unverified result implementation-ready.
 
-After verification, report the vision path, concise summary, publication PR, pushed commit and fetched target SHA, implementation checkout, and any associated Effort URL. Hand off with `implement-vision planning/visions/<vision>.md` or `implement-vision <Effort number or URL>`. Do not start implementation automatically.
+After verification, report the vision path, concise summary, publication PR, pushed commit and fetched target SHA, implementation checkout, and any associated issue URL. Hand off with `implement-vision planning/visions/<vision>.md` or `implement-vision <issue number or URL>`. Do not start implementation automatically.

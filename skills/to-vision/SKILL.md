@@ -5,7 +5,7 @@ description: Turn confirmed understanding into a published repository vision, or
 
 # To Vision
 
-Turn the completed discussion into one published handoff for a fresh implementing agent that cannot see the conversation. Invoking `to-vision` authorizes publication of the confirmed vision, including the ordinary documentation PR merge, unless the user explicitly requests draft-only output. It does not authorize implementation or merging research or implementation PRs. `grill-me` confirmation alone does not invoke this workflow or authorize publication.
+Turn the completed discussion into one published handoff for a fresh implementing agent that cannot see the conversation. Invoking `to-vision` authorizes publication of the confirmed vision, including the ordinary documentation PR merge, unless the user explicitly requests draft-only output. It does not authorize implementation or merging research or implementation PRs. `grill-me` confirmation alone does not invoke this workflow or authorize publication. A vision is not needed merely to save an unfinished discussion; [save-discussion](../save-discussion/SKILL.md) does that.
 
 ## Name and path
 
@@ -32,8 +32,12 @@ Write enough context that the fresh agent can implement without the prior conver
 - scope boundaries and explicit exclusions;
 - constraints and settled decisions;
 - important repository facts learned during the grill;
-- an ordinary link to the associated Effort, when there is one;
+- an ordinary link to the associated discussion issue, when there is one, and an explicit statement of whether this vision completes it;
 - material risks or genuine uncertainty that remains.
+
+Reuse and link existing evidence and discussion history rather than duplicating it. The designated outcome can itself be research or design; completing an issue does not imply production software.
+
+An experiment vision authorizes bounded experimental work, not adoption into production. It carries the originating discussion's evidence question and links the discussion where findings must return; it explicitly designates its own experiment issue for completion, never the originating discussion. Keep the experiment proportionate and use project-native tools, not a mandatory platform, benchmark framework, or exhaustive tournament. Where relevant, separate correctness from performance, account for preparation and deferred work, compare equivalent outputs, and name the data, settings, uncertainty, and measurement limits.
 
 Translate intent into useful technical context, but leave reversible mechanisms to the implementing agent. Do not invent unresolved questions to fill a section. Do not reopen decisions settled during the grill.
 
@@ -41,7 +45,7 @@ Translate intent into useful technical context, but leave reversible mechanisms 
 
 Investigate source evidence against the confirmed requirements before authoring. After drafting, compare each confirmed decision with the vision for omissions, weakened constraints, or contradictions, including draft-only output. Check proposed requirements against confirmed intent: distinguish ordinary technical elaboration from unapproved outcomes or constraints. Investigate uncertain or conflicting sources and repair mismatches before publication review. These checks do not grant publication or implementation authority.
 
-This same authoring check applies when called by `grill-ticket` or when `chart-program` converges on a standalone vision. Do not repeat completed checks for the same unchanged draft within one invocation.
+This same authoring check applies when `chart-program` converges on a standalone vision. Do not repeat completed checks for the same unchanged draft within one invocation.
 
 ## Draft-only output
 

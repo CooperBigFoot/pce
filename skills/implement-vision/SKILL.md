@@ -1,19 +1,19 @@
 ---
 name: implement-vision
-description: Implement or resume a published vision from its path or associated Effort issue.
+description: Implement or resume a published vision from its path or associated issue.
 ---
 
 # Implement Vision
 
-Own the full vision outcome through testing, independent review, authorized merge, and verification on the actual target branch. A ticket-linked vision follows the same process as a standalone vision.
+Own the full vision outcome through testing, independent review, authorized merge, and verification on the actual target branch. An issue-linked or experiment vision follows the same process as a standalone vision.
 
 ## Resolve published intent
 
 Follow the [checkout and preservation policy](checkout-preservation.md) before creating any checkout, and give the complete policy to delegates before they create one. Preserve unrelated user changes, staged files, branches, and worktrees.
 
-Accept a repository-relative `planning/visions/` path, an Effort number in the verified current repository, or a canonical GitHub issue URL. For a URL, derive the repository from that URL, not the caller's checkout. Verify the canonical remote of an existing checkout before using it; if none exists, create a durable canonical clone in a user-owned location under the preservation policy. Never implement URL-derived work in an unrelated repository.
+Accept a repository-relative `planning/visions/` path, an issue number in the verified current repository, or a canonical GitHub issue URL. For a URL, derive the repository from that URL, not the caller's checkout. Verify the canonical remote of an existing checkout before using it; if none exists, create a durable canonical clone in a user-owned location under the preservation policy. Never implement URL-derived work in an unrelated repository.
 
-For an issue, read its context and follow its vision link. For a path, recover any associated Effort from ordinary links in the vision and relevant GitHub publication evidence. Do not invent an issue for standalone work. Resolve ambiguous links or conflicting repository identities before proceeding, rather than choosing a convenient interpretation. Read relevant Program context and real blockers where present; no special ticket schema is required. Respect another user's assignment and repository permissions rather than taking over.
+For an issue, read its context and follow its vision link. For a path, recover any associated issue from ordinary links in the vision and relevant GitHub publication evidence. Do not invent an issue for standalone work. Resolve ambiguous links or conflicting repository identities before proceeding, rather than choosing a convenient interpretation. Read relevant Program context and real blockers where present; no special ticket schema is required. Respect another user's assignment and repository permissions rather than taking over.
 
 Establish the intended target branch from repository policy and GitHub evidence, normally the default branch; stop if they conflict. Fetch it and verify that the vision is a tracked regular file inside `planning/visions/`, with no symlinked path components. Read the complete vision and require exact agreement between the supplied local or linked copy and the fetched target copy. A draft, pushed branch, or open publication PR is not published intent. On missing, stale, unmerged, or conflicting publication, stop before planning, delegation, branch creation, or implementation. Preserve the evidence and direct authoring back to `to-vision` for the same path. Do not bootstrap publication here.
 
@@ -31,7 +31,7 @@ Give each implementation owner the complete vision, relevant source context, con
 
 Before implementing or reviewing code or tests, follow [test-first development](../test-first-development/SKILL.md). Before GitHub drafting, follow [github-writing](../github-writing/SKILL.md). Keep private data private. Match requirements to tests, source, and observed results; investigate missing or contradictory evidence.
 
-Use ordinary links to the vision and associated issue in PRs. Keep the Effort open while any outcome remains undelivered or unverified. Avoid auto-closing references in implementation PRs and commits; inspect GitHub closing relationships and the actual merge message before merge so no PR closes the issue before final target verification.
+Use ordinary links to the vision and associated issue in PRs. Keep the issue open while any outcome remains undelivered or unverified. Avoid auto-closing references in implementation PRs and commits; inspect GitHub closing relationships and the actual merge message before merge so no PR closes the issue before final target verification.
 
 Assign every PR to a fresh reviewer who did not implement it. Supply the full vision, repository rules, complete diff, and validation evidence. Review behavior, safety, regressions, scope, names, and architectural fit. Review tests for independent expectations and meaningful coverage, not a passing count. Check that removed coverage protects a retired requirement or that its useful guarantee remains. Large changes require a necessity review: what can be removed without weakening the outcome?
 
@@ -43,9 +43,11 @@ Ordinary implementation branches, PRs, repairs, and merges are authorized by han
 
 After approved PRs merge, fetch and inspect the actual intended target branch against the entire vision, run its required tests, and verify the delivered effects. Report failures or unfinished work, not completion based on a merged PR alone.
 
-Only when the full outcome is delivered and verified, close the associated Effort and leave a short comment linking the implementation PRs and explaining the delivered result where useful. Read back the issue state and comment; report a GitHub failure as remaining reconciliation work. Publishing a vision does not close the Effort, and merging one partial PR does not complete it. A standalone vision has no issue to close. Do not automatically close the Program, reorganize its remaining tickets, or initiate backlog reconsideration.
+For an experiment vision, return the evidence to its originating discussion with a concise comment: what was established, what was not, relevant implications, and links to detailed results. Preserve negative and inconclusive findings. Do not select the production design or restart the parent discussion. An evidence-return link is not a closing relationship: the parent stays open for the human to resume with `grill-me <issue>`. The posted and read-back return comment is part of the experiment's full outcome; if it fails, report unfinished reconciliation and leave the experiment issue open.
 
-Apply the checkout policy for the final checkout audit and post-merge branch cleanup. Report the delivered outcome, useful verification evidence, PR links, material limitations, and retained checkouts with reasons. Completion requires verified target effects and any associated issue closure, not a separate landing invocation.
+Only when the full outcome is delivered and verified, close the issue the vision explicitly designates to complete and leave a short comment linking the implementation PRs and explaining the delivered result where useful. That outcome can be research or design. A link alone is context, not authority to close; an experiment's originating discussion is never designated. If the vision links an issue without clearly saying whether it completes it, resolve that with the human instead of guessing, and leave the issue open meanwhile. Read back the issue state and comment; report a GitHub failure as remaining reconciliation work. Publishing a vision does not close the issue, merging one partial PR does not complete it, and returned evidence does not close the originating discussion. A standalone vision has no issue to close. Do not automatically close the Program, reorganize its remaining tickets, or initiate backlog reconsideration.
+
+Apply the checkout policy for the final checkout audit and post-merge branch cleanup. Report the delivered outcome, useful verification evidence, PR links, material limitations, and retained checkouts with reasons. Completion requires verified target effects and closure of the designated issue when there is one, not a separate landing invocation.
 
 ## Product naming boundary
 

@@ -15,7 +15,7 @@ SKILLS = (
     "to-vision",
     "implement-vision",
     "chart-program",
-    "grill-ticket",
+    "save-discussion",
     "github-writing",
     "test-first-development",
 )
@@ -279,14 +279,16 @@ class InstallTests(unittest.TestCase):
                 self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
 
     def test_removes_only_checkout_owned_retired_skill_links(self) -> None:
-        for kind, environment_root in product(
+        for name, kind, environment_root in product(
+            ("land-ticket", "grill-ticket"),
             ("owned", "relative-owned", "foreign", "directory", "file"), ENVIRONMENT_ROOTS
         ):
-            with self.subTest(kind=kind, root=environment_root), tempfile.TemporaryDirectory() as temporary:
+            with self.subTest(name=name, kind=kind, root=environment_root), \
+                    tempfile.TemporaryDirectory() as temporary:
                 home = Path(temporary)
-                retired = home / environment_root / "land-ticket"
+                retired = home / environment_root / name
                 retired.parent.mkdir(parents=True)
-                target = ROOT / "skills/land-ticket" if "owned" in kind else home / "foreign"
+                target = ROOT / "skills" / name if "owned" in kind else home / "foreign"
                 if kind == "directory":
                     retired.mkdir()
                     (retired / "SKILL.md").write_text("user skill")
