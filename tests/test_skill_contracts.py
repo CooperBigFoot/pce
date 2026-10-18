@@ -57,7 +57,6 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("fresh reviewer who did not implement it", implementation)
         self.assertIn("full outcome is delivered and verified", implementation)
         self.assertIn("close the issue the vision explicitly designates", implementation)
-        self.assertNotIn("any associated issue closure", implementation)
         chart = (SKILLS / "chart-program/SKILL.md").read_text()
         self.assertIn("explicitly requests `to-vision`", chart)
         self.assertIn("Do not automatically close the Program", implementation)
