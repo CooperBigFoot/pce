@@ -11,20 +11,24 @@ With Bash and Python 3 available, run from this checkout:
 ```
 
 All skills listed below are linked into Claude Code (`~/.claude/skills`), Codex
-(`~/.codex/skills`), and Prime Agent (`~/.prime/agent/skills`). Keep this checkout
+(`~/.codex/skills`), Prime Agent (`~/.prime/agent/skills`), and Gemini CLI /
+Antigravity CLI (`agy`) through their shared `~/.gemini/skills` directory. Keep this checkout
 in place: the links load its files, not copied guidance. Pull updates here and
 rerun the installer. It replaces checkout-owned links and refuses foreign paths for supported skills.
 It removes checkout-owned `land-ticket` and `grill-ticket` links, including dangling
 links, but preserves foreign links and user-owned files or directories at those retired paths.
 
-For Prime Agent only, installation creates or updates one section delimited by
-`<!-- pce:guidance:start -->` and `<!-- pce:guidance:end -->` in
-`~/.prime/agent/AGENTS.md`. It points to writing guidance before GitHub drafting
+Installation creates or updates one section delimited by
+`<!-- pce:guidance:start -->` and `<!-- pce:guidance:end -->` in each of
+`~/.prime/agent/AGENTS.md` and `~/.gemini/AGENTS.md`. These independent files
+point to their own installed skill paths: writing guidance before GitHub drafting
 and test-first guidance before code or test implementation and review. Unrelated
 instructions, files, links, extensions, and settings remain unchanged. Ambiguous
 section markers, linked global instruction files, or alternate global instruction
 files that would be hidden are refused; inspect the reported conflict before
-retrying. No downstream project edits are needed.
+retrying. Gemini’s existing `GEMINI.md` rules are preserved and loaded alongside
+`AGENTS.md`; only the alternate spelling `AGENTS.MD` conflicts when `AGENTS.md`
+is absent. No downstream project edits are needed.
 
 Prime Agent includes global and project instructions in its system prompt.
 Compaction retains that loaded prompt, not a fresh disk read. These persistent

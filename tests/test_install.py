@@ -19,7 +19,7 @@ SKILLS = (
     "github-writing",
     "test-first-development",
 )
-ENVIRONMENT_ROOTS = (".claude/skills", ".codex/skills", ".prime/agent/skills")
+ENVIRONMENT_ROOTS = (".claude/skills", ".codex/skills", ".prime/agent/skills", ".gemini/skills")
 MATRIX = {
     f"{root}/{name}": ROOT / "skills" / name
     for root in ENVIRONMENT_ROOTS
@@ -39,6 +39,29 @@ class InstallTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def seed_user_state(self, home: Path) -> None:
+        for directory in (".prime/agent", ".gemini"):
+            agents = home / directory / "AGENTS.md"
+            if not os.path.lexists(agents):
+                agents.parent.mkdir(parents=True, exist_ok=True)
+                agents.write_bytes(b"user rules\r\n")
+        link = home / ".claude/skills/save-discussion"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(ROOT / "skills/save-discussion")
+        retired = home / ".gemini/skills/grill-ticket"
+        retired.parent.mkdir(parents=True, exist_ok=True)
+        retired.symlink_to(ROOT / "skills/grill-ticket")
+
+    def snapshot(self, home: Path) -> dict:
+        return {
+            str(path.relative_to(home)): (
+                path.lstat().st_ino, path.lstat().st_mode,
+                os.readlink(path) if path.is_symlink() else
+                path.read_bytes() if path.is_file() else None,
+            )
+            for path in home.rglob("*")
+        }
 
     def assert_matrix(self, home: Path) -> None:
         for relative, expected in MATRIX.items():
@@ -129,10 +152,12 @@ class InstallTests(unittest.TestCase):
                     self.assert_matrix(home)
 
     def test_conflicts_are_preserved_before_any_link_is_created(self) -> None:
-        for kind in ("file", "directory", "foreign-link", "dangling-link"):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+        for environment_root, kind in product(
+            ENVIRONMENT_ROOTS, ("file", "directory", "foreign-link", "dangling-link")
+        ):
+            with self.subTest(root=environment_root, kind=kind), tempfile.TemporaryDirectory() as temporary:
                 home = Path(temporary)
-                conflict = home / ".codex/skills/to-vision"
+                conflict = home / environment_root / "to-vision"
                 conflict.parent.mkdir(parents=True)
                 target = home / "foreign"
                 if kind == "directory":
@@ -144,7 +169,10 @@ class InstallTests(unittest.TestCase):
                     if kind == "foreign-link":
                         target.mkdir()
                     conflict.symlink_to(target)
+                self.seed_user_state(home)
+                before = self.snapshot(home)
                 result = self.run_installer(home)
+                self.assertEqual(self.snapshot(home), before)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("ERROR: conflict:", result.stderr)
                 self.assertIn("Move or remove", result.stderr)
@@ -157,119 +185,138 @@ class InstallTests(unittest.TestCase):
                     self.assertEqual(os.readlink(conflict), str(target))
 
     def test_creates_global_task_pointers_once(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
-            result = self.run_installer(home)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            agents = home / ".prime/agent/AGENTS.md"
-            self.assertTrue(agents.is_file())
-            content = agents.read_bytes()
-            text = content.decode()
-            self.assertEqual(text.count("<!-- pce:guidance:start -->"), 1)
-            self.assertEqual(text.count("<!-- pce:guidance:end -->"), 1)
-            for trigger in ("Before drafting or revising a GitHub issue or PR body",
-                            "Before implementing or reviewing code or tests"):
-                self.assertIn(trigger, text)
-            for name in ("github-writing", "test-first-development"):
-                self.assertIn(f"~/.prime/agent/skills/{name}/SKILL.md", text)
-                self.assertTrue((home / ".prime/agent/skills" / name / "SKILL.md").is_file())
-            self.assertNotIn("compaction", text)
-            self.assertEqual(self.run_installer(home).returncode, 0)
-            self.assertEqual(agents.read_bytes(), content)
+        for guidance_root in (".prime/agent", ".gemini"):
+            with tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                result = self.run_installer(home)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                agents = home / guidance_root / "AGENTS.md"
+                self.assertTrue(agents.is_file())
+                content = agents.read_bytes()
+                text = content.decode()
+                self.assertEqual(text.count("<!-- pce:guidance:start -->"), 1)
+                self.assertEqual(text.count("<!-- pce:guidance:end -->"), 1)
+                for trigger in ("Before drafting or revising a GitHub issue or PR body",
+                                "Before implementing or reviewing code or tests"):
+                    self.assertIn(trigger, text)
+                for name in ("github-writing", "test-first-development"):
+                    self.assertIn(f"~/{guidance_root}/skills/{name}/SKILL.md", text)
+                    self.assertTrue((home / guidance_root / "skills" / name / "SKILL.md").is_file())
+                self.assertNotIn("compaction", text)
+                self.assertEqual(self.run_installer(home).returncode, 0)
+                self.assertEqual(agents.read_bytes(), content)
 
     def test_updates_only_owned_section_and_preserves_other_user_state(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
-            agents = home / ".prime/agent/AGENTS.md"
-            agents.parent.mkdir(parents=True)
-            prefix = b"# Personal rules\r\nKeep my exact bytes.\r\n"
-            suffix = b"\n# More rules\nKeep these too."
-            stale = b"<!-- pce:guidance:start -->\nOld PCE pointers\n<!-- pce:guidance:end -->"
-            agents.write_bytes(prefix + stale + suffix)
-            agents.chmod(0o640)
-            user_files = [home / ".claude/CLAUDE.md", home / ".codex/AGENTS.md",
-                          home / ".prime/agent/settings.json", home / ".prime/agent/extensions/custom.ts"]
-            for path in user_files:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"unrelated user state\r\n")
-            result = self.run_installer(home)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            updated = agents.read_bytes()
-            self.assertTrue(updated.startswith(prefix))
-            self.assertTrue(updated.endswith(suffix))
-            self.assertNotIn(b"Old PCE pointers", updated)
-            self.assertIn(b"skills/github-writing/SKILL.md", updated)
-            self.assertEqual(agents.stat().st_mode & 0o777, 0o640)
-            self.assertEqual(self.run_installer(home).returncode, 0)
-            self.assertEqual(agents.read_bytes(), updated)
-            for path in user_files:
-                self.assertEqual(path.read_bytes(), b"unrelated user state\r\n")
+        for guidance_root in (".prime/agent", ".gemini"):
+            with tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                agents = home / guidance_root / "AGENTS.md"
+                agents.parent.mkdir(parents=True)
+                prefix = b"# Personal rules\r\nKeep my exact bytes.\r\n"
+                suffix = b"\n# More rules\nKeep these too."
+                stale = b"<!-- pce:guidance:start -->\nOld PCE pointers\n<!-- pce:guidance:end -->"
+                agents.write_bytes(prefix + stale + suffix)
+                agents.chmod(0o640)
+                user_files = [home / ".claude/CLAUDE.md", home / ".codex/AGENTS.md",
+                              home / ".prime/agent/settings.json", home / ".prime/agent/extensions/custom.ts"]
+                for path in user_files:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"unrelated user state\r\n")
+                result = self.run_installer(home)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                updated = agents.read_bytes()
+                self.assertTrue(updated.startswith(prefix))
+                self.assertTrue(updated.endswith(suffix))
+                self.assertNotIn(b"Old PCE pointers", updated)
+                self.assertIn(b"skills/github-writing/SKILL.md", updated)
+                self.assertEqual(agents.stat().st_mode & 0o777, 0o640)
+                self.assertEqual(self.run_installer(home).returncode, 0)
+                self.assertEqual(agents.read_bytes(), updated)
+                for path in user_files:
+                    self.assertEqual(path.read_bytes(), b"unrelated user state\r\n")
 
     def test_appends_to_unowned_content_without_rewriting_it(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
-            agents = home / ".prime/agent/AGENTS.md"
-            agents.parent.mkdir(parents=True)
-            original = b"# My instructions\r\nNo final newline"
-            agents.write_bytes(original)
-            result = self.run_installer(home)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue(agents.read_bytes().startswith(original + b"\n\n<!-- pce:guidance:start -->"))
+        for guidance_root in (".prime/agent", ".gemini"):
+            with tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                agents = home / guidance_root / "AGENTS.md"
+                agents.parent.mkdir(parents=True)
+                original = b"# My instructions\r\nNo final newline"
+                agents.write_bytes(original)
+                agents.chmod(0o600)
+                result = self.run_installer(home)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(agents.read_bytes().startswith(original + b"\n\n<!-- pce:guidance:start -->"))
+                self.assertEqual(agents.stat().st_mode & 0o777, 0o600)
+                updated = agents.read_bytes()
+                self.assertEqual(self.run_installer(home).returncode, 0)
+                self.assertEqual(agents.read_bytes(), updated)
 
     def test_refuses_ambiguous_global_ownership_before_mutation(self) -> None:
-        start = b"<!-- pce:guidance:start -->"
-        end = b"<!-- pce:guidance:end -->"
-        for content in (start, end, end + b"\n" + start,
-                        start + b"\n" + end + b"\n" + start + b"\n" + end,
-                        b"user text " + start + b"\n" + end,
-                        start + b"\n" + end + b" user text",
-                        b"<!-- pce:guidance:unknown -->"):
-            with self.subTest(content=content), tempfile.TemporaryDirectory() as temporary:
-                home = Path(temporary)
-                agents = home / ".prime/agent/AGENTS.md"
-                agents.parent.mkdir(parents=True)
-                agents.write_bytes(content)
-                retired = home / ".prime/agent/skills/land-ticket"
-                retired.parent.mkdir(parents=True)
-                retired.symlink_to(ROOT / "skills/land-ticket")
-                result = self.run_installer(home)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("ERROR: conflict:", result.stderr)
-                self.assertTrue(retired.is_symlink())
-                self.assertEqual(agents.read_bytes(), content)
-                self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
+        for guidance_root in (".prime/agent", ".gemini"):
+            start = b"<!-- pce:guidance:start -->"
+            end = b"<!-- pce:guidance:end -->"
+            for content in (start, end, end + b"\n" + start,
+                            start + b"\n" + end + b"\n" + start + b"\n" + end,
+                            b"user text " + start + b"\n" + end,
+                            start + b"\n" + end + b" user text",
+                            b"<!-- pce:guidance:unknown -->"):
+                with self.subTest(content=content), tempfile.TemporaryDirectory() as temporary:
+                    home = Path(temporary)
+                    agents = home / guidance_root / "AGENTS.md"
+                    agents.parent.mkdir(parents=True)
+                    agents.write_bytes(content)
+                    retired = home / ".prime/agent/skills/land-ticket"
+                    retired.parent.mkdir(parents=True)
+                    retired.symlink_to(ROOT / "skills/land-ticket")
+                    self.seed_user_state(home)
+                    before = self.snapshot(home)
+                    result = self.run_installer(home)
+                    self.assertEqual(self.snapshot(home), before)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("ERROR: conflict:", result.stderr)
+                    self.assertTrue(retired.is_symlink())
+                    self.assertEqual(agents.read_bytes(), content)
+                    self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
 
     def test_refuses_indirect_or_nonregular_global_instructions(self) -> None:
-        for kind in ("symlink", "dangling-link", "directory", "hardlink"):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
-                home = Path(temporary)
-                agents = home / ".prime/agent/AGENTS.md"
-                agents.parent.mkdir(parents=True)
-                target = home / "personal.md"
-                target.write_bytes(b"personal rules")
-                if kind == "directory":
-                    agents.mkdir()
-                elif kind == "hardlink":
-                    os.link(target, agents)
-                else:
-                    agents.symlink_to(target if kind == "symlink" else home / "missing")
-                result = self.run_installer(home)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("ERROR: conflict:", result.stderr)
-                self.assertEqual(target.read_bytes(), b"personal rules")
-                self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
-                if kind in ("symlink", "dangling-link"):
-                    self.assertTrue(agents.is_symlink())
-                elif kind == "directory":
-                    self.assertTrue(agents.is_dir())
-                else:
-                    self.assertEqual(agents.stat().st_ino, target.stat().st_ino)
+        for guidance_root in (".prime/agent", ".gemini"):
+            for kind in ("symlink", "dangling-link", "directory", "hardlink"):
+                with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                    home = Path(temporary)
+                    agents = home / guidance_root / "AGENTS.md"
+                    agents.parent.mkdir(parents=True)
+                    target = home / "personal.md"
+                    target.write_bytes(b"personal rules")
+                    if kind == "directory":
+                        agents.mkdir()
+                    elif kind == "hardlink":
+                        os.link(target, agents)
+                    else:
+                        agents.symlink_to(target if kind == "symlink" else home / "missing")
+                    self.seed_user_state(home)
+                    before = self.snapshot(home)
+                    result = self.run_installer(home)
+                    self.assertEqual(self.snapshot(home), before)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("ERROR: conflict:", result.stderr)
+                    self.assertEqual(target.read_bytes(), b"personal rules")
+                    self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
+                    if kind in ("symlink", "dangling-link"):
+                        self.assertTrue(agents.is_symlink())
+                    elif kind == "directory":
+                        self.assertTrue(agents.is_dir())
+                    else:
+                        self.assertEqual(agents.stat().st_ino, target.stat().st_ino)
 
     def test_does_not_shadow_alternate_global_instructions(self) -> None:
-        for name in ("AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+        for directory, name in (
+            (".prime/agent", "AGENTS.MD"), (".prime/agent", "CLAUDE.md"),
+            (".prime/agent", "CLAUDE.MD"), (".gemini", "AGENTS.MD"),
+        ):
+            with self.subTest(directory=directory, name=name), tempfile.TemporaryDirectory() as temporary:
                 home = Path(temporary)
-                alternative = home / ".prime/agent" / name
+                alternative = home / directory / name
                 alternative.parent.mkdir(parents=True)
                 alternative.write_bytes(b"user global instructions")
                 result = self.run_installer(home)
@@ -277,6 +324,25 @@ class InstallTests(unittest.TestCase):
                 self.assertIn("ERROR: conflict:", result.stderr)
                 self.assertEqual(alternative.read_bytes(), b"user global instructions")
                 self.assertFalse(os.path.lexists(home / ".claude/skills/grill-me"))
+
+    def test_gemini_global_rules_are_cumulative(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            gemini = home / ".gemini/GEMINI.md"
+            gemini.parent.mkdir(parents=True)
+            gemini.write_bytes(b"personal Gemini rules\r\n")
+            result = self.run_installer(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(gemini.read_bytes(), b"personal Gemini rules\r\n")
+            prime = home / ".prime/agent/AGENTS.md"
+            agents = home / ".gemini/AGENTS.md"
+            self.assertFalse(agents.is_symlink())
+            self.assertFalse(prime.is_symlink())
+            self.assertNotEqual(agents.stat().st_ino, prime.stat().st_ino)
+            self.assertNotIn(b"~/.prime/", agents.read_bytes())
+            self.assertNotIn(b"~/.gemini/", prime.read_bytes())
+            self.assertFalse((home / ".gemini/antigravity-cli").exists())
+            self.assertFalse((home / ".agents").exists())
 
     def test_removes_only_checkout_owned_retired_skill_links(self) -> None:
         for name, kind, environment_root in product(
