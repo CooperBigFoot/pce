@@ -29,13 +29,17 @@ Plan only the remaining outcome. Investigate facts and decide reversible enginee
 
 Give each implementation owner the complete vision, relevant source context, constraints, and the naming boundary below before design or editing. Each owner owns one branch from the intended target, its tests, commit, push, and PR. Choose one PR or coherent vertical slices, not arbitrary technical layers. Stage only intended changes.
 
+Use experimentation when it helps achieve the vision’s objective. You may try alternative implementations, build disposable prototypes, benchmark representative workloads, and use the findings to revise your approach. This is optional, not a required phase. Stay within the vision’s boundaries and existing authorization limits; prefer the simplest solution supported by the evidence rather than pursuing optimization for its own sake.
+
+When experiments inform a meaningful implementation decision, keep brief notes in `planning/experimentation/<vision-filename>.md` and link to the published vision. Record the question explored, approaches tried, relevant observations and limitations, and resulting decision. Do not maintain an exhaustive log. Remove discarded prototypes; retain experimental code or benchmarks only when they provide ongoing value. Experimentation does not replace testing or independent review of the final implementation.
+
 Before implementing or reviewing code or tests, follow [test-first development](../test-first-development/SKILL.md). Before GitHub drafting, follow [github-writing](../github-writing/SKILL.md). Keep private data private. Match requirements to tests, source, and observed results; investigate missing or contradictory evidence.
 
 Use ordinary links to the vision and associated issue in PRs. Keep the issue open while any outcome remains undelivered or unverified. Avoid auto-closing references in implementation PRs and commits; inspect GitHub closing relationships and the actual merge message before merge so no PR closes the issue before final target verification.
 
 Assign every PR to a fresh reviewer who did not implement it. Supply the full vision, repository rules, complete diff, and validation evidence. Review behavior, safety, regressions, scope, names, and architectural fit. Review tests for independent expectations and meaningful coverage, not a passing count. Check that removed coverage protects a retired requirement or that its useful guarantee remains. Large changes require a necessity review: what can be removed without weakening the outcome?
 
-Repair findings and repeat review after material changes. Merge only with resolved findings, passing required checks, repository permissions, and applicable approvals. Do not bypass protected branches. Honor explicit instructions withholding merge authority; an open PR is not completion.
+Resolve findings through justified fixes or reasoned dismissal, not mandatory code changes. Repeat review after material changes. Merge only with resolved findings, passing required checks, repository permissions, and applicable approvals. Do not bypass protected branches. Honor explicit instructions withholding merge authority; an open PR is not completion.
 
 Ordinary implementation branches, PRs, repairs, and merges are authorized by handing over the vision. Deployments, destructive data operations, spending, credentials, external publication, infrastructure changes, and other irreversible external acts not clearly authorized still need human authority.
 

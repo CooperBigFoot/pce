@@ -10,6 +10,8 @@ Review and commit only the confirmed vision change. Inspect ignore rules when pl
 
 Open or reuse a documentation PR against the intended target. Obtain independent review from an agent who did not author it, repair findings, and satisfy required checks and approvals. Do not bypass protected branches.
 
+Have the reviewer read the vision without the authoring conversation and briefly restate its intended outcome, scope, and key constraints before critiquing it. Compare that interpretation with the confirmed intent. Investigate material differences and clarify the vision where needed; do not add implementation detail merely to eliminate reasonable engineering discretion.
+
 ## Keep publication separate from delivery
 
 Use neutral references to an associated issue, including an experiment's originating discussion. Before merging, inspect PR text, commit messages, GitHub closing relationships, and the exact prospective merge or squash title and body for auto-closing references. Negation does not make closing syntax safe. Remove unintended closing references through permitted edits and verify the correction. Submit the inspected merge payload explicitly or prove the actual payload matches it; otherwise stop. Publication must leave the issue open.

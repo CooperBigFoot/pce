@@ -7,6 +7,8 @@ description: Use when implementing or reviewing code or tests. Develop behavior 
 
 Loading this guidance does not start implementation or another workflow.
 
+During implementation and review, score potential failures—including edge cases—from 1–10 for likelihood in actual use and impact. Below a product of 5, default to leaving the code alone and moving on. Above it, weigh the risk against the fix’s complexity. Don’t build for future needs nobody asked for.
+
 Read and follow the target repository's testing guidance when implementing or reviewing tests; keep project-specific rules in that repository, in its existing layout. Use repository-native tools and the simplest sufficient test level.
 
 For bug fixes and new behavior, default to small test-first increments: choose a meaningful behavior, write a focused test with an independently established expected result, observe that it fails for the intended reason, implement the behavior, then improve the code while keeping tests passing. Derive expectations from requirements, independently worked examples, or suitable independent evidence, never from the implementation under test. An unrelated setup failure is not proof. Do not batch a large test suite before a large implementation.
