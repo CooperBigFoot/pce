@@ -39,7 +39,9 @@ Use ordinary links to the vision and associated issue in PRs. Keep the issue ope
 
 Assign every PR to a fresh reviewer who did not implement it. Supply the full vision, repository rules, complete diff, and validation evidence. Review behavior, safety, regressions, scope, names, and architectural fit. Review tests for independent expectations and meaningful coverage, not a passing count. Check that removed coverage protects a retired requirement or that its useful guarantee remains. Large changes require a necessity review: what can be removed without weakening the outcome?
 
-Resolve findings through justified fixes or reasoned dismissal, not mandatory code changes. Repeat review after material changes. Merge only with resolved findings, passing required checks, repository permissions, and applicable approvals. Do not bypass protected branches. Honor explicit instructions withholding merge authority; an open PR is not completion.
+State any material review gaps, including files or context not examined and failed delegated reviews. Receiving the complete diff does not prove it was fully examined; do not present a partial review as approval of the whole change.
+
+Resolve findings through justified fixes or reasoned dismissal, not mandatory code changes. Repeat review after material changes, carrying forward prior findings and dismissal reasons. Verify each prior finding was fixed or reasonably dismissed; absence from a later review is not proof of resolution. Merge only with resolved findings, passing required checks, repository permissions, and applicable approvals. Do not bypass protected branches. Honor explicit instructions withholding merge authority; an open PR is not completion.
 
 Ordinary implementation branches, PRs, repairs, and merges are authorized by handing over the vision. Deployments, destructive data operations, spending, credentials, external publication, infrastructure changes, and other irreversible external acts not clearly authorized still need human authority.
 
