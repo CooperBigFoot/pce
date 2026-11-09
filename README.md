@@ -4,11 +4,23 @@ PCE provides workflow skills for turning ideas into delivered work, plus support
 
 ## Install
 
-With Bash and Python 3 available, run from this checkout:
+With Bash and [uv](https://docs.astral.sh/uv/getting-started/installation/) available, run from this checkout:
 
 ```bash
 ./install.sh
 ```
+
+`install.sh` resolves the checkout path and runs the standard-library installer with
+`uv run --no-project --no-cache scripts/install.py <checkout-path>`. uv selects Python and may
+download it if needed. `--no-cache` avoids leaving a uv cache in the target home,
+including when installation refuses a conflict. No project environment, dependencies,
+or `pyproject.toml` are required.
+
+For future installer changes, edit `scripts/install.py`; keep `install.sh` as the
+small launcher rather than embedding Python in a shell heredoc. Run
+`python3 -m unittest discover -s tests -v` from the repository root before installing
+into your own home. Installer tests exercise `./install.sh` with isolated temporary
+`HOME` directories to check that unrelated user state is preserved.
 
 All skills listed below are linked into Claude Code (`~/.claude/skills`), Codex
 (`~/.codex/skills`), Prime Agent (`~/.prime/agent/skills`), and Gemini CLI /
