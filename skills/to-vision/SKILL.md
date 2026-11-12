@@ -43,7 +43,9 @@ Translate intent into useful technical context, but leave reversible mechanisms 
 
 ## Authoring checks
 
-Investigate source evidence against the confirmed requirements before authoring. After drafting, compare each confirmed decision with the vision for omissions, weakened constraints, or contradictions, including draft-only output. Check proposed requirements against confirmed intent: distinguish ordinary technical elaboration from unapproved outcomes or constraints. Investigate uncertain or conflicting sources and repair mismatches before publication review. These checks do not grant publication or implementation authority.
+Before authoring, build on established findings from the completed discussion rather than repeating its repository survey. Investigate gaps, changed facts, uncertainty, or conflicting evidence against the confirmed requirements; refresh findings that may be stale.
+
+After drafting, compare each confirmed decision with the vision for omissions, weakened constraints, or contradictions, including draft-only output. Check proposed requirements against confirmed intent: distinguish ordinary technical elaboration from unapproved outcomes or constraints. Investigate uncertain or conflicting sources and repair mismatches before independent publication review. Evidence reuse does not replace these draft and publication checks. These checks do not grant publication or implementation authority.
 
 This same authoring check applies when `chart-program` converges on a standalone vision. Do not repeat completed checks for the same unchanged draft within one invocation.
 
