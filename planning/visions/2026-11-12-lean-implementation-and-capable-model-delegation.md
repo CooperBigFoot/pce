@@ -21,7 +21,12 @@ Teach a harness-independent philosophy in the skill:
 - Reserve stronger models and deeper reasoning for genuinely demanding work, such as ambiguous architectural decisions, difficult unresolved debugging, and complex cross-cutting changes.
 - Match reasoning effort to the difficulty instead of maximizing it by default. Escalate when the work proves harder than expected.
 
-Do not hardcode model names in the skill text. Do not prescribe model discovery, routing APIs, runtime configuration, or harness-specific mechanisms. The guidance must apply to Prime Agent and Antigravity CLI without separate execution recipes. Do not add cost-accounting procedures, token budgets, classifier infrastructure, or a model-selection framework.
+Keep the shared task-to-model philosophy in `SKILL.md`, without hardcoded model names. Use progressive disclosure for the harness-specific preferences: link two small Markdown reference files and instruct agents to load only the one matching their current harness.
+
+- **Prime Agent reference:** use the GPT family.
+- **Antigravity CLI reference:** use Sonnet or Gemini Flash, depending on availability.
+
+These references contain model-family preferences, not execution recipes. Do not add model discovery procedures, routing APIs, runtime configuration, lifecycle instructions, cost-accounting procedures, token budgets, classifier infrastructure, or a model-selection framework. Leave reference filenames and placement to the implementing agent; do not turn this into a shared harness framework.
 
 ## Remove unnecessary work
 
@@ -45,7 +50,7 @@ This is a focused revision of workflow guidance, not a redesign of all PCE skill
 
 ## Evidence of success
 
-A fresh agent reading the revised guidance should understand that smaller, capable models can own real implementation and review work, with escalation based on task difficulty rather than a default to the strongest model. The text should remain useful in either supported harness without naming models or prescribing delegation APIs.
+A fresh agent reading the revised guidance should understand that smaller, capable models can own real implementation and review work, with escalation based on task difficulty rather than a default to the strongest model. The main skill should remain model-agnostic and load only the relevant harness reference: GPT-family guidance for Prime Agent, or Sonnet/Gemini Flash guidance for Antigravity CLI depending on availability. Neither reference should prescribe delegation APIs or expand into a harness manual.
 
 The revised workflow should allow a small change to proceed with focused investigation, isolated implementation, one coherent PR, independent review, and actual-target verification—without mandatory historical archaeology, unrelated naming repairs, numerical risk scoring, or a separate PR per delegate. Larger work may still use multiple owners and PRs where justified.
 
