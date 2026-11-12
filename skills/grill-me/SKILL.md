@@ -21,7 +21,7 @@ Explore one area in depth. For a larger destination split into several pieces of
 
 Finding facts is your responsibility. Investigate relevant repository evidence and other available sources before asking questions they could answer.
 
-When useful, delegate substantive, bounded research to capable smaller models: a narrow history question, source comparison, or repository investigation. For genuinely independent evidence questions, give each worker a clear, non-overlapping responsibility and request findings with relevant uncertainty. Reconcile results before the next interview batch. Keep dependent discussion and design judgments with the lead; do not parallelize every step or have workers repeat the same investigation.
+When useful, delegate substantive, bounded research to capable smaller models: a narrow history question, source comparison, or repository investigation. Load only the preference reference matching the current harness: [Prime Agent](../implement-vision/prime-agent.md) or [Antigravity CLI](../implement-vision/antigravity-cli.md). For genuinely independent evidence questions, give each worker a clear, non-overlapping responsibility and request findings with relevant uncertainty. Reconcile results before the next interview batch. Keep dependent discussion and design judgments with the lead; do not parallelize every step or have workers repeat the same investigation.
 
 While investigation is underway, do not advance the grilling tree or issue the next frontier batch. Finish the investigation, including delegated research, read and reconcile its findings, then recompute the frontier.
 
