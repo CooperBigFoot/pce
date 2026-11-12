@@ -7,7 +7,7 @@ description: Use when implementing or reviewing code or tests. Develop behavior 
 
 Loading this guidance does not start implementation or another workflow.
 
-During implementation and review, score potential failures—including edge cases—from 1–10 for likelihood in actual use and impact. Below a product of 5, default to leaving the code alone and moving on. Above it, weigh the risk against the fix’s complexity. Don’t build for future needs nobody asked for.
+Prioritize potential failures by realistic likelihood and impact in actual use, weighed against the complexity of a fix. Focus on consequential risks; leave speculative edge cases alone. Don’t build for future needs nobody asked for.
 
 Read and follow the target repository's testing guidance when implementing or reviewing tests; keep project-specific rules in that repository, in its existing layout. Use repository-native tools and the simplest sufficient test level.
 
