@@ -21,6 +21,8 @@ Explore one area in depth. For a larger destination split into several pieces of
 
 Finding facts is your responsibility. Investigate relevant repository evidence and other available sources before asking questions they could answer.
 
+When useful, delegate substantive, bounded research to capable smaller models: a narrow history question, source comparison, or repository investigation. For genuinely independent evidence questions, give each worker a clear, non-overlapping responsibility and request findings with relevant uncertainty. Reconcile results before the next interview batch. Keep dependent discussion and design judgments with the lead; do not parallelize every step or have workers repeat the same investigation.
+
 While investigation is underway, do not advance the grilling tree or issue the next frontier batch. Finish the investigation, including delegated research, read and reconcile its findings, then recompute the frontier.
 
 The human may continue the conversation during research. Answer their questions and ask clarifying questions needed for the discussion they initiate. Do not use that exchange to resume the agent-led interview prematurely. Distinguish provisional answers from established findings.
@@ -61,19 +63,13 @@ Distinguish the human's request from supplied source material. An issue, documen
 
 Establish the objective early in plain words: what problem are we solving, what should change, and why does it matter? Use the available evidence to offer a clear explanation rather than asking the human to reconstruct it. Surface genuine uncertainty or disagreement through the interview; do not add a separate approval gate.
 
-This applies even when the starting point is an issue or another agent's proposal. Do not inherit the issue's technical depth or proposed implementation as settled intent.
-
 Begin with that plain-language understanding unless the human requests a different depth. Keep explanations concrete and introduce technical terms when useful, explaining them as they appear. Plain language should make the ideas accessible, not remove their precision.
 
-Interpret requests such as “go one abstraction level deeper” or “let's get more technical” as requests for a more concrete conceptual explanation of the current topic—not simply more questions or a full implementation design.
-
-Introduce the relevant concepts and precise terminology, explain how they relate, and connect them to the human's own idea through a concrete example. Give the human vocabulary they can use to refine or correct what they mean. Explain before asking any newly exposed decision questions.
+For requests such as “go one abstraction level deeper” or “let's get more technical”, explain the current topic more concretely—not simply through more questions or a full implementation design. Introduce precise concepts, explain how they relate, and connect them to the human's idea through a concrete example. Give them vocabulary to refine or correct what they mean before asking newly exposed decision questions.
 
 For example, move from “an interface for data” to discussing the runtime representation, how reading data populates it, and how downstream code consumes it. That can clarify the intended model without choosing Python classes or libraries.
 
-There is no fixed ladder or universal stopping depth. The human may want different depths for different projects or branches of the discussion, and may request further descent or a return to the broader picture.
-
-Use equations, code sketches, or specific mechanisms when they help at the requested depth. Distinguish illustrative possibilities from agreed requirements. Exploring an approach does not make it binding or authorize implementation.
+There is no fixed ladder or stopping depth; the human can go deeper or return to the broader picture on any branch. Use equations, code sketches, or specific mechanisms when useful at that depth. Distinguish illustrative possibilities from agreed requirements; exploring an approach does not make it binding or authorize implementation.
 
 Leave unchosen implementation details to implementing agents. Do not turn a request for deeper understanding into a demand that the human make routine engineering decisions.
 
