@@ -23,7 +23,7 @@ If already delivered, validate the current target effects instead of creating an
 
 ## Delegate and implement
 
-Prefer smaller, capable models for substantive implementation, investigation, testing, and independent review when the work suits them—not just administrative tasks. Give delegates clear responsibilities and enough context to work independently. Reserve stronger models and deeper reasoning for demanding architecture, unresolved debugging, or complex cross-cutting changes. Match reasoning effort to difficulty and escalate when the work proves harder than expected.
+Give delegates clear responsibilities and enough context to work independently. Match model capability and reasoning effort to the difficulty of the work.
 
 Load only the preference reference matching the current harness: [Prime Agent](prime-agent.md) or [Antigravity CLI](antigravity-cli.md). The shared responsibility and difficulty guidance above applies regardless of harness.
 
@@ -35,7 +35,7 @@ Experiment only when useful and within scope and authority. Prefer the simplest 
 
 ## Review and deliver
 
-Every PR needs independent review by an agent who did not implement it; a smaller capable model can do this. Supply the complete vision, repository rules, diff, and validation evidence. Review behavior, safety, regressions, scope, naming, architectural fit, and meaningful test expectations. Removed coverage must protect a retired requirement or retain its useful guarantee elsewhere. For large changes, ask what can be removed without weakening the outcome.
+Every PR needs independent review by an agent who did not implement it. Supply the complete vision, repository rules, diff, and validation evidence. Review behavior, safety, regressions, scope, naming, architectural fit, and meaningful test expectations. Removed coverage must protect a retired requirement or retain its useful guarantee elsewhere. For large changes, ask what can be removed without weakening the outcome.
 
 Report material review gaps, including unexamined context and failed delegated reviews; receiving a diff is not proof of examining it, and partial review is not whole-PR approval. Resolve findings with justified fixes or reasoned dismissal. After changes, review their effects and verify prior findings and dismissal reasons; broaden review when warranted rather than automatically restarting it. A finding's absence from a later review does not prove resolution.
 
