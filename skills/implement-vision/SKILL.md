@@ -23,9 +23,7 @@ If already delivered, validate the current target effects instead of creating an
 
 ## Delegate and implement
 
-Give delegates clear responsibilities and enough context to work independently. Match model capability and reasoning effort to the difficulty of the work.
-
-Load only the preference reference matching the current harness: [Prime Agent](prime-agent.md) or [Antigravity CLI](antigravity-cli.md). The shared responsibility and difficulty guidance above applies regardless of harness.
+Give delegates clear responsibilities and enough context to exercise independent judgment.
 
 Give implementation owners the complete vision, relevant source context, constraints, and naming boundary below before design or editing. One accountable owner can integrate bounded contributions into one coherent PR, owning tests, commit, push, and delivery from the intended target. Delegation does not itself require another branch, worktree, or PR. Avoid conflicting concurrent edits; add owners or coherent vertical delivery slices when the work warrants them, not to mirror agent count. Stage only intended changes.
 
@@ -35,7 +33,9 @@ Experiment only when useful and within scope and authority. Prefer the simplest 
 
 ## Review and deliver
 
-Every PR needs independent review by an agent who did not implement it. Supply the complete vision, repository rules, diff, and validation evidence. Review behavior, safety, regressions, scope, naming, architectural fit, and meaningful test expectations. Removed coverage must protect a retired requirement or retain its useful guarantee elsewhere. For large changes, ask what can be removed without weakening the outcome.
+Every PR needs independent review by an agent who did not implement it. The implementing agent chooses when to request review, including intermediate reviews where useful. Honor review checkpoints and human sign-offs required by the vision or repository.
+
+Supply the complete vision, repository rules, diff, validation results, the revision they cover, and any setup needed to repeat relevant checks. Review behavior, safety, regressions, scope, naming, architectural fit, and meaningful test expectations. Inspect changed behavior or published output that passing tests leave unexamined. Check suspected defects against the surrounding code or actual output before reporting them. Removed coverage must protect a retired requirement or retain its useful guarantee elsewhere. For large changes, ask what can be removed without weakening the outcome.
 
 Report material review gaps, including unexamined context and failed delegated reviews; receiving a diff is not proof of examining it, and partial review is not whole-PR approval. Resolve findings with justified fixes or reasoned dismissal. After changes, review their effects and verify prior findings and dismissal reasons; broaden review when warranted rather than automatically restarting it. A finding's absence from a later review does not prove resolution.
 
